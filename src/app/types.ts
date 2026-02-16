@@ -24,6 +24,7 @@ export interface FetchPageResult {
   readonly statusText: string;
   readonly contentType: string | null;
   readonly html: string;
+  readonly responseHeaders: Readonly<Record<string, string>>;
   readonly setCookieHeaders: readonly string[];
   readonly fetchedAtIso: string;
 }
@@ -35,6 +36,7 @@ export interface FetchPageStreamResult {
   readonly statusText: string;
   readonly contentType: string | null;
   readonly stream: ReadableStream<Uint8Array>;
+  readonly responseHeaders: Readonly<Record<string, string>>;
   readonly setCookieHeaders: readonly string[];
   readonly fetchedAtIso: string;
 }
@@ -76,6 +78,8 @@ export interface PageSnapshot {
   readonly finalUrl: string;
   readonly status: number;
   readonly statusText: string;
+  readonly contentType: string | null;
+  readonly responseHeaders: Readonly<Record<string, string>>;
   readonly fetchedAtIso: string;
   readonly setCookieHeaders: readonly string[];
   readonly tree: DocumentTree;

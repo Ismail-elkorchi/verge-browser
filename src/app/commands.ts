@@ -356,6 +356,10 @@ export function formatHelpText(): string {
     "  l / ?               Links view / help view",
     "  m / H               Add bookmark / show history",
     "  :                   Command prompt",
-    "  q                   Exit"
+    "  q                   Exit",
+    "",
+    "CLI flags:",
+    "  --record-corpus     Write fetched HTML/CSS payloads to realworld corpus cache",
+    "  --once              Load initial target once, then exit"
   ].join("\n");
 }

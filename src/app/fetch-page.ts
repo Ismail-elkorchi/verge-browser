@@ -43,6 +43,9 @@ async function fetchFileUrl(requestUrl: string): Promise<FetchPageResult> {
     statusText: "OK",
     contentType: "text/html",
     html,
+    responseHeaders: {
+      "content-type": "text/html"
+    },
     setCookieHeaders: [],
     fetchedAtIso: nowIso()
   };
@@ -125,6 +128,7 @@ interface NetworkFetchResult {
   readonly status: number;
   readonly statusText: string;
   readonly contentType: string | null;
+  readonly responseHeaders: Readonly<Record<string, string>>;
   readonly body: ReadableStream<Uint8Array> | null;
   readonly setCookieHeaders: readonly string[];
   readonly fetchedAtIso: string;
@@ -142,6 +146,22 @@ function readSetCookieHeaders(headers: Headers): readonly string[] {
     return [];
   }
   return [singleHeader];
+}
+
+function flattenHeaders(headers: Headers): Readonly<Record<string, string>> {
+  const groupedValues = new Map<string, string[]>();
+  for (const [name, value] of headers.entries()) {
+    const normalizedName = name.toLowerCase();
+    const values = groupedValues.get(normalizedName) ?? [];
+    values.push(value);
+    groupedValues.set(normalizedName, values);
+  }
+
+  const flattened: Record<string, string> = {};
+  for (const name of [...groupedValues.keys()].sort((left, right) => left.localeCompare(right))) {
+    flattened[name] = (groupedValues.get(name) ?? []).join(", ");
+  }
+  return flattened;
 }
 
 async function fetchNetworkResponse(
@@ -201,6 +221,7 @@ async function fetchNetworkResponse(
         status: response.status,
         statusText: response.statusText,
         contentType,
+        responseHeaders: flattenHeaders(response.headers),
         body: response.body,
         setCookieHeaders: readSetCookieHeaders(response.headers),
         fetchedAtIso: nowIso()
@@ -249,6 +270,9 @@ export async function fetchPage(
       statusText: "OK",
       contentType: "text/html",
       html: ABOUT_HELP_HTML,
+      responseHeaders: {
+        "content-type": "text/html"
+      },
       setCookieHeaders: [],
       fetchedAtIso: nowIso()
     };
@@ -268,6 +292,7 @@ export async function fetchPage(
     statusText: networkResult.statusText,
     contentType: networkResult.contentType,
     html,
+    responseHeaders: networkResult.responseHeaders,
     setCookieHeaders: networkResult.setCookieHeaders,
     fetchedAtIso: networkResult.fetchedAtIso
   };
@@ -296,6 +321,9 @@ export async function fetchPageStream(
       statusText: "OK",
       contentType: "text/html",
       stream: streamFromUtf8(ABOUT_HELP_HTML),
+      responseHeaders: {
+        "content-type": "text/html"
+      },
       setCookieHeaders: [],
       fetchedAtIso: nowIso()
     };
@@ -314,6 +342,7 @@ export async function fetchPageStream(
       statusText: filePage.statusText,
       contentType: filePage.contentType,
       stream: streamFromUtf8(filePage.html),
+      responseHeaders: filePage.responseHeaders,
       setCookieHeaders: [],
       fetchedAtIso: filePage.fetchedAtIso
     };
@@ -329,6 +358,7 @@ export async function fetchPageStream(
     statusText: networkResult.statusText,
     contentType: networkResult.contentType,
     stream: withByteLimit(stream, policy.maxContentBytes),
+    responseHeaders: networkResult.responseHeaders,
     setCookieHeaders: networkResult.setCookieHeaders,
     fetchedAtIso: networkResult.fetchedAtIso
   };
