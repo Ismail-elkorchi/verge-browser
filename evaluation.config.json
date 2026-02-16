@@ -1,0 +1,51 @@
+{
+  "render": {
+    "suiteName": "render-v3",
+    "widths": [60, 80, 100, 120],
+    "holdoutMod": 10,
+    "profiles": {
+      "ci": {
+        "includeHoldout": true,
+        "minExecutedFraction": 0.9,
+        "minCases": 250
+      },
+      "release": {
+        "includeHoldout": true,
+        "minExecutedFraction": 1,
+        "minCases": 1000
+      }
+    },
+    "metrics": {
+      "textTokenF1": 0.97,
+      "linkLabelF1": 0.995,
+      "tableMatrixF1": 0.95,
+      "preWhitespaceExact": 0.995,
+      "outlineF1": 0.98
+    },
+    "comparativeWinDelta": 0.005
+  },
+  "baselines": {
+    "engines": [
+      {
+        "name": "lynx",
+        "version": "2.9.2dev.1"
+      },
+      {
+        "name": "w3m",
+        "version": "0.5.3+git20230121"
+      },
+      {
+        "name": "links2",
+        "version": "2.30"
+      }
+    ]
+  },
+  "phase34": {
+    "maxOraclePackageCount": 110,
+    "requiredRootPackages": ["lynx", "w3m", "links2"]
+  },
+  "benchmarks": {
+    "required": ["render-width-80", "render-width-120"],
+    "minSampleCases": 300
+  }
+}

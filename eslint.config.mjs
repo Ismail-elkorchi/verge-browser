@@ -24,7 +24,9 @@ export default [
       ...js.configs.recommended.languageOptions,
       globals: {
         console: "readonly",
-        process: "readonly"
+        process: "readonly",
+        setTimeout: "readonly",
+        clearTimeout: "readonly"
       }
     }
   },

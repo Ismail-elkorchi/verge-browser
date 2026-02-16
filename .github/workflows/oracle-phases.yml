@@ -1,0 +1,61 @@
+name: Oracle Phases
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 2"
+
+concurrency:
+  group: oracle-phases-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  oracle-ladder:
+    name: oracle-phase-ladder
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout html-parser dependency
+        run: |
+          set -euo pipefail
+          if [ ! -d ../html-parser ]; then
+            git clone --depth 1 https://github.com/Ismail-elkorchi/html-parser.git ../html-parser
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Run phase32 superiority
+        run: npm run eval:phase32:release
+
+      - name: Run phase33 fingerprint drift
+        run: npm run eval:phase33:release
+
+      - name: Run phase34 supply-chain
+        run: npm run eval:phase34:release
+
+      - name: Upload oracle ladder reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-phase-reports
+          path: |
+            reports/eval-phase31-summary.json
+            reports/eval-phase32-summary.json
+            reports/eval-phase33-summary.json
+            reports/eval-phase34-summary.json
+            reports/oracle-runtime.json
+            reports/oracle-supply-chain.json
+            scripts/oracles/oracle-image.lock.json
