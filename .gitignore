@@ -2,3 +2,7 @@ node_modules/
 dist/
 reports/
 tmp/
+realworld/corpus/**
+realworld/**/cache/**
+realworld/**/reports/**
+realworld/**/oracle/**

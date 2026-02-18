@@ -22,6 +22,7 @@ import {
 import { buildFormSubmissionRequest, extractForms } from "./app/forms.js";
 import { activeSearchLineIndex, createSearchState, moveSearchMatch, type SearchState } from "./app/search.js";
 import { resolveShortcutAction } from "./app/shortcuts.js";
+import { CorpusRecorder } from "./app/realworld.js";
 import { BrowserSession } from "./app/session.js";
 import { BrowserStore } from "./app/storage.js";
 import { clearTerminal, terminalHeight, terminalWidth } from "./app/terminal.js";
@@ -241,6 +242,41 @@ function formatOutlineView(snapshot: PageSnapshot | null): readonly string[] {
 
 type KeypressListener = (character: string, key: KeyboardKey) => void;
 
+interface CliFlags {
+  readonly initialTarget: string | null;
+  readonly recordCorpus: boolean;
+  readonly runOnce: boolean;
+}
+
+function parseCliFlags(argv: readonly string[]): CliFlags {
+  let initialTarget: string | null = null;
+  let recordCorpus = false;
+  let runOnce = false;
+
+  for (const token of argv) {
+    if (token === "--record-corpus") {
+      recordCorpus = true;
+      continue;
+    }
+    if (token === "--once") {
+      runOnce = true;
+      continue;
+    }
+    if (token.startsWith("--")) {
+      continue;
+    }
+    if (initialTarget === null) {
+      initialTarget = token;
+    }
+  }
+
+  return {
+    initialTarget,
+    recordCorpus,
+    runOnce
+  };
+}
+
 function attachKeypressListener(listener: KeypressListener): void {
   stdin.on("keypress", listener);
 }
@@ -250,10 +286,12 @@ function detachKeypressListener(listener: KeypressListener): void {
 }
 
 async function main(): Promise<void> {
+  const cliFlags = parseCliFlags(process.argv.slice(2));
   const session = new BrowserSession({
     widthProvider: terminalWidth
   });
   const store = await BrowserStore.open();
+  const corpusRecorder = cliFlags.recordCorpus ? new CorpusRecorder() : null;
 
   const commandInterface = createInterface({
     input: stdin,
@@ -400,6 +438,9 @@ async function main(): Promise<void> {
     const excerpt = composeExcerpt(snapshot.rendered.lines);
     await store.recordHistory(snapshot.finalUrl, snapshot.rendered.title, excerpt);
     await store.recordIndexDocument(snapshot.finalUrl, snapshot.rendered.title, snapshot.rendered.lines.join("\n"));
+    if (corpusRecorder) {
+      await corpusRecorder.recordNavigation(snapshot);
+    }
   }
 
   async function navigateToTarget(
@@ -830,14 +871,24 @@ async function main(): Promise<void> {
 
   const keypressListener = handleKeypress as KeypressListener;
 
-  const initialTarget = process.argv[2] ?? store.latestHistoryUrl() ?? "about:help";
+  const initialTarget = cliFlags.initialTarget ?? store.latestHistoryUrl() ?? "about:help";
+  let initialNavigationError: string | null = null;
 
   try {
     await navigateToTarget(initialTarget);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
+    initialNavigationError = message;
     setView({ kind: "help", title: "verge-browser help", lines: formatHelpText().split("\n") }, true);
     setStatus(`Initial navigation failed: ${message}`);
+  }
+
+  if (cliFlags.runOnce) {
+    commandInterface.close();
+    if (initialNavigationError) {
+      throw new Error(initialNavigationError);
+    }
+    return;
   }
 
   emitKeypressEvents(stdin);
