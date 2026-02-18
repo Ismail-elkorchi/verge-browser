@@ -24,7 +24,41 @@ export interface FetchPageResult {
   readonly statusText: string;
   readonly contentType: string | null;
   readonly html: string;
+  readonly setCookieHeaders: readonly string[];
   readonly fetchedAtIso: string;
+}
+
+export interface FetchPageStreamResult {
+  readonly requestUrl: string;
+  readonly finalUrl: string;
+  readonly status: number;
+  readonly statusText: string;
+  readonly contentType: string | null;
+  readonly stream: ReadableStream<Uint8Array>;
+  readonly setCookieHeaders: readonly string[];
+  readonly fetchedAtIso: string;
+}
+
+export type FetchPagePayload = FetchPageResult | FetchPageStreamResult;
+
+export interface PageRequestOptions {
+  readonly method?: "GET" | "POST";
+  readonly headers?: Readonly<Record<string, string>>;
+  readonly bodyText?: string;
+}
+
+export interface PageDiagnostics {
+  readonly parseMode: "text" | "stream";
+  readonly sourceBytes: number | null;
+  readonly parseErrorCount: number;
+  readonly traceEventCount: number;
+  readonly traceKinds: readonly string[];
+  readonly requestMethod: "GET" | "POST";
+  readonly fetchDurationMs: number;
+  readonly parseDurationMs: number;
+  readonly renderDurationMs: number;
+  readonly totalDurationMs: number;
+  readonly usedCookies: boolean;
 }
 
 export interface RenderInput {
@@ -43,6 +77,17 @@ export interface PageSnapshot {
   readonly status: number;
   readonly statusText: string;
   readonly fetchedAtIso: string;
+  readonly setCookieHeaders: readonly string[];
   readonly tree: DocumentTree;
   readonly rendered: RenderedPage;
+  readonly sourceHtml?: string;
+  readonly diagnostics: PageDiagnostics;
+}
+
+export interface KeyboardKey {
+  readonly sequence: string;
+  readonly name?: string;
+  readonly ctrl?: boolean;
+  readonly meta?: boolean;
+  readonly shift?: boolean;
 }

@@ -12,13 +12,35 @@
   "bin": {
     "verge": "./dist/cli.js"
   },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit -p tsconfig.build.json",
     "build": "tsc -p tsconfig.build.json",
     "test": "npm run build && node --test test/control/**/*.test.js",
-    "start": "node dist/cli.js",
-    "check": "npm run lint && npm run typecheck && npm test"
+    "smoke:cli": "node scripts/automation/smoke-cli.mjs",
+    "corpus:render": "node scripts/oracles/corpus/generate-render-v3.mjs",
+    "test:bench": "npm run build && node scripts/bench/run-bench.mjs",
+    "eval:ci": "npm run build && node scripts/eval/run-eval.mjs --profile=ci",
+    "eval:release": "npm run build && node scripts/eval/run-eval.mjs --profile=release",
+    "eval:phase31:ci": "npm run build && node scripts/eval/run-phase31-real-oracles.mjs --profile=ci",
+    "eval:phase31:release": "npm run build && node scripts/eval/run-phase31-real-oracles.mjs --profile=release",
+    "eval:phase32:ci": "npm run build && node scripts/eval/run-phase32-superiority.mjs --profile=ci",
+    "eval:phase32:release": "npm run build && node scripts/eval/run-phase32-superiority.mjs --profile=release",
+    "eval:phase33:ci": "npm run build && node scripts/eval/run-phase33-fingerprint-drift.mjs --profile=ci",
+    "eval:phase33:release": "npm run build && node scripts/eval/run-phase33-fingerprint-drift.mjs --profile=release",
+    "eval:phase34:ci": "npm run build && node scripts/eval/run-phase34-supply-chain.mjs --profile=ci",
+    "eval:phase34:release": "npm run build && node scripts/eval/run-phase34-supply-chain.mjs --profile=release",
+    "eval:phase-ladder:ci": "npm run build && node scripts/eval/write-phase-ladder-report.mjs --profile=ci",
+    "eval:phase-ladder:release": "npm run build && node scripts/eval/write-phase-ladder-report.mjs --profile=release",
+    "start": "npm run build && node dist/cli.js",
+    "check": "npm run lint && npm run typecheck && npm test && npm run smoke:cli && npm run eval:ci",
+    "ci": "npm run check",
+    "release:check": "npm run check && npm run eval:release && npm run eval:phase31:release && npm run eval:phase32:release && npm run eval:phase33:release && npm run eval:phase34:release && npm pack --dry-run"
   },
   "dependencies": {
     "html-parser": "file:../html-parser"

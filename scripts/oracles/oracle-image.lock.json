@@ -1,0 +1,517 @@
+{
+  "formatVersion": 1,
+  "generatedAtIso": "2026-02-16T08:48:45.603Z",
+  "rootPackages": [
+    "lynx",
+    "w3m",
+    "links2"
+  ],
+  "packages": [
+    {
+      "name": "fontconfig",
+      "version": "2.15.0-2.3ubuntu1",
+      "debSha256": "bdae1c5824577eeabc26a27ac684ed32b786bfce4f3312558d29a0f2503648b1"
+    },
+    {
+      "name": "fontconfig-config",
+      "version": "2.15.0-2.3ubuntu1",
+      "debSha256": "064b6e5c2cea4bf12d03d833a4f3ab0a91368d17dc0d9c629a3a052780813f0a"
+    },
+    {
+      "name": "fonts-croscore",
+      "version": "20201225-2",
+      "debSha256": "68ba36c33cd3b6edd8e765fd685bf55bd7da888e896ca0995a9781bbd61e78c4"
+    },
+    {
+      "name": "fonts-dejavu-core",
+      "version": "2.37-8",
+      "debSha256": "40049660c194f3b8a2541fc7369efebb10e9f94bdac836a2f38fafedd10fa73a"
+    },
+    {
+      "name": "fonts-dejavu-mono",
+      "version": "2.37-8",
+      "debSha256": "8a599d6553307db7ecb795d2f0e5a301e03234afc75c7358b0ba43466454c89a"
+    },
+    {
+      "name": "fonts-freefont-otf",
+      "version": "20211204+svn4273-2",
+      "debSha256": "a8811ba7279578539e37fec2bb6520bb9dbfeb378bae55e61bf4c5f976350d82"
+    },
+    {
+      "name": "fonts-freefont-ttf",
+      "version": "20211204+svn4273-2",
+      "debSha256": "c8283ec9ca390e6ad8d2114cb0942182db62bb97f5142c2f955218fc5f2027b4"
+    },
+    {
+      "name": "fonts-liberation",
+      "version": "1:2.1.5-3",
+      "debSha256": "065c2ab1abc9108b17d401016dc594b79750904390f095845c93bb06e1153acc"
+    },
+    {
+      "name": "fonts-noto-core",
+      "version": "20201225-2",
+      "debSha256": "4fee136cb12fc197703a340e010478f780a41044339fcefbd78ed9aa96c8b617"
+    },
+    {
+      "name": "fonts-noto-mono",
+      "version": "20201225-2",
+      "debSha256": "ce277a6e2fbbe7562206171e20e0493ac42c9c405758505cb42aaa01c982036c"
+    },
+    {
+      "name": "fonts-texgyre",
+      "version": "20180621-6",
+      "debSha256": "dc743718ece939f4a868e15012e383aa9bf6501ed6857c895835911053ef250a"
+    },
+    {
+      "name": "fonts-urw-base35",
+      "version": "20200910-8",
+      "debSha256": "46e75490faa7fd6fddbc8df234d14e0f7b60ea5e98563227a24d6bf5e5008647"
+    },
+    {
+      "name": "gcc-15-base",
+      "version": "15.2.0-4ubuntu4",
+      "debSha256": "5b58d85e04c3f8b52eb0da599fd618deb0969ccd6f14fe61f0181e63cb11e6bc"
+    },
+    {
+      "name": "libabsl20240722",
+      "version": "20240722.0-4ubuntu1",
+      "debSha256": "bf544c976bdd21a2f23ad9b383414fd41e1de774959c6fbbe0e62de715d032c5"
+    },
+    {
+      "name": "libaom3",
+      "version": "3.12.1-1",
+      "debSha256": "04be9d40c862c2594e4f2a68c3cd387b34b0376551d60b0915cd0c51108a535f"
+    },
+    {
+      "name": "libatomic1",
+      "version": "15.2.0-4ubuntu4",
+      "debSha256": "ef6011746249d92430050293e070c8a8b52c4194efebd52da63859356b779d3d"
+    },
+    {
+      "name": "libavif16",
+      "version": "1.3.0-1ubuntu1",
+      "debSha256": "2f7caabf8e3e76d6ae86701c99127910fca5adf93d9d63d0ea8458e2bb938e75"
+    },
+    {
+      "name": "libblkid1",
+      "version": "2.41-4ubuntu4.1",
+      "debSha256": "7fc43d9d14484697f7aa26e0447e8f7033763decc56e54c3aa2f4c91a73aa4c6"
+    },
+    {
+      "name": "libbrotli1",
+      "version": "1.1.0-2build5",
+      "debSha256": "2f3b0135b251eb70f1f5c33f092b813a0e3721c0a67070f06fe7ea111f6a2f88"
+    },
+    {
+      "name": "libbz2-1.0",
+      "version": "1.0.8-6build1",
+      "debSha256": "2eca5aa3957c1901829080d54021ad3b886a013a439219c31b86310216807ece"
+    },
+    {
+      "name": "libc6",
+      "version": "2.42-0ubuntu3.1",
+      "debSha256": "21cfeebe5d8dfd68acc88cea3118d41e35b5e1430a77b4f1109ac693fea65058"
+    },
+    {
+      "name": "libcairo-gobject2",
+      "version": "1.18.4-1build1",
+      "debSha256": "fef82f39aa41c9fc35d4c857456f1c90c8d3adeb934cf2fe3f444e94879a2777"
+    },
+    {
+      "name": "libcairo2",
+      "version": "1.18.4-1build1",
+      "debSha256": "b72e14c2abc599229922a450f6e25b4239edc62081979b4093caededa8214567"
+    },
+    {
+      "name": "libdatrie1",
+      "version": "0.2.13-4",
+      "debSha256": "0f21bb4b85772ee0c9268bd0ac54d60d0f70e0120b145e7ec0e127a479bf1b2b"
+    },
+    {
+      "name": "libdav1d7",
+      "version": "1.5.1-1",
+      "debSha256": "e911e32a67ceea615692594b91954822ad945052a6e1d7420275a16a508bcb23"
+    },
+    {
+      "name": "libdeflate0",
+      "version": "1.23-2",
+      "debSha256": "1d09340a4c7613d5e48a50a96e2205cbd3be2e0c70d3e55bd88c2c913b519217"
+    },
+    {
+      "name": "libevent-2.1-7t64",
+      "version": "2.1.12-stable-10build1",
+      "debSha256": "afbccf94591f54d2a9cc76b29b2a0b6d56d8e7a454a8cda3b069605b058a9164"
+    },
+    {
+      "name": "libexpat1",
+      "version": "2.7.1-2ubuntu0.2",
+      "debSha256": "93ae0f751dccd6591e412f55bfb1ef3d89749fc1f331d1c836672ae8167b7a54"
+    },
+    {
+      "name": "libffi8",
+      "version": "3.5.2-1build1",
+      "debSha256": "6ee4cd8d9242225623ac071ba7483d38642e14c600301766896c2f48b070547b"
+    },
+    {
+      "name": "libfontconfig1",
+      "version": "2.15.0-2.3ubuntu1",
+      "debSha256": "61cbad3c6cb4d1e7d792e3fd0559da386b53167c1715833a0714bb74686b7cea"
+    },
+    {
+      "name": "libfontenc1",
+      "version": "1:1.1.8-1build1",
+      "debSha256": "0c5d57211cac9659e7f4c856f5e1922c4a522fe8bcf5776e9707b2811f965702"
+    },
+    {
+      "name": "libfreetype6",
+      "version": "2.13.3+dfsg-1build1",
+      "debSha256": "6a0c4214cbe47d67f4c50fcdeca07b0f16328e4b73857cdc2150e170a7808b9b"
+    },
+    {
+      "name": "libfribidi0",
+      "version": "1.0.16-1",
+      "debSha256": "4c80a1f25ff23915d00c3f4247dc4f36c410969818fd65da104e617439c09272"
+    },
+    {
+      "name": "libgav1-1",
+      "version": "0.19.0-3build1",
+      "debSha256": "58b66ad4c2b7a86c6dfbf23735993cf7fd6b4a849ebeca15b490009d43045044"
+    },
+    {
+      "name": "libgc1",
+      "version": "1:8.2.8-1",
+      "debSha256": "d337914b08465d43186dbfe880fde5c9ea23808b0d56ea88397644cd6df84fcf"
+    },
+    {
+      "name": "libgcc-s1",
+      "version": "15.2.0-4ubuntu4",
+      "debSha256": "d6b402572df890d133095f12007a172a57c0215bafc1ffb7c8095d771eab6921"
+    },
+    {
+      "name": "libgdk-pixbuf-2.0-0",
+      "version": "2.42.12+dfsg-5",
+      "debSha256": "ecbeab67d0131312fb781f76e7086c0d39e28996a29aff55fa662b8915eeae05"
+    },
+    {
+      "name": "libgdk-pixbuf2.0-common",
+      "version": "2.42.12+dfsg-5",
+      "debSha256": "0f7b75b61f86fa088f55a6c36d289b620aa053fccfacc43fade57829097d41e2"
+    },
+    {
+      "name": "libglib2.0-0t64",
+      "version": "2.86.0-2ubuntu0.3",
+      "debSha256": "41b45b74785ad6562f18dfa7f31774bee1aae017886d45d81dbca1428e815f48"
+    },
+    {
+      "name": "libgmp10",
+      "version": "2:6.3.0+dfsg-5ubuntu1",
+      "debSha256": "e2ada598e3d8fbf80e74f530fd2c41ef48cc7f735a95bbce0a064219a60c09e5"
+    },
+    {
+      "name": "libgnutls30t64",
+      "version": "3.8.9-3ubuntu2",
+      "debSha256": "dd4e20730c1aa89461f3106748be55bb47f30069b7a99b9b66438962742d465b"
+    },
+    {
+      "name": "libgomp1",
+      "version": "15.2.0-4ubuntu4",
+      "debSha256": "1668ed626111f88cc717642128b728c037b3febbc7fa2e82191214b35a05716a"
+    },
+    {
+      "name": "libgpm2",
+      "version": "1.20.7-12",
+      "debSha256": "872072133953961282135e48a8f70b0d108c2c29fd9de652c6b3f25ead7a8d06"
+    },
+    {
+      "name": "libgraphite2-3",
+      "version": "1.3.14-2ubuntu1",
+      "debSha256": "4c2834d17b3e5dc949f6bdc0a78bb18ee36b631a671b4b2ba7b41350c4f80296"
+    },
+    {
+      "name": "libharfbuzz0b",
+      "version": "10.2.0-1",
+      "debSha256": "c7508aa0c690b4b1569a5fafbd4378190f82a47cb48bf774f050efe6bf2c153c"
+    },
+    {
+      "name": "libhogweed6t64",
+      "version": "3.10.1-1",
+      "debSha256": "82f72d19d66ee9d1b34c4ecfbb57ab7076c175497feb20d072d09dc5051eddce"
+    },
+    {
+      "name": "libidn2-0",
+      "version": "2.3.8-4",
+      "debSha256": "895de9e48a2ea2678a859fac28b373044ec5385463dede3e5958be314ceb58c1"
+    },
+    {
+      "name": "libjbig0",
+      "version": "2.1-6.1ubuntu2",
+      "debSha256": "074a760a86213a1286ad60f56394c90885cf45af070626a88c480d90b78c175a"
+    },
+    {
+      "name": "libjpeg-turbo8",
+      "version": "2.1.5-4ubuntu2",
+      "debSha256": "98505e2686e6d23b8977eca7471b40bee965ef35ca11ae7cf03536e55904fc9f"
+    },
+    {
+      "name": "libjpeg8",
+      "version": "8c-2ubuntu11",
+      "debSha256": "4d6ed682972bddf62af158a06d68a0dda497e421423b7ca92fb450b3d9ceaac9"
+    },
+    {
+      "name": "liblerc4",
+      "version": "4.0.0+ds-5ubuntu1",
+      "debSha256": "69083cfe2fcf860148311631de866831060aee4cabeec2774fca74b4332f296f"
+    },
+    {
+      "name": "liblz1",
+      "version": "1.15-3",
+      "debSha256": "0ef5d4a8a5466b9fa42cc017ba860315f88253c0c5d78082531d4efd990daa24"
+    },
+    {
+      "name": "liblzma5",
+      "version": "5.8.1-1build2",
+      "debSha256": "53af162c263b0c57811f9833888a4f70cc05b265d591d4ba5bbc057f9ea67e8d"
+    },
+    {
+      "name": "libmount1",
+      "version": "2.41-4ubuntu4.1",
+      "debSha256": "93b971dedff968a502996172cdb9423a0c5d2d4b54db6270e2ac2a2d19402b9a"
+    },
+    {
+      "name": "libncursesw6",
+      "version": "6.5+20250216-2build1",
+      "debSha256": "4920a73f26ca171ecc68a445dcfceeaef2cc69701cb8b0359ef998d6f58cef20"
+    },
+    {
+      "name": "libnettle8t64",
+      "version": "3.10.1-1",
+      "debSha256": "0b83efca58629427e6e89ced5b268e8b5db6a38bb17f1c9704530528f1c24576"
+    },
+    {
+      "name": "libp11-kit0",
+      "version": "0.25.5-3ubuntu1",
+      "debSha256": "442138c69906cf329bff5eebfef3e6487e2cf6106ad8d5b803182be57ba80d14"
+    },
+    {
+      "name": "libpango-1.0-0",
+      "version": "1.56.3-1build1",
+      "debSha256": "ed27fcda149710f0c185827c59970c15c8eb95d0d730061e7eead565f36ea10c"
+    },
+    {
+      "name": "libpangocairo-1.0-0",
+      "version": "1.56.3-1build1",
+      "debSha256": "9b74bc805e50083c5d14742c19773a697d9534ad96ede793670b6e30cae3e7c5"
+    },
+    {
+      "name": "libpangoft2-1.0-0",
+      "version": "1.56.3-1build1",
+      "debSha256": "7dae8002dd4872bc0d1d4f624890c5ea89ebd5f285507a95b746ac9002794eb4"
+    },
+    {
+      "name": "libpcre2-8-0",
+      "version": "10.46-1",
+      "debSha256": "5486870ccd3285970e15e9d6a6c68da1eabe438515790430f0a75dcc218a6c5b"
+    },
+    {
+      "name": "libpixman-1-0",
+      "version": "0.44.0-3",
+      "debSha256": "de9dc00ca038d16d1d9b8d75519e295c45ea89870edab09752efaddb7467c050"
+    },
+    {
+      "name": "libpng16-16t64",
+      "version": "1.6.50-1ubuntu0.4",
+      "debSha256": "4acad5938b2f4cffcf0738fdb8c132347f59a2eb888afdbcb2fbb3aa7e714b21"
+    },
+    {
+      "name": "librav1e0.7",
+      "version": "0.7.1-9",
+      "debSha256": "a2bbd23b1972e15cd0e03f4e4860f3457c1cf93b7dcaafe7e11987997045070a"
+    },
+    {
+      "name": "librsvg2-2",
+      "version": "2.60.0+dfsg-1build1",
+      "debSha256": "49fcbe09361f264c0e2e073c88946fa85bef60a3b5bd952b860a44bb07a41c95"
+    },
+    {
+      "name": "libselinux1",
+      "version": "3.8.1-1build1",
+      "debSha256": "58c80f381334c019c8a397ddec57276b509b3cff9200726f7a001a3b404fd6e8"
+    },
+    {
+      "name": "libsharpyuv0",
+      "version": "1.5.0-0.1",
+      "debSha256": "15602275058402b739e9fdeae064a4aea9add0bb9f07136ffc9ef386e949fa7d"
+    },
+    {
+      "name": "libssl3t64",
+      "version": "3.5.3-1ubuntu3",
+      "debSha256": "932d54ae2d9bc0182dcc265a453f3b5c044f2e24db1145f5e68483f3ec01a7b5"
+    },
+    {
+      "name": "libstdc++6",
+      "version": "15.2.0-4ubuntu4",
+      "debSha256": "b8c22d58331521eb920a8c00fc4ecd986f4efff8a60bff73ced30684f56252f6"
+    },
+    {
+      "name": "libsvtav1enc2",
+      "version": "2.3.0+dfsg-1",
+      "debSha256": "d92e84abb688ece22fa658984ad7a4f1d517b8431163e408aad5d95d95266418"
+    },
+    {
+      "name": "libtasn1-6",
+      "version": "4.20.0-2ubuntu0.25.10.1",
+      "debSha256": "24a0eabb9bf59455d51100119e53a754ce4794a10e89ada0dc22f01de7841d09"
+    },
+    {
+      "name": "libthai-data",
+      "version": "0.1.29-2build1",
+      "debSha256": "6035d4a714290b97816bed7f3bf64921c6358ddb84d1dacdddccdc1cf39bffb7"
+    },
+    {
+      "name": "libthai0",
+      "version": "0.1.29-2build1",
+      "debSha256": "5ada7045c5f84a4b774e6449151800aa6470e8d01dc9d6124ef4a44ae6af5508"
+    },
+    {
+      "name": "libtiff6",
+      "version": "4.7.0-3ubuntu3",
+      "debSha256": "b1a0ff0c8dde87513201e3699ad58a3fb30f568b7a7042a7446c83721705ab90"
+    },
+    {
+      "name": "libtinfo6",
+      "version": "6.5+20250216-2build1",
+      "debSha256": "bfffbdb3d1287339e0b4a40c1940755353a1a5bfb6b1f09ca5ec45035432c2b6"
+    },
+    {
+      "name": "libunistring5",
+      "version": "1.3-2",
+      "debSha256": "3cc52a88bb6313c5c084c07007ecba3286fd061d7d4bc6f7479a8bedf3d70fba"
+    },
+    {
+      "name": "libwebp7",
+      "version": "1.5.0-0.1",
+      "debSha256": "66d460029a186e226beee80e6511e4425c65314f8be2497ca1e688f54073a32e"
+    },
+    {
+      "name": "libx11-6",
+      "version": "2:1.8.12-1build1",
+      "debSha256": "7e1d0019f1962e8ed5d113c08fbcf5419ea2b3e0505caf09cdc2ab3f4eab6ab5"
+    },
+    {
+      "name": "libx11-data",
+      "version": "2:1.8.12-1build1",
+      "debSha256": "6ec18f94d18b309f6cf6dbad1aadeb83673eb74785a554006f109b488062176e"
+    },
+    {
+      "name": "libxau6",
+      "version": "1:1.0.11-1build1",
+      "debSha256": "ad8cdd9509e074d691e42f6fd6e68a9dd69c6026ffac0aac0ada9cdb912b9cd2"
+    },
+    {
+      "name": "libxcb-render0",
+      "version": "1.17.0-2build1",
+      "debSha256": "4a6f6db0a2f5cc7e7994f1b233efa86cc98a382a78601d31ac9e0524d7911160"
+    },
+    {
+      "name": "libxcb-shm0",
+      "version": "1.17.0-2build1",
+      "debSha256": "237ee43da2e1cc7a332bdb4aa0bd3d53c65aa90159368c10d16d0ac3da8c9878"
+    },
+    {
+      "name": "libxcb1",
+      "version": "1.17.0-2build1",
+      "debSha256": "6c43b75556f4aa07c7e05117250cd1e63cf777aaac50d6df05a02af707aa3931"
+    },
+    {
+      "name": "libxdmcp6",
+      "version": "1:1.1.5-1build1",
+      "debSha256": "cb8a6360d5f9876267f17fa33fa8a292b1661b12d64e5818d894c829f8faa9af"
+    },
+    {
+      "name": "libxext6",
+      "version": "2:1.3.4-1build2",
+      "debSha256": "45783969a9ece9d7b7b733b8c60981584c53c6bc5ee3b42d295d2f80d1285679"
+    },
+    {
+      "name": "libxml2-16",
+      "version": "2.14.5+dfsg-0.2ubuntu0.1",
+      "debSha256": "28d5d2bc566aa0e1741b7bb9e3c273b4e165d08b122479e2f9fd5df1858bd953"
+    },
+    {
+      "name": "libxrender1",
+      "version": "1:0.9.12-1",
+      "debSha256": "c21fa6bfe357bdcb0236abe615d8c36e603e0a14008787a703bb87b5ef8e8154"
+    },
+    {
+      "name": "libyuv0",
+      "version": "0.0.1916.20250814-1",
+      "debSha256": "88a49ca502d6a833bd5603e541ce8f360f27d35a3c8f18b6a1cb0bbc8797c594"
+    },
+    {
+      "name": "libzstd1",
+      "version": "1.5.7+dfsg-1build2",
+      "debSha256": "357b36efc6d9fdbfcd14e6c044d6f05d4cf901980066958d9a8ae183f972d9a4"
+    },
+    {
+      "name": "links2",
+      "version": "2.29-2",
+      "debSha256": "368df266b44dbaac245607ba2776bff9c44237ba7443738593165a342c31f13a"
+    },
+    {
+      "name": "lsb-base",
+      "version": "11.6",
+      "debSha256": "08a563e3c1984acdb295f12b77b4ec18d2ccf52fd03280a5bea29e506a3350ee"
+    },
+    {
+      "name": "lynx",
+      "version": "2.9.2-1",
+      "debSha256": "5acbb58c2c67f2507b58f557ef6ed502914ddc043100789148b0058a1070a3bf"
+    },
+    {
+      "name": "lynx-common",
+      "version": "2.9.2-1",
+      "debSha256": "d1cd2df5c891974c9d01deeb5fec280c2159d76dcc877cab09f4892ebfae9bc6"
+    },
+    {
+      "name": "openssl-provider-legacy",
+      "version": "3.5.3-1ubuntu3",
+      "debSha256": "7d416f2cf3d105d47afeb23c62d0c1907a1683c2d2bb4c9e743a1dc1be21426d"
+    },
+    {
+      "name": "shared-mime-info",
+      "version": "2.4-5build2",
+      "debSha256": "7238903f56503d0f9cfa40ac0013ba44f687415f5e2139a68e16f588fe097c32"
+    },
+    {
+      "name": "sysvinit-utils",
+      "version": "3.14-4ubuntu1",
+      "debSha256": "3c62dcbc9c6feb11291c2245645bb13d1cd30e341288b17e3fd09ccefa39ed65"
+    },
+    {
+      "name": "w3m",
+      "version": "0.5.3+git20230121-2.1ubuntu1",
+      "debSha256": "0eade966dae2a955e9bb651ea287fbc98efdeda5296c230798eb5377eb2b78b9"
+    },
+    {
+      "name": "x11-common",
+      "version": "1:7.7+24ubuntu1",
+      "debSha256": "4f48878f6bac2691cc6d543933d8744e5a42c733a02262ab0e38e12c36c9cb59"
+    },
+    {
+      "name": "xfonts-encodings",
+      "version": "1:1.0.5-0ubuntu2",
+      "debSha256": "3bac5ff1cba3b001aee1652e3af45d200c415b68e9b27932cb51fe9c464feb40"
+    },
+    {
+      "name": "xfonts-utils",
+      "version": "1:7.7+7",
+      "debSha256": "5a987f95186b79a2e412c3a377cd40c5afadb959d5a60549e2d0c4ddc529120e"
+    },
+    {
+      "name": "zlib1g",
+      "version": "1:1.3.dfsg+really1.3.1-1ubuntu2",
+      "debSha256": "f8100c77fdf80754b2e0fa46366fae640ed933458be85cc633dc3cf1fa30176b"
+    }
+  ],
+  "fingerprint": "99614e13e50a3711e90bf096bc73e2e2e813a4c24637467e2a1c083486e3413f"
+}

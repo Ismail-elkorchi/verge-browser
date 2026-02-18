@@ -1,0 +1,132 @@
+# Acceptance Gates
+
+Evaluation is executed through:
+- `npm run eval:ci`
+- `npm run eval:release`
+
+Artifacts are written to `reports/`.
+
+## G-301 Corpus integrity
+- `scripts/oracles/corpus/render-v3.json` exists
+- case count >= 1000
+- every case includes widths `[60, 80, 100, 120]`
+- every case `sha256` matches its HTML payload
+
+## G-302 Coverage integrity
+- `ci`: executed fraction >= 0.9 and executed surface >= 250
+- `release`: executed fraction == 1.0 and executed surface >= 1000
+- skipped surface must be 0
+- holdout selection rule: `sha256(caseId) % 10 == 0`
+
+## G-303 Determinism
+- For each executed case/width:
+  - two render runs produce identical output hash
+
+## G-304 Render quality floors
+- `textTokenF1 >= 0.970`
+- `linkLabelF1 >= 0.995`
+- `tableMatrixF1 >= 0.950`
+- `preWhitespaceExact >= 0.995`
+- `outlineF1 >= 0.980`
+
+## G-305 Comparative win
+For each metric:
+- `verge >= best(lynx, w3m, links2) + 0.005`
+
+## G-306 Report completeness
+- `reports/render-baselines.json` exists and includes pinned baseline versions
+- `reports/render-verge.json` exists and includes per-case output + normalized output
+- `reports/render-score.json` exists with metrics + coverage
+- `reports/eval-summary.json` exists and reports gate status
+
+## G-307 Agent report gate
+- `reports/agent.json` exists
+- `reports/agent.json.overall.ok` is `true`
+- required feature checks:
+  - `features.trace.ok`
+  - `features.spans.ok`
+  - `features.patch.ok`
+  - `features.outline.ok`
+  - `features.chunk.ok`
+  - `features.stream.ok`
+
+## G-308 Stream invariants gate
+- `reports/stream.json` exists
+- `reports/stream.json.overall.ok` is `true`
+- required check IDs:
+  - `stream-serialize-parity`
+  - `stream-max-input-budget`
+  - `stream-max-buffered-budget`
+  - `tokenize-stream-deterministic`
+
+## G-309 Benchmark governance gate
+- `reports/bench.json` exists
+- `reports/bench-governance.json` exists
+- `reports/bench-governance.json.ok` is `true`
+- benchmark names emitted in `reports/bench.json` must include all names in `evaluation.config.json.benchmarks.required`
+
+## R-310 Release integrity gate
+- enforced in `eval:release`
+- `reports/release-integrity.json` exists and `ok=true`
+- dry-run package must include `dist/`, `README.md`, and `LICENSE`
+- dry-run package must exclude `reports/`, `tmp/`, `scripts/`, and `test/`
+
+## G-311 Phase ladder gate (13 to 26)
+- enforced in `eval:ci` and `eval:release`
+- `reports/phase-ladder.json` exists
+- `reports/phase-ladder.json.overall.ok` is `true`
+- required phase checks:
+  - `checks.phase13.ok` through `checks.phase26.ok`
+
+## Phase-3.1 validation gates (real oracle pass)
+Executed by:
+- `npm run eval:phase31:ci`
+- `npm run eval:phase31:release`
+
+### V-401 Real engine execution
+- `lynx`, `w3m`, `links2` are executed from the rootless oracle image under `tmp/oracle-image/rootfs`.
+
+### V-402 Binary fingerprint capture
+- `reports/oracle-runtime.json` includes `sha256`, `sizeBytes`, and version output for all three engines.
+
+### V-403 Reproducible image identity
+- `scripts/oracles/oracle-image.lock.json` contains package versions + `.deb` hashes.
+- `reports/oracle-runtime.json.image.fingerprint` derives from the lock package set.
+
+### V-404 Real-baseline report integrity
+- `reports/render-baselines-real.json` includes case records for all engines.
+- per-engine record counts equal executed surface in `reports/render-score-real.json.coverage.executedSurface`.
+
+### V-405 Validation posture
+- Phase-3.1 gates enforce coverage, determinism, and metric floors.
+- Comparative superiority delta is recorded in metrics but is non-blocking for this validation pass.
+
+## Phase-3.2 validation gates (strict superiority)
+Executed by:
+- `npm run eval:phase32:ci`
+- `npm run eval:phase32:release`
+
+### V-406 Superiority gate
+- `reports/eval-phase32-summary.json.ok` is `true`.
+- for each configured render metric:
+  - `verge >= bestBaseline + comparativeWinDelta`.
+
+## Phase-3.3 validation gates (fingerprint drift)
+Executed by:
+- `npm run eval:phase33:ci`
+- `npm run eval:phase33:release`
+
+### V-407 Fingerprint identity gate
+- `reports/eval-phase33-summary.json.ok` is `true`.
+- lock-derived fingerprint equals runtime image fingerprint.
+- engine fingerprints for `lynx`, `w3m`, `links2` are present and complete.
+
+## Phase-3.4 validation gates (oracle supply chain)
+Executed by:
+- `npm run eval:phase34:ci`
+- `npm run eval:phase34:release`
+
+### V-408 Supply-chain envelope gate
+- `reports/eval-phase34-summary.json.ok` is `true`.
+- `reports/oracle-supply-chain.json.ok` is `true`.
+- package closure count is bounded by `evaluation.config.json.phase34.maxOraclePackageCount`.
