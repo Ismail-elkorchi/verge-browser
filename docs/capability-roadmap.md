@@ -1,9 +1,9 @@
-# Phase Roadmap (3.2 to 12)
+# Capability Roadmap (3.2 to 12)
 
-This file defines strict, falsifiable acceptance criteria for the implemented phases.
-Each phase is complete only when its command(s) exit with code `0` and required report fields match this contract.
+This file defines strict, falsifiable acceptance criteria for the implemented capabilities.
+Each capability is complete only when its command(s) exit with code `0` and required report fields match this contract.
 
-## Phase 3.2 — Real-oracle superiority gate
+## Capability 3.2 — Real-oracle superiority gate
 Acceptance criteria:
 - `npm run eval:oracle-superiority:release` passes.
 - `reports/eval-oracle-superiority-summary.json` exists.
@@ -12,7 +12,7 @@ Acceptance criteria:
   - `metrics.<name>.ok` is `true`.
   - `metrics.<name>.verge >= metrics.<name>.bestBaseline + evaluation.config.json.render.comparativeWinDelta`.
 
-## Phase 3.3 — Binary fingerprint drift gate
+## Capability 3.3 — Binary fingerprint drift gate
 Acceptance criteria:
 - `npm run eval:oracle-fingerprint:release` passes.
 - `reports/eval-oracle-fingerprint-summary.json` exists.
@@ -21,7 +21,7 @@ Acceptance criteria:
 - `reports/eval-oracle-fingerprint-summary.json.engines.missing` is empty.
 - `reports/eval-oracle-fingerprint-summary.json.engines.weakFingerprints` is empty.
 
-## Phase 3.4 — Oracle supply-chain envelope gate
+## Capability 3.4 — Oracle supply-chain envelope gate
 Acceptance criteria:
 - `npm run eval:oracle-supply-chain:release` passes.
 - `reports/eval-oracle-supply-chain-summary.json` exists.
@@ -29,7 +29,7 @@ Acceptance criteria:
 - `reports/oracle-supply-chain.json.ok` is `true`.
 - `reports/oracle-supply-chain.json.packageCount <= evaluation.config.json.oracleSupplyChain.maxOraclePackageCount`.
 
-## Phase 4 — Rendering parity hardening
+## Capability 4 — Rendering parity hardening
 Acceptance criteria:
 - `npm run eval:ci` passes.
 - `reports/render-score.json.metrics.verge.textTokenF1 >= 0.97`.
@@ -37,7 +37,7 @@ Acceptance criteria:
 - `reports/render-score.json.metrics.verge.preWhitespaceExact >= 0.995`.
 - `test/control/render.test.js` passes list nesting, pre, and table assertions.
 
-## Phase 5 — Navigation and command ergonomics
+## Capability 5 — Navigation and command ergonomics
 Acceptance criteria:
 - `npm test` passes.
 - `test/control/pager.test.js` passes.
@@ -45,7 +45,7 @@ Acceptance criteria:
 - `test/control/shortcuts.test.js` passes.
 - `test/control/storage.test.js` passes.
 
-## Phase 6 — Stream-first parse path
+## Capability 6 — Stream-first parse path
 Acceptance criteria:
 - `npm run eval:ci` passes.
 - `reports/stream.json` exists and `reports/stream.json.overall.ok` is `true`.
@@ -55,7 +55,7 @@ Acceptance criteria:
   - `stream-max-buffered-budget` with `ok=true`
   - `tokenize-stream-deterministic` with `ok=true`
 
-## Phase 7 — Form interaction surface
+## Capability 7 — Form interaction surface
 Acceptance criteria:
 - `npm test` passes.
 - `test/control/forms.test.js` passes.
@@ -63,14 +63,14 @@ Acceptance criteria:
   - `form list`
   - `form submit <index> [name=value ...]`
 
-## Phase 8 — Transport security hardening
+## Capability 8 — Transport security hardening
 Acceptance criteria:
 - `npm test` passes.
 - `test/control/fetch-page.test.js` passes protocol and size-limit checks.
 - Redirect protocol enforcement rejects unsupported protocols.
 - Content-type gate rejects non-HTML payloads.
 
-## Phase 9 — Agent observability
+## Capability 9 — Agent observability
 Acceptance criteria:
 - `npm run eval:ci` passes.
 - `reports/agent.json` exists and `reports/agent.json.overall.ok` is `true`.
@@ -79,7 +79,7 @@ Acceptance criteria:
 - `reports/agent.json.features.outline.ok` is `true`.
 - `reports/agent.json.features.chunk.ok` is `true`.
 
-## Phase 10 — Structural rewrite operations
+## Capability 10 — Structural rewrite operations
 Acceptance criteria:
 - `npm test` passes.
 - `test/control/commands.test.js` parses all patch command forms.
@@ -92,101 +92,101 @@ Acceptance criteria:
   - `patch insert-before <id> <html>`
   - `patch insert-after <id> <html>`
 
-## Phase 11 — CI and release automation hardening
+## Capability 11 — CI and release automation hardening
 Acceptance criteria:
 - `.github/workflows/ci.yml` runs `npm run ci`.
 - `.github/workflows/release.yml` runs `npm run release:check`.
-- `.github/workflows/oracle-validation-ladder.yml` runs phases 3.2, 3.3, and 3.4.
+- `.github/workflows/oracle-validation-ladder.yml` runs capabilities 3.2, 3.3, and 3.4.
 - `npm run release:check` passes locally.
 
-## Phase 12 — Benchmark governance
+## Capability 12 — Benchmark governance
 Acceptance criteria:
 - `npm run test:bench` passes.
 - `reports/bench.json` exists with benchmark entries for configured widths.
 - `reports/bench-governance.json` exists and `ok=true`.
 - `reports/bench-governance.json.benchmarksCompared` equals emitted benchmark count.
 
-## Phase 13 — Cookie jar parse + match determinism
+## Capability 13 — Cookie jar parse + match determinism
 Acceptance criteria:
-- `npm run eval:phase-ladder:ci` passes.
-- `reports/phase-ladder.json.checks.phase13.ok` is `true`.
+- `npm run eval:capability-ladder:ci` passes.
+- `reports/capability-ladder.json.checks.capability13.ok` is `true`.
 - Cookie parsing/merge/header checks are deterministic for identical inputs.
 
-## Phase 14 — Form submission request synthesis (GET + POST)
+## Capability 14 — Form submission request synthesis (GET + POST)
 Acceptance criteria:
 - `npm test` passes.
-- `reports/phase-ladder.json.checks.phase14.ok` is `true`.
+- `reports/capability-ladder.json.checks.capability14.ok` is `true`.
 - `form submit` supports both GET and POST forms.
 
-## Phase 15 — Local recall index persistence
+## Capability 15 — Local recall index persistence
 Acceptance criteria:
 - `npm test` passes.
-- `reports/phase-ladder.json.checks.phase15.ok` is `true`.
+- `reports/capability-ladder.json.checks.capability15.ok` is `true`.
 - Index search returns deterministic ranking for repeated inputs.
 
-## Phase 16 — Reader/download command surface
+## Capability 16 — Reader/download command surface
 Acceptance criteria:
 - `npm test` passes.
-- `reports/phase-ladder.json.checks.phase16.ok` is `true`.
+- `reports/capability-ladder.json.checks.capability16.ok` is `true`.
 - Command parser accepts `reader` and `download <path>`.
 
-## Phase 17 — Navigation diagnostics completeness
+## Capability 17 — Navigation diagnostics completeness
 Acceptance criteria:
 - `npm test` passes.
-- `reports/phase-ladder.json.checks.phase17.ok` is `true`.
+- `reports/capability-ladder.json.checks.capability17.ok` is `true`.
 - Diagnostics include request method, cookie usage, and duration fields.
 
-## Phase 18 — Command grammar hardening for stateful navigation
+## Capability 18 — Command grammar hardening for stateful navigation
 Acceptance criteria:
 - `npm test` passes.
-- `reports/phase-ladder.json.checks.phase18.ok` is `true`.
+- `reports/capability-ladder.json.checks.capability18.ok` is `true`.
 - Command parser accepts `cookie list`, `cookie clear`, and `recall open <index>`.
 
-## Phase 19 — Transport policy verification
+## Capability 19 — Transport policy verification
 Acceptance criteria:
-- `npm run eval:phase-ladder:ci` passes.
-- `reports/phase-ladder.json.checks.phase19.ok` is `true`.
+- `npm run eval:capability-ladder:ci` passes.
+- `reports/capability-ladder.json.checks.capability19.ok` is `true`.
 - Protocol/content-type security checks reject disallowed inputs.
 
-## Phase 20 — POST transport + Set-Cookie capture
+## Capability 20 — POST transport + Set-Cookie capture
 Acceptance criteria:
 - `npm test` passes.
-- `reports/phase-ladder.json.checks.phase20.ok` is `true`.
+- `reports/capability-ladder.json.checks.capability20.ok` is `true`.
 - `fetchPage` POST request path captures `Set-Cookie` headers.
 
-## Phase 21 — Cookie store replay integration
+## Capability 21 — Cookie store replay integration
 Acceptance criteria:
 - `npm test` passes.
-- `reports/phase-ladder.json.checks.phase21.ok` is `true`.
+- `reports/capability-ladder.json.checks.capability21.ok` is `true`.
 - Cookie store replay produces deterministic header output.
 
-## Phase 22 — Stream invariants carried forward
+## Capability 22 — Stream invariants carried forward
 Acceptance criteria:
 - `npm run eval:ci` passes.
-- `reports/phase-ladder.json.checks.phase22.ok` is `true`.
+- `reports/capability-ladder.json.checks.capability22.ok` is `true`.
 - `reports/stream.json.overall.ok` is `true`.
 
-## Phase 23 — Agent report carried forward
+## Capability 23 — Agent report carried forward
 Acceptance criteria:
 - `npm run eval:ci` passes.
-- `reports/phase-ladder.json.checks.phase23.ok` is `true`.
+- `reports/capability-ladder.json.checks.capability23.ok` is `true`.
 - `reports/agent.json.overall.ok` is `true`.
 
-## Phase 24 — Benchmark governance carried forward
+## Capability 24 — Benchmark governance carried forward
 Acceptance criteria:
 - `npm run eval:ci` passes.
-- `reports/phase-ladder.json.checks.phase24.ok` is `true`.
+- `reports/capability-ladder.json.checks.capability24.ok` is `true`.
 - `reports/bench-governance.json.ok` is `true`.
 
-## Phase 25 — Release integrity continuity
+## Capability 25 — Release integrity continuity
 Acceptance criteria:
 - `npm run eval:release` passes.
-- `reports/phase-ladder.json.checks.phase25.ok` is `true`.
+- `reports/capability-ladder.json.checks.capability25.ok` is `true`.
 - `reports/release-integrity.json.ok` is `true` in release profile.
 
-## Phase 26 — Integrated phase ladder gate
+## Capability 26 — Integrated capability ladder gate
 Acceptance criteria:
 - `npm run eval:ci` passes.
 - `npm run eval:release` passes.
-- `reports/phase-ladder.json.checks.phase26.ok` is `true`.
-- `reports/phase-ladder.json.overall.ok` is `true`.
+- `reports/capability-ladder.json.checks.capability26.ok` is `true`.
+- `reports/capability-ladder.json.overall.ok` is `true`.

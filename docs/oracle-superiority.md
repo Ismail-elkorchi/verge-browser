@@ -1,4 +1,4 @@
-# Phase 3.2 Superiority Gate
+# Superiority gate
 
 Commands:
 - `npm run eval:oracle-superiority:ci`

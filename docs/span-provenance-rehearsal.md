@@ -1,4 +1,4 @@
-# Phase 4 span provenance rehearsal
+# Span provenance rehearsal
 
 ## Objective
 Validate that patch workflows in `html-parser` succeed on input spans and reject non-input spans with a structured failure payload.

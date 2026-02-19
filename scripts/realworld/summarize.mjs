@@ -70,7 +70,7 @@ async function main() {
   }, {});
 
   const markdownLines = [
-    "# Phase 5 field report",
+    "# Field report",
     "",
     `Generated: ${new Date().toISOString()}`,
     "",
@@ -116,7 +116,7 @@ async function main() {
     )
   ];
 
-  const outputPath = resolve(process.cwd(), "docs/phase5-field-report.md");
+  const outputPath = resolve(process.cwd(), "docs/field-report.md");
   await writeFile(outputPath, `${markdownLines.join("\n")}\n`, "utf8");
   process.stdout.write(`field-report doc updated: ${outputPath}\n`);
 }

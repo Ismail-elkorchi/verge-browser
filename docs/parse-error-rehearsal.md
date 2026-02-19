@@ -1,4 +1,4 @@
-# Phase 4 parse-error taxonomy rehearsal
+# Parse-error taxonomy rehearsal
 
 ## Objective
 Use `parseErrorId` from `html-parser` in local mismatch triage output.
@@ -44,8 +44,8 @@ const html = '<table><tr><td>A<td>B</tr></span>';
 const widths = config.render.widths;
 const sha256 = createHash('sha256').update(html).digest('hex');
 const corpus = {
-  suite: 'phase4-triage',
-  cases: [{ id: 'phase4-malformed-0001', html, sha256, widths }]
+  suite: 'capability4-triage',
+  cases: [{ id: 'capability4-malformed-0001', html, sha256, widths }]
 };
 const evaluation = await runRenderEvaluation({ config, corpus, profile: 'ci', minimumCorpusCases: 1 });
 const caseReport = evaluation.vergeReport.cases[0];
@@ -82,7 +82,7 @@ NODE
 - Malformed triage case:
 ```json
 {
-  "caseId": "phase4-malformed-0001",
+  "caseId": "capability4-malformed-0001",
   "metrics": {
     "textTokenF1": 1,
     "linkLabelF1": 1,

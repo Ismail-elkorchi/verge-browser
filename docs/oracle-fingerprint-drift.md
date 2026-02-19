@@ -1,4 +1,4 @@
-# Phase 3.3 Fingerprint Drift Gate
+# Fingerprint drift gate
 
 Commands:
 - `npm run eval:oracle-fingerprint:ci`

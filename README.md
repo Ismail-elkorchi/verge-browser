@@ -131,7 +131,7 @@ npm run release:check
   - `docs/oracle-fingerprint-drift.md`
   - `docs/oracle-supply-chain.md`
   - `docs/benchmark-governance.md`
-  - `docs/phases.md`
+  - `docs/capability-roadmap.md`
 
 ## Persistence model
 - State file stores bookmarks, history, cookies, and indexed recall documents as JSON.
