@@ -5,11 +5,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { fetchPage, fetchPageStream, readByteStreamToText } from "../../dist/app/fetch-page.js";
+import {
+  NetworkFetchError,
+  classifyNetworkFailure,
+  fetchPage,
+  fetchPageStream,
+  readByteStreamToText
+} from "../../dist/app/fetch-page.js";
 
 test("fetchPage supports about:help without network", async () => {
   const page = await fetchPage("about:help");
   assert.equal(page.status, 200);
+  assert.equal(page.networkOutcome.kind, "ok");
   assert.ok(page.html.includes("verge-browser"));
   assert.ok(page.html.includes("stream &lt;url&gt;"));
   assert.ok(page.html.includes("patch set-attr"));
@@ -27,6 +34,7 @@ test("fetchPage supports file URLs", async () => {
 
     assert.equal(page.status, 200);
     assert.equal(page.finalUrl, fileUrl);
+    assert.equal(page.networkOutcome.kind, "ok");
     assert.ok(page.html.includes("Local file"));
   } finally {
     await rm(tempDir, { recursive: true, force: true });
@@ -35,6 +43,7 @@ test("fetchPage supports file URLs", async () => {
 
 test("fetchPageStream supports about:help without network", async () => {
   const page = await fetchPageStream("about:help");
+  assert.equal(page.networkOutcome.kind, "ok");
   const html = await readByteStreamToText(page.stream);
   assert.equal(page.status, 200);
   assert.ok(html.includes("verge-browser"));
@@ -55,7 +64,10 @@ test("fetchPage blocks unsupported redirect protocols", async () => {
   const url = `http://127.0.0.1:${String(address.port)}/`;
 
   try {
-    await assert.rejects(fetchPage(url), /Blocked unsupported protocol/);
+    await assert.rejects(
+      fetchPage(url),
+      (error) => error instanceof NetworkFetchError && error.networkOutcome.kind === "unsupported_protocol"
+    );
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -76,7 +88,10 @@ test("fetchPage enforces maxContentBytes", async () => {
   const url = `http://127.0.0.1:${String(address.port)}/`;
 
   try {
-    await assert.rejects(fetchPage(url, 15_000, { maxContentBytes: 64 }), /maxContentBytes/);
+    await assert.rejects(
+      fetchPage(url, 15_000, { maxContentBytes: 64 }),
+      (error) => error instanceof NetworkFetchError && error.networkOutcome.kind === "size_limit"
+    );
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -102,6 +117,73 @@ test("fetchPageStream enforces maxContentBytes", async () => {
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
+});
+
+test("fetchPage classifies timeout deterministically", async () => {
+  const server = createServer((_, response) => {
+    setTimeout(() => {
+      response.statusCode = 200;
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      response.end("<html><body>slow</body></html>");
+    }, 200);
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("server address unavailable");
+  }
+  const url = `http://127.0.0.1:${String(address.port)}/`;
+
+  try {
+    await assert.rejects(
+      fetchPage(url, 10),
+      (error) => error instanceof NetworkFetchError && error.networkOutcome.kind === "timeout"
+    );
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("fetchPage marks HTTP failures as http_error while returning body", async () => {
+  const server = createServer((_, response) => {
+    response.statusCode = 403;
+    response.statusMessage = "Forbidden";
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end("<html><body><h1>blocked</h1></body></html>");
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("server address unavailable");
+  }
+  const url = `http://127.0.0.1:${String(address.port)}/`;
+
+  try {
+    const page = await fetchPage(url);
+    assert.equal(page.status, 403);
+    assert.equal(page.networkOutcome.kind, "http_error");
+    assert.ok(page.html.includes("blocked"));
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("classifyNetworkFailure maps DNS and TLS failure codes", () => {
+  const dnsOutcome = classifyNetworkFailure(
+    new Error("fetch failed", { cause: { code: "ENOTFOUND" } }),
+    "https://missing.example/"
+  );
+  assert.equal(dnsOutcome.kind, "dns");
+  assert.equal(dnsOutcome.detailCode, "ENOTFOUND");
+
+  const tlsOutcome = classifyNetworkFailure(
+    new Error("fetch failed", { cause: { code: "CERT_HAS_EXPIRED" } }),
+    "https://expired.example/"
+  );
+  assert.equal(tlsOutcome.kind, "tls");
+  assert.equal(tlsOutcome.detailCode, "CERT_HAS_EXPIRED");
 });
 
 test("fetchPage forwards request options and captures set-cookie headers", async () => {
@@ -136,6 +218,7 @@ test("fetchPage forwards request options and captures set-cookie headers", async
     });
 
     assert.equal(page.status, 200);
+    assert.equal(page.networkOutcome.kind, "ok");
     assert.ok(page.html.includes("posted"));
     assert.deepEqual(page.setCookieHeaders, ["sid=abc; Path=/; HttpOnly"]);
   } finally {

@@ -1,5 +1,26 @@
 import type { DocumentTree } from "html-parser";
 
+export type NetworkOutcomeKind =
+  | "ok"
+  | "http_error"
+  | "timeout"
+  | "dns"
+  | "tls"
+  | "redirect_limit"
+  | "content_type_block"
+  | "size_limit"
+  | "unsupported_protocol"
+  | "unknown";
+
+export interface NetworkOutcome {
+  readonly kind: NetworkOutcomeKind;
+  readonly finalUrl: string;
+  readonly status: number | null;
+  readonly statusText: string | null;
+  readonly detailCode: string | null;
+  readonly detailMessage: string;
+}
+
 export interface RenderedLink {
   readonly index: number;
   readonly label: string;
@@ -27,6 +48,7 @@ export interface FetchPageResult {
   readonly responseHeaders: Readonly<Record<string, string>>;
   readonly setCookieHeaders: readonly string[];
   readonly fetchedAtIso: string;
+  readonly networkOutcome: NetworkOutcome;
 }
 
 export interface FetchPageStreamResult {
@@ -39,6 +61,7 @@ export interface FetchPageStreamResult {
   readonly responseHeaders: Readonly<Record<string, string>>;
   readonly setCookieHeaders: readonly string[];
   readonly fetchedAtIso: string;
+  readonly networkOutcome: NetworkOutcome;
 }
 
 export type FetchPagePayload = FetchPageResult | FetchPageStreamResult;
@@ -61,6 +84,7 @@ export interface PageDiagnostics {
   readonly renderDurationMs: number;
   readonly totalDurationMs: number;
   readonly usedCookies: boolean;
+  readonly networkOutcome: NetworkOutcome;
 }
 
 export interface RenderInput {
