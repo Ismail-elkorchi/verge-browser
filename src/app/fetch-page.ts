@@ -17,6 +17,23 @@ const DNS_ERROR_CODES = new Set([
   "ENODATA",
   "EHOSTUNREACH"
 ]);
+const TIMEOUT_ERROR_CODES = new Set([
+  "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "ABORT_ERR",
+  "TIMEOUT"
+]);
+const TRANSIENT_RETRY_CODES = new Set([
+  "ECONNRESET",
+  "EPIPE",
+  "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_SOCKET"
+]);
+const ERROR_CODE_PATTERN =
+  /\b(ENOTFOUND|EAI_AGAIN|ENODATA|EHOSTUNREACH|ETIMEDOUT|ECONNRESET|EPIPE|ERR_TLS_[A-Z_]+|ERR_SSL_[A-Z_]+|CERT_[A-Z_]+|SELF_SIGNED_CERT_IN_CHAIN|UNABLE_TO_VERIFY_LEAF_SIGNATURE|UND_ERR_[A-Z_]+)\b/gi;
 
 function escapeHtml(value: string): string {
   return value
@@ -89,18 +106,76 @@ function tlsCodeLike(rawCode: string): boolean {
   );
 }
 
-function detailCodeFromError(error: unknown, messageUpper: string): string | null {
-  if (!(error instanceof Error)) {
-    return null;
+function collectErrorCodes(error: unknown): readonly string[] {
+  const codes = new Set<string>();
+  const queue: unknown[] = [error];
+  const visited = new Set<unknown>();
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (current === undefined || current === null || visited.has(current)) {
+      continue;
+    }
+    visited.add(current);
+
+    if (typeof current === "object" && "code" in current) {
+      const rawCode = (current as { readonly code: unknown }).code;
+      if (typeof rawCode === "string" && rawCode.trim().length > 0) {
+        codes.add(rawCode.toUpperCase());
+      }
+    }
+
+    if (current instanceof Error) {
+      for (const match of current.message.toUpperCase().matchAll(ERROR_CODE_PATTERN)) {
+        const code = match[1];
+        if (code) {
+          codes.add(code);
+        }
+      }
+      const cause = (current as { readonly cause?: unknown }).cause;
+      if (cause !== undefined) {
+        queue.push(cause);
+      }
+      continue;
+    }
+
+    if (typeof current === "string") {
+      for (const match of current.toUpperCase().matchAll(ERROR_CODE_PATTERN)) {
+        const code = match[1];
+        if (code) {
+          codes.add(code);
+        }
+      }
+      continue;
+    }
+
+    if (typeof current === "object" && "cause" in current) {
+      queue.push((current as { readonly cause?: unknown }).cause);
+    }
   }
-  const cause = (error as { readonly cause?: unknown }).cause;
-  if (cause && typeof cause === "object" && "code" in cause) {
-    return String((cause as { readonly code: unknown }).code).toUpperCase();
+
+  return [...codes];
+}
+
+function detailCodeFromError(error: unknown): string | null {
+  const codes = collectErrorCodes(error);
+  return codes[0] ?? null;
+}
+
+function shouldRetryNetworkError(error: unknown, method: string, attemptIndex: number, maxRequestRetries: number): boolean {
+  if (attemptIndex >= maxRequestRetries || method !== "GET") {
+    return false;
   }
-  const match = messageUpper.match(
-    /\b(ENOTFOUND|EAI_AGAIN|ENODATA|EHOSTUNREACH|ERR_TLS_[A-Z_]+|ERR_SSL_[A-Z_]+|CERT_[A-Z_]+|SELF_SIGNED_CERT_IN_CHAIN|UNABLE_TO_VERIFY_LEAF_SIGNATURE)\b/
-  );
-  return match?.[1] ?? null;
+  for (const code of collectErrorCodes(error)) {
+    if (TRANSIENT_RETRY_CODES.has(code)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function sleep(delayMs: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
 function isAbortError(error: unknown): boolean {
@@ -124,9 +199,14 @@ export function classifyNetworkFailure(error: unknown, finalUrl: string): Networ
 
   const message = error instanceof Error ? error.message : String(error);
   const messageUpper = message.toUpperCase();
-  const detailCode = detailCodeFromError(error, messageUpper);
+  const detailCode = detailCodeFromError(error);
 
-  if (isAbortError(error) || messageUpper.includes("TIMED OUT") || messageUpper.includes("FETCH TIMEOUT")) {
+  if (
+    isAbortError(error) ||
+    messageUpper.includes("TIMED OUT") ||
+    messageUpper.includes("FETCH TIMEOUT") ||
+    (detailCode !== null && TIMEOUT_ERROR_CODES.has(detailCode))
+  ) {
     return createNetworkOutcome("timeout", {
       finalUrl,
       detailCode: detailCode ?? "TIMEOUT",
@@ -338,77 +418,82 @@ async function fetchNetworkResponse(
   for (let redirectCount = 0; redirectCount <= securityPolicy.maxRedirects; redirectCount += 1) {
     const parsedCurrentUrl = new URL(currentUrl);
     assertAllowedProtocol(parsedCurrentUrl);
+    const method = requestOptions.method ?? "GET";
+    const requestHeaders: Record<string, string> = {
+      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "user-agent": "verge-browser/0.1 (+terminal; html-parser)",
+      ...(requestOptions.headers ?? {})
+    };
 
-    const abortController = new AbortController();
-    const timeoutHandle = setTimeout(() => {
-      abortController.abort("fetch timeout");
-    }, timeoutMs);
+    for (let attemptIndex = 0; attemptIndex <= securityPolicy.maxRequestRetries; attemptIndex += 1) {
+      const abortController = new AbortController();
+      const timeoutHandle = setTimeout(() => {
+        abortController.abort("fetch timeout");
+      }, timeoutMs);
 
-    try {
-      const method = requestOptions.method ?? "GET";
-      const requestHeaders: Record<string, string> = {
-        accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "user-agent": "verge-browser/0.1 (+terminal; html-parser)",
-        ...(requestOptions.headers ?? {})
-      };
+      try {
+        const response = await fetch(currentUrl, {
+          method,
+          redirect: "manual",
+          signal: abortController.signal,
+          headers: requestHeaders,
+          ...(method === "POST" ? { body: requestOptions.bodyText ?? "" } : {})
+        });
 
-      const response = await fetch(currentUrl, {
-        method,
-        redirect: "manual",
-        signal: abortController.signal,
-        headers: requestHeaders,
-        ...(method === "POST" ? { body: requestOptions.bodyText ?? "" } : {})
-      });
-
-      if (isRedirectStatus(response.status)) {
-        if (redirectCount >= securityPolicy.maxRedirects) {
-          throw new Error(`Redirect limit exceeded (${String(securityPolicy.maxRedirects)})`);
+        if (isRedirectStatus(response.status)) {
+          if (redirectCount >= securityPolicy.maxRedirects) {
+            throw new Error(`Redirect limit exceeded (${String(securityPolicy.maxRedirects)})`);
+          }
+          const location = response.headers.get("location");
+          if (!location) {
+            throw new Error(`Redirect response missing location header: ${String(response.status)}`);
+          }
+          const nextUrl = new URL(location, currentUrl);
+          assertAllowedProtocol(nextUrl);
+          currentUrl = nextUrl.toString();
+          break;
         }
-        const location = response.headers.get("location");
-        if (!location) {
-          throw new Error(`Redirect response missing location header: ${String(response.status)}`);
+
+        const contentType = response.headers.get("content-type");
+        if (!isHtmlLikeContentType(contentType)) {
+          throw new Error(`Blocked non-HTML content-type: ${contentType ?? "unknown"}`);
         }
-        const nextUrl = new URL(location, currentUrl);
-        assertAllowedProtocol(nextUrl);
-        currentUrl = nextUrl.toString();
-        continue;
-      }
 
-      const contentType = response.headers.get("content-type");
-      if (!isHtmlLikeContentType(contentType)) {
-        throw new Error(`Blocked non-HTML content-type: ${contentType ?? "unknown"}`);
+        return {
+          requestUrl,
+          finalUrl: response.url || currentUrl,
+          status: response.status,
+          statusText: response.statusText,
+          contentType,
+          responseHeaders: flattenHeaders(response.headers),
+          body: response.body,
+          setCookieHeaders: readSetCookieHeaders(response.headers),
+          fetchedAtIso: nowIso()
+        };
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") {
+          throw new Error(`Network request timed out after ${String(timeoutMs)}ms`, { cause: error });
+        }
+        if (shouldRetryNetworkError(error, method, attemptIndex, securityPolicy.maxRequestRetries)) {
+          await sleep(securityPolicy.retryDelayMs);
+          continue;
+        }
+        if (error instanceof Error) {
+          const cause = (error as { readonly cause?: unknown }).cause;
+          const causeMessage = cause instanceof Error
+            ? cause.message
+            : (
+              cause && typeof cause === "object" && "code" in cause
+                ? String(cause.code)
+                : null
+            );
+          const detail = causeMessage ? `${error.message} (${causeMessage})` : error.message;
+          throw new Error(`Network request failed for ${currentUrl}: ${detail}`, { cause: error });
+        }
+        throw new Error(`Network request failed for ${currentUrl}: ${String(error)}`);
+      } finally {
+        clearTimeout(timeoutHandle);
       }
-
-      return {
-        requestUrl,
-        finalUrl: response.url || currentUrl,
-        status: response.status,
-        statusText: response.statusText,
-        contentType,
-        responseHeaders: flattenHeaders(response.headers),
-        body: response.body,
-        setCookieHeaders: readSetCookieHeaders(response.headers),
-        fetchedAtIso: nowIso()
-      };
-    } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
-        throw new Error(`Network request timed out after ${String(timeoutMs)}ms`);
-      }
-      if (error instanceof Error) {
-        const cause = (error as { readonly cause?: unknown }).cause;
-        const causeMessage = cause instanceof Error
-          ? cause.message
-          : (
-            cause && typeof cause === "object" && "code" in cause
-              ? String(cause.code)
-              : null
-          );
-        const detail = causeMessage ? `${error.message} (${causeMessage})` : error.message;
-        throw new Error(`Network request failed for ${currentUrl}: ${detail}`);
-      }
-      throw new Error(`Network request failed for ${currentUrl}: ${String(error)}`);
-    } finally {
-      clearTimeout(timeoutHandle);
     }
   }
 

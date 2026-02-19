@@ -76,6 +76,7 @@ All evaluation outputs are artifacts under `reports/`.
 - `requiredKinds`: `string[]`
 - `coverage`:
   - `{ presentKinds, missingKinds }`
+- `replayFixtureCount`: number (`> 0`)
 - `cases`:
   - entries: `{ id, expectedKind, actualKind, ok, detailCode, detailMessage }`
 - `overall`: `{ ok }`

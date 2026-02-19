@@ -1,0 +1,124 @@
+[
+  {
+    "id": "dns-cause-code",
+    "finalUrl": "https://dns.invalid/",
+    "error": {
+      "message": "fetch failed",
+      "cause": {
+        "code": "ENOTFOUND"
+      }
+    },
+    "expected": {
+      "kind": "dns",
+      "detailCode": "ENOTFOUND"
+    }
+  },
+  {
+    "id": "tls-nested-cause",
+    "finalUrl": "https://tls.invalid/",
+    "error": {
+      "message": "fetch failed",
+      "cause": {
+        "message": "socket connect failed",
+        "cause": {
+          "code": "CERT_HAS_EXPIRED"
+        }
+      }
+    },
+    "expected": {
+      "kind": "tls",
+      "detailCode": "CERT_HAS_EXPIRED"
+    }
+  },
+  {
+    "id": "timeout-undici-code",
+    "finalUrl": "https://timeout.invalid/",
+    "error": {
+      "message": "request pipeline timeout",
+      "cause": {
+        "code": "UND_ERR_CONNECT_TIMEOUT"
+      }
+    },
+    "expected": {
+      "kind": "timeout",
+      "detailCode": "UND_ERR_CONNECT_TIMEOUT"
+    }
+  },
+  {
+    "id": "timeout-message",
+    "finalUrl": "https://slow.invalid/",
+    "error": {
+      "message": "Network request timed out after 15000ms"
+    },
+    "expected": {
+      "kind": "timeout",
+      "detailCode": "TIMEOUT"
+    }
+  },
+  {
+    "id": "transient-reset",
+    "finalUrl": "https://unstable.invalid/",
+    "error": {
+      "message": "Network request failed for https://unstable.invalid/: fetch failed (ECONNRESET)"
+    },
+    "expected": {
+      "kind": "unknown",
+      "detailCode": "ECONNRESET"
+    }
+  },
+  {
+    "id": "unsupported-protocol-message",
+    "finalUrl": "ftp://example.invalid/page",
+    "error": {
+      "message": "Blocked unsupported protocol: ftp:"
+    },
+    "expected": {
+      "kind": "unsupported_protocol",
+      "detailCode": "UNSUPPORTED_PROTOCOL"
+    }
+  },
+  {
+    "id": "redirect-limit-message",
+    "finalUrl": "https://loop.invalid/",
+    "error": {
+      "message": "Redirect limit exceeded (5)"
+    },
+    "expected": {
+      "kind": "redirect_limit",
+      "detailCode": "REDIRECT_LIMIT"
+    }
+  },
+  {
+    "id": "content-type-message",
+    "finalUrl": "https://json.invalid/",
+    "error": {
+      "message": "Blocked non-HTML content-type: application/json"
+    },
+    "expected": {
+      "kind": "content_type_block",
+      "detailCode": "CONTENT_TYPE_BLOCK"
+    }
+  },
+  {
+    "id": "size-limit-message",
+    "finalUrl": "https://large.invalid/",
+    "error": {
+      "message": "Response exceeded maxContentBytes=128"
+    },
+    "expected": {
+      "kind": "size_limit",
+      "detailCode": "MAX_CONTENT_BYTES"
+    }
+  },
+  {
+    "id": "opaque-message",
+    "finalUrl": "https://opaque.invalid/",
+    "error": {
+      "message": "opaque network failure"
+    },
+    "expected": {
+      "kind": "unknown",
+      "detailCode": null
+    }
+  }
+]
