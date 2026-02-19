@@ -21,10 +21,10 @@ function parseArgs(argv) {
   return forwardedArgs;
 }
 
-function runPhase31Validation(forwardedArgs) {
+function runOracleRuntimeValidation(forwardedArgs) {
   const result = spawnSync(
     process.execPath,
-    ["scripts/eval/run-phase31-real-oracles.mjs", ...forwardedArgs],
+    ["scripts/eval/run-oracle-runtime-validation.mjs", ...forwardedArgs],
     {
       encoding: "utf8",
       stdio: "inherit"
@@ -34,7 +34,7 @@ function runPhase31Validation(forwardedArgs) {
     throw result.error;
   }
   if (result.status !== 0) {
-    throw new Error(`phase31 precheck failed with status ${String(result.status)}`);
+    throw new Error(`oracle runtime precheck failed with status ${String(result.status)}`);
   }
 }
 
@@ -47,7 +47,7 @@ function lockFingerprint(lockFile) {
 
 async function main() {
   const forwardedArgs = parseArgs(process.argv.slice(2));
-  runPhase31Validation(forwardedArgs);
+  runOracleRuntimeValidation(forwardedArgs);
 
   const [runtimeReport, lockFile] = await Promise.all([
     readJson(resolve("reports/oracle-runtime.json")),
@@ -73,7 +73,7 @@ async function main() {
   });
 
   const report = {
-    suite: "phase33-fingerprint-drift",
+    suite: "oracle-fingerprint-drift-check",
     timestamp: new Date().toISOString(),
     fingerprint: {
       runtime: runtimeFingerprint,
@@ -88,14 +88,14 @@ async function main() {
     ok: runtimeFingerprint === expectedFingerprint && missingEngines.length === 0 && weakFingerprints.length === 0
   };
 
-  const reportPath = resolve("reports/eval-phase33-summary.json");
+  const reportPath = resolve("reports/eval-oracle-fingerprint-summary.json");
   await writeJsonReport(reportPath, report);
 
   if (!report.ok) {
-    throw new Error("phase33 fingerprint drift check failed");
+    throw new Error("oracle fingerprint drift check failed");
   }
 
-  process.stdout.write("phase33 fingerprint drift check ok\n");
+  process.stdout.write("oracle fingerprint drift check ok\n");
 }
 
 await main();

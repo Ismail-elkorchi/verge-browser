@@ -3,10 +3,10 @@
 Phase 3.1 validates rendering claims with real terminal browser binaries.
 
 ## Commands
-- `npm run eval:phase31:ci`
-- `npm run eval:phase31:release`
-- GitHub PR CI job: `.github/workflows/ci.yml` (`node`, runs `npm run eval:phase31:ci -- --rebuild-lock`)
-- Scheduled/manual workflow: `.github/workflows/oracle-phase31.yml`
+- `npm run eval:oracle-runtime:ci`
+- `npm run eval:oracle-runtime:release`
+- GitHub PR CI job: `.github/workflows/ci.yml` (`node`, runs `npm run eval:oracle-runtime:ci -- --rebuild-lock`)
+- Scheduled/manual workflow: `.github/workflows/oracle-runtime-validation.yml`
 
 ## What the pass does
 1. Builds a rootless oracle host image under `tmp/oracle-image/` from Ubuntu `.deb` packages.
@@ -31,7 +31,7 @@ Phase 3.1 validates rendering claims with real terminal browser binaries.
 - `reports/render-baselines-real.json`
 - `reports/render-verge-real.json`
 - `reports/render-score-real.json`
-- `reports/eval-phase31-summary.json`
+- `reports/eval-oracle-runtime-summary.json`
 
 ## Runtime notes
 - This pass does not require `sudo`.

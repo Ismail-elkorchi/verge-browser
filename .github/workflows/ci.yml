@@ -55,5 +55,5 @@ jobs:
       - name: Refresh apt package index
         run: sudo apt-get update
 
-      - name: Real oracle validation (phase31)
-        run: npm run eval:phase31:ci -- --rebuild-lock
+      - name: Real oracle validation
+        run: npm run eval:oracle-runtime:ci -- --rebuild-lock
