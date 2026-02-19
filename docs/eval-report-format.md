@@ -49,7 +49,7 @@ All evaluation outputs are artifacts under `reports/`.
 - `reports`: absolute paths to generated reports
 - `gates`:
   - `{ ok, failures[] }`
-  - includes phase-ladder status via `reports/phase-ladder.json`
+  - includes capability-ladder status via `reports/capability-ladder.json`
 
 ## reports/agent.json
 - `suite`: `"agent"`
@@ -109,12 +109,12 @@ All evaluation outputs are artifacts under `reports/`.
   - `{ count, hasDist, hasReadme, hasLicense, forbiddenPrefixes, forbiddenEntries }`
 - `ok`: boolean
 
-## reports/phase-ladder.json
-- `suite`: `"phase-ladder"`
+## reports/capability-ladder.json
+- `suite`: `"capability-ladder"`
 - `timestamp`: ISO-8601
 - `profile`: `"ci"` or `"release"`
 - `checks`:
-  - `phase13` through `phase26`
+  - `capability13` through `capability26`
   - each entry: `{ ok, details }`
 - `overall`: `{ ok }`
 

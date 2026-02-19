@@ -71,12 +71,12 @@ For each metric:
 - dry-run package must include `dist/`, `README.md`, and `LICENSE`
 - dry-run package must exclude `reports/`, `tmp/`, `scripts/`, and `test/`
 
-## G-311 Phase ladder gate (13 to 26)
+## G-311 Capability ladder gate (13 to 26)
 - enforced in `eval:ci` and `eval:release`
-- `reports/phase-ladder.json` exists
-- `reports/phase-ladder.json.overall.ok` is `true`
-- required phase checks:
-  - `checks.phase13.ok` through `checks.phase26.ok`
+- `reports/capability-ladder.json` exists
+- `reports/capability-ladder.json.overall.ok` is `true`
+- required capability checks:
+  - `checks.capability13.ok` through `checks.capability26.ok`
 
 ## G-312 Network outcome taxonomy gate
 - `reports/network-outcomes.json` exists
@@ -136,7 +136,7 @@ Executed by:
 - Oracle runtime gates enforce coverage, determinism, and metric floors.
 - Comparative superiority delta is recorded in metrics but is non-blocking for this validation pass.
 
-## Phase-3.2 validation gates (strict superiority)
+## Oracle superiority validation gates
 Executed by:
 - `npm run eval:oracle-superiority:ci`
 - `npm run eval:oracle-superiority:release`
@@ -146,7 +146,7 @@ Executed by:
 - for each configured render metric:
   - `verge >= bestBaseline + comparativeWinDelta`.
 
-## Phase-3.3 validation gates (fingerprint drift)
+## Oracle fingerprint drift validation gates
 Executed by:
 - `npm run eval:oracle-fingerprint:ci`
 - `npm run eval:oracle-fingerprint:release`
@@ -156,7 +156,7 @@ Executed by:
 - lock-derived fingerprint equals runtime image fingerprint.
 - engine fingerprints for `lynx`, `w3m`, `links2` are present and complete.
 
-## Phase-3.4 validation gates (oracle supply chain)
+## Oracle supply-chain validation gates
 Executed by:
 - `npm run eval:oracle-supply-chain:ci`
 - `npm run eval:oracle-supply-chain:release`

@@ -100,8 +100,8 @@ npm run eval:oracle-superiority:release
 npm run eval:oracle-fingerprint:release
 npm run eval:oracle-supply-chain:release
 npm run oracle:lock:refresh
-npm run eval:phase-ladder:ci
-npm run eval:phase-ladder:release
+npm run eval:capability-ladder:ci
+npm run eval:capability-ladder:release
 npm run release:check
 ```
 
@@ -120,8 +120,8 @@ npm run release:check
   - `npm run eval:oracle-fingerprint:release`
   - `npm run eval:oracle-supply-chain:ci`
   - `npm run eval:oracle-supply-chain:release`
-  - `npm run eval:phase-ladder:ci`
-  - `npm run eval:phase-ladder:release`
+  - `npm run eval:capability-ladder:ci`
+  - `npm run eval:capability-ladder:release`
 - Contracts:
   - `docs/rendering-contract.md`
   - `docs/acceptance-gates.md`
