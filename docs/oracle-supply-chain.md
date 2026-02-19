@@ -1,4 +1,4 @@
-# Phase 3.4 Supply-chain Envelope Gate
+# Supply-chain envelope gate
 
 Commands:
 - `npm run eval:oracle-supply-chain:ci`

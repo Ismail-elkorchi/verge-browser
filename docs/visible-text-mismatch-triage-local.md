@@ -1,4 +1,4 @@
-# Phase 4 visible-text mismatch triage (local)
+# Visible-text mismatch triage (local)
 
 Date: 2026-02-16
 Profile: ci (`npm run eval:ci`)

@@ -1,4 +1,4 @@
-# Phase 4 local rehearsal: visible-text integration
+# Visible-text local rehearsal: integration
 
 Date: 2026-02-16
 Consumer: `verge-browser` (local-only)

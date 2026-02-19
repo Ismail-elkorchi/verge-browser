@@ -1,4 +1,4 @@
-# Rendering Contract (Phase 3)
+# Rendering Contract (Capability track 3)
 
 This document defines the measurable rendering contract for `verge-browser`.
 
