@@ -89,6 +89,44 @@ function hasCookieHeader(headers: Readonly<Record<string, string>> | undefined):
   return false;
 }
 
+function normalizeTriageToken(value: string | null | undefined): string {
+  if (!value || value.trim().length === 0) {
+    return "NONE";
+  }
+  return value
+    .trim()
+    .replaceAll(/[^A-Za-z0-9_.:-]+/g, "_");
+}
+
+function buildTriageIds(tree: DocumentTree, networkOutcome: PageDiagnostics["networkOutcome"] | undefined): readonly string[] {
+  const safeNetworkOutcome = networkOutcome ?? {
+    kind: "unknown",
+    finalUrl: "about:blank",
+    status: null,
+    statusText: null,
+    detailCode: "MISSING_NETWORK_OUTCOME",
+    detailMessage: "Network outcome unavailable"
+  };
+  const triage = new Set<string>();
+  triage.add(
+    `NET:${normalizeTriageToken(safeNetworkOutcome.kind.toUpperCase())}:${normalizeTriageToken(safeNetworkOutcome.detailCode)}`
+  );
+
+  const parseErrorIds = tree.errors
+    .map((entry) => (typeof entry.parseErrorId === "string" && entry.parseErrorId.length > 0 ? entry.parseErrorId : null))
+    .filter((entry) => entry !== null);
+
+  if (parseErrorIds.length === 0) {
+    triage.add("PARSE:NONE");
+  } else {
+    for (const parseErrorId of [...new Set(parseErrorIds)].sort((left, right) => left.localeCompare(right))) {
+      triage.add(`PARSE:${normalizeTriageToken(parseErrorId)}`);
+    }
+  }
+
+  return [...triage].sort((left, right) => left.localeCompare(right));
+}
+
 function diagnosticsFromTree(
   tree: DocumentTree,
   parseMode: ParseMode,
@@ -96,8 +134,17 @@ function diagnosticsFromTree(
   requestMethod: "GET" | "POST",
   timings: NavigationTimings,
   usedCookies: boolean,
-  networkOutcome: PageDiagnostics["networkOutcome"]
+  networkOutcome: PageDiagnostics["networkOutcome"] | undefined
 ): PageDiagnostics {
+  const safeNetworkOutcome = networkOutcome ?? {
+    kind: "unknown",
+    finalUrl: "about:blank",
+    status: null,
+    statusText: null,
+    detailCode: "MISSING_NETWORK_OUTCOME",
+    detailMessage: "Network outcome unavailable"
+  };
+
   return {
     parseMode,
     sourceBytes: sourceHtml === undefined ? null : TEXT_ENCODER.encode(sourceHtml).byteLength,
@@ -110,7 +157,8 @@ function diagnosticsFromTree(
     renderDurationMs: timings.renderDurationMs,
     totalDurationMs: timings.totalDurationMs,
     usedCookies,
-    networkOutcome
+    networkOutcome: safeNetworkOutcome,
+    triageIds: buildTriageIds(tree, safeNetworkOutcome)
   };
 }
 
