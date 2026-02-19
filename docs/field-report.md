@@ -1,48 +1,54 @@
 # Field report
 
-Generated: 2026-02-19T18:28:31.273Z
+Generated: 2026-02-19T20:31:07.171Z
 
 ## Corpus
-- pages: 10
-- css payload records: 419
-- css by kind: {"linked":38,"style-attr":356,"inline-style":25}
+- pages: 102
+- css payload records: 11251
+- css by kind: {"linked":513,"style-attr":10265,"inline-style":473}
 
 ## Timing distribution
-- parse p50 ms: 17.18
-- parse p95 ms: 95.706
-- render p50 ms: 3.754
-- render p95 ms: 15.582
+- parse p50 ms: 33.53
+- parse p95 ms: 228.813
+- render p50 ms: 8.039
+- render p95 ms: 66.571
 
 ## Worst pages by parse time
-- c3a6d9674d9825d6be99d1cb57a22189705857a6ad6bc02c87112111800f70a7 (parseTimeMs=111.009) https://en.wikipedia.org/wiki/HTML
-- 47e943a744d3a61463b3cfea5d149237e2c04cce014aeeb8550a94f433cf31b1 (parseTimeMs=95.706) https://developer.mozilla.org/en-US/docs/Web/HTML
-- 8ee7a82086122e9468429f1ab610a35203686b4edc2f0eed171ea34d94e0069d (parseTimeMs=64.165) https://nodejs.org/en
-- 51a52ac06241ad2b1fabe077a5216705b760044d272bdb381011a84260beee61 (parseTimeMs=26.613) https://www.rfc-editor.org/
-- 9a024cc07b452c8bdac48b1319cac868d10a4d7904e3e28854e4fd1ddf53d6db (parseTimeMs=18.276) https://www.gnu.org/
-- 3f324f9914742e62cf082861ba03b207282dba781c3349bee9d7c1b5ef8e0bfe (parseTimeMs=17.18) https://httpbin.org/html
-- 7789d1f028a924bc039f43a18c4058f4bed67ff689cea9e2909219706799b399 (parseTimeMs=11.211) https://www.w3.org/
-- feea237652a329a56679107f313817ce42d5564d93f86d20bb3eba0b12899061 (parseTimeMs=8.26) https://www.python.org/
-- a59a9a8f6d6eba16e6c30046510e37f3b346a6b53f11f1113f45e1abc4f3ee00 (parseTimeMs=2.438) http://www.iana.org/help/example-domains
-- fb91d75a6bb430787a61b0aec5e374f580030f2878e1613eab5ca6310f7bbb9a (parseTimeMs=0.363) http://example.org/
+- 74ac228397b20808860315ba7e8d4b7b52a69ff46ccc4a9f079998746f086da5 (parseTimeMs=393.008) https://fetch.spec.whatwg.org/
+- 2fac45d1ade51c54e5acbc986dc82d1918b5bf7a7e2544c9aea1fdec7022b706 (parseTimeMs=353.384) https://www.rfc-editor.org/rfc/rfc9110
+- 05aa64853c4428146973943b35caf121e44c1076bdf5b8c29f8896dba9b778e2 (parseTimeMs=337.531) https://www.w3.org/TR/css-grid-2/
+- b0e3b097bc6db0688d4712968c290cda280f8f750eb998bc358c28df490ff3f5 (parseTimeMs=282.035) https://www.w3.org/TR/css-flexbox-1/
+- 557f48bce4a5a9b84860d0ba8435c3ab928d2610e63f5229e3e08fa9b59a649f (parseTimeMs=264.71) https://www.w3.org/TR/css-fonts-4/
+- 32f416053f48bdd1a11f83325323bed05ad40243d9534c5fbb2bf55f18f98a26 (parseTimeMs=242.848) https://www.w3.org/TR/css-color-4/
+- 26deff18a5cff0e933eda56a71aeb2f1fa99683defdbf89e6ffc2242ea5b2dc0 (parseTimeMs=228.813) https://bun.sh/docs/runtime/http/server
+- 5d3b3f7e1fcc562dcec1a01ad2c5651e9f0bac294b255a75352e9df202604e6d (parseTimeMs=192.629) https://www.w3.org/TR/selectors-4/
+- 17ea376e45886536bd59dbc69ea2d93cc3c5f1744da985899f329133303d5c52 (parseTimeMs=190.66) https://bun.sh/docs/runtime/shell
+- 59f107062bee1844e43f41ec3c93d447fc0367a3d113e4a2876f8eedb690a937 (parseTimeMs=162.003) https://workers.cloudflare.com/
 
 ## Worst pages by render time
-- c3a6d9674d9825d6be99d1cb57a22189705857a6ad6bc02c87112111800f70a7 (renderTimeMs=72.138) https://en.wikipedia.org/wiki/HTML
-- 47e943a744d3a61463b3cfea5d149237e2c04cce014aeeb8550a94f433cf31b1 (renderTimeMs=15.582) https://developer.mozilla.org/en-US/docs/Web/HTML
-- feea237652a329a56679107f313817ce42d5564d93f86d20bb3eba0b12899061 (renderTimeMs=5.937) https://www.python.org/
-- 9a024cc07b452c8bdac48b1319cac868d10a4d7904e3e28854e4fd1ddf53d6db (renderTimeMs=5.561) https://www.gnu.org/
-- 7789d1f028a924bc039f43a18c4058f4bed67ff689cea9e2909219706799b399 (renderTimeMs=5.123) https://www.w3.org/
-- 8ee7a82086122e9468429f1ab610a35203686b4edc2f0eed171ea34d94e0069d (renderTimeMs=3.754) https://nodejs.org/en
-- 51a52ac06241ad2b1fabe077a5216705b760044d272bdb381011a84260beee61 (renderTimeMs=2.632) https://www.rfc-editor.org/
-- 3f324f9914742e62cf082861ba03b207282dba781c3349bee9d7c1b5ef8e0bfe (renderTimeMs=2.277) https://httpbin.org/html
-- a59a9a8f6d6eba16e6c30046510e37f3b346a6b53f11f1113f45e1abc4f3ee00 (renderTimeMs=1.21) http://www.iana.org/help/example-domains
-- fb91d75a6bb430787a61b0aec5e374f580030f2878e1613eab5ca6310f7bbb9a (renderTimeMs=0.186) http://example.org/
+- 2fac45d1ade51c54e5acbc986dc82d1918b5bf7a7e2544c9aea1fdec7022b706 (renderTimeMs=151.063) https://www.rfc-editor.org/rfc/rfc9110
+- 74ac228397b20808860315ba7e8d4b7b52a69ff46ccc4a9f079998746f086da5 (renderTimeMs=124.895) https://fetch.spec.whatwg.org/
+- b0e3b097bc6db0688d4712968c290cda280f8f750eb998bc358c28df490ff3f5 (renderTimeMs=105.242) https://www.w3.org/TR/css-flexbox-1/
+- 557f48bce4a5a9b84860d0ba8435c3ab928d2610e63f5229e3e08fa9b59a649f (renderTimeMs=104.609) https://www.w3.org/TR/css-fonts-4/
+- 05aa64853c4428146973943b35caf121e44c1076bdf5b8c29f8896dba9b778e2 (renderTimeMs=82.005) https://www.w3.org/TR/css-grid-2/
+- 32f416053f48bdd1a11f83325323bed05ad40243d9534c5fbb2bf55f18f98a26 (renderTimeMs=74.741) https://www.w3.org/TR/css-color-4/
+- 5d3b3f7e1fcc562dcec1a01ad2c5651e9f0bac294b255a75352e9df202604e6d (renderTimeMs=66.571) https://www.w3.org/TR/selectors-4/
+- 2b5c038befc0d3ab2d619143fe6c474dd75a7f2573a365d847c8a4894340a20b (renderTimeMs=66.363) https://url.spec.whatwg.org/
+- 1fe27cdb69e4990a801bdad630d4bea755b4d472ff9aa23bf07f743056a3a2a1 (renderTimeMs=62.846) https://www.w3.org/TR/css-cascade-5/
+- 413b27acb4e16721d28b487456359ecbcecba472c4310bd2f6a4939ad393738b (renderTimeMs=60.836) https://www.w3.org/TR/css-syntax-3/
 
 ## Parse error frequencies
-- none
+- control-character-in-input-stream: 51
+- unexpected-question-mark-instead-of-tag-name: 50
+- duplicate-attribute: 6
+- missing-doctype: 5
+- non-void-html-element-start-tag-with-trailing-solidus: 3
+- non-conforming-doctype: 2
+- end-tag-without-matching-open-element: 1
 
 ## Oracle availability and fingerprints
 - source mode: image
-- image fingerprint: 5192b45b44d206859d6bc2783f14b61c921ce601e0523e66175f89c597a519dd
+- image fingerprint: 31d45a12dd44d953c521be371a5250108dc9a826d66d527522c188b1f879ff26
 - image package count: 101
 - lynx (image): sha256=a598456aa5c8122453f7074c66233800a4032bf14b1171bccde98f83810ebf9d version=Lynx Version 2.9.2 (31 May 2024)
 libwww-FM 2.14, SSL-MM 1.4.1, GNUTLS 3.8.5, ncurses 6.5.20250216(wide)
@@ -56,12 +62,12 @@ See https://lynx.invisible-island.net/ and the online help for more information.
 - links2 (image): sha256=dc742a769d9b6bea15ae4712a30f5d03356c9f4a4fc396ed1ef02ce4462a90cc version=Links 2.29
 
 ## Worst oracle disagreements
-- links2: meanTokenF1=0.955391
-  worst: 7789d1f028a924bc039f43a18c4058f4bed67ff689cea9e2909219706799b399 width=80 tokenF1=0.835498
-- lynx: meanTokenF1=0.971912
-  worst: 8ee7a82086122e9468429f1ab610a35203686b4edc2f0eed171ea34d94e0069d width=80 tokenF1=0.896
-- w3m: meanTokenF1=0.985821
-  worst: 47e943a744d3a61463b3cfea5d149237e2c04cce014aeeb8550a94f433cf31b1 width=80 tokenF1=0.92529
+- links2: meanTokenF1=0.960218
+  worst: e427ac1791eeab4568589fc73ef8fb3971092c92a1f96bee20f68d4b0c6d9841 width=80 tokenF1=0
+- lynx: meanTokenF1=0.937337
+  worst: e427ac1791eeab4568589fc73ef8fb3971092c92a1f96bee20f68d4b0c6d9841 width=80 tokenF1=0
+- w3m: meanTokenF1=0.956068
+  worst: e427ac1791eeab4568589fc73ef8fb3971092c92a1f96bee20f68d4b0c6d9841 width=80 tokenF1=0
 
 ## Parity checks
 - parseBytes vs parseStream mismatches: 0
