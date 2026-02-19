@@ -56,4 +56,4 @@ jobs:
         run: sudo apt-get update
 
       - name: Real oracle validation
-        run: npm run eval:oracle-runtime:ci
+        run: npm run eval:oracle-runtime:ci -- --rebuild-lock

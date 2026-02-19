@@ -42,7 +42,7 @@ jobs:
         run: sudo apt-get update
 
       - name: Run oracle runtime validation
-        run: npm run eval:oracle-runtime:release
+        run: npm run eval:oracle-runtime:release -- --rebuild-lock
 
       - name: Run oracle superiority check
         run: npm run eval:oracle-superiority:release
