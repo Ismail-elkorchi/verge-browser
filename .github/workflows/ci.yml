@@ -46,5 +46,8 @@ jobs:
       - name: Install
         run: npm ci
 
+      - name: Static analysis
+        run: npm run lint && npm run typecheck
+
       - name: Check
         run: npm run ci
