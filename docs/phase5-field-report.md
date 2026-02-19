@@ -1,6 +1,6 @@
 # Phase 5 field report
 
-Generated: 2026-02-19T03:01:42.620Z
+Generated: 2026-02-19T18:28:31.273Z
 
 ## Corpus
 - pages: 10
@@ -42,7 +42,7 @@ Generated: 2026-02-19T03:01:42.620Z
 
 ## Oracle availability and fingerprints
 - source mode: image
-- image fingerprint: 652091a853b227c75e1c966ce4033ab5358089f4b6ff23468282946efd1100dc
+- image fingerprint: 5192b45b44d206859d6bc2783f14b61c921ce601e0523e66175f89c597a519dd
 - image package count: 101
 - lynx (image): sha256=a598456aa5c8122453f7074c66233800a4032bf14b1171bccde98f83810ebf9d version=Lynx Version 2.9.2 (31 May 2024)
 libwww-FM 2.14, SSL-MM 1.4.1, GNUTLS 3.8.5, ncurses 6.5.20250216(wide)
