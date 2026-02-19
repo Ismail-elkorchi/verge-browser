@@ -40,7 +40,7 @@
       }
     ]
   },
-  "phase34": {
+  "oracleSupplyChain": {
     "maxOraclePackageCount": 110,
     "requiredRootPackages": ["lynx", "w3m", "links2"]
   },

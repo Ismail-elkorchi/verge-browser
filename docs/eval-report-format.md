@@ -137,8 +137,8 @@ Same shape as `reports/render-verge.json` for the sampled phase-3.1 run.
 ## reports/render-score-real.json
 Same shape as `reports/render-score.json` for the sampled phase-3.1 run.
 
-## reports/eval-phase31-summary.json
-- `suite`: `"phase31-real-oracles"`
+## reports/eval-oracle-runtime-summary.json
+- `suite`: `"oracle-runtime-validation"`
 - `timestamp`: ISO-8601
 - `profile`: `"ci"` or `"release"`
 - `selection`: `{ sampleCases, widths }`
@@ -148,19 +148,19 @@ Same shape as `reports/render-score.json` for the sampled phase-3.1 run.
   - `engineRecordChecks`
 - `reports`: paths to generated artifacts
 
-## reports/eval-phase32-summary.json
-- `suite`: `"phase32-superiority"`
+## reports/eval-oracle-superiority-summary.json
+- `suite`: `"oracle-superiority-check"`
 - `timestamp`: ISO-8601
 - `profile`: `"ci"` or `"release"`
-- `phase31GatesOk`: boolean
+- `runtimeValidationOk`: boolean
 - `metrics`:
   - key per metric:
     - `{ verge, bestBaseline, required, ok }`
 - `failures`: `string[]`
 - `ok`: boolean
 
-## reports/eval-phase33-summary.json
-- `suite`: `"phase33-fingerprint-drift"`
+## reports/eval-oracle-fingerprint-summary.json
+- `suite`: `"oracle-fingerprint-drift-check"`
 - `timestamp`: ISO-8601
 - `fingerprint`:
   - `{ runtime, expected, match }`
@@ -179,10 +179,10 @@ Same shape as `reports/render-score.json` for the sampled phase-3.1 run.
 - `imageFingerprint`: string
 - `ok`: boolean
 
-## reports/eval-phase34-summary.json
-- `suite`: `"phase34-supply-chain"`
+## reports/eval-oracle-supply-chain-summary.json
+- `suite`: `"oracle-supply-chain-check"`
 - `timestamp`: ISO-8601
-- `phase31`: `{ ok }`
+- `runtimeValidation`: `{ ok }`
 - `supplyChain`:
   - `{ ok, packageCount, maxOraclePackageCount, missingRootPackages }`
 - `ok`: boolean

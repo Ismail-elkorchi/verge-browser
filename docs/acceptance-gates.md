@@ -95,8 +95,8 @@ For each metric:
 
 ## Phase-3.1 validation gates (real oracle pass)
 Executed by:
-- `npm run eval:phase31:ci`
-- `npm run eval:phase31:release`
+- `npm run eval:oracle-runtime:ci`
+- `npm run eval:oracle-runtime:release`
 - required in GitHub PR CI (`.github/workflows/ci.yml`, `node` job, `--rebuild-lock`)
 - required in release checks (`npm run release:check`)
 
@@ -120,30 +120,30 @@ Executed by:
 
 ## Phase-3.2 validation gates (strict superiority)
 Executed by:
-- `npm run eval:phase32:ci`
-- `npm run eval:phase32:release`
+- `npm run eval:oracle-superiority:ci`
+- `npm run eval:oracle-superiority:release`
 
 ### V-406 Superiority gate
-- `reports/eval-phase32-summary.json.ok` is `true`.
+- `reports/eval-oracle-superiority-summary.json.ok` is `true`.
 - for each configured render metric:
   - `verge >= bestBaseline + comparativeWinDelta`.
 
 ## Phase-3.3 validation gates (fingerprint drift)
 Executed by:
-- `npm run eval:phase33:ci`
-- `npm run eval:phase33:release`
+- `npm run eval:oracle-fingerprint:ci`
+- `npm run eval:oracle-fingerprint:release`
 
 ### V-407 Fingerprint identity gate
-- `reports/eval-phase33-summary.json.ok` is `true`.
+- `reports/eval-oracle-fingerprint-summary.json.ok` is `true`.
 - lock-derived fingerprint equals runtime image fingerprint.
 - engine fingerprints for `lynx`, `w3m`, `links2` are present and complete.
 
 ## Phase-3.4 validation gates (oracle supply chain)
 Executed by:
-- `npm run eval:phase34:ci`
-- `npm run eval:phase34:release`
+- `npm run eval:oracle-supply-chain:ci`
+- `npm run eval:oracle-supply-chain:release`
 
 ### V-408 Supply-chain envelope gate
-- `reports/eval-phase34-summary.json.ok` is `true`.
+- `reports/eval-oracle-supply-chain-summary.json.ok` is `true`.
 - `reports/oracle-supply-chain.json.ok` is `true`.
-- package closure count is bounded by `evaluation.config.json.phase34.maxOraclePackageCount`.
+- package closure count is bounded by `evaluation.config.json.oracleSupplyChain.maxOraclePackageCount`.

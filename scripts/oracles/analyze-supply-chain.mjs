@@ -9,8 +9,8 @@ async function main() {
     readJson(resolve("reports/oracle-runtime.json"))
   ]);
 
-  const maxOraclePackageCount = config.phase34?.maxOraclePackageCount ?? 110;
-  const requiredRootPackages = config.phase34?.requiredRootPackages ?? ["lynx", "w3m", "links2"];
+  const maxOraclePackageCount = config.oracleSupplyChain?.maxOraclePackageCount ?? 110;
+  const requiredRootPackages = config.oracleSupplyChain?.requiredRootPackages ?? ["lynx", "w3m", "links2"];
   const lockRootPackages = Array.isArray(lockFile.rootPackages) ? lockFile.rootPackages : [];
   const lockPackages = Array.isArray(lockFile.packages) ? lockFile.packages : [];
 

@@ -65,7 +65,7 @@ function sampleCases(cases, sampleCount) {
   return rankedCases.slice(0, Math.min(sampleCount, rankedCases.length));
 }
 
-function createPhase31Config(baseConfig, profile, widths, sampleCaseCount) {
+function createRuntimeValidationConfig(baseConfig, profile, widths, sampleCaseCount) {
   const nextConfig = JSON.parse(JSON.stringify(baseConfig));
   nextConfig.render.widths = widths;
   nextConfig.render.profiles[profile] = {
@@ -129,10 +129,10 @@ async function main() {
   }));
   const selectedCorpus = {
     ...baseCorpus,
-    suite: `${baseCorpus.suite ?? "render-v3"}-phase31`,
+    suite: `${baseCorpus.suite ?? "render-v3"}-oracle-runtime`,
     cases: selectedCaseItems
   };
-  const selectedConfig = createPhase31Config(baseConfig, options.profile, options.widths, selectedCaseItems.length);
+  const selectedConfig = createRuntimeValidationConfig(baseConfig, options.profile, options.widths, selectedCaseItems.length);
 
   const imageState = await ensureOracleImage({
     rebuildLock: options.rebuildLock
@@ -208,7 +208,7 @@ async function main() {
 
   const engineRecordsOk = Object.values(engineRecordChecks).every((entry) => entry.ok);
   const summary = {
-    suite: "phase31-real-oracles",
+    suite: "oracle-runtime-validation",
     timestamp: new Date().toISOString(),
     profile: options.profile,
     selection: {
@@ -228,7 +228,7 @@ async function main() {
     }
   };
 
-  await writeJsonReport(resolve(reportsDir, "eval-phase31-summary.json"), summary);
+  await writeJsonReport(resolve(reportsDir, "eval-oracle-runtime-summary.json"), summary);
 
   if (!gateResult.ok || !engineRecordsOk) {
     for (const failure of gateResult.failures) {
@@ -237,10 +237,10 @@ async function main() {
     if (!engineRecordsOk) {
       process.stderr.write(`record-failure: ${JSON.stringify(engineRecordChecks)}\n`);
     }
-    throw new Error("phase31 real-oracle validation failed");
+    throw new Error("oracle runtime validation failed");
   }
 
-  process.stdout.write("phase31 real-oracle validation ok\n");
+  process.stdout.write("oracle runtime validation ok\n");
 }
 
 await main();

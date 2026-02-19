@@ -22,10 +22,10 @@ Standalone evaluation commands:
 ```bash
 npm run eval:ci
 npm run eval:release
-npm run eval:phase31:release
-npm run eval:phase32:release
-npm run eval:phase33:release
-npm run eval:phase34:release
+npm run eval:oracle-runtime:release
+npm run eval:oracle-superiority:release
+npm run eval:oracle-fingerprint:release
+npm run eval:oracle-supply-chain:release
 npm run test:bench
 ```
 

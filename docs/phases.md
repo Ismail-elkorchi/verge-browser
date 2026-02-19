@@ -5,29 +5,29 @@ Each phase is complete only when its command(s) exit with code `0` and required 
 
 ## Phase 3.2 — Real-oracle superiority gate
 Acceptance criteria:
-- `npm run eval:phase32:release` passes.
-- `reports/eval-phase32-summary.json` exists.
-- `reports/eval-phase32-summary.json.ok` is `true`.
+- `npm run eval:oracle-superiority:release` passes.
+- `reports/eval-oracle-superiority-summary.json` exists.
+- `reports/eval-oracle-superiority-summary.json.ok` is `true`.
 - For every metric in `evaluation.config.json.render.metrics`:
   - `metrics.<name>.ok` is `true`.
   - `metrics.<name>.verge >= metrics.<name>.bestBaseline + evaluation.config.json.render.comparativeWinDelta`.
 
 ## Phase 3.3 — Binary fingerprint drift gate
 Acceptance criteria:
-- `npm run eval:phase33:release` passes.
-- `reports/eval-phase33-summary.json` exists.
-- `reports/eval-phase33-summary.json.ok` is `true`.
-- `reports/eval-phase33-summary.json.fingerprint.match` is `true`.
-- `reports/eval-phase33-summary.json.engines.missing` is empty.
-- `reports/eval-phase33-summary.json.engines.weakFingerprints` is empty.
+- `npm run eval:oracle-fingerprint:release` passes.
+- `reports/eval-oracle-fingerprint-summary.json` exists.
+- `reports/eval-oracle-fingerprint-summary.json.ok` is `true`.
+- `reports/eval-oracle-fingerprint-summary.json.fingerprint.match` is `true`.
+- `reports/eval-oracle-fingerprint-summary.json.engines.missing` is empty.
+- `reports/eval-oracle-fingerprint-summary.json.engines.weakFingerprints` is empty.
 
 ## Phase 3.4 — Oracle supply-chain envelope gate
 Acceptance criteria:
-- `npm run eval:phase34:release` passes.
-- `reports/eval-phase34-summary.json` exists.
-- `reports/eval-phase34-summary.json.ok` is `true`.
+- `npm run eval:oracle-supply-chain:release` passes.
+- `reports/eval-oracle-supply-chain-summary.json` exists.
+- `reports/eval-oracle-supply-chain-summary.json.ok` is `true`.
 - `reports/oracle-supply-chain.json.ok` is `true`.
-- `reports/oracle-supply-chain.json.packageCount <= evaluation.config.json.phase34.maxOraclePackageCount`.
+- `reports/oracle-supply-chain.json.packageCount <= evaluation.config.json.oracleSupplyChain.maxOraclePackageCount`.
 
 ## Phase 4 — Rendering parity hardening
 Acceptance criteria:
@@ -96,7 +96,7 @@ Acceptance criteria:
 Acceptance criteria:
 - `.github/workflows/ci.yml` runs `npm run ci`.
 - `.github/workflows/release.yml` runs `npm run release:check`.
-- `.github/workflows/oracle-phases.yml` runs phases 3.2, 3.3, and 3.4.
+- `.github/workflows/oracle-validation-ladder.yml` runs phases 3.2, 3.3, and 3.4.
 - `npm run release:check` passes locally.
 
 ## Phase 12 — Benchmark governance

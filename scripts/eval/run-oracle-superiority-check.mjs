@@ -15,10 +15,10 @@ function parseArgs(argv) {
   return forwarded;
 }
 
-function runPhase31RealOracles(forwardedArgs) {
+function runOracleRuntimeValidation(forwardedArgs) {
   const result = spawnSync(
     process.execPath,
-    ["scripts/eval/run-phase31-real-oracles.mjs", ...forwardedArgs],
+    ["scripts/eval/run-oracle-runtime-validation.mjs", ...forwardedArgs],
     {
       encoding: "utf8",
       stdio: "inherit"
@@ -28,18 +28,18 @@ function runPhase31RealOracles(forwardedArgs) {
     throw result.error;
   }
   if (result.status !== 0) {
-    throw new Error(`phase31 precheck failed with status ${String(result.status)}`);
+    throw new Error(`oracle runtime precheck failed with status ${String(result.status)}`);
   }
 }
 
 async function main() {
   const forwardedArgs = parseArgs(process.argv.slice(2));
-  runPhase31RealOracles(forwardedArgs);
+  runOracleRuntimeValidation(forwardedArgs);
 
-  const [config, scoreReport, phase31Summary] = await Promise.all([
+  const [config, scoreReport, runtimeValidationSummary] = await Promise.all([
     readJson(resolve("evaluation.config.json")),
     readJson(resolve("reports/render-score-real.json")),
-    readJson(resolve("reports/eval-phase31-summary.json"))
+    readJson(resolve("reports/eval-oracle-runtime-summary.json"))
   ]);
 
   const delta = config.render.comparativeWinDelta;
@@ -66,26 +66,26 @@ async function main() {
   }
 
   const report = {
-    suite: "phase32-superiority",
+    suite: "oracle-superiority-check",
     timestamp: new Date().toISOString(),
-    profile: phase31Summary?.profile ?? "release",
-    phase31GatesOk: phase31Summary?.gates?.ok === true,
+    profile: runtimeValidationSummary?.profile ?? "release",
+    runtimeValidationOk: runtimeValidationSummary?.gates?.ok === true,
     metrics,
     failures,
-    ok: failures.length === 0 && phase31Summary?.gates?.ok === true
+    ok: failures.length === 0 && runtimeValidationSummary?.gates?.ok === true
   };
 
-  const reportPath = resolve("reports/eval-phase32-summary.json");
+  const reportPath = resolve("reports/eval-oracle-superiority-summary.json");
   await writeJsonReport(reportPath, report);
 
   if (!report.ok) {
     for (const failure of failures) {
-      process.stderr.write(`phase32-failure: ${failure}\n`);
+      process.stderr.write(`oracle-superiority-failure: ${failure}\n`);
     }
-    throw new Error("phase32 superiority check failed");
+    throw new Error("oracle superiority check failed");
   }
 
-  process.stdout.write(`phase32 superiority check ok: ${reportPath}\n`);
+  process.stdout.write(`oracle superiority check ok: ${reportPath}\n`);
 }
 
 await main();

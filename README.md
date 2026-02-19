@@ -95,10 +95,10 @@ npm run smoke:cli
 npm run eval:ci
 npm run eval:release
 npm run test:bench
-npm run eval:phase31:release
-npm run eval:phase32:release
-npm run eval:phase33:release
-npm run eval:phase34:release
+npm run eval:oracle-runtime:release
+npm run eval:oracle-superiority:release
+npm run eval:oracle-fingerprint:release
+npm run eval:oracle-supply-chain:release
 npm run eval:phase-ladder:ci
 npm run eval:phase-ladder:release
 npm run release:check
@@ -110,24 +110,24 @@ npm run release:check
 - Commands:
   - `npm run eval:ci`
   - `npm run eval:release`
-  - `npm run eval:phase31:ci`
-  - `npm run eval:phase31:release`
-  - `npm run eval:phase32:ci`
-  - `npm run eval:phase32:release`
-  - `npm run eval:phase33:ci`
-  - `npm run eval:phase33:release`
-  - `npm run eval:phase34:ci`
-  - `npm run eval:phase34:release`
+  - `npm run eval:oracle-runtime:ci`
+  - `npm run eval:oracle-runtime:release`
+  - `npm run eval:oracle-superiority:ci`
+  - `npm run eval:oracle-superiority:release`
+  - `npm run eval:oracle-fingerprint:ci`
+  - `npm run eval:oracle-fingerprint:release`
+  - `npm run eval:oracle-supply-chain:ci`
+  - `npm run eval:oracle-supply-chain:release`
   - `npm run eval:phase-ladder:ci`
   - `npm run eval:phase-ladder:release`
 - Contracts:
   - `docs/rendering-contract.md`
   - `docs/acceptance-gates.md`
   - `docs/eval-report-format.md`
-  - `docs/phase31-real-oracles.md`
-  - `docs/phase32-superiority.md`
-  - `docs/phase33-fingerprint-drift.md`
-  - `docs/phase34-supply-chain.md`
+  - `docs/oracle-runtime-validation.md`
+  - `docs/oracle-superiority.md`
+  - `docs/oracle-fingerprint-drift.md`
+  - `docs/oracle-supply-chain.md`
   - `docs/benchmark-governance.md`
   - `docs/phases.md`
 
@@ -168,9 +168,9 @@ npm run release:check
   - runs `npm run release:check`
   - produces npm package artifact (`.tgz`)
   - emits package checksum (`package.sha256`)
-- Oracle validation workflow: `.github/workflows/oracle-phase31.yml`
-  - runs `npm run eval:phase31:release`
+- Oracle validation workflow: `.github/workflows/oracle-runtime-validation.yml`
+  - runs `npm run eval:oracle-runtime:release`
   - uploads phase-3.1 oracle artifacts and lock file
-- Oracle ladder workflow: `.github/workflows/oracle-phases.yml`
+- Oracle ladder workflow: `.github/workflows/oracle-validation-ladder.yml`
   - runs phase 3.2, 3.3, and 3.4 release checks
   - uploads oracle phase reports

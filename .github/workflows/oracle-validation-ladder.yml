@@ -1,4 +1,4 @@
-name: Oracle Phases
+name: Oracle Validation Ladder
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     - cron: "0 3 * * 2"
 
 concurrency:
-  group: oracle-phases-${{ github.ref }}
+  group: oracle-validation-ladder-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   oracle-ladder:
-    name: oracle-phase-ladder
+    name: oracle-validation-ladder
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -38,24 +38,30 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Run phase32 superiority
-        run: npm run eval:phase32:release
+      - name: Refresh apt package index
+        run: sudo apt-get update
 
-      - name: Run phase33 fingerprint drift
-        run: npm run eval:phase33:release
+      - name: Run oracle runtime validation
+        run: npm run eval:oracle-runtime:release
 
-      - name: Run phase34 supply-chain
-        run: npm run eval:phase34:release
+      - name: Run oracle superiority check
+        run: npm run eval:oracle-superiority:release
+
+      - name: Run oracle fingerprint drift check
+        run: npm run eval:oracle-fingerprint:release
+
+      - name: Run oracle supply-chain check
+        run: npm run eval:oracle-supply-chain:release
 
       - name: Upload oracle ladder reports
         uses: actions/upload-artifact@v6
         with:
-          name: oracle-phase-reports
+          name: oracle-validation-reports
           path: |
-            reports/eval-phase31-summary.json
-            reports/eval-phase32-summary.json
-            reports/eval-phase33-summary.json
-            reports/eval-phase34-summary.json
+            reports/eval-oracle-runtime-summary.json
+            reports/eval-oracle-superiority-summary.json
+            reports/eval-oracle-fingerprint-summary.json
+            reports/eval-oracle-supply-chain-summary.json
             reports/oracle-runtime.json
             reports/oracle-supply-chain.json
             scripts/oracles/oracle-image.lock.json
