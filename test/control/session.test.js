@@ -124,6 +124,8 @@ test("BrowserSession openStream parses from byte stream", async () => {
   const snapshot = await session.openStream("https://a.example/");
   assert.equal(snapshot.diagnostics.parseMode, "stream");
   assert.equal(snapshot.diagnostics.networkOutcome.kind, "ok");
+  assert.ok(snapshot.diagnostics.triageIds.some((entry) => entry.startsWith("NET:OK:HTTP_200")));
+  assert.ok(snapshot.diagnostics.triageIds.some((entry) => entry.startsWith("PARSE:")));
   assert.equal(snapshot.rendered.title, "A");
   assert.ok(snapshot.sourceHtml?.includes("<title>A</title>"));
 });
@@ -223,5 +225,7 @@ test("BrowserSession openWithRequest records method and cookie diagnostics", asy
   assert.equal(snapshot.diagnostics.requestMethod, "POST");
   assert.equal(snapshot.diagnostics.usedCookies, true);
   assert.equal(snapshot.diagnostics.networkOutcome.kind, "ok");
+  assert.ok(snapshot.diagnostics.triageIds.some((entry) => entry.startsWith("NET:OK:HTTP_200")));
+  assert.ok(snapshot.diagnostics.triageIds.some((entry) => entry.startsWith("PARSE:")));
   assert.equal(snapshot.setCookieHeaders[0], "sid=next; Path=/; HttpOnly");
 });

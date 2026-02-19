@@ -194,6 +194,7 @@ function formatDiagnosticsView(snapshot: PageSnapshot | null): readonly string[]
     `network detail: ${snapshot.diagnostics.networkOutcome.detailMessage}`,
     `source bytes: ${snapshot.diagnostics.sourceBytes === null ? "unavailable" : String(snapshot.diagnostics.sourceBytes)}`,
     `parse errors: ${String(snapshot.diagnostics.parseErrorCount)}`,
+    `triage ids: ${snapshot.diagnostics.triageIds.length === 0 ? "(none)" : snapshot.diagnostics.triageIds.join(", ")}`,
     `trace events: ${String(snapshot.diagnostics.traceEventCount)}`,
     `trace kinds: ${snapshot.diagnostics.traceKinds.length === 0 ? "(none)" : snapshot.diagnostics.traceKinds.join(", ")}`,
     `fetch ms: ${String(snapshot.diagnostics.fetchDurationMs)}`,

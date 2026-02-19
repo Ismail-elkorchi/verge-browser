@@ -85,6 +85,7 @@ export interface PageDiagnostics {
   readonly totalDurationMs: number;
   readonly usedCookies: boolean;
   readonly networkOutcome: NetworkOutcome;
+  readonly triageIds: readonly string[];
 }
 
 export interface RenderInput {
