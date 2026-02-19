@@ -3,11 +3,15 @@ const ALLOWED_PROTOCOLS = new Set(["http:", "https:", "file:", "about:"]);
 export interface SecurityPolicyOptions {
   readonly maxRedirects?: number;
   readonly maxContentBytes?: number;
+  readonly maxRequestRetries?: number;
+  readonly retryDelayMs?: number;
 }
 
 export const DEFAULT_SECURITY_POLICY: Required<SecurityPolicyOptions> = Object.freeze({
   maxRedirects: 5,
-  maxContentBytes: 2 * 1024 * 1024
+  maxContentBytes: 2 * 1024 * 1024,
+  maxRequestRetries: 1,
+  retryDelayMs: 75
 });
 
 export function assertAllowedProtocol(urlValue: URL): void {

@@ -81,6 +81,7 @@ For each metric:
 ## G-312 Network outcome taxonomy gate
 - `reports/network-outcomes.json` exists
 - `reports/network-outcomes.json.overall.ok` is `true`
+- `reports/network-outcomes.json.replayFixtureCount > 0`
 - required taxonomy kinds are all covered:
   - `ok`
   - `http_error`

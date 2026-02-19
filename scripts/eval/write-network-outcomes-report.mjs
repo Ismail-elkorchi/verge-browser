@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { once } from "node:events";
+import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { classifyNetworkFailure, fetchPage } from "../../dist/app/fetch-page.js";
@@ -122,6 +123,27 @@ function syntheticError(message, detailCode) {
   return error;
 }
 
+function buildReplayError(spec) {
+  const cause = spec && typeof spec === "object" && "cause" in spec ? buildReplayError(spec.cause) : undefined;
+  const hasMessage = typeof spec?.message === "string";
+  const hasName = typeof spec?.name === "string";
+  const hasCode = typeof spec?.code === "string";
+  if (!hasMessage && !hasName && hasCode && cause === undefined) {
+    return { code: spec.code };
+  }
+  const error = new Error(hasMessage ? spec.message : "network replay error", cause !== undefined ? { cause } : undefined);
+  if (hasName) {
+    error.name = spec.name;
+  }
+  if (hasCode) {
+    Object.defineProperty(error, "code", {
+      value: spec.code,
+      enumerable: true
+    });
+  }
+  return error;
+}
+
 async function main() {
   const server = startFixtureServer();
   server.listen(0, "127.0.0.1");
@@ -202,9 +224,20 @@ async function main() {
     }
   ];
 
+  const replayFixtureSource = await readFile("test/fixtures/network-replay/failure-cases.json", "utf8");
+  const replayFixtures = JSON.parse(replayFixtureSource);
+  const replayCases = replayFixtures.map((fixture) => ({
+    id: `replay-${fixture.id}`,
+    expectedKind: fixture.expected.kind,
+    url: fixture.finalUrl,
+    run: async () => {
+      throw buildReplayError(fixture.error);
+    }
+  }));
+
   let records;
   try {
-    records = await Promise.all(cases.map((entry) => evaluateCase(entry)));
+    records = await Promise.all([...cases, ...replayCases].map((entry) => evaluateCase(entry)));
   } finally {
     server.close();
   }
@@ -220,9 +253,10 @@ async function main() {
       presentKinds,
       missingKinds
     },
+    replayFixtureCount: replayCases.length,
     cases: records,
     overall: {
-      ok: records.every((record) => record.ok) && missingKinds.length === 0
+      ok: records.every((record) => record.ok) && missingKinds.length === 0 && replayCases.length > 0
     }
   };
 
