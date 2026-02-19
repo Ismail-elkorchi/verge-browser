@@ -5,7 +5,8 @@ Phase 3.1 validates rendering claims with real terminal browser binaries.
 ## Commands
 - `npm run eval:phase31:ci`
 - `npm run eval:phase31:release`
-- GitHub workflow: `.github/workflows/oracle-phase31.yml`
+- GitHub PR CI job: `.github/workflows/ci.yml` (`node`, runs `npm run eval:phase31:ci -- --rebuild-lock`)
+- Scheduled/manual workflow: `.github/workflows/oracle-phase31.yml`
 
 ## What the pass does
 1. Builds a rootless oracle host image under `tmp/oracle-image/` from Ubuntu `.deb` packages.
