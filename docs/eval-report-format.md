@@ -70,6 +70,16 @@ All evaluation outputs are artifacts under `reports/`.
   - entries: `{ id, ok, observed, expected }`
 - `overall`: `{ ok }`
 
+## reports/network-outcomes.json
+- `suite`: `"network-outcomes"`
+- `timestamp`: ISO-8601
+- `requiredKinds`: `string[]`
+- `coverage`:
+  - `{ presentKinds, missingKinds }`
+- `cases`:
+  - entries: `{ id, expectedKind, actualKind, ok, detailCode, detailMessage }`
+- `overall`: `{ ok }`
+
 ## reports/bench.json
 - `suite`: `"bench"`
 - `timestamp`: ISO-8601
