@@ -309,7 +309,37 @@ async function downloadDebForPackage(pkgsDir, packageName, packageVersion) {
   return downloadedPath;
 }
 
-async function downloadDebFromUrl(pkgsDir, packageRecord) {
+function dedupeUrls(urls) {
+  const unique = [];
+  const seen = new Set();
+  for (const url of urls) {
+    if (typeof url !== "string" || url.length === 0) {
+      continue;
+    }
+    if (seen.has(url)) {
+      continue;
+    }
+    seen.add(url);
+    unique.push(url);
+  }
+  return unique;
+}
+
+function fallbackDownloadUrls(packageRecord, fallbackMirrorBases) {
+  if (!Array.isArray(fallbackMirrorBases) || fallbackMirrorBases.length === 0) {
+    return [];
+  }
+  if (typeof packageRecord.filename !== "string" || packageRecord.filename.length === 0) {
+    return [];
+  }
+  const relativeFilename = ensureRelativePath(packageRecord.filename);
+  if (relativeFilename.length === 0) {
+    return [];
+  }
+  return fallbackMirrorBases.map((baseUrl) => `${baseUrl.replace(/\/+$/, "")}/${relativeFilename}`);
+}
+
+async function downloadDebFromUrl(pkgsDir, packageRecord, options = {}) {
   const filenameFromPath = packageRecord.filename
     ? basename(packageRecord.filename)
     : `${packageRecord.name}_${packageRecord.version}.deb`;
@@ -319,9 +349,28 @@ async function downloadDebFromUrl(pkgsDir, packageRecord) {
     return existingPath;
   }
 
-  await fetchUrlToFile(packageRecord.downloadUrl, debPath);
+  const urlCandidates = dedupeUrls([
+    packageRecord.downloadUrl,
+    ...fallbackDownloadUrls(packageRecord, options.fallbackMirrorBases ?? [])
+  ]);
+  const failures = [];
 
-  return debPath;
+  for (const url of urlCandidates) {
+    try {
+      await fetchUrlToFile(url, debPath);
+      return debPath;
+    } catch (error) {
+      failures.push({
+        url,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      await unlink(debPath).catch(() => {});
+    }
+  }
+
+  const failureSummary = failures.map((entry) => `${entry.url}: ${entry.error}`).join("\n");
+  throw new Error(`failed to download deb for ${packageRecord.name}@${packageRecord.version}\n${failureSummary}`);
+
 }
 
 function dependencyClosure(rootPackages) {
@@ -431,11 +480,14 @@ async function materializeRootfs(input) {
   await mkdir(pkgsDir, { recursive: true });
   await rm(rootfsDir, { recursive: true, force: true });
   await mkdir(rootfsDir, { recursive: true });
+  const fallbackMirrorBases = Array.isArray(input.lock?.sourcePolicy?.mirrors)
+    ? input.lock.sourcePolicy.mirrors.filter((entry) => typeof entry === "string")
+    : [];
 
   const packageEntries = [];
   for (const packageRecord of input.lock.packages) {
     const debPath = packageRecord.downloadUrl
-      ? await downloadDebFromUrl(pkgsDir, packageRecord)
+      ? await downloadDebFromUrl(pkgsDir, packageRecord, { fallbackMirrorBases })
       : await downloadDebForPackage(pkgsDir, packageRecord.name, packageRecord.version);
     const debStat = await stat(debPath);
     const debSha = await hashFile(debPath);
