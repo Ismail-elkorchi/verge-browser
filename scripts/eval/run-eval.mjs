@@ -58,9 +58,9 @@ async function main() {
   if (profile === "release") {
     runNodeScript("scripts/eval/check-release-integrity.mjs");
   }
-  runNodeScript("scripts/eval/write-phase-ladder-report.mjs", [`--profile=${profile}`]);
+  runNodeScript("scripts/eval/write-capability-ladder-report.mjs", [`--profile=${profile}`]);
 
-  const [agentReport, streamReport, networkOutcomesReport, benchGovernanceReport, oracleWorkflowPolicyReport, releaseIntegrityReport, phaseLadderReport] = await Promise.all([
+  const [agentReport, streamReport, networkOutcomesReport, benchGovernanceReport, oracleWorkflowPolicyReport, releaseIntegrityReport, capabilityLadderReport] = await Promise.all([
     readJson(resolve(reportsDir, "agent.json")),
     readJson(resolve(reportsDir, "stream.json")),
     readJson(resolve(reportsDir, "network-outcomes.json")),
@@ -69,7 +69,7 @@ async function main() {
     profile === "release"
       ? readJson(resolve(reportsDir, "release-integrity.json"))
       : Promise.resolve(null),
-    readJson(resolve(reportsDir, "phase-ladder.json"))
+    readJson(resolve(reportsDir, "capability-ladder.json"))
   ]);
 
   const gateResult = evaluateRenderGates({
@@ -98,8 +98,8 @@ async function main() {
   if (profile === "release" && releaseIntegrityReport?.ok !== true) {
     extraFailures.push("release integrity report failed");
   }
-  if (phaseLadderReport?.overall?.ok !== true) {
-    extraFailures.push("phase ladder report failed");
+  if (capabilityLadderReport?.overall?.ok !== true) {
+    extraFailures.push("capability ladder report failed");
   }
 
   const combinedGateResult = {
@@ -121,7 +121,7 @@ async function main() {
       bench: resolve(reportsDir, "bench.json"),
       benchGovernance: resolve(reportsDir, "bench-governance.json"),
       oracleWorkflowPolicy: resolve(reportsDir, "oracle-workflow-policy.json"),
-      phaseLadder: resolve(reportsDir, "phase-ladder.json"),
+      capabilityLadder: resolve(reportsDir, "capability-ladder.json"),
       ...(profile === "release" ? { releaseIntegrity: resolve(reportsDir, "release-integrity.json") } : {})
     },
     gates: combinedGateResult

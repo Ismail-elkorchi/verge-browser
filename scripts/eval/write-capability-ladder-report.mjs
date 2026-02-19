@@ -28,13 +28,13 @@ function parseProfile(argv) {
   return value;
 }
 
-async function runPhase20PostAndSetCookieCheck() {
+async function runCapability20PostAndSetCookieCheck() {
   const server = createServer((request, response) => {
     if (request.method === "POST") {
       response.statusCode = 200;
       response.setHeader("content-type", "text/html; charset=utf-8");
-      response.setHeader("set-cookie", "phase20=ok; Path=/");
-      response.end("<html><body><h1>phase20</h1></body></html>");
+      response.setHeader("set-cookie", "capability20=ok; Path=/");
+      response.end("<html><body><h1>capability20</h1></body></html>");
       return;
     }
     response.statusCode = 405;
@@ -59,7 +59,7 @@ async function runPhase20PostAndSetCookieCheck() {
       bodyText: "q=alpha"
     });
     return {
-      ok: response.status === 200 && response.setCookieHeaders[0] === "phase20=ok; Path=/",
+      ok: response.status === 200 && response.setCookieHeaders[0] === "capability20=ok; Path=/",
       details: {
         status: response.status,
         setCookieHeaders: response.setCookieHeaders
@@ -70,8 +70,8 @@ async function runPhase20PostAndSetCookieCheck() {
   }
 }
 
-async function runPhase21CookieStoreCheck() {
-  const stateDir = await mkdtemp(join(tmpdir(), "verge-phase21-"));
+async function runCapability21CookieStoreCheck() {
+  const stateDir = await mkdtemp(join(tmpdir(), "verge-capability21-"));
   const statePath = join(stateDir, "state.json");
   try {
     const store = await BrowserStore.open({ statePath });
@@ -93,7 +93,7 @@ async function runPhase21CookieStoreCheck() {
   }
 }
 
-async function runPhase17DiagnosticsCheck() {
+async function runCapability17DiagnosticsCheck() {
   const observed = {
     method: null,
     cookie: null
@@ -146,8 +146,8 @@ async function runPhase17DiagnosticsCheck() {
   };
 }
 
-async function runPhase15RecallCheck() {
-  const stateDir = await mkdtemp(join(tmpdir(), "verge-phase15-"));
+async function runCapability15RecallCheck() {
+  const stateDir = await mkdtemp(join(tmpdir(), "verge-capability15-"));
   const statePath = join(stateDir, "state.json");
   try {
     const store = await BrowserStore.open({ statePath });
@@ -172,7 +172,7 @@ async function main() {
   const parsedCookie = parseSetCookie("sid=abc; Path=/; HttpOnly", "https://example.com/");
   const mergedCookies = mergeSetCookieHeaders([], ["sid=abc; Path=/; HttpOnly"], "https://example.com/");
   const cookieHeader = cookieHeaderForUrl(mergedCookies, "https://example.com/home");
-  const phase13 = {
+  const capability13 = {
     ok: Boolean(parsedCookie) && mergedCookies.length === 1 && cookieHeader === "sid=abc",
     details: {
       parsedCookie,
@@ -190,7 +190,7 @@ async function main() {
   const forms = extractForms(formTree, "https://example.com/base");
   const getSubmission = buildFormSubmissionRequest(forms[0], { q: "beta" });
   const postSubmission = buildFormSubmissionRequest(forms[1], { user: "agent" });
-  const phase14 = {
+  const capability14 = {
     ok:
       forms.length === 2
       && getSubmission.requestOptions.method === "GET"
@@ -204,8 +204,8 @@ async function main() {
     }
   };
 
-  const phase15 = await runPhase15RecallCheck();
-  const phase16 = {
+  const capability15 = await runCapability15RecallCheck();
+  const capability16 = {
     ok:
       parseCommand("reader").kind === "reader"
       && parseCommand("download ./snapshot.html").kind === "download"
@@ -217,9 +217,9 @@ async function main() {
     }
   };
 
-  const phase17 = await runPhase17DiagnosticsCheck();
+  const capability17 = await runCapability17DiagnosticsCheck();
 
-  const phase18 = {
+  const capability18 = {
     ok:
       parseCommand("cookie list").kind === "cookie-list"
       && parseCommand("cookie clear").kind === "cookie-clear"
@@ -237,7 +237,7 @@ async function main() {
   } catch {
     blockedProtocol = true;
   }
-  const phase19 = {
+  const capability19 = {
     ok: blockedProtocol && isHtmlLikeContentType("image/png") === false && isHtmlLikeContentType("text/html; charset=utf-8") === true,
     details: {
       blockedProtocol,
@@ -246,11 +246,11 @@ async function main() {
     }
   };
 
-  const phase20 = await runPhase20PostAndSetCookieCheck();
-  const phase21 = await runPhase21CookieStoreCheck();
+  const capability20 = await runCapability20PostAndSetCookieCheck();
+  const capability21 = await runCapability21CookieStoreCheck();
 
   const streamReport = await readJson(resolve("reports/stream.json"));
-  const phase22 = {
+  const capability22 = {
     ok: streamReport?.overall?.ok === true,
     details: {
       streamOk: streamReport?.overall?.ok === true
@@ -258,7 +258,7 @@ async function main() {
   };
 
   const agentReport = await readJson(resolve("reports/agent.json"));
-  const phase23 = {
+  const capability23 = {
     ok: agentReport?.overall?.ok === true,
     details: {
       agentOk: agentReport?.overall?.ok === true
@@ -266,7 +266,7 @@ async function main() {
   };
 
   const benchGovernanceReport = await readJson(resolve("reports/bench-governance.json"));
-  const phase24 = {
+  const capability24 = {
     ok: benchGovernanceReport?.ok === true,
     details: {
       benchGovernanceOk: benchGovernanceReport?.ok === true,
@@ -274,17 +274,17 @@ async function main() {
     }
   };
 
-  let phase25;
+  let capability25;
   if (profile === "release") {
     const releaseIntegrity = await readJson(resolve("reports/release-integrity.json"));
-    phase25 = {
+    capability25 = {
       ok: releaseIntegrity?.ok === true,
       details: {
         releaseIntegrityOk: releaseIntegrity?.ok === true
       }
     };
   } else {
-    phase25 = {
+    capability25 = {
       ok: true,
       details: {
         releaseIntegrityOk: null,
@@ -293,52 +293,52 @@ async function main() {
     };
   }
 
-  const phaseChecks = {
-    phase13: phase13,
-    phase14: phase14,
-    phase15: phase15,
-    phase16: phase16,
-    phase17: phase17,
-    phase18: phase18,
-    phase19: phase19,
-    phase20: phase20,
-    phase21: phase21,
-    phase22: phase22,
-    phase23: phase23,
-    phase24: phase24,
-    phase25: phase25
+  const capabilityChecks = {
+    capability13: capability13,
+    capability14: capability14,
+    capability15: capability15,
+    capability16: capability16,
+    capability17: capability17,
+    capability18: capability18,
+    capability19: capability19,
+    capability20: capability20,
+    capability21: capability21,
+    capability22: capability22,
+    capability23: capability23,
+    capability24: capability24,
+    capability25: capability25
   };
 
-  const phase26 = {
-    ok: Object.values(phaseChecks).every((check) => check.ok === true),
+  const capability26 = {
+    ok: Object.values(capabilityChecks).every((check) => check.ok === true),
     details: {
-      failingPhases: Object.entries(phaseChecks).filter(([, check]) => check.ok !== true).map(([phaseName]) => phaseName)
+      failingChecks: Object.entries(capabilityChecks).filter(([, check]) => check.ok !== true).map(([checkName]) => checkName)
     }
   };
 
-  assert.equal(typeof phase26.ok, "boolean");
+  assert.equal(typeof capability26.ok, "boolean");
 
   const report = {
-    suite: "phase-ladder",
+    suite: "capability-ladder",
     profile,
     timestamp: new Date().toISOString(),
     checks: {
-      ...phaseChecks,
-      phase26
+      ...capabilityChecks,
+      capability26
     },
     overall: {
-      ok: phase26.ok
+      ok: capability26.ok
     }
   };
 
-  const reportPath = resolve("reports/phase-ladder.json");
+  const reportPath = resolve("reports/capability-ladder.json");
   await writeJsonReport(reportPath, report);
 
   if (!report.overall.ok) {
-    throw new Error("phase ladder checks failed");
+    throw new Error("capability ladder checks failed");
   }
 
-  process.stdout.write(`phase ladder ${profile} ok: ${reportPath}\n`);
+  process.stdout.write(`capability ladder ${profile} ok: ${reportPath}\n`);
 }
 
 await main();
