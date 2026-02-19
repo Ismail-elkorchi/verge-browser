@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import { copyFile, mkdir, open, readdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -486,9 +486,39 @@ function baseOracleEnv(rootfsPath) {
   };
 }
 
+function oracleDynamicLoaderPath(rootfsPath) {
+  const candidates = [
+    join(rootfsPath, "usr", "lib", "x86_64-linux-gnu", "ld-linux-x86-64.so.2"),
+    join(rootfsPath, "lib64", "ld-linux-x86-64.so.2"),
+    join(rootfsPath, "lib", "x86_64-linux-gnu", "ld-linux-x86-64.so.2")
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function runOracleBinary(rootfsPath, binaryPath, args) {
+  const loaderPath = oracleDynamicLoaderPath(rootfsPath);
+  if (!loaderPath) {
+    return runCommand(binaryPath, args, {
+      env: baseOracleEnv(rootfsPath)
+    });
+  }
+  return runCommand(loaderPath, [
+    "--library-path",
+    oracleLdLibraryPath(rootfsPath),
+    binaryPath,
+    ...args
+  ], {
+    env: baseOracleEnv(rootfsPath)
+  });
+}
+
 export function runEngineDump(options) {
   const binaryPath = oracleCommandPath(options.rootfsPath, options.engineName);
-  const env = baseOracleEnv(options.rootfsPath);
   const htmlPath = options.htmlPath;
   const fileUrl = `file://${htmlPath}`;
 
@@ -503,9 +533,7 @@ export function runEngineDump(options) {
     throw new Error(`unsupported engine: ${options.engineName}`);
   }
 
-  const result = runCommand(binaryPath, args, {
-    env
-  });
+  const result = runOracleBinary(options.rootfsPath, binaryPath, args);
   const output = result.stdout.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const lines = output.split("\n");
   if (lines.length > 0 && lines[lines.length - 1] === "") {
@@ -527,9 +555,11 @@ export async function collectEngineFingerprints(options) {
     const binaryPath = oracleCommandPath(options.rootfsPath, engineName);
     const binaryStat = await stat(binaryPath);
     const binarySha = await hashFile(binaryPath);
-    const version = runCommand(binaryPath, versionCommandArgs(engineName), {
-      env: baseOracleEnv(options.rootfsPath)
-    }).stdout.trim();
+    const version = runOracleBinary(
+      options.rootfsPath,
+      binaryPath,
+      versionCommandArgs(engineName)
+    ).stdout.trim();
     fingerprints[engineName] = {
       engine: engineName,
       path: binaryPath,
