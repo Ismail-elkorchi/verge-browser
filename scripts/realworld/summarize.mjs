@@ -32,9 +32,9 @@ function formatOracleTools(tools) {
   }
   return tools.map((tool) => {
     if (!tool.available) {
-      return `- ${tool.tool}: unavailable`;
+      return `- ${tool.tool} (${tool.source ?? "unknown"}): unavailable${tool.error ? ` (${tool.error})` : ""}`;
     }
-    return `- ${tool.tool}: sha256=${tool.binarySha256} version=${tool.version}`;
+    return `- ${tool.tool} (${tool.source ?? "unknown"}): sha256=${tool.binarySha256} version=${tool.version}`;
   }).join("\n");
 }
 
@@ -95,6 +95,13 @@ async function main() {
     formatParseErrorFrequency(fieldSummary.parseErrorIdFrequency),
     "",
     "## Oracle availability and fingerprints",
+    `- source mode: ${oracleSummary.sourceMode ?? "unknown"}`,
+    ...(oracleSummary.image
+      ? [
+        `- image fingerprint: ${oracleSummary.image.fingerprint}`,
+        `- image package count: ${String(oracleSummary.image.packageCount)}`
+      ]
+      : []),
     formatOracleTools(oracleSummary.tools),
     "",
     "## Worst oracle disagreements",

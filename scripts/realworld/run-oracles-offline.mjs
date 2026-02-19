@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import { TextDecoder } from "node:util";
 
 import { parseBytes, visibleTextTokens } from "html-parser";
+import { collectEngineFingerprints, ensureOracleImage, runEngineDump } from "../oracles/real-oracle-lib.mjs";
 
 import {
   corpusPath,
@@ -92,6 +93,128 @@ async function resolveToolBinary(toolName) {
   return path.length > 0 ? path : null;
 }
 
+async function resolveHostTools() {
+  const toolMetadata = [];
+  const availableTools = [];
+
+  for (const tool of ORACLE_TOOLS) {
+    const binaryPath = await resolveToolBinary(tool.name);
+    if (!binaryPath) {
+      toolMetadata.push({
+        tool: tool.name,
+        source: "host",
+        available: false
+      });
+      continue;
+    }
+    const versionResult = await runProcess(binaryPath, tool.versionArgs);
+    const toolEntry = {
+      ...tool,
+      source: "host",
+      binaryPath
+    };
+    availableTools.push(toolEntry);
+    toolMetadata.push({
+      tool: tool.name,
+      source: "host",
+      available: true,
+      binaryPath,
+      binarySha256: await binarySha256(binaryPath),
+      version: versionResult.stdout.trim() || versionResult.stderr.trim() || "unknown"
+    });
+  }
+
+  return {
+    sourceMode: "host",
+    tools: availableTools,
+    metadata: toolMetadata,
+    image: null
+  };
+}
+
+async function resolveImageTools() {
+  const imageRoot = resolve(process.env.VERGE_ORACLE_IMAGE_ROOT ?? "tmp/oracle-image-field");
+  const lockPath = resolve(process.env.VERGE_ORACLE_IMAGE_LOCK ?? `${imageRoot}/oracle-image.lock.json`);
+  const rebuildLock = process.env.VERGE_ORACLE_REBUILD_LOCK !== "0";
+
+  const imageState = await ensureOracleImage({
+    imageRoot,
+    lockPath,
+    rebuildLock
+  });
+  const fingerprints = await collectEngineFingerprints({
+    rootfsPath: imageState.rootfsPath
+  });
+
+  const toolMetadata = [];
+  const availableTools = [];
+  for (const tool of ORACLE_TOOLS) {
+    const fingerprint = fingerprints[tool.name];
+    if (!fingerprint) {
+      toolMetadata.push({
+        tool: tool.name,
+        source: "image",
+        available: false
+      });
+      continue;
+    }
+    availableTools.push({
+      ...tool,
+      source: "image",
+      rootfsPath: imageState.rootfsPath,
+      binaryPath: fingerprint.path
+    });
+    toolMetadata.push({
+      tool: tool.name,
+      source: "image",
+      available: true,
+      binaryPath: fingerprint.path,
+      binarySha256: fingerprint.sha256,
+      version: fingerprint.version
+    });
+  }
+
+  return {
+    sourceMode: "image",
+    tools: availableTools,
+    metadata: toolMetadata,
+    image: {
+      rootfsPath: imageState.rootfsPath,
+      lockPath: imageState.lockPath,
+      fingerprint: imageState.fingerprint,
+      packageCount: imageState.packageCount
+    }
+  };
+}
+
+async function resolveOracleTools() {
+  const sourceMode = (process.env.VERGE_ORACLE_SOURCE ?? "auto").trim().toLowerCase();
+  if (sourceMode === "host") {
+    return resolveHostTools();
+  }
+  if (sourceMode === "image") {
+    return resolveImageTools();
+  }
+
+  const hostResolution = await resolveHostTools();
+  if (hostResolution.tools.length === ORACLE_TOOLS.length) {
+    return hostResolution;
+  }
+
+  try {
+    return await resolveImageTools();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    hostResolution.metadata.push({
+      tool: "image-fallback",
+      source: "image",
+      available: false,
+      error: message
+    });
+    return hostResolution;
+  }
+}
+
 async function binarySha256(path) {
   const bytes = new Uint8Array(await readFile(path));
   return sha256HexBytes(bytes);
@@ -109,6 +232,23 @@ function computeExpectedTokens(htmlBytes) {
 }
 
 async function runToolOnHtml(tool, htmlText, width) {
+  if (tool.source === "image") {
+    const tempRoot = await mkdtemp(join(tmpdir(), "verge-oracle-image-"));
+    const tempFilePath = resolve(tempRoot, "page.html");
+    try {
+      await writeFile(tempFilePath, htmlText, "utf8");
+      const lines = runEngineDump({
+        rootfsPath: tool.rootfsPath,
+        engineName: tool.name,
+        width,
+        htmlPath: tempFilePath
+      });
+      return `${lines.join("\n")}\n`;
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  }
+
   if (tool.mode === "stdin") {
     const result = await runProcess(tool.binaryPath, tool.renderArgs(width), {
       stdinText: htmlText
@@ -184,35 +324,14 @@ async function main() {
   const runId = sha256HexString(
     JSON.stringify({
       script: "run-oracles-offline-v1",
-      pages: pages.map((page) => page.sha256)
+      pages: pages.map((page) => page.sha256),
+      sourceMode: process.env.VERGE_ORACLE_SOURCE ?? "auto"
     })
   );
 
-  const toolMetadata = [];
-  const availableTools = [];
-  for (const tool of ORACLE_TOOLS) {
-    const binaryPath = await resolveToolBinary(tool.name);
-    if (!binaryPath) {
-      toolMetadata.push({
-        tool: tool.name,
-        available: false
-      });
-      continue;
-    }
-    const versionResult = await runProcess(binaryPath, tool.versionArgs);
-    const toolEntry = {
-      ...tool,
-      binaryPath
-    };
-    availableTools.push(toolEntry);
-    toolMetadata.push({
-      tool: tool.name,
-      available: true,
-      binaryPath,
-      binarySha256: await binarySha256(binaryPath),
-      version: versionResult.stdout.trim() || versionResult.stderr.trim() || "unknown"
-    });
-  }
+  const oracleTools = await resolveOracleTools();
+  const availableTools = oracleTools.tools;
+  const toolMetadata = oracleTools.metadata;
 
   const comparisonRecords = [];
   for (const page of pages) {
@@ -240,7 +359,8 @@ async function main() {
             width,
             tokenF1: Number(tokenScore.toFixed(6)),
             stdoutSha256: oracleOutputSha,
-            binaryPath: tool.binaryPath
+            binaryPath: tool.binaryPath,
+            source: tool.source
           });
         } catch (error) {
           comparisonRecords.push({
@@ -252,6 +372,7 @@ async function main() {
             tokenF1: 0,
             stdoutSha256: null,
             binaryPath: tool.binaryPath,
+            source: tool.source,
             error: error instanceof Error ? error.message : String(error)
           });
         }
@@ -274,6 +395,8 @@ async function main() {
     runId,
     generatedAtIso: new Date().toISOString(),
     pagesCompared: pages.length,
+    sourceMode: oracleTools.sourceMode,
+    image: oracleTools.image,
     tools: toolMetadata,
     toolScores: summarizeByTool(comparisonRecords.filter((record) => !record.error))
   };
