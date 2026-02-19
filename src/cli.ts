@@ -23,6 +23,7 @@ import { buildFormSubmissionRequest, extractForms } from "./app/forms.js";
 import { activeSearchLineIndex, createSearchState, moveSearchMatch, type SearchState } from "./app/search.js";
 import { resolveShortcutAction } from "./app/shortcuts.js";
 import { CorpusRecorder } from "./app/realworld.js";
+import { NetworkFetchError } from "./app/fetch-page.js";
 import { BrowserSession } from "./app/session.js";
 import { BrowserStore } from "./app/storage.js";
 import { clearTerminal, terminalHeight, terminalWidth } from "./app/terminal.js";
@@ -189,6 +190,8 @@ function formatDiagnosticsView(snapshot: PageSnapshot | null): readonly string[]
     `parse mode: ${snapshot.diagnostics.parseMode}`,
     `request method: ${snapshot.diagnostics.requestMethod}`,
     `used cookies: ${snapshot.diagnostics.usedCookies ? "yes" : "no"}`,
+    `network outcome: ${snapshot.diagnostics.networkOutcome.kind}`,
+    `network detail: ${snapshot.diagnostics.networkOutcome.detailMessage}`,
     `source bytes: ${snapshot.diagnostics.sourceBytes === null ? "unavailable" : String(snapshot.diagnostics.sourceBytes)}`,
     `parse errors: ${String(snapshot.diagnostics.parseErrorCount)}`,
     `trace events: ${String(snapshot.diagnostics.traceEventCount)}`,
@@ -200,6 +203,17 @@ function formatDiagnosticsView(snapshot: PageSnapshot | null): readonly string[]
   ];
 
   return lines;
+}
+
+function formatErrorForStatus(error: unknown): string {
+  if (error instanceof NetworkFetchError) {
+    const outcome = error.networkOutcome;
+    const statusText = outcome.status === null
+      ? ""
+      : ` status=${String(outcome.status)}${outcome.statusText ? ` ${outcome.statusText}` : ""}`;
+    return `Navigation failed (${outcome.kind}${statusText}): ${outcome.detailMessage}`;
+  }
+  return error instanceof Error ? error.message : String(error);
 }
 
 function formatReaderView(snapshot: PageSnapshot | null): readonly string[] {
@@ -773,8 +787,7 @@ async function main(): Promise<void> {
       try {
         await action();
       } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error);
-        setStatus(`Command failed: ${message}`);
+        setStatus(`Command failed: ${formatErrorForStatus(error)}`);
       }
 
       render();
@@ -877,10 +890,10 @@ async function main(): Promise<void> {
   try {
     await navigateToTarget(initialTarget);
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = formatErrorForStatus(error);
     initialNavigationError = message;
     setView({ kind: "help", title: "verge-browser help", lines: formatHelpText().split("\n") }, true);
-    setStatus(`Initial navigation failed: ${message}`);
+    setStatus(message);
   }
 
   if (cliFlags.runOnce) {

@@ -36,6 +36,18 @@ test("BrowserSession supports open, back, and forward", async () => {
     statusText: "OK",
     contentType: "text/html",
     html: htmlMap.get(requestUrl) ?? "<html><body>missing</body></html>",
+    responseHeaders: {
+      "content-type": "text/html"
+    },
+    setCookieHeaders: [],
+    networkOutcome: {
+      kind: "ok",
+      finalUrl: requestUrl,
+      status: 200,
+      statusText: "OK",
+      detailCode: "HTTP_200",
+      detailMessage: "200 OK"
+    },
     fetchedAtIso: "2026-01-01T00:00:00.000Z"
   });
 
@@ -66,6 +78,18 @@ test("BrowserSession openStream parses from byte stream", async () => {
     statusText: "OK",
     contentType: "text/html",
     html: htmlMap.get(requestUrl) ?? "<html><body>missing</body></html>",
+    responseHeaders: {
+      "content-type": "text/html"
+    },
+    setCookieHeaders: [],
+    networkOutcome: {
+      kind: "ok",
+      finalUrl: requestUrl,
+      status: 200,
+      statusText: "OK",
+      detailCode: "HTTP_200",
+      detailMessage: "200 OK"
+    },
     fetchedAtIso: "2026-01-01T00:00:00.000Z"
   });
 
@@ -76,6 +100,18 @@ test("BrowserSession openStream parses from byte stream", async () => {
     statusText: "OK",
     contentType: "text/html",
     stream: streamFromString(htmlMap.get(requestUrl) ?? "<html><body>missing</body></html>"),
+    responseHeaders: {
+      "content-type": "text/html"
+    },
+    setCookieHeaders: [],
+    networkOutcome: {
+      kind: "ok",
+      finalUrl: requestUrl,
+      status: 200,
+      statusText: "OK",
+      detailCode: "HTTP_200",
+      detailMessage: "200 OK"
+    },
     fetchedAtIso: "2026-01-01T00:00:00.000Z"
   });
 
@@ -87,6 +123,7 @@ test("BrowserSession openStream parses from byte stream", async () => {
 
   const snapshot = await session.openStream("https://a.example/");
   assert.equal(snapshot.diagnostics.parseMode, "stream");
+  assert.equal(snapshot.diagnostics.networkOutcome.kind, "ok");
   assert.equal(snapshot.rendered.title, "A");
   assert.ok(snapshot.sourceHtml?.includes("<title>A</title>"));
 });
@@ -99,6 +136,18 @@ test("BrowserSession applyEdits mutates current snapshot deterministically", asy
     statusText: "OK",
     contentType: "text/html",
     html: "<html><head><title>T</title></head><body><p>Hello</p></body></html>",
+    responseHeaders: {
+      "content-type": "text/html"
+    },
+    setCookieHeaders: [],
+    networkOutcome: {
+      kind: "ok",
+      finalUrl: requestUrl,
+      status: 200,
+      statusText: "OK",
+      detailCode: "HTTP_200",
+      detailMessage: "200 OK"
+    },
     fetchedAtIso: "2026-01-01T00:00:00.000Z"
   });
 
@@ -139,7 +188,18 @@ test("BrowserSession openWithRequest records method and cookie diagnostics", asy
       statusText: "OK",
       contentType: "text/html",
       html: "<html><head><title>Submit</title></head><body><p>ok</p></body></html>",
+      responseHeaders: {
+        "content-type": "text/html"
+      },
       setCookieHeaders: ["sid=next; Path=/; HttpOnly"],
+      networkOutcome: {
+        kind: "ok",
+        finalUrl: requestUrl,
+        status: 200,
+        statusText: "OK",
+        detailCode: "HTTP_200",
+        detailMessage: "200 OK"
+      },
       fetchedAtIso: "2026-01-01T00:00:00.000Z"
     };
   };
@@ -162,5 +222,6 @@ test("BrowserSession openWithRequest records method and cookie diagnostics", asy
   assert.equal(capturedRequestOptions?.headers?.cookie, "sid=seed");
   assert.equal(snapshot.diagnostics.requestMethod, "POST");
   assert.equal(snapshot.diagnostics.usedCookies, true);
+  assert.equal(snapshot.diagnostics.networkOutcome.kind, "ok");
   assert.equal(snapshot.setCookieHeaders[0], "sid=next; Path=/; HttpOnly");
 });

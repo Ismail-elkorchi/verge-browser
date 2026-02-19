@@ -95,7 +95,8 @@ function diagnosticsFromTree(
   sourceHtml: string | undefined,
   requestMethod: "GET" | "POST",
   timings: NavigationTimings,
-  usedCookies: boolean
+  usedCookies: boolean,
+  networkOutcome: PageDiagnostics["networkOutcome"]
 ): PageDiagnostics {
   return {
     parseMode,
@@ -108,7 +109,8 @@ function diagnosticsFromTree(
     parseDurationMs: timings.parseDurationMs,
     renderDurationMs: timings.renderDurationMs,
     totalDurationMs: timings.totalDurationMs,
-    usedCookies
+    usedCookies,
+    networkOutcome
   };
 }
 
@@ -265,7 +267,8 @@ export class BrowserSession {
           renderDurationMs,
           totalDurationMs
         },
-        currentPage.diagnostics.usedCookies
+        currentPage.diagnostics.usedCookies,
+        currentPage.diagnostics.networkOutcome
       )
     };
 
@@ -363,6 +366,7 @@ export class BrowserSession {
     const totalDurationMs = Date.now() - startedAtMs;
     const requestMethod = requestOptions.method ?? "GET";
     const usedCookies = hasCookieHeader(requestOptions.headers);
+    const networkOutcome = fetchedPage.networkOutcome;
 
     const snapshot: PageSnapshot = {
       requestUrl: fetchedPage.requestUrl,
@@ -387,7 +391,8 @@ export class BrowserSession {
           renderDurationMs,
           totalDurationMs
         },
-        usedCookies
+        usedCookies,
+        networkOutcome
       )
     };
 

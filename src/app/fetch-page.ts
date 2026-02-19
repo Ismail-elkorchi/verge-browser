@@ -2,9 +2,21 @@ import { readFile } from "node:fs/promises";
 
 import { formatHelpText } from "./commands.js";
 import { DEFAULT_SECURITY_POLICY, assertAllowedProtocol, isHtmlLikeContentType, type SecurityPolicyOptions } from "./security.js";
-import type { FetchPageResult, FetchPageStreamResult, PageRequestOptions } from "./types.js";
+import type {
+  FetchPageResult,
+  FetchPageStreamResult,
+  NetworkOutcome,
+  NetworkOutcomeKind,
+  PageRequestOptions
+} from "./types.js";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
+const DNS_ERROR_CODES = new Set([
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ENODATA",
+  "EHOSTUNREACH"
+]);
 
 function escapeHtml(value: string): string {
   return value
@@ -24,6 +36,151 @@ const ABOUT_HELP_HTML = `<!doctype html>
 </html>`;
 
 const UTF8_ENCODER = new TextEncoder();
+
+function createNetworkOutcome(
+  kind: NetworkOutcomeKind,
+  options: {
+    readonly finalUrl: string;
+    readonly status?: number | null;
+    readonly statusText?: string | null;
+    readonly detailCode?: string | null;
+    readonly detailMessage: string;
+  }
+): NetworkOutcome {
+  return {
+    kind,
+    finalUrl: options.finalUrl,
+    status: options.status ?? null,
+    statusText: options.statusText ?? null,
+    detailCode: options.detailCode ?? null,
+    detailMessage: options.detailMessage
+  };
+}
+
+function outcomeFromHttpStatus(finalUrl: string, status: number, statusText: string): NetworkOutcome {
+  const detailCode = `HTTP_${String(status)}`;
+  const detailMessage = `${String(status)} ${statusText}`;
+  if (status >= 400) {
+    return createNetworkOutcome("http_error", {
+      finalUrl,
+      status,
+      statusText,
+      detailCode,
+      detailMessage
+    });
+  }
+  return createNetworkOutcome("ok", {
+    finalUrl,
+    status,
+    statusText,
+    detailCode,
+    detailMessage
+  });
+}
+
+function tlsCodeLike(rawCode: string): boolean {
+  const normalized = rawCode.toUpperCase();
+  return (
+    normalized.includes("TLS") ||
+    normalized.includes("SSL") ||
+    normalized.includes("CERT") ||
+    normalized.includes("SELF_SIGNED") ||
+    normalized.includes("UNABLE_TO_VERIFY")
+  );
+}
+
+function detailCodeFromError(error: unknown, messageUpper: string): string | null {
+  if (!(error instanceof Error)) {
+    return null;
+  }
+  const cause = (error as { readonly cause?: unknown }).cause;
+  if (cause && typeof cause === "object" && "code" in cause) {
+    return String((cause as { readonly code: unknown }).code).toUpperCase();
+  }
+  const match = messageUpper.match(
+    /\b(ENOTFOUND|EAI_AGAIN|ENODATA|EHOSTUNREACH|ERR_TLS_[A-Z_]+|ERR_SSL_[A-Z_]+|CERT_[A-Z_]+|SELF_SIGNED_CERT_IN_CHAIN|UNABLE_TO_VERIFY_LEAF_SIGNATURE)\b/
+  );
+  return match?.[1] ?? null;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+export class NetworkFetchError extends Error {
+  readonly networkOutcome: NetworkOutcome;
+
+  constructor(networkOutcome: NetworkOutcome) {
+    super(`${networkOutcome.kind}: ${networkOutcome.detailMessage}`);
+    this.name = "NetworkFetchError";
+    this.networkOutcome = networkOutcome;
+  }
+}
+
+export function classifyNetworkFailure(error: unknown, finalUrl: string): NetworkOutcome {
+  if (error instanceof NetworkFetchError) {
+    return error.networkOutcome;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  const messageUpper = message.toUpperCase();
+  const detailCode = detailCodeFromError(error, messageUpper);
+
+  if (isAbortError(error) || messageUpper.includes("TIMED OUT") || messageUpper.includes("FETCH TIMEOUT")) {
+    return createNetworkOutcome("timeout", {
+      finalUrl,
+      detailCode: detailCode ?? "TIMEOUT",
+      detailMessage: message
+    });
+  }
+  if (messageUpper.includes("BLOCKED UNSUPPORTED PROTOCOL")) {
+    return createNetworkOutcome("unsupported_protocol", {
+      finalUrl,
+      detailCode: detailCode ?? "UNSUPPORTED_PROTOCOL",
+      detailMessage: message
+    });
+  }
+  if (messageUpper.includes("REDIRECT LIMIT EXCEEDED")) {
+    return createNetworkOutcome("redirect_limit", {
+      finalUrl,
+      detailCode: detailCode ?? "REDIRECT_LIMIT",
+      detailMessage: message
+    });
+  }
+  if (messageUpper.includes("NON-HTML CONTENT-TYPE")) {
+    return createNetworkOutcome("content_type_block", {
+      finalUrl,
+      detailCode: detailCode ?? "CONTENT_TYPE_BLOCK",
+      detailMessage: message
+    });
+  }
+  if (messageUpper.includes("MAXCONTENTBYTES")) {
+    return createNetworkOutcome("size_limit", {
+      finalUrl,
+      detailCode: detailCode ?? "MAX_CONTENT_BYTES",
+      detailMessage: message
+    });
+  }
+  if (detailCode && DNS_ERROR_CODES.has(detailCode)) {
+    return createNetworkOutcome("dns", {
+      finalUrl,
+      detailCode,
+      detailMessage: message
+    });
+  }
+  if (detailCode && tlsCodeLike(detailCode)) {
+    return createNetworkOutcome("tls", {
+      finalUrl,
+      detailCode,
+      detailMessage: message
+    });
+  }
+  return createNetworkOutcome("unknown", {
+    finalUrl,
+    detailCode,
+    detailMessage: message
+  });
+}
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -47,7 +204,14 @@ async function fetchFileUrl(requestUrl: string): Promise<FetchPageResult> {
       "content-type": "text/html"
     },
     setCookieHeaders: [],
-    fetchedAtIso: nowIso()
+    fetchedAtIso: nowIso(),
+    networkOutcome: createNetworkOutcome("ok", {
+      finalUrl: requestUrl,
+      status: 200,
+      statusText: "OK",
+      detailCode: "FILE_URL",
+      detailMessage: "Loaded file URL"
+    })
   };
 }
 
@@ -274,7 +438,14 @@ export async function fetchPage(
         "content-type": "text/html"
       },
       setCookieHeaders: [],
-      fetchedAtIso: nowIso()
+      fetchedAtIso: nowIso(),
+      networkOutcome: createNetworkOutcome("ok", {
+        finalUrl: requestUrl,
+        status: 200,
+        statusText: "OK",
+        detailCode: "ABOUT_HELP",
+        detailMessage: "Loaded about:help"
+      })
     };
   }
 
@@ -282,8 +453,19 @@ export async function fetchPage(
     return fetchFileUrl(requestUrl);
   }
 
-  const networkResult = await fetchNetworkResponse(requestUrl, timeoutMs, policy, requestOptions);
-  const html = await readResponseBodyWithLimit(networkResult.body, policy.maxContentBytes);
+  let networkResult: NetworkFetchResult;
+  try {
+    networkResult = await fetchNetworkResponse(requestUrl, timeoutMs, policy, requestOptions);
+  } catch (error) {
+    throw new NetworkFetchError(classifyNetworkFailure(error, requestUrl));
+  }
+
+  let html = "";
+  try {
+    html = await readResponseBodyWithLimit(networkResult.body, policy.maxContentBytes);
+  } catch (error) {
+    throw new NetworkFetchError(classifyNetworkFailure(error, networkResult.finalUrl));
+  }
 
   return {
     requestUrl: networkResult.requestUrl,
@@ -294,7 +476,8 @@ export async function fetchPage(
     html,
     responseHeaders: networkResult.responseHeaders,
     setCookieHeaders: networkResult.setCookieHeaders,
-    fetchedAtIso: networkResult.fetchedAtIso
+    fetchedAtIso: networkResult.fetchedAtIso,
+    networkOutcome: outcomeFromHttpStatus(networkResult.finalUrl, networkResult.status, networkResult.statusText)
   };
 }
 
@@ -312,7 +495,13 @@ export async function fetchPageStream(
   if (requestUrl === "about:help") {
     const aboutBytes = utf8ByteLength(ABOUT_HELP_HTML);
     if (aboutBytes > policy.maxContentBytes) {
-      throw new Error(`Response exceeded maxContentBytes=${String(policy.maxContentBytes)}`);
+      throw new NetworkFetchError(
+        createNetworkOutcome("size_limit", {
+          finalUrl: requestUrl,
+          detailCode: "MAX_CONTENT_BYTES",
+          detailMessage: `Response exceeded maxContentBytes=${String(policy.maxContentBytes)}`
+        })
+      );
     }
     return {
       requestUrl,
@@ -325,7 +514,14 @@ export async function fetchPageStream(
         "content-type": "text/html"
       },
       setCookieHeaders: [],
-      fetchedAtIso: nowIso()
+      fetchedAtIso: nowIso(),
+      networkOutcome: createNetworkOutcome("ok", {
+        finalUrl: requestUrl,
+        status: 200,
+        statusText: "OK",
+        detailCode: "ABOUT_HELP",
+        detailMessage: "Loaded about:help"
+      })
     };
   }
 
@@ -333,7 +529,13 @@ export async function fetchPageStream(
     const filePage = await fetchFileUrl(requestUrl);
     const fileBytes = utf8ByteLength(filePage.html);
     if (fileBytes > policy.maxContentBytes) {
-      throw new Error(`Response exceeded maxContentBytes=${String(policy.maxContentBytes)}`);
+      throw new NetworkFetchError(
+        createNetworkOutcome("size_limit", {
+          finalUrl: filePage.finalUrl,
+          detailCode: "MAX_CONTENT_BYTES",
+          detailMessage: `Response exceeded maxContentBytes=${String(policy.maxContentBytes)}`
+        })
+      );
     }
     return {
       requestUrl: filePage.requestUrl,
@@ -344,11 +546,17 @@ export async function fetchPageStream(
       stream: streamFromUtf8(filePage.html),
       responseHeaders: filePage.responseHeaders,
       setCookieHeaders: [],
-      fetchedAtIso: filePage.fetchedAtIso
+      fetchedAtIso: filePage.fetchedAtIso,
+      networkOutcome: filePage.networkOutcome
     };
   }
 
-  const networkResult = await fetchNetworkResponse(requestUrl, timeoutMs, policy, requestOptions);
+  let networkResult: NetworkFetchResult;
+  try {
+    networkResult = await fetchNetworkResponse(requestUrl, timeoutMs, policy, requestOptions);
+  } catch (error) {
+    throw new NetworkFetchError(classifyNetworkFailure(error, requestUrl));
+  }
   const stream = networkResult.body ?? streamFromUtf8("");
 
   return {
@@ -360,6 +568,7 @@ export async function fetchPageStream(
     stream: withByteLimit(stream, policy.maxContentBytes),
     responseHeaders: networkResult.responseHeaders,
     setCookieHeaders: networkResult.setCookieHeaders,
-    fetchedAtIso: networkResult.fetchedAtIso
+    fetchedAtIso: networkResult.fetchedAtIso,
+    networkOutcome: outcomeFromHttpStatus(networkResult.finalUrl, networkResult.status, networkResult.statusText)
   };
 }
