@@ -122,7 +122,13 @@ All evaluation outputs are artifacts under `reports/`.
 - `timestamp`: ISO-8601
 - `profile`: `"ci"` or `"release"`
 - `image`:
-  - `{ rootfsPath, lockPath, fingerprint, packageCount, rootPackages }`
+  - `{ rootfsPath, lockPath, fingerprint, packageCount, rootPackages, sourcePolicy, releaseMetadata }`
+  - `sourcePolicy`:
+    - `{ mode, snapshotRoot, snapshotId, keyringPath, mirrors }`
+  - `releaseMetadata[]`:
+    - `{ suite, inReleaseUrl, inReleaseSha256, signatureKey, packageIndexes[] }`
+    - `packageIndexes[]`:
+      - `{ component, indexPath, indexUrl, indexSha256 }`
 - `engines`:
   - keys: `lynx`, `w3m`, `links2`
   - values:
@@ -145,6 +151,8 @@ Same shape as `reports/render-score.json` for the sampled oracle runtime run.
 - `gates`: `{ ok, failures[] }`
 - `runtime`:
   - `hasAllEngineFingerprints`
+  - `hasSnapshotPolicy`
+  - `hasReleaseMetadata`
   - `engineRecordChecks`
 - `reports`: paths to generated artifacts
 

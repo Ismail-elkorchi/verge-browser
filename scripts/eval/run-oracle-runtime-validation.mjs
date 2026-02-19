@@ -196,7 +196,17 @@ async function main() {
       lockPath: imageState.lockPath,
       fingerprint: imageState.fingerprint,
       packageCount: imageState.packageCount,
-      rootPackages: imageState.rootPackages
+      rootPackages: imageState.rootPackages,
+      sourcePolicy: imageState.lock?.sourcePolicy ?? null,
+      releaseMetadata: Array.isArray(imageState.lock?.releaseMetadata)
+        ? imageState.lock.releaseMetadata.map((releaseRecord) => ({
+            suite: releaseRecord.suite,
+            inReleaseUrl: releaseRecord.inReleaseUrl,
+            inReleaseSha256: releaseRecord.inReleaseSha256,
+            signatureKey: releaseRecord.signatureKey,
+            packageIndexes: releaseRecord.packageIndexes
+          }))
+        : []
     },
     engines: engineFingerprints
   };
@@ -218,6 +228,8 @@ async function main() {
     gates: gateResult,
     runtime: {
       hasAllEngineFingerprints: Object.keys(engineFingerprints).length === defaultOracleRootPackages().length,
+      hasSnapshotPolicy: imageState.lock?.sourcePolicy?.mode === "snapshot-replay",
+      hasReleaseMetadata: Array.isArray(imageState.lock?.releaseMetadata) && imageState.lock.releaseMetadata.length > 0,
       engineRecordChecks
     },
     reports: {
