@@ -23,6 +23,7 @@ Standalone evaluation commands:
 npm run eval:ci
 npm run eval:release
 npm run eval:oracle-runtime:release
+npm run oracle:lock:refresh
 npm run eval:oracle-superiority:release
 npm run eval:oracle-fingerprint:release
 npm run eval:oracle-supply-chain:release

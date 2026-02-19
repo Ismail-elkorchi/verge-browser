@@ -54,16 +54,18 @@ async function main() {
   runNodeScript("scripts/eval/write-network-outcomes-report.mjs");
   runNodeScript("scripts/bench/run-bench.mjs");
   runNodeScript("scripts/eval/check-bench-governance.mjs");
+  runNodeScript("scripts/eval/check-oracle-workflow-policy.mjs");
   if (profile === "release") {
     runNodeScript("scripts/eval/check-release-integrity.mjs");
   }
   runNodeScript("scripts/eval/write-phase-ladder-report.mjs", [`--profile=${profile}`]);
 
-  const [agentReport, streamReport, networkOutcomesReport, benchGovernanceReport, releaseIntegrityReport, phaseLadderReport] = await Promise.all([
+  const [agentReport, streamReport, networkOutcomesReport, benchGovernanceReport, oracleWorkflowPolicyReport, releaseIntegrityReport, phaseLadderReport] = await Promise.all([
     readJson(resolve(reportsDir, "agent.json")),
     readJson(resolve(reportsDir, "stream.json")),
     readJson(resolve(reportsDir, "network-outcomes.json")),
     readJson(resolve(reportsDir, "bench-governance.json")),
+    readJson(resolve(reportsDir, "oracle-workflow-policy.json")),
     profile === "release"
       ? readJson(resolve(reportsDir, "release-integrity.json"))
       : Promise.resolve(null),
@@ -90,6 +92,9 @@ async function main() {
   if (benchGovernanceReport?.ok !== true) {
     extraFailures.push("bench governance report failed");
   }
+  if (oracleWorkflowPolicyReport?.ok !== true) {
+    extraFailures.push("oracle workflow policy report failed");
+  }
   if (profile === "release" && releaseIntegrityReport?.ok !== true) {
     extraFailures.push("release integrity report failed");
   }
@@ -115,6 +120,7 @@ async function main() {
       networkOutcomes: resolve(reportsDir, "network-outcomes.json"),
       bench: resolve(reportsDir, "bench.json"),
       benchGovernance: resolve(reportsDir, "bench-governance.json"),
+      oracleWorkflowPolicy: resolve(reportsDir, "oracle-workflow-policy.json"),
       phaseLadder: resolve(reportsDir, "phase-ladder.json"),
       ...(profile === "release" ? { releaseIntegrity: resolve(reportsDir, "release-integrity.json") } : {})
     },

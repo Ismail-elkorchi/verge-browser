@@ -52,8 +52,5 @@ jobs:
       - name: Check
         run: npm run ci
 
-      - name: Refresh apt package index
-        run: sudo apt-get update
-
       - name: Real oracle validation
-        run: npm run eval:oracle-runtime:ci -- --rebuild-lock
+        run: npm run eval:oracle-runtime:ci
