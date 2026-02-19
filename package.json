@@ -27,6 +27,7 @@
     "field:oracles": "npm run build && node scripts/realworld/run-oracles-offline.mjs",
     "field:report": "node scripts/realworld/summarize.mjs",
     "corpus:render": "node scripts/oracles/corpus/generate-render-v3.mjs",
+    "oracle:lock:refresh": "node scripts/oracles/refresh-oracle-lock.mjs",
     "test:bench": "npm run build && node scripts/bench/run-bench.mjs",
     "eval:ci": "npm run build && node scripts/eval/run-eval.mjs --profile=ci",
     "eval:release": "npm run build && node scripts/eval/run-eval.mjs --profile=release",

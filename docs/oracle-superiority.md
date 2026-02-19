@@ -5,7 +5,7 @@ Commands:
 - `npm run eval:oracle-superiority:release`
 
 Mechanism:
-1. Executes phase-3.1 real-oracle validation.
+1. Executes oracle runtime validation.
 2. Reads `reports/render-score-real.json`.
 3. Enforces strict comparative win per configured metric:
    - `verge(metric) >= bestBaseline(metric) + comparativeWinDelta`.

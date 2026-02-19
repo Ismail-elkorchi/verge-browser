@@ -93,11 +93,16 @@ For each metric:
   - `unsupported_protocol`
   - `unknown`
 
-## Phase-3.1 validation gates (real oracle pass)
+## G-313 Oracle workflow replay policy gate
+- `reports/oracle-workflow-policy.json` exists
+- `reports/oracle-workflow-policy.json.ok` is `true`
+- CI/release workflows do not use `--rebuild-lock` for oracle runtime validation
+
+## Oracle runtime validation gates
 Executed by:
 - `npm run eval:oracle-runtime:ci`
 - `npm run eval:oracle-runtime:release`
-- required in GitHub PR CI (`.github/workflows/ci.yml`, `node` job, `--rebuild-lock`)
+- required in GitHub PR CI (`.github/workflows/ci.yml`, `node` job)
 - required in release checks (`npm run release:check`)
 
 ### V-401 Real engine execution
@@ -107,7 +112,7 @@ Executed by:
 - `reports/oracle-runtime.json` includes `sha256`, `sizeBytes`, and version output for all three engines.
 
 ### V-403 Reproducible image identity
-- `scripts/oracles/oracle-image.lock.json` contains package versions + `.deb` hashes.
+- `scripts/oracles/oracle-image.lock.json` contains package versions + `.deb` hashes + direct replay URLs.
 - `reports/oracle-runtime.json.image.fingerprint` derives from the lock package set.
 
 ### V-404 Real-baseline report integrity
@@ -115,7 +120,7 @@ Executed by:
 - per-engine record counts equal executed surface in `reports/render-score-real.json.coverage.executedSurface`.
 
 ### V-405 Validation posture
-- Phase-3.1 gates enforce coverage, determinism, and metric floors.
+- Oracle runtime gates enforce coverage, determinism, and metric floors.
 - Comparative superiority delta is recorded in metrics but is non-blocking for this validation pass.
 
 ## Phase-3.2 validation gates (strict superiority)

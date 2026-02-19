@@ -5,7 +5,7 @@ Commands:
 - `npm run eval:oracle-supply-chain:release`
 
 Mechanism:
-1. Executes phase-3.1 real-oracle validation.
+1. Executes oracle runtime validation.
 2. Runs `scripts/oracles/analyze-supply-chain.mjs`.
 3. Enforces:
    - package closure count bound from `evaluation.config.json.oracleSupplyChain.maxOraclePackageCount`

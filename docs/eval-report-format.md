@@ -132,10 +132,10 @@ All evaluation outputs are artifacts under `reports/`.
 Same shape as `reports/render-baselines.json` with engine metadata `runner: "real-binary"` and binary fingerprint fields.
 
 ## reports/render-verge-real.json
-Same shape as `reports/render-verge.json` for the sampled phase-3.1 run.
+Same shape as `reports/render-verge.json` for the sampled oracle runtime run.
 
 ## reports/render-score-real.json
-Same shape as `reports/render-score.json` for the sampled phase-3.1 run.
+Same shape as `reports/render-score.json` for the sampled oracle runtime run.
 
 ## reports/eval-oracle-runtime-summary.json
 - `suite`: `"oracle-runtime-validation"`
@@ -185,4 +185,11 @@ Same shape as `reports/render-score.json` for the sampled phase-3.1 run.
 - `runtimeValidation`: `{ ok }`
 - `supplyChain`:
   - `{ ok, packageCount, maxOraclePackageCount, missingRootPackages }`
+- `ok`: boolean
+
+## reports/oracle-workflow-policy.json
+- `suite`: `"oracle-workflow-policy"`
+- `timestamp`: ISO-8601
+- `workflows`: `string[]`
+- `violations`: `{ path, line, reason }[]`
 - `ok`: boolean

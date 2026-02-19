@@ -1,12 +1,16 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import { copyFile, mkdir, open, readdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 const DEFAULT_ROOT_PACKAGES = ["lynx", "w3m", "links2"];
 const DEFAULT_IMAGE_ROOT = resolve("tmp/oracle-image");
 const DEFAULT_LOCK_PATH = resolve("scripts/oracles/oracle-image.lock.json");
+const DEFAULT_LOCK_MIRRORS = [
+  "http://archive.ubuntu.com/ubuntu",
+  "http://security.ubuntu.com/ubuntu"
+];
 
 function runCommand(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -57,6 +61,71 @@ function parseDependencyNames(rawText) {
     dependencyNames.add(packageName);
   }
   return [...dependencyNames];
+}
+
+function parsePackageStanzas(rawText) {
+  return rawText
+    .split(/\n\n+/)
+    .map((block) => block.trim())
+    .filter((block) => block.length > 0)
+    .map((block) => {
+      const record = {};
+      for (const line of block.split(/\r?\n/)) {
+        const separatorIndex = line.indexOf(":");
+        if (separatorIndex <= 0) continue;
+        const key = line.slice(0, separatorIndex).trim();
+        const value = line.slice(separatorIndex + 1).trim();
+        if (key.length === 0 || value.length === 0) continue;
+        record[key] = value;
+      }
+      return record;
+    });
+}
+
+function resolvePackageMetadata(packageName, packageVersion) {
+  const showOutput = runCommand("apt-cache", ["show", packageName]).stdout;
+  const stanzas = parsePackageStanzas(showOutput);
+  for (const stanza of stanzas) {
+    if (stanza.Version !== packageVersion) continue;
+    const filename = typeof stanza.Filename === "string" ? stanza.Filename : null;
+    const sha256 = typeof stanza.SHA256 === "string" ? stanza.SHA256.toLowerCase() : null;
+    if (!filename || !sha256) {
+      continue;
+    }
+    return {
+      filename,
+      sha256
+    };
+  }
+  return null;
+}
+
+function resolvePolicySourceUrl(packageName, packageVersion) {
+  const policyOutput = runCommand("apt-cache", ["policy", packageName]).stdout;
+  const lines = policyOutput.split(/\r?\n/);
+  let inVersionBlock = false;
+
+  for (const line of lines) {
+    const versionLine = line.match(/^\s*(?:\*{3}\s*)?(\S+)\s+\d+/);
+    if (versionLine) {
+      const currentVersion = versionLine[1] ?? "";
+      inVersionBlock = currentVersion === packageVersion;
+      continue;
+    }
+    if (!inVersionBlock) {
+      continue;
+    }
+    const sourceLine = line.match(/^\s+\d+\s+(\S+)\s+/);
+    if (!sourceLine) {
+      continue;
+    }
+    const sourceUrl = sourceLine[1] ?? "";
+    if (sourceUrl.startsWith("http://") || sourceUrl.startsWith("https://")) {
+      return sourceUrl.replace(/\/+$/, "");
+    }
+  }
+
+  return null;
 }
 
 function resolveCandidateVersion(packageName) {
@@ -137,6 +206,32 @@ async function downloadDebForPackage(pkgsDir, packageName, packageVersion) {
   return downloadedPath;
 }
 
+async function downloadDebFromUrl(pkgsDir, packageRecord) {
+  const filenameFromPath = packageRecord.filename
+    ? basename(packageRecord.filename)
+    : `${packageRecord.name}_${packageRecord.version}.deb`;
+  const debPath = join(pkgsDir, filenameFromPath);
+  const existingPath = await findMatchingDebPath(pkgsDir, packageRecord.name, packageRecord.version);
+  if (existingPath) {
+    return existingPath;
+  }
+
+  runCommand("curl", [
+    "-fsSL",
+    "--retry",
+    "3",
+    "--retry-delay",
+    "2",
+    "--connect-timeout",
+    "15",
+    "--output",
+    debPath,
+    packageRecord.downloadUrl
+  ]);
+
+  return debPath;
+}
+
 function dependencyClosure(rootPackages) {
   const dependencyOutput = runCommand("apt-cache", [
     "depends",
@@ -163,7 +258,9 @@ async function materializeRootfs(input) {
 
   const packageEntries = [];
   for (const packageRecord of input.lock.packages) {
-    const debPath = await downloadDebForPackage(pkgsDir, packageRecord.name, packageRecord.version);
+    const debPath = packageRecord.downloadUrl
+      ? await downloadDebFromUrl(pkgsDir, packageRecord)
+      : await downloadDebForPackage(pkgsDir, packageRecord.name, packageRecord.version);
     const debStat = await stat(debPath);
     const debSha = await hashFile(debPath);
 
@@ -188,7 +285,10 @@ async function materializeRootfs(input) {
 
 function lockFingerprint(lockPayload) {
   const fingerprintBasis = lockPayload.packages
-    .map((packageRecord) => `${packageRecord.name}@${packageRecord.version}:${packageRecord.debSha256}`)
+    .map((packageRecord) => {
+      const downloadUrl = typeof packageRecord.downloadUrl === "string" ? packageRecord.downloadUrl : "";
+      return `${packageRecord.name}@${packageRecord.version}:${packageRecord.debSha256}:${downloadUrl}`;
+    })
     .join("\n");
   return hashString(fingerprintBasis);
 }
@@ -238,16 +338,33 @@ async function createLock(input) {
   for (const packageRecord of packages) {
     const debPath = await downloadDebForPackage(pkgsDir, packageRecord.name, packageRecord.version);
     const debSha = await hashFile(debPath);
+    const metadata = resolvePackageMetadata(packageRecord.name, packageRecord.version);
+    if (!metadata) {
+      throw new Error(`unable to resolve package metadata for ${packageRecord.name}=${packageRecord.version}`);
+    }
+    if (metadata.sha256 !== debSha) {
+      throw new Error(`apt-cache SHA256 mismatch for ${packageRecord.name}=${packageRecord.version}`);
+    }
+    const sourceUrl = resolvePolicySourceUrl(packageRecord.name, packageRecord.version)
+      ?? DEFAULT_LOCK_MIRRORS[0];
+    const filenamePath = metadata.filename.replace(/^\/+/, "");
     hydratedPackages.push({
       ...packageRecord,
+      filename: filenamePath,
+      aptSourceUrl: sourceUrl,
+      downloadUrl: `${sourceUrl}/${filenamePath}`,
       debSha256: debSha
     });
   }
 
   const lockPayload = {
-    formatVersion: 1,
+    formatVersion: 2,
     generatedAtIso: new Date().toISOString(),
     rootPackages: input.rootPackages,
+    sourcePolicy: {
+      mode: "direct-url",
+      mirrors: DEFAULT_LOCK_MIRRORS
+    },
     packages: hydratedPackages
   };
 
@@ -260,11 +377,31 @@ async function createLock(input) {
 async function loadLock(lockPath) {
   const rawText = await readFile(lockPath, "utf8");
   const lock = JSON.parse(rawText);
+  if (!Number.isInteger(lock?.formatVersion) || lock.formatVersion < 2) {
+    throw new Error(`oracle lock formatVersion must be >=2: ${lockPath}`);
+  }
   if (!Array.isArray(lock?.packages) || lock.packages.length === 0) {
     throw new Error(`invalid oracle lock file: ${lockPath}`);
   }
   if (!Array.isArray(lock?.rootPackages) || lock.rootPackages.length === 0) {
     throw new Error(`oracle lock file missing rootPackages: ${lockPath}`);
+  }
+  for (const packageRecord of lock.packages) {
+    if (typeof packageRecord?.name !== "string" || packageRecord.name.length === 0) {
+      throw new Error(`oracle lock package missing name: ${lockPath}`);
+    }
+    if (typeof packageRecord?.version !== "string" || packageRecord.version.length === 0) {
+      throw new Error(`oracle lock package missing version: ${lockPath}`);
+    }
+    if (typeof packageRecord?.debSha256 !== "string" || packageRecord.debSha256.length !== 64) {
+      throw new Error(`oracle lock package missing debSha256: ${lockPath}`);
+    }
+    if (typeof packageRecord?.downloadUrl !== "string" || packageRecord.downloadUrl.length === 0) {
+      throw new Error(`oracle lock package missing downloadUrl: ${lockPath}`);
+    }
+    if (typeof packageRecord?.filename !== "string" || packageRecord.filename.length === 0) {
+      throw new Error(`oracle lock package missing filename: ${lockPath}`);
+    }
   }
   return lock;
 }
@@ -289,15 +426,7 @@ export async function ensureOracleImage(options = {}) {
         rootPackages
       });
     } else {
-      try {
-        lock = await loadLock(lockPath);
-      } catch {
-        lock = await createLock({
-          imageRoot,
-          lockPath,
-          rootPackages
-        });
-      }
+      lock = await loadLock(lockPath);
     }
 
     const materialized = await materializeRootfs({
@@ -329,6 +458,24 @@ export async function ensureOracleImage(options = {}) {
   });
 }
 
+export async function refreshOracleLock(options = {}) {
+  return withOracleImageLock(resolve(options.imageRoot ?? DEFAULT_IMAGE_ROOT), async () => {
+    const imageRoot = resolve(options.imageRoot ?? DEFAULT_IMAGE_ROOT);
+    const lockPath = resolve(options.lockPath ?? DEFAULT_LOCK_PATH);
+    const rootPackages = [...(options.rootPackages ?? DEFAULT_ROOT_PACKAGES)];
+    const lock = await createLock({
+      imageRoot,
+      lockPath,
+      rootPackages
+    });
+    return {
+      lockPath,
+      fingerprint: lock.fingerprint,
+      packageCount: lock.packages.length
+    };
+  });
+}
+
 function baseOracleEnv(rootfsPath) {
   return {
     ...process.env,
@@ -339,9 +486,39 @@ function baseOracleEnv(rootfsPath) {
   };
 }
 
+function oracleDynamicLoaderPath(rootfsPath) {
+  const candidates = [
+    join(rootfsPath, "usr", "lib", "x86_64-linux-gnu", "ld-linux-x86-64.so.2"),
+    join(rootfsPath, "lib64", "ld-linux-x86-64.so.2"),
+    join(rootfsPath, "lib", "x86_64-linux-gnu", "ld-linux-x86-64.so.2")
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function runOracleBinary(rootfsPath, binaryPath, args) {
+  const loaderPath = oracleDynamicLoaderPath(rootfsPath);
+  if (!loaderPath) {
+    return runCommand(binaryPath, args, {
+      env: baseOracleEnv(rootfsPath)
+    });
+  }
+  return runCommand(loaderPath, [
+    "--library-path",
+    oracleLdLibraryPath(rootfsPath),
+    binaryPath,
+    ...args
+  ], {
+    env: baseOracleEnv(rootfsPath)
+  });
+}
+
 export function runEngineDump(options) {
   const binaryPath = oracleCommandPath(options.rootfsPath, options.engineName);
-  const env = baseOracleEnv(options.rootfsPath);
   const htmlPath = options.htmlPath;
   const fileUrl = `file://${htmlPath}`;
 
@@ -356,9 +533,7 @@ export function runEngineDump(options) {
     throw new Error(`unsupported engine: ${options.engineName}`);
   }
 
-  const result = runCommand(binaryPath, args, {
-    env
-  });
+  const result = runOracleBinary(options.rootfsPath, binaryPath, args);
   const output = result.stdout.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const lines = output.split("\n");
   if (lines.length > 0 && lines[lines.length - 1] === "") {
@@ -380,9 +555,11 @@ export async function collectEngineFingerprints(options) {
     const binaryPath = oracleCommandPath(options.rootfsPath, engineName);
     const binaryStat = await stat(binaryPath);
     const binarySha = await hashFile(binaryPath);
-    const version = runCommand(binaryPath, versionCommandArgs(engineName), {
-      env: baseOracleEnv(options.rootfsPath)
-    }).stdout.trim();
+    const version = runOracleBinary(
+      options.rootfsPath,
+      binaryPath,
+      versionCommandArgs(engineName)
+    ).stdout.trim();
     fingerprints[engineName] = {
       engine: engineName,
       path: binaryPath,

@@ -99,6 +99,7 @@ npm run eval:oracle-runtime:release
 npm run eval:oracle-superiority:release
 npm run eval:oracle-fingerprint:release
 npm run eval:oracle-supply-chain:release
+npm run oracle:lock:refresh
 npm run eval:phase-ladder:ci
 npm run eval:phase-ladder:release
 npm run release:check
@@ -112,6 +113,7 @@ npm run release:check
   - `npm run eval:release`
   - `npm run eval:oracle-runtime:ci`
   - `npm run eval:oracle-runtime:release`
+  - `npm run oracle:lock:refresh`
   - `npm run eval:oracle-superiority:ci`
   - `npm run eval:oracle-superiority:release`
   - `npm run eval:oracle-fingerprint:ci`
@@ -170,7 +172,7 @@ npm run release:check
   - emits package checksum (`package.sha256`)
 - Oracle validation workflow: `.github/workflows/oracle-runtime-validation.yml`
   - runs `npm run eval:oracle-runtime:release`
-  - uploads phase-3.1 oracle artifacts and lock file
+  - uploads oracle runtime artifacts and lock file
 - Oracle ladder workflow: `.github/workflows/oracle-validation-ladder.yml`
-  - runs phase 3.2, 3.3, and 3.4 release checks
-  - uploads oracle phase reports
+  - runs oracle superiority, fingerprint drift, and supply-chain release checks
+  - uploads oracle validation reports
