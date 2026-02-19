@@ -78,6 +78,21 @@ For each metric:
 - required phase checks:
   - `checks.phase13.ok` through `checks.phase26.ok`
 
+## G-312 Network outcome taxonomy gate
+- `reports/network-outcomes.json` exists
+- `reports/network-outcomes.json.overall.ok` is `true`
+- required taxonomy kinds are all covered:
+  - `ok`
+  - `http_error`
+  - `timeout`
+  - `dns`
+  - `tls`
+  - `redirect_limit`
+  - `content_type_block`
+  - `size_limit`
+  - `unsupported_protocol`
+  - `unknown`
+
 ## Phase-3.1 validation gates (real oracle pass)
 Executed by:
 - `npm run eval:phase31:ci`

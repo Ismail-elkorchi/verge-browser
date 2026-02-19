@@ -51,6 +51,7 @@ async function main() {
 
   runNodeScript("scripts/eval/write-agent-report.mjs");
   runNodeScript("scripts/eval/write-stream-report.mjs");
+  runNodeScript("scripts/eval/write-network-outcomes-report.mjs");
   runNodeScript("scripts/bench/run-bench.mjs");
   runNodeScript("scripts/eval/check-bench-governance.mjs");
   if (profile === "release") {
@@ -58,9 +59,10 @@ async function main() {
   }
   runNodeScript("scripts/eval/write-phase-ladder-report.mjs", [`--profile=${profile}`]);
 
-  const [agentReport, streamReport, benchGovernanceReport, releaseIntegrityReport, phaseLadderReport] = await Promise.all([
+  const [agentReport, streamReport, networkOutcomesReport, benchGovernanceReport, releaseIntegrityReport, phaseLadderReport] = await Promise.all([
     readJson(resolve(reportsDir, "agent.json")),
     readJson(resolve(reportsDir, "stream.json")),
+    readJson(resolve(reportsDir, "network-outcomes.json")),
     readJson(resolve(reportsDir, "bench-governance.json")),
     profile === "release"
       ? readJson(resolve(reportsDir, "release-integrity.json"))
@@ -81,6 +83,9 @@ async function main() {
   }
   if (streamReport?.overall?.ok !== true) {
     extraFailures.push("stream report failed");
+  }
+  if (networkOutcomesReport?.overall?.ok !== true) {
+    extraFailures.push("network outcomes report failed");
   }
   if (benchGovernanceReport?.ok !== true) {
     extraFailures.push("bench governance report failed");
@@ -107,6 +112,7 @@ async function main() {
       score: scoreReportPath,
       agent: resolve(reportsDir, "agent.json"),
       stream: resolve(reportsDir, "stream.json"),
+      networkOutcomes: resolve(reportsDir, "network-outcomes.json"),
       bench: resolve(reportsDir, "bench.json"),
       benchGovernance: resolve(reportsDir, "bench-governance.json"),
       phaseLadder: resolve(reportsDir, "phase-ladder.json"),
