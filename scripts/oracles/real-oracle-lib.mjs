@@ -350,8 +350,8 @@ async function downloadDebFromUrl(pkgsDir, packageRecord, options = {}) {
   }
 
   const urlCandidates = dedupeUrls([
-    packageRecord.downloadUrl,
-    ...fallbackDownloadUrls(packageRecord, options.fallbackMirrorBases ?? [])
+    ...fallbackDownloadUrls(packageRecord, options.fallbackMirrorBases ?? []),
+    packageRecord.downloadUrl
   ]);
   const failures = [];
 
