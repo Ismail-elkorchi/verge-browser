@@ -17,7 +17,7 @@ jobs:
   node:
     name: node
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -51,3 +51,9 @@ jobs:
 
       - name: Check
         run: npm run ci
+
+      - name: Refresh apt package index
+        run: sudo apt-get update
+
+      - name: Real oracle validation (phase31)
+        run: npm run eval:phase31:ci -- --rebuild-lock

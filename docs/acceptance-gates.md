@@ -97,6 +97,8 @@ For each metric:
 Executed by:
 - `npm run eval:phase31:ci`
 - `npm run eval:phase31:release`
+- required in GitHub PR CI (`.github/workflows/ci.yml`, `node` job, `--rebuild-lock`)
+- required in release checks (`npm run release:check`)
 
 ### V-401 Real engine execution
 - `lynx`, `w3m`, `links2` are executed from the rootless oracle image under `tmp/oracle-image/rootfs`.
