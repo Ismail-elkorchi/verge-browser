@@ -36,6 +36,13 @@ jobs:
           node-version: '24'
           cache: npm
 
+      - name: Prepare html-parser dependency
+        run: |
+          set -euo pipefail
+          cd ../html-parser
+          npm ci
+          npm run build
+
       - name: Install
         run: npm ci
 
