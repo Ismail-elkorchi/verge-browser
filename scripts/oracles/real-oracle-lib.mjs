@@ -232,10 +232,16 @@ async function fetchUrlToFile(url, destinationPath) {
   await mkdir(dirname(destinationPath), { recursive: true });
   runCommand("curl", [
     "-fsSL",
+    "--retry-all-errors",
+    "--retry-connrefused",
     "--retry",
-    "3",
+    "10",
     "--retry-delay",
-    "2",
+    "3",
+    "--retry-max-time",
+    "300",
+    "--max-time",
+    "120",
     "--connect-timeout",
     "15",
     "--output",
