@@ -6,6 +6,7 @@ Oracle runtime validation checks rendering claims with real terminal browser bin
 - `npm run eval:oracle-runtime:ci`
 - `npm run eval:oracle-runtime:release`
 - `npm run oracle:lock:refresh` (maintainer action, updates `scripts/oracles/oracle-image.lock.json`)
+- `npm run oracle:lock:refresh -- --snapshot-id=YYYYMMDDTHHMMSSZ` (explicit immutable snapshot)
 - GitHub PR CI job: `.github/workflows/ci.yml` (`node`, runs `npm run eval:oracle-runtime:ci`)
 - Scheduled/manual workflow: `.github/workflows/oracle-runtime-validation.yml`
 
@@ -23,10 +24,19 @@ Oracle runtime validation checks rendering claims with real terminal browser bin
    - Comparative superiority delta is reported but not a blocking gate in this pass.
 
 ## Reproducibility contract
-- Package identity is lock-driven (`name`, `version`, `.deb` `sha256`).
+- Package identity is lock-driven (`name`, `version`, `.deb` `sha256`, `suite`, `component`).
+- Replay source is lock-driven:
+  - `sourcePolicy.mode = snapshot-replay`
+  - `sourcePolicy.snapshotRoot`
+  - `sourcePolicy.snapshotId`
 - Each locked package carries a direct replay URL (`downloadUrl`) and pool path (`filename`).
 - Rootfs content fingerprint is derived from the lock file package list + hashes.
 - Binary fingerprints are captured per run (`path`, `sizeBytes`, `sha256`, `version` output).
+- Lock refresh verifies signed release metadata:
+  - fetches `dists/<suite>/InRelease` from the snapshot
+  - verifies signatures with `gpgv` and Ubuntu archive keyring
+  - verifies signed `Packages` index hashes
+  - verifies each locked package `(name, version, filename, sha256)` is present in the signed index
 
 ## Artifacts
 - `reports/oracle-runtime.json`
@@ -38,5 +48,5 @@ Oracle runtime validation checks rendering claims with real terminal browser bin
 ## Runtime notes
 - This pass does not require `sudo`.
 - Lock replay requires `curl` and `dpkg-deb`.
-- Lock refresh additionally requires `apt` and `apt-cache`.
+- Lock refresh additionally requires `apt`, `apt-cache`, `gpgv`, and the Ubuntu archive keyring at `/usr/share/keyrings/ubuntu-archive-keyring.gpg`.
 - The default release sample size is 320 cases at widths `80` and `120`.

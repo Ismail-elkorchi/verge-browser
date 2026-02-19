@@ -112,8 +112,20 @@ Executed by:
 - `reports/oracle-runtime.json` includes `sha256`, `sizeBytes`, and version output for all three engines.
 
 ### V-403 Reproducible image identity
-- `scripts/oracles/oracle-image.lock.json` contains package versions + `.deb` hashes + direct replay URLs.
+- `scripts/oracles/oracle-image.lock.json` has `formatVersion >= 3`.
+- lock source policy is snapshot-based:
+  - `sourcePolicy.mode = snapshot-replay`
+  - `sourcePolicy.snapshotRoot`
+  - `sourcePolicy.snapshotId`
+- lock package records contain package versions + `.deb` hashes + direct replay URLs.
 - `reports/oracle-runtime.json.image.fingerprint` derives from the lock package set.
+
+### V-409 Signed release metadata verification
+- lock refresh verifies signed snapshot metadata:
+  - `dists/<suite>/InRelease` signature verified against Ubuntu archive keyring
+  - signed `Packages` index hash verified
+  - each locked package exists in the signed index with matching `Filename` and `SHA256`
+- `reports/oracle-runtime.json.image.releaseMetadata` is present and non-empty.
 
 ### V-404 Real-baseline report integrity
 - `reports/render-baselines-real.json` includes case records for all engines.

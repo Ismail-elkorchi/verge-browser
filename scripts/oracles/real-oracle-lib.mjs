@@ -3,10 +3,13 @@ import { createHash } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { copyFile, mkdir, open, readdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
+import { gunzipSync } from "node:zlib";
 
 const DEFAULT_ROOT_PACKAGES = ["lynx", "w3m", "links2"];
 const DEFAULT_IMAGE_ROOT = resolve("tmp/oracle-image");
 const DEFAULT_LOCK_PATH = resolve("scripts/oracles/oracle-image.lock.json");
+const DEFAULT_SNAPSHOT_ROOT = "https://snapshot.ubuntu.com/ubuntu";
+const DEFAULT_KEYRING_PATH = "/usr/share/keyrings/ubuntu-archive-keyring.gpg";
 const DEFAULT_LOCK_MIRRORS = [
   "http://archive.ubuntu.com/ubuntu",
   "http://security.ubuntu.com/ubuntu"
@@ -100,7 +103,7 @@ function resolvePackageMetadata(packageName, packageVersion) {
   return null;
 }
 
-function resolvePolicySourceUrl(packageName, packageVersion) {
+function resolvePolicySourceRecord(packageName, packageVersion) {
   const policyOutput = runCommand("apt-cache", ["policy", packageName]).stdout;
   const lines = policyOutput.split(/\r?\n/);
   let inVersionBlock = false;
@@ -115,13 +118,28 @@ function resolvePolicySourceUrl(packageName, packageVersion) {
     if (!inVersionBlock) {
       continue;
     }
-    const sourceLine = line.match(/^\s+\d+\s+(\S+)\s+/);
+    const sourceLine = line.match(/^\s+\d+\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s*$/);
     if (!sourceLine) {
       continue;
     }
     const sourceUrl = sourceLine[1] ?? "";
+    const suiteAndComponent = sourceLine[2] ?? "";
+    const architecture = sourceLine[3] ?? "";
+    const indexKind = sourceLine[4] ?? "";
     if (sourceUrl.startsWith("http://") || sourceUrl.startsWith("https://")) {
-      return sourceUrl.replace(/\/+$/, "");
+      const suitePathParts = suiteAndComponent.split("/");
+      const suite = suitePathParts[0] ?? "";
+      const component = suitePathParts[1] ?? "main";
+      const indexType = `${architecture} ${indexKind}`.trim();
+      if (suite.length === 0) {
+        continue;
+      }
+      return {
+        aptSourceUrl: sourceUrl.replace(/\/+$/, ""),
+        suite,
+        component,
+        indexType
+      };
     }
   }
 
@@ -145,6 +163,85 @@ function resolveCandidateVersion(packageName) {
 
 function hashString(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function formatSnapshotId(dateValue = new Date()) {
+  const year = String(dateValue.getUTCFullYear()).padStart(4, "0");
+  const month = String(dateValue.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(dateValue.getUTCDate()).padStart(2, "0");
+  const hour = String(dateValue.getUTCHours()).padStart(2, "0");
+  const minute = String(dateValue.getUTCMinutes()).padStart(2, "0");
+  const second = String(dateValue.getUTCSeconds()).padStart(2, "0");
+  return `${year}${month}${day}T${hour}${minute}${second}Z`;
+}
+
+function validateSnapshotId(snapshotId) {
+  if (!/^\d{8}T\d{6}Z$/.test(snapshotId)) {
+    throw new Error(`invalid snapshot id: ${snapshotId}`);
+  }
+  return snapshotId;
+}
+
+function buildSnapshotBaseUrl(snapshotRoot, snapshotId) {
+  const trimmedRoot = snapshotRoot.replace(/\/+$/, "");
+  return `${trimmedRoot}/${snapshotId}`;
+}
+
+function parseSha256EntriesFromInRelease(inReleaseRawText) {
+  const lines = inReleaseRawText.split(/\r?\n/);
+  const hashByPath = new Map();
+  let inShaSection = false;
+  for (const line of lines) {
+    if (!inShaSection) {
+      if (line === "SHA256:") {
+        inShaSection = true;
+      }
+      continue;
+    }
+    if (!line.startsWith(" ")) {
+      break;
+    }
+    const match = line.match(/^\s*([0-9a-f]{64})\s+(\d+)\s+(\S+)\s*$/i);
+    if (!match) {
+      continue;
+    }
+    const hashValue = match[1]?.toLowerCase() ?? "";
+    const sizeValue = Number.parseInt(match[2] ?? "0", 10);
+    const pathValue = match[3] ?? "";
+    if (hashValue.length !== 64 || !Number.isFinite(sizeValue) || pathValue.length === 0) {
+      continue;
+    }
+    hashByPath.set(pathValue, {
+      sha256: hashValue,
+      sizeBytes: sizeValue
+    });
+  }
+  return hashByPath;
+}
+
+function parseVerifiedSignatureKey(gpgvStderr) {
+  const keyMatch = gpgvStderr.match(/using (?:RSA|EDDSA|ECDSA) key ([0-9A-F]{16,40})/i);
+  return keyMatch ? keyMatch[1].toUpperCase() : null;
+}
+
+function ensureRelativePath(pathValue) {
+  return pathValue.replace(/^\/+/, "");
+}
+
+async function fetchUrlToFile(url, destinationPath) {
+  await mkdir(dirname(destinationPath), { recursive: true });
+  runCommand("curl", [
+    "-fsSL",
+    "--retry",
+    "3",
+    "--retry-delay",
+    "2",
+    "--connect-timeout",
+    "15",
+    "--output",
+    destinationPath,
+    url
+  ]);
 }
 
 async function hashFile(path) {
@@ -216,18 +313,7 @@ async function downloadDebFromUrl(pkgsDir, packageRecord) {
     return existingPath;
   }
 
-  runCommand("curl", [
-    "-fsSL",
-    "--retry",
-    "3",
-    "--retry-delay",
-    "2",
-    "--connect-timeout",
-    "15",
-    "--output",
-    debPath,
-    packageRecord.downloadUrl
-  ]);
+  await fetchUrlToFile(packageRecord.downloadUrl, debPath);
 
   return debPath;
 }
@@ -247,6 +333,90 @@ function dependencyClosure(rootPackages) {
 
   const names = new Set([...rootPackages, ...parseDependencyNames(dependencyOutput)]);
   return [...names].sort((left, right) => left.localeCompare(right));
+}
+
+async function fetchAndVerifyInRelease(input) {
+  const inReleaseUrl = `${input.snapshotBaseUrl}/dists/${input.suite}/InRelease`;
+  const inReleasePath = join(input.imageRoot, "release", input.suite, "InRelease");
+  await fetchUrlToFile(inReleaseUrl, inReleasePath);
+  const inReleaseRaw = await readFile(inReleasePath, "utf8");
+  const inReleaseSha256 = await hashFile(inReleasePath);
+
+  const verification = runCommand("gpgv", [
+    "--keyring",
+    input.keyringPath,
+    inReleasePath
+  ]);
+  const signatureKey = parseVerifiedSignatureKey(verification.stderr) ?? "UNKNOWN";
+  const sha256Entries = parseSha256EntriesFromInRelease(inReleaseRaw);
+
+  return {
+    suite: input.suite,
+    inReleaseUrl,
+    inReleasePath,
+    inReleaseSha256,
+    signatureKey,
+    sha256Entries
+  };
+}
+
+async function fetchAndVerifyPackagesIndex(input) {
+  const indexCandidates = [
+    `${input.component}/binary-amd64/Packages.gz`,
+    `${input.component}/binary-amd64/Packages.xz`,
+    `${input.component}/binary-amd64/Packages`
+  ];
+  const selectedPath = indexCandidates.find((candidatePath) => input.sha256Entries.has(candidatePath));
+  if (!selectedPath) {
+    throw new Error(`missing signed packages index for ${input.suite}/${input.component}`);
+  }
+
+  const expectedHash = input.sha256Entries.get(selectedPath)?.sha256;
+  if (!expectedHash) {
+    throw new Error(`missing signed hash for ${input.suite}/${selectedPath}`);
+  }
+
+  const indexUrl = `${input.snapshotBaseUrl}/dists/${input.suite}/${selectedPath}`;
+  const indexPath = join(input.imageRoot, "release", input.suite, ensureRelativePath(selectedPath));
+  await fetchUrlToFile(indexUrl, indexPath);
+  const actualHash = await hashFile(indexPath);
+  if (actualHash !== expectedHash) {
+    throw new Error(`packages index hash mismatch for ${input.suite}/${selectedPath}`);
+  }
+  let packagesRaw;
+  if (selectedPath.endsWith(".gz")) {
+    const compressedBuffer = await readFile(indexPath);
+    packagesRaw = gunzipSync(compressedBuffer).toString("utf8");
+  } else if (selectedPath.endsWith(".xz")) {
+    packagesRaw = runCommand("xz", ["-dc", indexPath]).stdout;
+  } else if (selectedPath.endsWith("/Packages")) {
+    packagesRaw = await readFile(indexPath, "utf8");
+  } else {
+    throw new Error(`unsupported signed index format for ${input.suite}/${selectedPath}`);
+  }
+
+  const stanzas = parsePackageStanzas(packagesRaw);
+  const packageLookup = new Map();
+
+  for (const stanza of stanzas) {
+    const packageName = typeof stanza.Package === "string" ? stanza.Package : "";
+    const packageVersion = typeof stanza.Version === "string" ? stanza.Version : "";
+    const filename = typeof stanza.Filename === "string" ? ensureRelativePath(stanza.Filename) : "";
+    const sha256 = typeof stanza.SHA256 === "string" ? stanza.SHA256.toLowerCase() : "";
+    if (packageName.length === 0 || packageVersion.length === 0 || filename.length === 0 || sha256.length !== 64) {
+      continue;
+    }
+    packageLookup.set(`${packageName}\n${packageVersion}\n${filename}`, sha256);
+  }
+
+  return {
+    suite: input.suite,
+    component: input.component,
+    indexPath: selectedPath,
+    indexUrl,
+    indexSha256: expectedHash,
+    packageLookup
+  };
 }
 
 async function materializeRootfs(input) {
@@ -316,55 +486,146 @@ async function withOracleImageLock(imageRoot, operation) {
 
 async function createLock(input) {
   const dependencyNames = dependencyClosure(input.rootPackages);
-  const packages = [];
+  const candidatePackages = [];
 
   for (const packageName of dependencyNames) {
     const version = resolveCandidateVersion(packageName);
     if (!version) {
       continue;
     }
-    packages.push({
+    const sourceRecord = resolvePolicySourceRecord(packageName, version);
+    if (!sourceRecord) {
+      throw new Error(`unable to resolve apt policy source for ${packageName}=${version}`);
+    }
+    candidatePackages.push({
       name: packageName,
-      version
+      version,
+      ...sourceRecord
     });
   }
 
-  packages.sort((left, right) => left.name.localeCompare(right.name));
+  candidatePackages.sort((left, right) => left.name.localeCompare(right.name));
 
   const pkgsDir = join(input.imageRoot, "pkgs");
   await mkdir(pkgsDir, { recursive: true });
 
+  const snapshotRoot = (input.snapshotRoot ?? DEFAULT_SNAPSHOT_ROOT).replace(/\/+$/, "");
+  const snapshotId = validateSnapshotId(
+    typeof input.snapshotId === "string" && input.snapshotId.length > 0
+      ? input.snapshotId
+      : formatSnapshotId()
+  );
+  const keyringPath = resolve(input.keyringPath ?? DEFAULT_KEYRING_PATH);
+  const snapshotBaseUrl = buildSnapshotBaseUrl(snapshotRoot, snapshotId);
+
+  const suites = [...new Set(candidatePackages.map((packageRecord) => packageRecord.suite))].sort((left, right) =>
+    left.localeCompare(right)
+  );
+  const releaseBySuite = new Map();
+  for (const suite of suites) {
+    const releaseMetadata = await fetchAndVerifyInRelease({
+      imageRoot: input.imageRoot,
+      snapshotBaseUrl,
+      suite,
+      keyringPath
+    });
+    releaseBySuite.set(suite, releaseMetadata);
+  }
+
+  const packageIndexCache = new Map();
   const hydratedPackages = [];
-  for (const packageRecord of packages) {
-    const debPath = await downloadDebForPackage(pkgsDir, packageRecord.name, packageRecord.version);
-    const debSha = await hashFile(debPath);
+  for (const packageRecord of candidatePackages) {
     const metadata = resolvePackageMetadata(packageRecord.name, packageRecord.version);
     if (!metadata) {
       throw new Error(`unable to resolve package metadata for ${packageRecord.name}=${packageRecord.version}`);
     }
-    if (metadata.sha256 !== debSha) {
-      throw new Error(`apt-cache SHA256 mismatch for ${packageRecord.name}=${packageRecord.version}`);
+
+    const filenamePath = ensureRelativePath(metadata.filename);
+    const indexCacheKey = `${packageRecord.suite}/${packageRecord.component}`;
+    let packagesIndex = packageIndexCache.get(indexCacheKey);
+    if (!packagesIndex) {
+      const releaseMetadata = releaseBySuite.get(packageRecord.suite);
+      if (!releaseMetadata) {
+        throw new Error(`missing verified release metadata for suite ${packageRecord.suite}`);
+      }
+      packagesIndex = await fetchAndVerifyPackagesIndex({
+        imageRoot: input.imageRoot,
+        snapshotBaseUrl,
+        suite: packageRecord.suite,
+        component: packageRecord.component,
+        sha256Entries: releaseMetadata.sha256Entries
+      });
+      packageIndexCache.set(indexCacheKey, packagesIndex);
     }
-    const sourceUrl = resolvePolicySourceUrl(packageRecord.name, packageRecord.version)
-      ?? DEFAULT_LOCK_MIRRORS[0];
-    const filenamePath = metadata.filename.replace(/^\/+/, "");
+
+    const packageIndexKey = `${packageRecord.name}\n${packageRecord.version}\n${filenamePath}`;
+    const signedPackageSha256 = packagesIndex.packageLookup.get(packageIndexKey);
+    if (!signedPackageSha256) {
+      throw new Error(
+        `signed metadata missing package record for ${packageRecord.name}=${packageRecord.version} in ${indexCacheKey}`
+      );
+    }
+    if (signedPackageSha256 !== metadata.sha256) {
+      throw new Error(
+        `signed metadata SHA256 mismatch for ${packageRecord.name}=${packageRecord.version}: ${signedPackageSha256} != ${metadata.sha256}`
+      );
+    }
+
+    const downloadUrl = `${snapshotBaseUrl}/${filenamePath}`;
+    const debPath = await downloadDebFromUrl(pkgsDir, {
+      name: packageRecord.name,
+      version: packageRecord.version,
+      filename: filenamePath,
+      downloadUrl
+    });
+    const debSha = await hashFile(debPath);
+    if (debSha !== metadata.sha256) {
+      throw new Error(`snapshot deb SHA256 mismatch for ${packageRecord.name}: expected ${metadata.sha256}, got ${debSha}`);
+    }
+
     hydratedPackages.push({
       ...packageRecord,
       filename: filenamePath,
-      aptSourceUrl: sourceUrl,
-      downloadUrl: `${sourceUrl}/${filenamePath}`,
-      debSha256: debSha
+      aptSourceUrl: packageRecord.aptSourceUrl,
+      downloadUrl,
+      debSha256: debSha,
+      suite: packageRecord.suite,
+      component: packageRecord.component
     });
   }
 
+  const releaseMetadata = [...releaseBySuite.values()].map((releaseRecord) => {
+    const packageIndexes = [...packageIndexCache.values()]
+      .filter((indexRecord) => indexRecord.suite === releaseRecord.suite)
+      .map((indexRecord) => ({
+        component: indexRecord.component,
+        indexPath: indexRecord.indexPath,
+        indexUrl: indexRecord.indexUrl,
+        indexSha256: indexRecord.indexSha256
+      }))
+      .sort((left, right) => left.indexPath.localeCompare(right.indexPath));
+
+    return {
+      suite: releaseRecord.suite,
+      inReleaseUrl: releaseRecord.inReleaseUrl,
+      inReleaseSha256: releaseRecord.inReleaseSha256,
+      signatureKey: releaseRecord.signatureKey,
+      packageIndexes
+    };
+  });
+
   const lockPayload = {
-    formatVersion: 2,
+    formatVersion: 3,
     generatedAtIso: new Date().toISOString(),
     rootPackages: input.rootPackages,
     sourcePolicy: {
-      mode: "direct-url",
-      mirrors: DEFAULT_LOCK_MIRRORS
+      mode: "snapshot-replay",
+      mirrors: DEFAULT_LOCK_MIRRORS,
+      snapshotRoot,
+      snapshotId,
+      keyringPath
     },
+    releaseMetadata,
     packages: hydratedPackages
   };
 
@@ -377,14 +638,50 @@ async function createLock(input) {
 async function loadLock(lockPath) {
   const rawText = await readFile(lockPath, "utf8");
   const lock = JSON.parse(rawText);
-  if (!Number.isInteger(lock?.formatVersion) || lock.formatVersion < 2) {
-    throw new Error(`oracle lock formatVersion must be >=2: ${lockPath}`);
+  if (!Number.isInteger(lock?.formatVersion) || lock.formatVersion < 3) {
+    throw new Error(`oracle lock formatVersion must be >=3: ${lockPath}`);
   }
   if (!Array.isArray(lock?.packages) || lock.packages.length === 0) {
     throw new Error(`invalid oracle lock file: ${lockPath}`);
   }
   if (!Array.isArray(lock?.rootPackages) || lock.rootPackages.length === 0) {
     throw new Error(`oracle lock file missing rootPackages: ${lockPath}`);
+  }
+  if (!lock?.sourcePolicy || typeof lock.sourcePolicy !== "object") {
+    throw new Error(`oracle lock missing sourcePolicy: ${lockPath}`);
+  }
+  if (lock.sourcePolicy.mode !== "snapshot-replay") {
+    throw new Error(`oracle lock sourcePolicy.mode must be snapshot-replay: ${lockPath}`);
+  }
+  if (typeof lock.sourcePolicy.snapshotRoot !== "string" || lock.sourcePolicy.snapshotRoot.length === 0) {
+    throw new Error(`oracle lock missing sourcePolicy.snapshotRoot: ${lockPath}`);
+  }
+  if (typeof lock.sourcePolicy.snapshotId !== "string") {
+    throw new Error(`oracle lock missing sourcePolicy.snapshotId: ${lockPath}`);
+  }
+  validateSnapshotId(lock.sourcePolicy.snapshotId);
+  if (typeof lock.sourcePolicy.keyringPath !== "string" || lock.sourcePolicy.keyringPath.length === 0) {
+    throw new Error(`oracle lock missing sourcePolicy.keyringPath: ${lockPath}`);
+  }
+  if (!Array.isArray(lock?.releaseMetadata) || lock.releaseMetadata.length === 0) {
+    throw new Error(`oracle lock missing releaseMetadata: ${lockPath}`);
+  }
+  for (const releaseRecord of lock.releaseMetadata) {
+    if (typeof releaseRecord?.suite !== "string" || releaseRecord.suite.length === 0) {
+      throw new Error(`oracle lock releaseMetadata suite missing: ${lockPath}`);
+    }
+    if (typeof releaseRecord?.inReleaseUrl !== "string" || releaseRecord.inReleaseUrl.length === 0) {
+      throw new Error(`oracle lock releaseMetadata inReleaseUrl missing: ${lockPath}`);
+    }
+    if (typeof releaseRecord?.inReleaseSha256 !== "string" || releaseRecord.inReleaseSha256.length !== 64) {
+      throw new Error(`oracle lock releaseMetadata inReleaseSha256 missing: ${lockPath}`);
+    }
+    if (typeof releaseRecord?.signatureKey !== "string" || releaseRecord.signatureKey.length === 0) {
+      throw new Error(`oracle lock releaseMetadata signatureKey missing: ${lockPath}`);
+    }
+    if (!Array.isArray(releaseRecord?.packageIndexes) || releaseRecord.packageIndexes.length === 0) {
+      throw new Error(`oracle lock releaseMetadata packageIndexes missing: ${lockPath}`);
+    }
   }
   for (const packageRecord of lock.packages) {
     if (typeof packageRecord?.name !== "string" || packageRecord.name.length === 0) {
@@ -401,6 +698,12 @@ async function loadLock(lockPath) {
     }
     if (typeof packageRecord?.filename !== "string" || packageRecord.filename.length === 0) {
       throw new Error(`oracle lock package missing filename: ${lockPath}`);
+    }
+    if (typeof packageRecord?.suite !== "string" || packageRecord.suite.length === 0) {
+      throw new Error(`oracle lock package missing suite: ${lockPath}`);
+    }
+    if (typeof packageRecord?.component !== "string" || packageRecord.component.length === 0) {
+      throw new Error(`oracle lock package missing component: ${lockPath}`);
     }
   }
   return lock;
@@ -463,15 +766,20 @@ export async function refreshOracleLock(options = {}) {
     const imageRoot = resolve(options.imageRoot ?? DEFAULT_IMAGE_ROOT);
     const lockPath = resolve(options.lockPath ?? DEFAULT_LOCK_PATH);
     const rootPackages = [...(options.rootPackages ?? DEFAULT_ROOT_PACKAGES)];
+    const snapshotId = typeof options.snapshotId === "string" ? validateSnapshotId(options.snapshotId) : undefined;
     const lock = await createLock({
       imageRoot,
       lockPath,
-      rootPackages
+      rootPackages,
+      snapshotId,
+      snapshotRoot: options.snapshotRoot,
+      keyringPath: options.keyringPath
     });
     return {
       lockPath,
       fingerprint: lock.fingerprint,
-      packageCount: lock.packages.length
+      packageCount: lock.packages.length,
+      snapshotId: lock.sourcePolicy.snapshotId
     };
   });
 }
