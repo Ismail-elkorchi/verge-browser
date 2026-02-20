@@ -48,6 +48,7 @@ The generated candidates contain only synthetic HTML snippets and expected text 
 Policy and taxonomy notes:
 - `field:visible-text:ab` evaluates candidate policies against offline oracle outputs.
 - Policy promotion uses `meaningful-content` as the decision surface and keeps baseline when candidate delta is negative.
-- `field:triage:taxonomy` classifies baseline residual mass into deterministic buckets (`missing:<sourceRole>` / `extra:oracle`).
-- Top-bucket coverage must be at least `0.90` of baseline residual mass.
+- `field:triage:taxonomy` classifies baseline residual mass into deterministic buckets (`missing:<sourceRole>` / `extra:oracle`) and deterministic `extra:oracle:*` subclasses.
+- Top-bucket coverage must be at least `0.95` of baseline residual mass.
+- `extra:oracle:unclassified` residual share must be at most `0.05`.
 - `field:triage:fixtures` builds synthetic fixture candidates from observed top baseline buckets only.

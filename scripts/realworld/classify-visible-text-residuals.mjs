@@ -14,7 +14,40 @@ import {
 
 const DECISION_SURFACE = "meaningful-content";
 const TOP_BUCKET_COUNT = 5;
-const MIN_TOP_BUCKET_SHARE = 0.9;
+const MIN_TOP_BUCKET_SHARE = 0.95;
+const MAX_UNCLASSIFIED_RESIDUAL_SHARE = 0.05;
+const EXTRA_ORACLE_LOCALE_WORDS = new Set([
+  "english",
+  "deutsch",
+  "espa",
+  "fran",
+  "portugu",
+  "brasil",
+  "ais",
+  "us"
+]);
+const EXTRA_ORACLE_UI_WORDS = new Set([
+  "submit",
+  "toggle",
+  "theme",
+  "language",
+  "sidebar",
+  "remember",
+  "filter",
+  "copy",
+  "read",
+  "report",
+  "helpful",
+  "yes",
+  "no",
+  "avatar",
+  "learn",
+  "iframe",
+  "view",
+  "more",
+  "free",
+  "cloudflare"
+]);
 
 function normalizeOracleTextForScoring(value) {
   return value
@@ -67,6 +100,38 @@ function sourceRoleBucketId(sourceRole) {
   return `missing:${sourceRole}`;
 }
 
+function classifyExtraOracleWord(word) {
+  if (/^[0-9]+$/u.test(word)) {
+    return "extra:oracle:number";
+  }
+  if (/^[+\-_=|]{2,}$/u.test(word)) {
+    return "extra:oracle:separator";
+  }
+  if (
+    word.includes("chrome")
+    || word.includes("firefox")
+    || word.includes("safari")
+    || word.includes("edge")
+    || word.includes("ienone")
+    || /^js[0-9]+$/u.test(word)
+  ) {
+    return "extra:oracle:compat-table";
+  }
+  if (EXTRA_ORACLE_LOCALE_WORDS.has(word)) {
+    return "extra:oracle:locale-label";
+  }
+  if (EXTRA_ORACLE_UI_WORDS.has(word)) {
+    return "extra:oracle:ui-label";
+  }
+  if (/^[a-z]+$/u.test(word)) {
+    return "extra:oracle:word";
+  }
+  if (/^[a-z0-9+-]+$/u.test(word)) {
+    return "extra:oracle:mixed-token";
+  }
+  return "extra:oracle:unclassified";
+}
+
 function classifyRecordResiduals(expectedWords, oracleWords) {
   const expectedCounts = toCountMap(expectedWords.map((entry) => entry.word));
   const oracleCounts = toCountMap(oracleWords);
@@ -79,7 +144,9 @@ function classifyRecordResiduals(expectedWords, oracleWords) {
   }
 
   const bucketTokenCounts = new Map();
+  const extraSubclassCounts = new Map();
   let mismatchTokenCount = 0;
+  let extraTokenCount = 0;
 
   for (const [word, expectedCount] of expectedCounts.entries()) {
     const oracleCount = oracleCounts.get(word) ?? 0;
@@ -107,12 +174,17 @@ function classifyRecordResiduals(expectedWords, oracleWords) {
       continue;
     }
     bucketTokenCounts.set("extra:oracle", (bucketTokenCounts.get("extra:oracle") ?? 0) + extraCount);
+    const subclassId = classifyExtraOracleWord(word);
+    extraSubclassCounts.set(subclassId, (extraSubclassCounts.get(subclassId) ?? 0) + extraCount);
+    extraTokenCount += extraCount;
     mismatchTokenCount += extraCount;
   }
 
   return {
     bucketTokenCounts,
-    mismatchTokenCount
+    mismatchTokenCount,
+    extraSubclassCounts,
+    extraTokenCount
   };
 }
 
@@ -157,6 +229,7 @@ async function main() {
 
   const expectedWordsCache = new Map();
   const bucketAggregates = new Map();
+  const extraSubclassAggregates = new Map();
   const perRecord = [];
   let residualMassTotal = 0;
 
@@ -166,7 +239,7 @@ async function main() {
     const oracleOutput = await readFile(oracleOutputPath, "utf8");
     const oracleWords = tokenizeText(normalizeOracleTextForScoring(oracleOutput));
 
-    const { bucketTokenCounts, mismatchTokenCount } = classifyRecordResiduals(expectedWords, oracleWords);
+    const { bucketTokenCounts, mismatchTokenCount, extraSubclassCounts, extraTokenCount } = classifyRecordResiduals(expectedWords, oracleWords);
     const residualMass = Math.max(0, 1 - Number(record.normalizedTokenF1 ?? 0));
     if (residualMass <= 0 || mismatchTokenCount <= 0) {
       continue;
@@ -211,6 +284,48 @@ async function main() {
       });
     }
 
+    const recordExtraSubclasses = [];
+    if (extraTokenCount > 0) {
+      const extraResidualMass = residualMass * (extraTokenCount / mismatchTokenCount);
+      const sortedExtraSubclasses = [...extraSubclassCounts.entries()].sort((left, right) => {
+        if (right[1] !== left[1]) {
+          return right[1] - left[1];
+        }
+        return left[0].localeCompare(right[0]);
+      });
+      for (const [subclassId, tokenCount] of sortedExtraSubclasses) {
+        const contribution = extraResidualMass * (tokenCount / extraTokenCount);
+        recordExtraSubclasses.push({
+          subclassId,
+          tokenCount,
+          contribution: fixed6(contribution)
+        });
+
+        if (!extraSubclassAggregates.has(subclassId)) {
+          extraSubclassAggregates.set(subclassId, {
+            subclassId,
+            residualMass: 0,
+            tokenCount: 0,
+            recordCount: 0,
+            examples: []
+          });
+        }
+        const aggregate = extraSubclassAggregates.get(subclassId);
+        aggregate.residualMass += contribution;
+        aggregate.tokenCount += tokenCount;
+        aggregate.recordCount += 1;
+        aggregate.examples.push({
+          pageSha256: record.pageSha256,
+          finalUrl: record.finalUrl,
+          tool: record.tool,
+          width: record.width,
+          normalizedTokenF1: Number(record.normalizedTokenF1 ?? 0),
+          residualMass: fixed6(residualMass),
+          contribution: fixed6(contribution)
+        });
+      }
+    }
+
     perRecord.push({
       pageSha256: record.pageSha256,
       finalUrl: record.finalUrl,
@@ -219,7 +334,8 @@ async function main() {
       normalizedTokenF1: Number(record.normalizedTokenF1 ?? 0),
       residualMass: fixed6(residualMass),
       mismatchTokenCount,
-      buckets: recordBuckets
+      buckets: recordBuckets,
+      extraOracleSubclasses: recordExtraSubclasses
     });
   }
 
@@ -256,6 +372,37 @@ async function main() {
   const topBuckets = buckets.slice(0, TOP_BUCKET_COUNT);
   const topBucketsResidualShare = fixed6(topBuckets.reduce((sum, entry) => sum + entry.residualShare, 0));
   const taxonomyCoveragePass = topBucketsResidualShare >= MIN_TOP_BUCKET_SHARE;
+  const extraOracleSubclasses = [...extraSubclassAggregates.values()]
+    .map((entry) => ({
+      subclassId: entry.subclassId,
+      residualMass: fixed6(entry.residualMass),
+      residualShare: residualMassTotal > 0 ? fixed6(entry.residualMass / residualMassTotal) : 0,
+      tokenCount: entry.tokenCount,
+      recordCount: entry.recordCount,
+      examples: [...entry.examples]
+        .sort((left, right) => {
+          if (right.contribution !== left.contribution) {
+            return right.contribution - left.contribution;
+          }
+          if (left.pageSha256 !== right.pageSha256) {
+            return left.pageSha256.localeCompare(right.pageSha256);
+          }
+          if (left.tool !== right.tool) {
+            return left.tool.localeCompare(right.tool);
+          }
+          return left.width - right.width;
+        })
+        .slice(0, 5)
+    }))
+    .sort((left, right) => {
+      if (right.residualMass !== left.residualMass) {
+        return right.residualMass - left.residualMass;
+      }
+      return left.subclassId.localeCompare(right.subclassId);
+    });
+  const unclassifiedSubclass = extraOracleSubclasses.find((entry) => entry.subclassId === "extra:oracle:unclassified") ?? null;
+  const unclassifiedResidualShare = unclassifiedSubclass ? unclassifiedSubclass.residualShare : 0;
+  const subclassCoveragePass = unclassifiedResidualShare <= MAX_UNCLASSIFIED_RESIDUAL_SHARE;
 
   const report = {
     suite: "visible-text-residual-taxonomy",
@@ -275,28 +422,41 @@ async function main() {
     decisionSurface: DECISION_SURFACE,
     thresholds: {
       topBucketCount: TOP_BUCKET_COUNT,
-      minTopBucketShare: MIN_TOP_BUCKET_SHARE
+      minTopBucketShare: MIN_TOP_BUCKET_SHARE,
+      maxUnclassifiedResidualShare: MAX_UNCLASSIFIED_RESIDUAL_SHARE
     },
     recordsCompared: perRecord.length,
     residualMassTotal: fixed6(residualMassTotal),
+    unclassifiedResidualShare,
     taxonomyCoverage: {
       topBucketCount: TOP_BUCKET_COUNT,
       topBucketsResidualShare,
       pass: taxonomyCoveragePass
     },
+    classificationCoverage: {
+      unclassifiedResidualShare,
+      maxUnclassifiedResidualShare: MAX_UNCLASSIFIED_RESIDUAL_SHARE,
+      pass: subclassCoveragePass
+    },
     buckets,
     topBuckets,
+    extraOracleSubclasses,
     records: perRecord
   };
 
   await writeJson(corpusPath(corpusDir, "reports/visible-text-residual-taxonomy.json"), report);
-  if (!taxonomyCoveragePass) {
-    throw new Error(
-      `residual taxonomy coverage failed: top${String(TOP_BUCKET_COUNT)} share=${String(topBucketsResidualShare)}`
-    );
+  if (!taxonomyCoveragePass || !subclassCoveragePass) {
+    const failures = [];
+    if (!taxonomyCoveragePass) {
+      failures.push(`top${String(TOP_BUCKET_COUNT)} share=${String(topBucketsResidualShare)}`);
+    }
+    if (!subclassCoveragePass) {
+      failures.push(`unclassified share=${String(unclassifiedResidualShare)}`);
+    }
+    throw new Error(`residual taxonomy coverage failed: ${failures.join(", ")}`);
   }
   process.stdout.write(
-    `visible-text-residual-taxonomy ok: records=${String(perRecord.length)} buckets=${String(buckets.length)} topShare=${String(topBucketsResidualShare)}\n`
+    `visible-text-residual-taxonomy ok: records=${String(perRecord.length)} buckets=${String(buckets.length)} topShare=${String(topBucketsResidualShare)} unclassifiedShare=${String(unclassifiedResidualShare)}\n`
   );
 }
 
