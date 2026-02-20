@@ -50,6 +50,14 @@ const ORACLE_TOOLS = Object.freeze([
 
 const WIDTHS = Object.freeze([80, 120]);
 
+const CHALLENGE_PATTERNS = Object.freeze([
+  /just a moment/i,
+  /enable javascript and cookies to continue/i,
+  /attention required/i,
+  /\bcf[-_ ]challenge\b/i,
+  /captcha/i
+]);
+
 function runProcess(command, args, options = {}) {
   return new Promise((resolveProcess, rejectProcess) => {
     const child = spawn(command, args, {
@@ -301,6 +309,69 @@ function summarizeByTool(records) {
   }).sort((left, right) => left.tool.localeCompare(right.tool));
 }
 
+function classifyPageSurface(htmlText, expectedTokens) {
+  const reasons = [];
+  const normalizedHtml = htmlText.toLowerCase();
+  if (/<meta[^>]+http-equiv\s*=\s*["']?refresh/i.test(normalizedHtml)) {
+    reasons.push("meta-refresh");
+  }
+  if (CHALLENGE_PATTERNS.some((pattern) => pattern.test(htmlText))) {
+    reasons.push("challenge-pattern");
+  }
+  if (expectedTokens.length < 8 && /<script\b/i.test(normalizedHtml)) {
+    reasons.push("low-visible-text-script-shell");
+  }
+
+  let surface = "meaningful-content";
+  if (reasons.includes("challenge-pattern")) {
+    surface = "challenge-shell";
+  } else if (reasons.includes("meta-refresh")) {
+    surface = "redirect-shell";
+  } else if (reasons.length > 0) {
+    surface = "shell-other";
+  }
+
+  return {
+    surface,
+    reasons,
+    visibleTokenCount: expectedTokens.length
+  };
+}
+
+function summarizeBySurface(records, pageClassificationBySha) {
+  const bySurface = new Map();
+  for (const [sha256, classification] of pageClassificationBySha.entries()) {
+    const surface = classification.surface;
+    if (!bySurface.has(surface)) {
+      bySurface.set(surface, {
+        pageShaSet: new Set(),
+        records: []
+      });
+    }
+    bySurface.get(surface).pageShaSet.add(sha256);
+  }
+
+  for (const record of records) {
+    const surface = record.pageSurface ?? "meaningful-content";
+    if (!bySurface.has(surface)) {
+      bySurface.set(surface, {
+        pageShaSet: new Set(),
+        records: []
+      });
+    }
+    bySurface.get(surface).pageShaSet.add(record.pageSha256);
+    bySurface.get(surface).records.push(record);
+  }
+
+  return [...bySurface.entries()]
+    .sort((left, right) => left[0].localeCompare(right[0]))
+    .map(([surface, group]) => ({
+      surface,
+      pages: group.pageShaSet.size,
+      toolScores: summarizeByTool(group.records)
+    }));
+}
+
 async function main() {
   const corpusDir = resolveCorpusDir();
   await ensureCorpusDirs(corpusDir);
@@ -334,11 +405,14 @@ async function main() {
   const toolMetadata = oracleTools.metadata;
 
   const comparisonRecords = [];
+  const pageClassificationBySha = new Map();
   for (const page of pages) {
     const pagePath = corpusPath(corpusDir, `cache/html/${page.sha256}.bin`);
     const htmlBytes = new Uint8Array(await readFile(pagePath));
     const htmlText = new TextDecoder().decode(htmlBytes);
     const expectedTokens = computeExpectedTokens(htmlBytes);
+    const pageClassification = classifyPageSurface(htmlText, expectedTokens);
+    pageClassificationBySha.set(page.sha256, pageClassification);
 
     for (const tool of availableTools) {
       for (const width of WIDTHS) {
@@ -360,7 +434,9 @@ async function main() {
             tokenF1: Number(tokenScore.toFixed(6)),
             stdoutSha256: oracleOutputSha,
             binaryPath: tool.binaryPath,
-            source: tool.source
+            source: tool.source,
+            pageSurface: pageClassification.surface,
+            pageSurfaceReasons: pageClassification.reasons
           });
         } catch (error) {
           comparisonRecords.push({
@@ -373,6 +449,8 @@ async function main() {
             stdoutSha256: null,
             binaryPath: tool.binaryPath,
             source: tool.source,
+            pageSurface: pageClassification.surface,
+            pageSurfaceReasons: pageClassification.reasons,
             error: error instanceof Error ? error.message : String(error)
           });
         }
@@ -398,7 +476,16 @@ async function main() {
     sourceMode: oracleTools.sourceMode,
     image: oracleTools.image,
     tools: toolMetadata,
-    toolScores: summarizeByTool(comparisonRecords.filter((record) => !record.error))
+    pageSurfaceCounts: [...pageClassificationBySha.values()].reduce((acc, entry) => {
+      const key = entry.surface;
+      acc[key] = (acc[key] ?? 0) + 1;
+      return acc;
+    }, {}),
+    toolScores: summarizeByTool(comparisonRecords.filter((record) => !record.error)),
+    toolScoresBySurface: summarizeBySurface(
+      comparisonRecords.filter((record) => !record.error),
+      pageClassificationBySha
+    )
   };
 
   const reportPath = corpusPath(corpusDir, "reports/oracle-compare.ndjson");
