@@ -192,6 +192,18 @@ function mean(values) {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
+async function readOptionalJson(path) {
+  try {
+    const source = await readFile(path, "utf8");
+    return JSON.parse(source);
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
 async function main() {
   const corpusDir = resolveCorpusDir();
   await ensureCorpusDirs(corpusDir);
@@ -200,6 +212,9 @@ async function main() {
   if (compareRecords.length === 0) {
     throw new Error("policy compare report missing; run npm run field:visible-text:ab first");
   }
+  const residualMinimization = await readOptionalJson(
+    corpusPath(corpusDir, "reports/visible-text-residual-minimization.json")
+  );
 
   const pageScores = new Map();
   for (const record of compareRecords) {
@@ -308,6 +323,15 @@ async function main() {
     generatedAtIso: new Date().toISOString(),
     comparedPages: pageFeatures.size,
     comparedRecords: compareRecords.length,
+    residualMinimization: residualMinimization
+      ? {
+        runId: residualMinimization.runId,
+        selectedPageCount: residualMinimization.selectedPageCount,
+        preservedCases: Array.isArray(residualMinimization.minimizedCases)
+          ? residualMinimization.minimizedCases.filter((entry) => entry.preservedDifference === true).length
+          : 0
+      }
+      : null,
     featureEvidence: evidenceList,
     candidates: candidateList
   };
@@ -318,6 +342,13 @@ async function main() {
     `runId: ${runId}`,
     `comparedPages: ${String(report.comparedPages)}`,
     `comparedRecords: ${String(report.comparedRecords)}`,
+    ...(report.residualMinimization
+      ? [
+        `residualMinimizationRunId: ${report.residualMinimization.runId}`,
+        `residualMinimizationSelectedPages: ${String(report.residualMinimization.selectedPageCount)}`,
+        `residualMinimizationPreservedCases: ${String(report.residualMinimization.preservedCases)}`
+      ]
+      : ["residualMinimizationRunId: missing (run npm run field:triage:minimize)"]),
     "",
     "## Candidate list",
     ...candidateList.flatMap((candidate) => ([

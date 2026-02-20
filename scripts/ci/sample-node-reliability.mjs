@@ -8,10 +8,12 @@ function parseArgs(argv) {
     sampleSizePerEvent: 10,
     eventSampleSizes: {},
     events: ["push", "pull_request"],
-    pivotSha: "fd9887b1d9e3577b306deb75c1185be8cd774964",
     outputPath: resolve("reports/ci-node-reliability.json"),
     confidence: 0.95,
-    requireNonOverlap: false
+    requireNonOverlap: false,
+    mode: "rolling",
+    windowCount: 3,
+    pivotSha: null
   };
 
   for (const arg of argv) {
@@ -68,10 +70,6 @@ function parseArgs(argv) {
       options.eventSampleSizes = parsed;
       continue;
     }
-    if (arg.startsWith("--pivot-sha=")) {
-      options.pivotSha = arg.slice("--pivot-sha=".length).trim();
-      continue;
-    }
     if (arg.startsWith("--output=")) {
       options.outputPath = resolve(arg.slice("--output=".length).trim());
       continue;
@@ -82,6 +80,27 @@ function parseArgs(argv) {
         throw new Error(`invalid --confidence value: ${arg}`);
       }
       options.confidence = value;
+      continue;
+    }
+    if (arg.startsWith("--mode=")) {
+      const value = arg.slice("--mode=".length).trim();
+      if (value !== "rolling" && value !== "pivot") {
+        throw new Error(`invalid --mode value: ${arg}`);
+      }
+      options.mode = value;
+      continue;
+    }
+    if (arg.startsWith("--window-count=")) {
+      const value = Number.parseInt(arg.slice("--window-count=".length), 10);
+      if (!Number.isSafeInteger(value) || value < 2) {
+        throw new Error(`invalid --window-count value: ${arg}`);
+      }
+      options.windowCount = value;
+      continue;
+    }
+    if (arg.startsWith("--pivot-sha=")) {
+      options.pivotSha = arg.slice("--pivot-sha=".length).trim();
+      options.mode = "pivot";
       continue;
     }
     if (arg === "--require-non-overlap") {
@@ -109,7 +128,7 @@ function listCiRuns(workflow) {
     "--workflow",
     workflow,
     "--limit",
-    "300",
+    "400",
     "--json",
     "databaseId,headSha,headBranch,status,conclusion,event,createdAt,displayTitle,url"
   ]);
@@ -154,10 +173,7 @@ function clamp01(value) {
 
 function wilsonInterval(successes, total, z) {
   if (total === 0) {
-    return {
-      lower: 0,
-      upper: 0
-    };
+    return { lower: 0, upper: 0 };
   }
   const p = successes / total;
   const z2 = z * z;
@@ -174,10 +190,7 @@ function differenceInterval(summaryBefore, summaryAfter, z) {
   const n1 = summaryBefore.total;
   const n2 = summaryAfter.total;
   if (n1 === 0 || n2 === 0) {
-    return {
-      lower: 0,
-      upper: 0
-    };
+    return { lower: 0, upper: 0 };
   }
   const p1 = summaryBefore.failureRate;
   const p2 = summaryAfter.failureRate;
@@ -224,6 +237,30 @@ function collectSample(candidates, sampleSize) {
   return sample;
 }
 
+function collectRollingWindows(candidates, sampleSize, windowCount, event) {
+  const windows = [];
+  const stride = Math.max(1, sampleSize);
+  for (let index = 0; index < windowCount; index += 1) {
+    const start = index * stride;
+    const windowCandidates = candidates.slice(start, start + sampleSize * 12);
+    const windowSample = collectSample(windowCandidates, sampleSize);
+    if (windowSample.length < sampleSize) {
+      break;
+    }
+    windows.push({
+      windowIndex: index,
+      label: index === 0 ? "current" : `prior-${String(index)}`,
+      runs: windowSample
+    });
+  }
+  if (windows.length === 0) {
+    throw new Error(
+      `insufficient rolling sample for event ${event}: collected=0 requiredWindowSample=${String(sampleSize)}`
+    );
+  }
+  return windows;
+}
+
 function summarizeBeforeAfter(beforeSample, afterSample, z) {
   const beforeSummary = summarizeSample(beforeSample);
   const afterSummary = summarizeSample(afterSample);
@@ -249,14 +286,103 @@ function summarizeBeforeAfter(beforeSample, afterSample, z) {
   };
 }
 
-async function main() {
-  const options = parseArgs(process.argv.slice(2));
-  const z = zScoreForConfidence(options.confidence);
+function evaluateClaim(summary) {
+  const nonOverlapping = intervalsDoNotOverlap(
+    summary.before.failureRateInterval,
+    summary.after.failureRateInterval
+  );
+  const upperBelowZero = summary.delta.failureRateInterval.upper < 0;
+  return {
+    nonOverlappingFailureRateIntervals: nonOverlapping,
+    deltaUpperBelowZero: upperBelowZero,
+    canClaimImprovement: nonOverlapping && upperBelowZero
+  };
+}
 
-  const allRuns = listCiRuns(options.workflow)
-    .filter((run) => run.status === "completed")
-    .filter((run) => run.conclusion !== "cancelled");
+function summarizeWindow(window, z) {
+  const summary = summarizeSample(window.runs);
+  return {
+    windowIndex: window.windowIndex,
+    label: window.label,
+    summary,
+    failureRateInterval: wilsonInterval(summary.failed, summary.total, z),
+    runs: window.runs
+  };
+}
 
+function buildRollingReport(allRuns, options, z) {
+  const strata = [];
+  for (const event of options.events) {
+    const sampleSize = options.eventSampleSizes[event] ?? options.sampleSizePerEvent;
+    const candidates = allRuns
+      .filter((run) => run.event === event)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+
+    const windows = collectRollingWindows(candidates, sampleSize, options.windowCount, event);
+    const summarizedWindows = windows.map((window) => summarizeWindow(window, z));
+    const currentWindow = summarizedWindows.find((entry) => entry.windowIndex === 0);
+    const previousWindow = summarizedWindows.find((entry) => entry.windowIndex === 1);
+    const sampleSufficient = Boolean(currentWindow && previousWindow);
+    const comparison = sampleSufficient
+      ? summarizeBeforeAfter(previousWindow.runs, currentWindow.runs, z)
+      : null;
+    const claim = sampleSufficient
+      ? evaluateClaim(comparison)
+      : {
+        nonOverlappingFailureRateIntervals: false,
+        deltaUpperBelowZero: false,
+        canClaimImprovement: false
+      };
+    strata.push({
+      event,
+      sampleSize,
+      windows: summarizedWindows,
+      sampleSufficient,
+      comparison,
+      claim
+    });
+  }
+
+  const comparableStrata = strata.filter((entry) => entry.sampleSufficient);
+  const previousRuns = comparableStrata.flatMap((entry) => entry.comparison.before.runs);
+  const currentRuns = comparableStrata.flatMap((entry) => entry.comparison.after.runs);
+  const overallComparison = previousRuns.length > 0 && currentRuns.length > 0
+    ? summarizeBeforeAfter(previousRuns, currentRuns, z)
+    : summarizeBeforeAfter([], [], z);
+  const overallClaim = previousRuns.length > 0 && currentRuns.length > 0
+    ? evaluateClaim(overallComparison)
+    : {
+      nonOverlappingFailureRateIntervals: false,
+      deltaUpperBelowZero: false,
+      canClaimImprovement: false
+    };
+
+  const claim = {
+    criterion: "Claim reliability improvement only if current vs prior windows are non-overlapping and delta upper bound < 0",
+    nonOverlappingFailureRateIntervals: overallClaim.nonOverlappingFailureRateIntervals,
+    deltaUpperBelowZero: overallClaim.deltaUpperBelowZero,
+    allStrataComparable: comparableStrata.length === strata.length,
+    allStrataClaimable: comparableStrata.length > 0 && comparableStrata.every((entry) => entry.claim.canClaimImprovement),
+    canClaimImprovement: overallClaim.canClaimImprovement
+      && comparableStrata.length === strata.length
+      && comparableStrata.every((entry) => entry.claim.canClaimImprovement)
+  };
+
+  return {
+    mode: "rolling",
+    windowCount: options.windowCount,
+    strata,
+    before: overallComparison.before,
+    after: overallComparison.after,
+    delta: overallComparison.delta,
+    claim
+  };
+}
+
+function buildPivotReport(allRuns, options, z) {
+  if (!options.pivotSha) {
+    throw new Error("pivot mode requires --pivot-sha");
+  }
   const pivotRun = allRuns.find((run) => run.headSha === options.pivotSha && run.event === "push");
   if (!pivotRun) {
     throw new Error(`pivot run not found for sha ${options.pivotSha}`);
@@ -270,67 +396,40 @@ async function main() {
       .filter((run) => run.event === event)
       .filter((run) => run.createdAt < pivotTime)
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-      .slice(0, sampleSize * 8);
+      .slice(0, sampleSize * 12);
 
     const afterCandidates = allRuns
       .filter((run) => run.event === event)
       .filter((run) => run.createdAt > pivotTime)
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-      .slice(0, sampleSize * 8);
+      .slice(0, sampleSize * 12);
 
     const beforeSample = collectSample(beforeCandidates, sampleSize);
     const afterSample = collectSample(afterCandidates, sampleSize);
-
     if (beforeSample.length < sampleSize || afterSample.length < sampleSize) {
       throw new Error(
-        `insufficient sample for event ${event}: ` +
-        `before=${String(beforeSample.length)} after=${String(afterSample.length)} ` +
-        `requested=${String(sampleSize)}`
+        `insufficient pivot sample for event ${event}: ` +
+        `before=${String(beforeSample.length)} after=${String(afterSample.length)} requested=${String(sampleSize)}`
       );
     }
 
-    const summary = summarizeBeforeAfter(beforeSample, afterSample, z);
+    const comparison = summarizeBeforeAfter(beforeSample, afterSample, z);
+    const claim = evaluateClaim(comparison);
     strata.push({
       event,
       sampleSize,
-      ...summary
+      comparison,
+      claim
     });
   }
 
-  const overallBeforeRuns = strata.flatMap((entry) => entry.before.runs);
-  const overallAfterRuns = strata.flatMap((entry) => entry.after.runs);
-  const overall = summarizeBeforeAfter(overallBeforeRuns, overallAfterRuns, z);
+  const overallBeforeRuns = strata.flatMap((entry) => entry.comparison.before.runs);
+  const overallAfterRuns = strata.flatMap((entry) => entry.comparison.after.runs);
+  const overallComparison = summarizeBeforeAfter(overallBeforeRuns, overallAfterRuns, z);
+  const overallClaim = evaluateClaim(overallComparison);
 
-  const nonOverlapping = intervalsDoNotOverlap(
-    overall.before.failureRateInterval,
-    overall.after.failureRateInterval
-  );
-  const upperBelowZero = overall.delta.failureRateInterval.upper < 0;
-
-  const claim = {
-    criterion: "Claim reliability improvement only if failure-rate intervals are non-overlapping and delta upper bound < 0",
-    nonOverlappingFailureRateIntervals: nonOverlapping,
-    deltaUpperBelowZero: upperBelowZero,
-    canClaimImprovement: nonOverlapping && upperBelowZero
-  };
-
-  if (options.requireNonOverlap && !claim.canClaimImprovement) {
-    throw new Error(
-      "non-overlap claim criterion not met: " +
-      `nonOverlap=${String(claim.nonOverlappingFailureRateIntervals)} ` +
-      `deltaUpperBelowZero=${String(claim.deltaUpperBelowZero)}`
-    );
-  }
-
-  const report = {
-    suite: "ci-node-reliability-sample",
-    timestamp: new Date().toISOString(),
-    workflow: options.workflow,
-    sampleSizePerEvent: options.sampleSizePerEvent,
-    eventSampleSizes: options.eventSampleSizes,
-    events: options.events,
-    confidence: options.confidence,
-    zScore: z,
+  return {
+    mode: "pivot",
     pivot: {
       sha: options.pivotSha,
       runId: pivotRun.databaseId,
@@ -338,21 +437,69 @@ async function main() {
       title: pivotRun.displayTitle
     },
     strata,
-    before: overall.before,
-    after: overall.after,
-    delta: overall.delta,
-    claim
+    before: overallComparison.before,
+    after: overallComparison.after,
+    delta: overallComparison.delta,
+    claim: {
+      criterion: "Claim reliability improvement only if failure-rate intervals are non-overlapping and delta upper bound < 0",
+      nonOverlappingFailureRateIntervals: overallClaim.nonOverlappingFailureRateIntervals,
+      deltaUpperBelowZero: overallClaim.deltaUpperBelowZero,
+      allStrataClaimable: strata.every((entry) => entry.claim.canClaimImprovement),
+      canClaimImprovement: overallClaim.canClaimImprovement && strata.every((entry) => entry.claim.canClaimImprovement)
+    }
+  };
+}
+
+async function main() {
+  const options = parseArgs(process.argv.slice(2));
+  const z = zScoreForConfidence(options.confidence);
+
+  const allRuns = listCiRuns(options.workflow)
+    .filter((run) => run.status === "completed")
+    .filter((run) => run.conclusion !== "cancelled");
+
+  const modeReport = options.mode === "pivot"
+    ? buildPivotReport(allRuns, options, z)
+    : buildRollingReport(allRuns, options, z);
+
+  if (options.requireNonOverlap && !modeReport.claim.canClaimImprovement) {
+    throw new Error(
+      "non-overlap claim criterion not met: " +
+      `nonOverlap=${String(modeReport.claim.nonOverlappingFailureRateIntervals)} ` +
+      `deltaUpperBelowZero=${String(modeReport.claim.deltaUpperBelowZero)} ` +
+      `allStrataClaimable=${String(modeReport.claim.allStrataClaimable)}`
+    );
+  }
+
+  const report = {
+    suite: "ci-node-reliability-sample",
+    timestamp: new Date().toISOString(),
+    workflow: options.workflow,
+    mode: modeReport.mode,
+    sampleSizePerEvent: options.sampleSizePerEvent,
+    eventSampleSizes: options.eventSampleSizes,
+    events: options.events,
+    confidence: options.confidence,
+    zScore: z,
+    ...(modeReport.mode === "rolling" ? { windowCount: modeReport.windowCount } : {}),
+    ...(modeReport.mode === "pivot" ? { pivot: modeReport.pivot } : {}),
+    strata: modeReport.strata,
+    before: modeReport.before,
+    after: modeReport.after,
+    delta: modeReport.delta,
+    claim: modeReport.claim
   };
 
   await writeFile(options.outputPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   process.stdout.write(
     `ci node reliability sample ok: ` +
+    `mode=${modeReport.mode} ` +
     `events=${options.events.join(",")} ` +
-    `beforeFailureRate=${String(overall.before.summary.failureRate)} ` +
-    `afterFailureRate=${String(overall.after.summary.failureRate)} ` +
-    `delta=${String(overall.delta.failureRate)} ` +
-    `ci=[${String(overall.delta.failureRateInterval.lower)},${String(overall.delta.failureRateInterval.upper)}] ` +
-    `claim=${String(claim.canClaimImprovement)}\n`
+    `beforeFailureRate=${String(modeReport.before.summary.failureRate)} ` +
+    `afterFailureRate=${String(modeReport.after.summary.failureRate)} ` +
+    `delta=${String(modeReport.delta.failureRate)} ` +
+    `ci=[${String(modeReport.delta.failureRateInterval.lower)},${String(modeReport.delta.failureRateInterval.upper)}] ` +
+    `claim=${String(modeReport.claim.canClaimImprovement)}\n`
   );
 }
 

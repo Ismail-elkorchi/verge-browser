@@ -36,14 +36,19 @@ Local-only commands:
 Artifacts are written under ignored paths in `realworld/corpus/`:
 - `reports/visible-text-policy-compare.ndjson`
 - `reports/visible-text-policy-compare.json`
+- `reports/visible-text-residual-minimization.json`
 - `triage/visible-text-fixture-candidates.json`
 - `triage/visible-text-fixture-candidates.md`
+- `triage/minimized/*.html` (local-only minimized residual inputs)
 
 The generated candidates contain only synthetic HTML snippets and expected text outputs.
 
 Policy search notes:
 - `field:visible-text:ab` now evaluates multiple fallback policies against offline oracle outputs.
-- The report selects `recommendedCandidatePolicyId` deterministically using:
+- The report selects `recommendedCandidatePolicyId` using `meaningful-content` as the decision surface.
+- Selection rule on the decision surface:
   1. highest mean delta from baseline
   2. highest mean normalized token F1
   3. lowest worse-count
+- If no candidate improves baseline on `meaningful-content`, baseline remains selected.
+- `challenge-shell` is evaluated separately with a regression floor check and reported as a distinct gate outcome.

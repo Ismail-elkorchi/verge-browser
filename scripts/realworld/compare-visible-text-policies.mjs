@@ -17,6 +17,10 @@ import {
 
 const NORMALIZATION_VERSION = "v2";
 const UTF8_ENCODER = new TextEncoder();
+const DECISION_SURFACE = "meaningful-content";
+const CHALLENGE_SURFACE = "challenge-shell";
+const MIN_DECISION_SURFACE_DELTA = 0;
+const MIN_CHALLENGE_SURFACE_DELTA = -0.002;
 
 const POLICIES = Object.freeze([
   {
@@ -248,6 +252,10 @@ function selectRecommendedCandidate(policies, summaryByPolicyId) {
   return sorted[0] ?? null;
 }
 
+function parseSurfaceSummaryList(entries) {
+  return new Map(entries.map((entry) => [entry.policyId, entry]));
+}
+
 async function main() {
   const corpusDir = resolveCorpusDir();
   await ensureCorpusDirs(corpusDir);
@@ -352,28 +360,6 @@ async function main() {
     })
   );
 
-  const policySummaryList = summarizePolicies(baseRecords, POLICIES);
-  const policySummaryById = new Map(policySummaryList.map((item) => [item.policyId, item]));
-  const recommendedCandidate = selectRecommendedCandidate(POLICIES, policySummaryById);
-  if (!recommendedCandidate) {
-    throw new Error("candidate policy selection failed");
-  }
-
-  const detailRecords = baseRecords.map((record) => ({
-    runId,
-    pageSha256: record.pageSha256,
-    finalUrl: record.finalUrl,
-    tool: record.tool,
-    width: record.width,
-    pageSurface: record.pageSurface,
-    pageSurfaceReasons: record.pageSurfaceReasons,
-    baseline: record.scores[BASELINE_POLICY_ID],
-    candidate: record.scores[recommendedCandidate.id],
-    delta: record.deltasFromBaseline[recommendedCandidate.id],
-    scores: record.scores,
-    deltasFromBaseline: record.deltasFromBaseline
-  }));
-
   const groupedBySurface = new Map();
   for (const record of baseRecords) {
     if (!groupedBySurface.has(record.pageSurface)) {
@@ -382,14 +368,116 @@ async function main() {
     groupedBySurface.get(record.pageSurface).push(record);
   }
 
+  const policySummaryList = summarizePolicies(baseRecords, POLICIES);
+  const policySummaryById = parseSurfaceSummaryList(policySummaryList);
+  const bySurfaceSummary = [...groupedBySurface.entries()]
+    .sort((left, right) => left[0].localeCompare(right[0]))
+    .map(([surface, records]) => ({
+      surface,
+      byPolicy: summarizePolicies(records, POLICIES)
+    }));
+
+  const decisionSurfaceRecords = groupedBySurface.get(DECISION_SURFACE) ?? [];
+  const decisionSummaryList = summarizePolicies(
+    decisionSurfaceRecords.length > 0 ? decisionSurfaceRecords : baseRecords,
+    POLICIES
+  );
+  const decisionSummaryById = parseSurfaceSummaryList(decisionSummaryList);
+  const primaryCandidate = selectRecommendedCandidate(POLICIES, decisionSummaryById);
+  if (!primaryCandidate) {
+    throw new Error("candidate policy selection failed");
+  }
+  const primaryCandidateSummary = decisionSummaryById.get(primaryCandidate.id);
+  if (!primaryCandidateSummary) {
+    throw new Error(`candidate summary missing for ${primaryCandidate.id}`);
+  }
+
+  const promotedPolicyId = primaryCandidateSummary.meanDeltaNormalizedTokenF1 > MIN_DECISION_SURFACE_DELTA
+    ? primaryCandidate.id
+    : BASELINE_POLICY_ID;
+  const promotedPolicySummaryDecisionSurface = decisionSummaryById.get(promotedPolicyId);
+  if (!promotedPolicySummaryDecisionSurface) {
+    throw new Error(`decision surface summary missing for ${promotedPolicyId}`);
+  }
+
+  const challengeSurfaceSummary = bySurfaceSummary.find((entry) => entry.surface === CHALLENGE_SURFACE);
+  const challengeSummaryByPolicyId = challengeSurfaceSummary
+    ? parseSurfaceSummaryList(challengeSurfaceSummary.byPolicy)
+    : new Map();
+  const promotedPolicyChallengeSurfaceSummary = challengeSummaryByPolicyId.get(promotedPolicyId) ?? null;
+
+  const surfaceGates = {
+    decisionSurfaceCoverage: {
+      pass: decisionSurfaceRecords.length > 0,
+      surface: DECISION_SURFACE,
+      comparedRecords: decisionSurfaceRecords.length
+    },
+    decisionSurfaceNonRegression: {
+      pass: promotedPolicySummaryDecisionSurface.meanDeltaNormalizedTokenF1 >= MIN_DECISION_SURFACE_DELTA,
+      surface: DECISION_SURFACE,
+      minDelta: MIN_DECISION_SURFACE_DELTA,
+      observedDelta: promotedPolicySummaryDecisionSurface.meanDeltaNormalizedTokenF1,
+      promotedPolicyId
+    },
+    challengeSurfaceRegressionFloor: {
+      pass: promotedPolicyChallengeSurfaceSummary === null
+        || promotedPolicyChallengeSurfaceSummary.meanDeltaNormalizedTokenF1 >= MIN_CHALLENGE_SURFACE_DELTA,
+      surface: CHALLENGE_SURFACE,
+      minDelta: MIN_CHALLENGE_SURFACE_DELTA,
+      observedDelta: promotedPolicyChallengeSurfaceSummary?.meanDeltaNormalizedTokenF1 ?? null,
+      promotedPolicyId
+    }
+  };
+  const allSurfaceGatesPass = Object.values(surfaceGates).every((gate) => gate.pass);
+
+  const detailRecords = baseRecords.map((record) => {
+    const delta = promotedPolicyId === BASELINE_POLICY_ID
+      ? { rawTokenF1: 0, normalizedTokenF1: 0 }
+      : record.deltasFromBaseline[promotedPolicyId] ?? { rawTokenF1: 0, normalizedTokenF1: 0 };
+    return {
+      runId,
+      pageSha256: record.pageSha256,
+      finalUrl: record.finalUrl,
+      tool: record.tool,
+      width: record.width,
+      pageSurface: record.pageSurface,
+      pageSurfaceReasons: record.pageSurfaceReasons,
+      baseline: record.scores[BASELINE_POLICY_ID],
+      candidate: record.scores[promotedPolicyId],
+      delta,
+      scores: record.scores,
+      deltasFromBaseline: record.deltasFromBaseline
+    };
+  });
+
   const summary = {
     suite: "visible-text-policy-compare",
     runId,
     generatedAtIso: new Date().toISOString(),
     normalizationVersion: NORMALIZATION_VERSION,
     baselinePolicyId: BASELINE_POLICY_ID,
-    recommendedCandidatePolicyId: recommendedCandidate.id,
-    recommendedCandidateReason: "Highest mean delta vs baseline, tie-broken by mean score then lower worseCount",
+    recommendedCandidatePolicyId: promotedPolicyId,
+    recommendedCandidateReason: promotedPolicyId === BASELINE_POLICY_ID
+      ? `No candidate exceeded baseline on ${DECISION_SURFACE}; baseline retained`
+      : `Highest mean delta on ${DECISION_SURFACE}, tie-broken by mean score then lower worseCount`,
+    policySelection: {
+      decisionSurface: DECISION_SURFACE,
+      primaryCandidatePolicyId: primaryCandidate.id,
+      primaryCandidateDeltaOnDecisionSurface: primaryCandidateSummary.meanDeltaNormalizedTokenF1,
+      promotedPolicyId
+    },
+    gates: {
+      ok: allSurfaceGatesPass,
+      thresholds: {
+        decisionSurface: {
+          minDelta: MIN_DECISION_SURFACE_DELTA
+        },
+        challengeSurface: {
+          minDelta: MIN_CHALLENGE_SURFACE_DELTA
+        }
+      },
+      checks: surfaceGates
+    },
     policies: POLICIES.map((policy) => ({
       id: policy.id,
       description: policy.description,
@@ -399,21 +487,24 @@ async function main() {
     comparedPages: new Set(detailRecords.map((record) => record.pageSha256)).size,
     overall: {
       baseline: policySummaryById.get(BASELINE_POLICY_ID),
-      candidate: policySummaryById.get(recommendedCandidate.id)
+      candidate: policySummaryById.get(promotedPolicyId)
+    },
+    decisionSurface: {
+      surface: DECISION_SURFACE,
+      baseline: decisionSummaryById.get(BASELINE_POLICY_ID),
+      candidate: decisionSummaryById.get(promotedPolicyId)
     },
     byPolicy: policySummaryList,
-    bySurface: [...groupedBySurface.entries()]
-      .sort((left, right) => left[0].localeCompare(right[0]))
-      .map(([surface, records]) => ({
-        surface,
-        byPolicy: summarizePolicies(records, POLICIES)
-      }))
+    bySurface: bySurfaceSummary
   };
 
   await writeNdjson(corpusPath(corpusDir, "reports/visible-text-policy-compare.ndjson"), detailRecords);
   await writeJson(corpusPath(corpusDir, "reports/visible-text-policy-compare.json"), summary);
+  if (!allSurfaceGatesPass) {
+    throw new Error("visible-text-policy-compare surface gates failed");
+  }
   process.stdout.write(
-    `visible-text-policy-compare ok: records=${String(detailRecords.length)} candidate=${recommendedCandidate.id} runId=${runId}\n`
+    `visible-text-policy-compare ok: records=${String(detailRecords.length)} candidate=${promotedPolicyId} runId=${runId}\n`
   );
 }
 
