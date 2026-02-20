@@ -29,6 +29,7 @@
     "corpus:render": "node scripts/oracles/corpus/generate-render-v3.mjs",
     "oracle:lock:refresh": "node scripts/oracles/refresh-oracle-lock.mjs",
     "oracle:image:prepare": "node scripts/oracles/prepare-image.mjs",
+    "ci:reliability:sample": "node scripts/ci/sample-node-reliability.mjs",
     "test:bench": "npm run build && node scripts/bench/run-bench.mjs",
     "eval:ci": "npm run build && node scripts/eval/run-eval.mjs --profile=ci",
     "eval:release": "npm run build && node scripts/eval/run-eval.mjs --profile=release",
