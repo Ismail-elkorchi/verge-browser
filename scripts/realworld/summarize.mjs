@@ -53,6 +53,24 @@ function formatOracleWorst(toolScores) {
   return lines.join("\n");
 }
 
+function formatOracleBySurface(surfaceScores) {
+  if (!surfaceScores || surfaceScores.length === 0) {
+    return "- no surface split available";
+  }
+  const lines = [];
+  for (const surfaceEntry of surfaceScores) {
+    lines.push(`- ${surfaceEntry.surface}: pages=${String(surfaceEntry.pages)}`);
+    if (!surfaceEntry.toolScores || surfaceEntry.toolScores.length === 0) {
+      lines.push("  no comparisons");
+      continue;
+    }
+    for (const score of surfaceEntry.toolScores) {
+      lines.push(`  ${score.tool}: meanTokenF1=${String(score.meanTokenF1)}`);
+    }
+  }
+  return lines.join("\n");
+}
+
 async function main() {
   const corpusDir = resolveCorpusDir();
   const pageSummaryPath = corpusPath(corpusDir, "reports/field-summary.json");
@@ -106,6 +124,10 @@ async function main() {
     "",
     "## Worst oracle disagreements",
     formatOracleWorst(oracleSummary.toolScores),
+    "",
+    "## Oracle scores by page surface",
+    `- page surfaces: ${JSON.stringify(oracleSummary.pageSurfaceCounts ?? {})}`,
+    formatOracleBySurface(oracleSummary.toolScoresBySurface),
     "",
     "## Parity checks",
     formatList(

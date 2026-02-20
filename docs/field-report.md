@@ -1,6 +1,6 @@
 # Field report
 
-Generated: 2026-02-19T20:31:07.171Z
+Generated: 2026-02-20T00:09:50.226Z
 
 ## Corpus
 - pages: 102
@@ -48,7 +48,7 @@ Generated: 2026-02-19T20:31:07.171Z
 
 ## Oracle availability and fingerprints
 - source mode: image
-- image fingerprint: 31d45a12dd44d953c521be371a5250108dc9a826d66d527522c188b1f879ff26
+- image fingerprint: 5aa7ed1adbada1936af21c573786b4b121e6e9afcf5d604f5eec457a6ad58331
 - image package count: 101
 - lynx (image): sha256=a598456aa5c8122453f7074c66233800a4032bf14b1171bccde98f83810ebf9d version=Lynx Version 2.9.2 (31 May 2024)
 libwww-FM 2.14, SSL-MM 1.4.1, GNUTLS 3.8.5, ncurses 6.5.20250216(wide)
@@ -68,6 +68,21 @@ See https://lynx.invisible-island.net/ and the online help for more information.
   worst: e427ac1791eeab4568589fc73ef8fb3971092c92a1f96bee20f68d4b0c6d9841 width=80 tokenF1=0
 - w3m: meanTokenF1=0.956068
   worst: e427ac1791eeab4568589fc73ef8fb3971092c92a1f96bee20f68d4b0c6d9841 width=80 tokenF1=0
+
+## Oracle scores by page surface
+- page surfaces: {"meaningful-content":88,"challenge-shell":13,"redirect-shell":1}
+- challenge-shell: pages=13
+  links2: meanTokenF1=0.99363
+  lynx: meanTokenF1=0.841151
+  w3m: meanTokenF1=0.933545
+- meaningful-content: pages=88
+  links2: meanTokenF1=0.966193
+  lynx: meanTokenF1=0.962198
+  w3m: meanTokenF1=0.970259
+- redirect-shell: pages=1
+  links2: meanTokenF1=0
+  lynx: meanTokenF1=0
+  w3m: meanTokenF1=0
 
 ## Parity checks
 - parseBytes vs parseStream mismatches: 0
