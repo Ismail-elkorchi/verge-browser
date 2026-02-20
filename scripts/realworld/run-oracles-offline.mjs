@@ -49,6 +49,7 @@ const ORACLE_TOOLS = Object.freeze([
 ]);
 
 const WIDTHS = Object.freeze([80, 120]);
+const ORACLE_TEXT_NORMALIZATION_VERSION = "v1";
 
 const CHALLENGE_PATTERNS = Object.freeze([
   /just a moment/i,
@@ -290,23 +291,50 @@ function summarizeByTool(records) {
     grouped.get(record.tool).push(record);
   }
   return [...grouped.entries()].map(([tool, toolRecords]) => {
-    const meanTokenF1 = toolRecords.reduce((sum, entry) => sum + entry.tokenF1, 0) / toolRecords.length;
-    const worst = [...toolRecords]
-      .sort((left, right) => left.tokenF1 - right.tokenF1)
+    const meanRawTokenF1 = toolRecords.reduce((sum, entry) => sum + entry.rawTokenF1, 0) / toolRecords.length;
+    const meanNormalizedTokenF1 = toolRecords.reduce((sum, entry) => sum + entry.normalizedTokenF1, 0) / toolRecords.length;
+    const worstRaw = [...toolRecords]
+      .sort((left, right) => left.rawTokenF1 - right.rawTokenF1)
       .slice(0, 10)
       .map((entry) => ({
         sha256: entry.pageSha256,
         finalUrl: entry.finalUrl,
         width: entry.width,
-        tokenF1: Number(entry.tokenF1.toFixed(6))
+        rawTokenF1: Number(entry.rawTokenF1.toFixed(6)),
+        normalizedTokenF1: Number(entry.normalizedTokenF1.toFixed(6))
+      }));
+    const worstNormalized = [...toolRecords]
+      .sort((left, right) => left.normalizedTokenF1 - right.normalizedTokenF1)
+      .slice(0, 10)
+      .map((entry) => ({
+        sha256: entry.pageSha256,
+        finalUrl: entry.finalUrl,
+        width: entry.width,
+        rawTokenF1: Number(entry.rawTokenF1.toFixed(6)),
+        normalizedTokenF1: Number(entry.normalizedTokenF1.toFixed(6))
       }));
     return {
       tool,
       compared: toolRecords.length,
-      meanTokenF1: Number(meanTokenF1.toFixed(6)),
-      worst
+      meanRawTokenF1: Number(meanRawTokenF1.toFixed(6)),
+      meanNormalizedTokenF1: Number(meanNormalizedTokenF1.toFixed(6)),
+      worstRaw,
+      worstNormalized
     };
   }).sort((left, right) => left.tool.localeCompare(right.tool));
+}
+
+function normalizeOracleTextForScoring(value) {
+  const normalized = value
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/^\s*link:\s+.*$/gim, "")
+    .replace(/^\s*iframe:\s+.*$/gim, "")
+    .replace(/\[(?:img|image)\]/gim, " ")
+    .replace(/\((?:button|submit|image)\)/gim, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized;
 }
 
 function classifyPageSurface(htmlText, expectedTokens) {
@@ -422,8 +450,10 @@ async function main() {
           const oracleDir = corpusPath(corpusDir, `cache/oracle/${tool.name}`);
           await mkdir(oracleDir, { recursive: true });
           await writeFile(resolve(oracleDir, `${oracleOutputSha}.txt`), oracleOutput, "utf8");
-          const oracleTokens = tokenizeText(oracleOutput);
-          const tokenScore = tokenF1(expectedTokens, oracleTokens);
+          const oracleTokensRaw = tokenizeText(oracleOutput);
+          const oracleTokensNormalized = tokenizeText(normalizeOracleTextForScoring(oracleOutput));
+          const rawTokenScore = tokenF1(expectedTokens, oracleTokensRaw);
+          const normalizedTokenScore = tokenF1(expectedTokens, oracleTokensNormalized);
 
           comparisonRecords.push({
             runId,
@@ -431,7 +461,10 @@ async function main() {
             finalUrl: page.finalUrl,
             tool: tool.name,
             width,
-            tokenF1: Number(tokenScore.toFixed(6)),
+            rawTokenF1: Number(rawTokenScore.toFixed(6)),
+            normalizedTokenF1: Number(normalizedTokenScore.toFixed(6)),
+            tokenF1: Number(rawTokenScore.toFixed(6)),
+            normalizationVersion: ORACLE_TEXT_NORMALIZATION_VERSION,
             stdoutSha256: oracleOutputSha,
             binaryPath: tool.binaryPath,
             source: tool.source,
@@ -445,7 +478,10 @@ async function main() {
             finalUrl: page.finalUrl,
             tool: tool.name,
             width,
+            rawTokenF1: 0,
+            normalizedTokenF1: 0,
             tokenF1: 0,
+            normalizationVersion: ORACLE_TEXT_NORMALIZATION_VERSION,
             stdoutSha256: null,
             binaryPath: tool.binaryPath,
             source: tool.source,
@@ -476,6 +512,12 @@ async function main() {
     sourceMode: oracleTools.sourceMode,
     image: oracleTools.image,
     tools: toolMetadata,
+    normalization: {
+      version: ORACLE_TEXT_NORMALIZATION_VERSION,
+      mode: "side-by-side",
+      rawScoreField: "rawTokenF1",
+      normalizedScoreField: "normalizedTokenF1"
+    },
     pageSurfaceCounts: [...pageClassificationBySha.values()].reduce((acc, entry) => {
       const key = entry.surface;
       acc[key] = (acc[key] ?? 0) + 1;
