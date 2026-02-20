@@ -6,6 +6,7 @@ function parseArgs(argv) {
   const options = {
     workflow: "CI",
     sampleSizePerEvent: 10,
+    eventSampleSizes: {},
     events: ["push", "pull_request"],
     pivotSha: "fd9887b1d9e3577b306deb75c1185be8cd774964",
     outputPath: resolve("reports/ci-node-reliability.json"),
@@ -43,6 +44,28 @@ function parseArgs(argv) {
         throw new Error(`invalid --events value: ${arg}`);
       }
       options.events = [...new Set(events)];
+      continue;
+    }
+    if (arg.startsWith("--event-sample-sizes=")) {
+      const rawEntries = arg.slice("--event-sample-sizes=".length).split(",");
+      const parsed = {};
+      for (const rawEntry of rawEntries) {
+        const entry = rawEntry.trim();
+        if (entry.length === 0) {
+          continue;
+        }
+        const separator = entry.indexOf(":");
+        if (separator <= 0 || separator === entry.length - 1) {
+          throw new Error(`invalid --event-sample-sizes entry: ${rawEntry}`);
+        }
+        const event = entry.slice(0, separator).trim();
+        const size = Number.parseInt(entry.slice(separator + 1).trim(), 10);
+        if (!Number.isSafeInteger(size) || size < 1) {
+          throw new Error(`invalid --event-sample-sizes entry: ${rawEntry}`);
+        }
+        parsed[event] = size;
+      }
+      options.eventSampleSizes = parsed;
       continue;
     }
     if (arg.startsWith("--pivot-sha=")) {
@@ -242,32 +265,34 @@ async function main() {
 
   const strata = [];
   for (const event of options.events) {
+    const sampleSize = options.eventSampleSizes[event] ?? options.sampleSizePerEvent;
     const beforeCandidates = allRuns
       .filter((run) => run.event === event)
       .filter((run) => run.createdAt < pivotTime)
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-      .slice(0, options.sampleSizePerEvent * 8);
+      .slice(0, sampleSize * 8);
 
     const afterCandidates = allRuns
       .filter((run) => run.event === event)
       .filter((run) => run.createdAt > pivotTime)
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-      .slice(0, options.sampleSizePerEvent * 8);
+      .slice(0, sampleSize * 8);
 
-    const beforeSample = collectSample(beforeCandidates, options.sampleSizePerEvent);
-    const afterSample = collectSample(afterCandidates, options.sampleSizePerEvent);
+    const beforeSample = collectSample(beforeCandidates, sampleSize);
+    const afterSample = collectSample(afterCandidates, sampleSize);
 
-    if (beforeSample.length < options.sampleSizePerEvent || afterSample.length < options.sampleSizePerEvent) {
+    if (beforeSample.length < sampleSize || afterSample.length < sampleSize) {
       throw new Error(
         `insufficient sample for event ${event}: ` +
         `before=${String(beforeSample.length)} after=${String(afterSample.length)} ` +
-        `requested=${String(options.sampleSizePerEvent)}`
+        `requested=${String(sampleSize)}`
       );
     }
 
     const summary = summarizeBeforeAfter(beforeSample, afterSample, z);
     strata.push({
       event,
+      sampleSize,
       ...summary
     });
   }
@@ -302,6 +327,7 @@ async function main() {
     timestamp: new Date().toISOString(),
     workflow: options.workflow,
     sampleSizePerEvent: options.sampleSizePerEvent,
+    eventSampleSizes: options.eventSampleSizes,
     events: options.events,
     confidence: options.confidence,
     zScore: z,

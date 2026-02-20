@@ -10,7 +10,10 @@ This report measures `CI` workflow `node` job reliability before and after commi
 - Strata:
   - `push`
   - `pull_request`
-- Sample size: 8 runs per stratum before + 8 runs per stratum after (32 total).
+- Sample size profile:
+  - `push`: 3 before + 3 after
+  - `pull_request`: 7 before + 7 after
+  - total: 20 runs
 - Confidence interval model:
   - Wilson interval for each failure-rate estimate.
   - Normal approximation interval for failure-rate delta.
@@ -27,6 +30,12 @@ Reliability improvement is claimable only if:
 Use:
 - `npm run ci:reliability:claim`
 to enforce this criterion (`--require-non-overlap`).
+
+## Latest stratified result
+- Before (overall): failed 2 / total 10, failure rate 0.200000, CI [0.056681, 0.509843]
+- After (overall): failed 0 / total 10, failure rate 0.000000, CI [0.000000, 0.277540]
+- Delta failure rate: -0.200000, CI [-0.447923, 0.047923]
+- Claim status: `false` (interval criterion not met)
 
 ## Sample composition
 - Before and after samples are selected independently per stratum (`push`, `pull_request`).
