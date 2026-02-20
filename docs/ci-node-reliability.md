@@ -1,7 +1,7 @@
-# CI node reliability sample (before/after oracle-image cache hardening)
+# CI node reliability sample (rolling windows, stratified)
 
 ## Scope
-This report measures `CI` workflow `node` job reliability before and after commit `fd9887b1d9e3577b306deb75c1185be8cd774964` (`ci(oracle): prebuild and cache oracle image artifacts`), with stratified sampling by event type.
+This report measures `CI` workflow `node` job reliability using stratified rolling windows per event type.
 
 ## Method
 - Sample source: GitHub Actions runs fetched with `gh` CLI.
@@ -10,10 +10,13 @@ This report measures `CI` workflow `node` job reliability before and after commi
 - Strata:
   - `push`
   - `pull_request`
-- Sample size profile:
-  - `push`: 5 before + 5 after
-  - `pull_request`: 9 before + 9 after
-  - total: 28 runs
+- Window profile:
+  - rolling windows per stratum: 3 (`current`, `prior-1`, `prior-2`)
+  - sample size per window:
+    - `push`: 5 runs
+    - `pull_request`: 9 runs
+  - comparison for claim:
+    - `current` vs `prior-1` per stratum
 - Confidence interval model:
   - Wilson interval for each failure-rate estimate.
   - Normal approximation interval for failure-rate delta.
@@ -24,21 +27,27 @@ This report measures `CI` workflow `node` job reliability before and after commi
 
 ## Claim criterion
 Reliability improvement is claimable only if:
-- before/after failure-rate confidence intervals are non-overlapping
+- for each stratum and overall, `current` vs `prior-1` failure-rate confidence intervals are non-overlapping
 - and the upper bound of the failure-rate delta interval is below 0
+
+Claim status values:
+- `improved`: strict criterion satisfied.
+- `not-improved`: enough evidence exists, strict criterion not satisfied.
+- `insufficient-evidence`: windows are not comparable or both compared windows have zero failures.
 
 Use:
 - `npm run ci:reliability:claim`
 to enforce this criterion (`--require-non-overlap`).
 
 ## Latest stratified result
-- Before (overall): failed 2 / total 14, failure rate 0.142857, CI [0.040093, 0.399419]
-- After (overall): failed 0 / total 14, failure rate 0.000000, CI [0.000000, 0.215317]
-- Delta failure rate: -0.142857, CI [-0.326160, 0.040446]
-- Claim status: `false` (interval criterion not met)
+Run `npm run ci:reliability:sample:stratified` and read `reports/ci-node-reliability.json`.
+The report includes:
+- per-stratum window summaries and confidence intervals
+- current vs prior delta intervals
+- strict claim result (`claim.canClaimImprovement`)
 
 ## Sample composition
-- Before and after samples are selected independently per stratum (`push`, `pull_request`).
+- Windows are selected independently per stratum (`push`, `pull_request`).
 - Each stratum is sorted by recency and sampled deterministically from completed runs with completed `node` jobs.
 
 ## Interpretation boundary

@@ -31,19 +31,24 @@ Local-only commands:
 
 1. `npm run field:oracles`
 2. `npm run field:visible-text:ab`
-3. `npm run field:triage:fixtures`
+3. `npm run field:triage:taxonomy`
+4. `npm run field:triage:fixtures`
 
 Artifacts are written under ignored paths in `realworld/corpus/`:
 - `reports/visible-text-policy-compare.ndjson`
 - `reports/visible-text-policy-compare.json`
+- `reports/visible-text-residual-taxonomy.json`
+- `reports/visible-text-residual-minimization.json`
 - `triage/visible-text-fixture-candidates.json`
 - `triage/visible-text-fixture-candidates.md`
+- `triage/minimized/*.html` (local-only minimized residual inputs)
 
 The generated candidates contain only synthetic HTML snippets and expected text outputs.
 
-Policy search notes:
-- `field:visible-text:ab` now evaluates multiple fallback policies against offline oracle outputs.
-- The report selects `recommendedCandidatePolicyId` deterministically using:
-  1. highest mean delta from baseline
-  2. highest mean normalized token F1
-  3. lowest worse-count
+Policy and taxonomy notes:
+- `field:visible-text:ab` evaluates candidate policies against offline oracle outputs.
+- Policy promotion uses `meaningful-content` as the decision surface and keeps baseline when candidate delta is negative.
+- `field:triage:taxonomy` classifies baseline residual mass into deterministic buckets (`missing:<sourceRole>` / `extra:oracle`) and deterministic `extra:oracle:*` subclasses.
+- Top-bucket coverage must be at least `0.95` of baseline residual mass.
+- `extra:oracle:unclassified` residual share must be at most `0.05`.
+- `field:triage:fixtures` builds synthetic fixture candidates from observed top baseline buckets only.
