@@ -46,6 +46,15 @@ jobs:
       - name: Install
         run: npm ci
 
+      - name: Restore oracle image cache
+        uses: actions/cache@v4
+        with:
+          path: tmp/oracle-image
+          key: ${{ runner.os }}-oracle-image-${{ hashFiles('scripts/oracles/oracle-image.lock.json') }}
+
+      - name: Prepare oracle image
+        run: npm run oracle:image:prepare
+
       - name: Static analysis
         run: npm run lint && npm run typecheck
 
