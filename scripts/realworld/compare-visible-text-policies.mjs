@@ -24,6 +24,7 @@ const CHALLENGE_SURFACE = "challenge-shell";
 const MIN_DECISION_SURFACE_DELTA = 0;
 const MIN_CHALLENGE_SURFACE_DELTA = -0.002;
 const MAX_RENDERED_STYLE_RULES = 512;
+const RENDERED_TERMINAL_POLICY_ID = "rendered-terminal-v1";
 const RENDERED_STYLE_POLICY_ID = "rendered-style-v1";
 const STYLE_DECLARATION_HIDE_VALUES = new Set(["none", "hidden", "collapse"]);
 
@@ -74,6 +75,15 @@ const POLICIES = Object.freeze([
       stripTitleAll: true,
       stripAriaLabelFromTags: ["a", "button"]
     })
+  },
+  {
+    id: RENDERED_TERMINAL_POLICY_ID,
+    description: "terminal-aligned rendered-visible approximation (do not skip hidden/aria-hidden subtrees)",
+    options: Object.freeze({
+      skipHiddenSubtrees: false
+    }),
+    mode: "rendered-terminal-v1",
+    transform: (html) => html
   },
   {
     id: RENDERED_STYLE_POLICY_ID,
@@ -528,7 +538,7 @@ async function main() {
 
   const runId = sha256HexString(
     JSON.stringify({
-      script: "compare-visible-text-policies-v2",
+      script: "compare-visible-text-policies-v3",
       oracleRunIds: [...new Set(eligibleRecords.map((record) => record.runId))].sort(),
       policies: POLICIES.map((policy) => policy.id),
       compared: baseRecords.map((record) => ({
