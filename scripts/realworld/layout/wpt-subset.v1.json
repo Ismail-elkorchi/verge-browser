@@ -1,0 +1,93 @@
+{
+  "suite": "layout-pilot-wpt-subset",
+  "version": "v1",
+  "source": {
+    "repository": "https://github.com/web-platform-tests/wpt",
+    "commit": "3d3a9202727fcceb8da22df8ee0ec86dde8361ce",
+    "retrievedAtIso": "2026-02-20T00:00:00Z"
+  },
+  "scope": {
+    "layoutSurface": [
+      "block-flow",
+      "inline-flow"
+    ],
+    "excluded": [
+      "grid",
+      "flex",
+      "absolute-positioning",
+      "table-layout-model"
+    ]
+  },
+  "snapshots": [
+    {
+      "id": "snapshot-a",
+      "cases": [
+        {
+          "id": "wpt-flow-div-align",
+          "path": "html/rendering/non-replaced-elements/flow-content-0/div-align.html",
+          "sha256": "e964c0968c4a13564b9ca83e5d6c63aee02c6d312672e2e9c75402a2e100af90"
+        },
+        {
+          "id": "wpt-flow-figure",
+          "path": "html/rendering/non-replaced-elements/flow-content-0/figure.html",
+          "sha256": "3f54bef977745553e7fcdb374de5e9acf135a8235af99cf58ea78103d93ea6c6"
+        },
+        {
+          "id": "wpt-flow-dialog",
+          "path": "html/rendering/non-replaced-elements/flow-content-0/dialog.html",
+          "sha256": "adce2e9b6b6d72da66d4085d68b254fe93d7258e9fed42e31e9b580c571f1bcb"
+        },
+        {
+          "id": "wpt-flow-dialog-display",
+          "path": "html/rendering/non-replaced-elements/flow-content-0/dialog-display.html",
+          "sha256": "db66a234a1a15870b3f8ac0a0805f6a2c32eba0b98d92cd3ad68d491d85beaf1"
+        },
+        {
+          "id": "wpt-inline-b-strong",
+          "path": "html/rendering/non-replaced-elements/phrasing-content-0/b-strong-styles.html",
+          "sha256": "8a437fe558f6165641276ad574ba7298067b86d1582cf965603ec4efe66a0d56"
+        },
+        {
+          "id": "wpt-flow-headings",
+          "path": "html/rendering/non-replaced-elements/sections-and-headings/headings-styles.html",
+          "sha256": "c76340e0d68575762f9f4bcc51d2c1a36b791e16d869c62a5721231c051ca348"
+        }
+      ]
+    },
+    {
+      "id": "snapshot-b",
+      "cases": [
+        {
+          "id": "wpt-list-styles",
+          "path": "html/rendering/non-replaced-elements/lists/lists-styles.html",
+          "sha256": "78580e2a3f190f69f9d5fe5cee018dff6d6a85772f1134de3518924d1f2c8fe9"
+        },
+        {
+          "id": "wpt-list-styles-quirks",
+          "path": "html/rendering/non-replaced-elements/lists/lists-styles-quirks.html",
+          "sha256": "8669c36f8fc670cfa45760ac2ed6ab1243034c892d97a52580f02b06c13a756c"
+        },
+        {
+          "id": "wpt-list-li-text-align",
+          "path": "html/rendering/non-replaced-elements/lists/li-text-align.html",
+          "sha256": "3f248fd5f1a602ad7943ed11598b02bfecd694215a32ef7b88e9086af91350ec"
+        },
+        {
+          "id": "wpt-list-ol-type",
+          "path": "html/rendering/non-replaced-elements/lists/ol-type-supported.html",
+          "sha256": "bdd921a3e67cdea07bf5a97f90ab775071ea26a55a7c37bbc7a6a02233c0af51"
+        },
+        {
+          "id": "wpt-list-ul-type",
+          "path": "html/rendering/non-replaced-elements/lists/ul-type-supported.html",
+          "sha256": "f8f2ce4b69e0a24b3658f16f1a986e9b7a02555a86b0754b6d0a8d70bfee7f68"
+        },
+        {
+          "id": "wpt-flow-search-styles",
+          "path": "html/rendering/non-replaced-elements/flow-content-0/search-styles.html",
+          "sha256": "e50b73dd3118f71f5282697ac896b0188c62e3ca354f2e00be821ef6b3aa8b78"
+        }
+      ]
+    }
+  ]
+}

@@ -36,6 +36,27 @@ npm run field:oracles
 npm run field:report
 ```
 
+Layout pilot commands (local-only):
+
+```bash
+npm run field:layout:wpt:fetch
+npm run field:layout:wpt:run
+```
+
+Layout pilot uses a pinned WPT subset manifest:
+
+- `scripts/realworld/layout/wpt-subset.v1.json`
+
+Raw WPT files are cached under ignored paths:
+
+- `realworld/corpus/layout/cache/wpt/<commit>/...`
+
+Reports are written under ignored paths:
+
+- `realworld/corpus/layout/reports/layout-wpt-fetch.json`
+- `realworld/corpus/layout/reports/layout-pilot.json`
+- `realworld/corpus/layout/reports/layout-pilot.ndjson`
+
 Visible-text policy compare dependency:
 
 - `field:visible-text:ab` requires css-parser style-signal helpers.
