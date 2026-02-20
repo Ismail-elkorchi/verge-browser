@@ -49,3 +49,9 @@ Oracle source selection:
 - `VERGE_ORACLE_SOURCE=host`: only use host binaries from `PATH`.
 - `VERGE_ORACLE_SOURCE=image`: only use the rootless oracle image binaries.
 - `VERGE_ORACLE_REBUILD_LOCK=0`: keep the local image lock file if already present (default rebuild is enabled).
+
+Visible-text policy candidates:
+
+- `baseline`: html-parser default visible-text contract.
+- `rendered-terminal-v1`: terminal-aligned rendered-visible approximation that does not skip `hidden`/`aria-hidden` subtrees.
+- `rendered-style-v1`: style-signal filtered rendered-visible approximation using css-parser selectors and declarations.

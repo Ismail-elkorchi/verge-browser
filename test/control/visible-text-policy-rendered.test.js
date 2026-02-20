@@ -15,7 +15,7 @@ async function writeNdjson(path, records) {
   await writeFile(path, `${lines.join("\n")}\n`, "utf8");
 }
 
-test("compare-visible-text-policies includes rendered-style-v1 policy and diagnostics", async () => {
+test("compare-visible-text-policies includes rendered candidates and diagnostics", async () => {
   const fixtureRoot = await mkdtemp(join(tmpdir(), "verge-visible-style-"));
   const corpusDir = join(fixtureRoot, "corpus");
   const cacheHtmlDir = join(corpusDir, "cache/html");
@@ -118,10 +118,96 @@ export function querySelectorAll() {
       summary.policies.some((entry) => entry.id === "rendered-style-v1"),
       true
     );
+    assert.equal(
+      summary.policies.some((entry) => entry.id === "rendered-terminal-v1"),
+      true
+    );
     assert.equal(summary.recommendedCandidatePolicyId, "rendered-style-v1");
     assert.equal(summary.renderedStyleDiagnostics.records, 1);
     assert.equal(summary.renderedStyleDiagnostics.meanHiddenRootNodeCount, 1);
     assert.equal(summary.renderedStyleDiagnostics.meanHiddenSubtreeNodeCount, 2);
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("compare-visible-text-policies promotes rendered-terminal-v1 when hidden attribute text matches oracle", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "verge-visible-terminal-"));
+  const corpusDir = join(fixtureRoot, "corpus");
+  const cacheHtmlDir = join(corpusDir, "cache/html");
+  const cacheOracleDir = join(corpusDir, "cache/oracle/lynx");
+  const manifestsDir = join(corpusDir, "manifests");
+  const reportsDir = join(corpusDir, "reports");
+  const triageDir = join(corpusDir, "triage");
+
+  await mkdir(cacheHtmlDir, { recursive: true });
+  await mkdir(cacheOracleDir, { recursive: true });
+  await mkdir(manifestsDir, { recursive: true });
+  await mkdir(reportsDir, { recursive: true });
+  await mkdir(triageDir, { recursive: true });
+
+  const html = "<html><body><p hidden>hidden-text</p><p>public</p></body></html>";
+  const pageSha = sha256Hex(html);
+  const oracleOutput = "hidden-text public";
+  const stdoutSha = sha256Hex(oracleOutput);
+
+  await writeFile(join(cacheHtmlDir, `${pageSha}.bin`), html, "utf8");
+  await writeFile(join(cacheOracleDir, `${stdoutSha}.txt`), oracleOutput, "utf8");
+
+  await writeNdjson(join(manifestsDir, "pages.ndjson"), [
+    {
+      url: "https://example-hidden.test/",
+      finalUrl: "https://example-hidden.test/",
+      sha256: pageSha
+    }
+  ]);
+
+  await writeNdjson(join(reportsDir, "oracle-compare.ndjson"), [
+    {
+      runId: "fixture-hidden",
+      pageSurface: "meaningful-content",
+      pageSurfaceReasons: ["fixture"],
+      error: null,
+      pageSha256: pageSha,
+      finalUrl: "https://example-hidden.test/",
+      tool: "lynx",
+      width: 80,
+      stdoutSha256: stdoutSha
+    }
+  ]);
+
+  const cssParserStubPath = join(fixtureRoot, "css-parser-stub.mjs");
+  await writeFile(cssParserStubPath, `
+export function extractInlineStyleSignals() { return []; }
+export function extractStyleRuleSignals() { return []; }
+export function querySelectorAll() { return []; }
+`, "utf8");
+
+  try {
+    const execution = spawnSync(
+      process.execPath,
+      ["scripts/realworld/compare-visible-text-policies.mjs"],
+      {
+        cwd: resolve(process.cwd()),
+        env: {
+          ...process.env,
+          VERGE_CORPUS_DIR: corpusDir,
+          VERGE_CSS_PARSER_MODULE_PATH: cssParserStubPath
+        },
+        encoding: "utf8"
+      }
+    );
+
+    assert.equal(execution.status, 0, `compare script failed: ${execution.stderr}`);
+
+    const summary = JSON.parse(
+      await readFile(join(reportsDir, "visible-text-policy-compare.json"), "utf8")
+    );
+
+    assert.equal(summary.gates.ok, true);
+    assert.equal(summary.recommendedCandidatePolicyId, "rendered-terminal-v1");
+    assert.equal(summary.decisionSurface.candidate.policyId, "rendered-terminal-v1");
+    assert.equal(summary.decisionSurface.candidate.meanDeltaNormalizedTokenF1 > 0, true);
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true });
   }

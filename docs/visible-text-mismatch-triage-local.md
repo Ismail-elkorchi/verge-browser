@@ -51,7 +51,9 @@ The generated candidates contain only synthetic HTML snippets and expected text 
 
 Policy and taxonomy notes:
 - `field:visible-text:ab` evaluates candidate policies against offline oracle outputs.
-- Candidate set includes `rendered-style-v1` (style-signal filtered rendered-visible approximation).
+- Candidate set includes:
+  - `rendered-terminal-v1` (terminal-aligned rendered-visible approximation; does not skip `hidden`/`aria-hidden` subtrees).
+  - `rendered-style-v1` (style-signal filtered rendered-visible approximation).
 - Policy promotion uses `meaningful-content` as the decision surface and keeps baseline when candidate delta is negative.
 - `field:triage:taxonomy` classifies baseline residual mass into deterministic buckets (`missing:<sourceRole>` / `extra:oracle`) and deterministic `extra:oracle:*` subclasses.
 - Top-bucket coverage must be at least `0.95` of baseline residual mass.
