@@ -299,6 +299,31 @@ function evaluateClaim(summary) {
   };
 }
 
+function classifyClaimStatus({ beforeSummary, afterSummary, allStrataComparable, comparableStrataCount, canClaimImprovement }) {
+  if (!allStrataComparable || comparableStrataCount === 0) {
+    return {
+      status: "insufficient-evidence",
+      reason: "not enough comparable strata windows"
+    };
+  }
+  if (beforeSummary.failed === 0 && afterSummary.failed === 0) {
+    return {
+      status: "insufficient-evidence",
+      reason: "no observed failures in compared windows"
+    };
+  }
+  if (canClaimImprovement) {
+    return {
+      status: "improved",
+      reason: "non-overlap and negative upper bound criteria satisfied"
+    };
+  }
+  return {
+    status: "not-improved",
+    reason: "criteria not satisfied"
+  };
+}
+
 function summarizeWindow(window, z) {
   const summary = summarizeSample(window.runs);
   return {
@@ -367,6 +392,15 @@ function buildRollingReport(allRuns, options, z) {
       && comparableStrata.length === strata.length
       && comparableStrata.every((entry) => entry.claim.canClaimImprovement)
   };
+  const claimStatus = classifyClaimStatus({
+    beforeSummary: overallComparison.before.summary,
+    afterSummary: overallComparison.after.summary,
+    allStrataComparable: claim.allStrataComparable,
+    comparableStrataCount: comparableStrata.length,
+    canClaimImprovement: claim.canClaimImprovement
+  });
+  claim.status = claimStatus.status;
+  claim.reason = claimStatus.reason;
 
   return {
     mode: "rolling",
@@ -461,13 +495,25 @@ async function main() {
   const modeReport = options.mode === "pivot"
     ? buildPivotReport(allRuns, options, z)
     : buildRollingReport(allRuns, options, z);
+  if (modeReport.mode === "pivot") {
+    const pivotClaimStatus = classifyClaimStatus({
+      beforeSummary: modeReport.before.summary,
+      afterSummary: modeReport.after.summary,
+      allStrataComparable: true,
+      comparableStrataCount: Array.isArray(modeReport.strata) ? modeReport.strata.length : 0,
+      canClaimImprovement: modeReport.claim.canClaimImprovement
+    });
+    modeReport.claim.status = pivotClaimStatus.status;
+    modeReport.claim.reason = pivotClaimStatus.reason;
+  }
 
-  if (options.requireNonOverlap && !modeReport.claim.canClaimImprovement) {
+  if (options.requireNonOverlap && modeReport.claim.status !== "improved") {
     throw new Error(
       "non-overlap claim criterion not met: " +
       `nonOverlap=${String(modeReport.claim.nonOverlappingFailureRateIntervals)} ` +
       `deltaUpperBelowZero=${String(modeReport.claim.deltaUpperBelowZero)} ` +
-      `allStrataClaimable=${String(modeReport.claim.allStrataClaimable)}`
+      `allStrataClaimable=${String(modeReport.claim.allStrataClaimable)} ` +
+      `status=${String(modeReport.claim.status)}`
     );
   }
 

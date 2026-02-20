@@ -30,6 +30,11 @@ Reliability improvement is claimable only if:
 - for each stratum and overall, `current` vs `prior-1` failure-rate confidence intervals are non-overlapping
 - and the upper bound of the failure-rate delta interval is below 0
 
+Claim status values:
+- `improved`: strict criterion satisfied.
+- `not-improved`: enough evidence exists, strict criterion not satisfied.
+- `insufficient-evidence`: windows are not comparable or both compared windows have zero failures.
+
 Use:
 - `npm run ci:reliability:claim`
 to enforce this criterion (`--require-non-overlap`).

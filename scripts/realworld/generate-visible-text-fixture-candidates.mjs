@@ -1,384 +1,231 @@
 import { readFile, writeFile } from "node:fs/promises";
 
-import { parseBytes } from "html-parser";
+import { corpusPath, ensureCorpusDirs, resolveCorpusDir, sha256HexString, writeJson } from "./lib.mjs";
 
-import {
-  corpusPath,
-  ensureCorpusDirs,
-  readNdjson,
-  resolveCorpusDir,
-  sha256HexString,
-  writeJson
-} from "./lib.mjs";
-
-const FEATURE_TEMPLATES = Object.freeze({
-  "interactive-aria-label-only": {
-    title: "Interactive element uses aria-label fallback",
-    syntheticHtml: "<main><button aria-label=\"Open menu\"></button><p>Next</p></main>",
-    expectedDefaultText: "Next",
-    expectedCandidateText: "Open menu Next",
-    notes: "Verifies optional accessible-name fallback for unlabeled button content."
+const FIXTURE_TEMPLATES = Object.freeze({
+  "missing:text-node": {
+    title: "Inline text node retention",
+    residualClassId: "missing-text-node",
+    syntheticHtml: "<main><p>alpha <strong>beta</strong> gamma</p></main>",
+    expectedText: "alpha beta gamma",
+    notes: "Covers plain text-node loss across inline boundaries."
   },
-  "interactive-title-only": {
-    title: "Interactive element uses title fallback",
-    syntheticHtml: "<main><a title=\"Open details\"></a><p>Next</p></main>",
-    expectedDefaultText: "Next",
-    expectedCandidateText: "Open details Next",
-    notes: "Verifies title fallback when aria-label is absent."
+  "missing:noscript-fallback": {
+    title: "Noscript visible text retention",
+    residualClassId: "missing-noscript-fallback",
+    syntheticHtml: "<main><noscript>fallback text</noscript><p>tail</p></main>",
+    expectedText: "fallback text tail",
+    notes: "Covers noscript fallback text extraction in visible flow."
   },
-  "input-value-fallback": {
-    title: "Input value contributes when no visible label exists",
-    syntheticHtml: "<main><input type=\"submit\" value=\"Search\"><p>Done</p></main>",
-    expectedDefaultText: "Done",
-    expectedCandidateText: "Search Done",
-    notes: "Validates input value contribution in fallback mode."
+  "missing:img-alt": {
+    title: "Image alt contribution",
+    residualClassId: "missing-img-alt",
+    syntheticHtml: "<main><img alt=\"brand logo\"><p>end</p></main>",
+    expectedText: "brand logo end",
+    notes: "Covers alt text contribution contract."
   },
-  "aria-hidden-subtree-suppression": {
-    title: "aria-hidden subtree stays excluded",
-    syntheticHtml: "<main><div aria-hidden=\"true\">Hidden text</div><p>Shown</p></main>",
-    expectedDefaultText: "Shown",
-    expectedCandidateText: "Shown",
-    notes: "Ensures fallback does not leak hidden subtree text."
+  "missing:input-value": {
+    title: "Input value contribution",
+    residualClassId: "missing-input-value",
+    syntheticHtml: "<main><input type=\"submit\" value=\"send\"><p>end</p></main>",
+    expectedText: "send end",
+    notes: "Covers input value contribution for unlabeled controls."
   },
-  "hidden-subtree-suppression": {
-    title: "hidden subtree stays excluded",
-    syntheticHtml: "<main><section hidden>Hidden block</section><p>Shown</p></main>",
-    expectedDefaultText: "Shown",
-    expectedCandidateText: "Shown",
-    notes: "Ensures hidden attribute suppression remains stable."
+  "missing:button-value": {
+    title: "Button value attribute contribution",
+    residualClassId: "missing-button-value",
+    syntheticHtml: "<main><button value=\"Continue\"></button><p>end</p></main>",
+    expectedText: "Continue end",
+    notes: "Covers value attribute contribution on unlabeled button elements."
   },
-  "table-separator-shape": {
-    title: "Table cell and row separators remain deterministic",
-    syntheticHtml: "<table><tr><td>A</td><td>B</td></tr><tr><td>C</td><td>D</td></tr></table>",
-    expectedDefaultText: "A\tB\nC\tD",
-    expectedCandidateText: "A\tB\nC\tD",
-    notes: "Protects table separator semantics while fallback option is enabled."
+  "missing:block-break": {
+    title: "Block break preservation",
+    residualClassId: "missing-block-break",
+    syntheticHtml: "<main><div>alpha</div><div>beta</div></main>",
+    expectedText: "alpha\n\nbeta",
+    notes: "Covers deterministic block boundary breaks."
   },
-  "foreign-content-inline-text": {
-    title: "SVG and MathML inline text stays visible",
-    syntheticHtml: "<p><svg><text>X</text></svg><math><mi>y</mi></math></p>",
-    expectedDefaultText: "Xy",
-    expectedCandidateText: "Xy",
-    notes: "Protects foreign-content visible text extraction."
+  "missing:paragraph-break": {
+    title: "Paragraph break preservation",
+    residualClassId: "missing-paragraph-break",
+    syntheticHtml: "<main><p>alpha</p><p>beta</p></main>",
+    expectedText: "alpha\n\nbeta",
+    notes: "Covers deterministic paragraph boundary breaks."
   },
-  "pre-whitespace-preservation": {
-    title: "Preformatted whitespace remains preserved",
-    syntheticHtml: "<pre>line 1\n  line 2</pre>",
-    expectedDefaultText: "line 1\n  line 2",
-    expectedCandidateText: "line 1\n  line 2",
-    notes: "Ensures whitespace preservation remains unchanged by fallback behavior."
+  "missing:table-row-break": {
+    title: "Table row separator",
+    residualClassId: "missing-table-row-break",
+    syntheticHtml: "<table><tr><td>A</td></tr><tr><td>B</td></tr></table>",
+    expectedText: "A\nB",
+    notes: "Covers row separator semantics."
   },
-  "template-exclusion": {
-    title: "Template content remains excluded",
-    syntheticHtml: "<main><template><p>Hidden</p></template><p>Shown</p></main>",
-    expectedDefaultText: "Shown",
-    expectedCandidateText: "Shown",
-    notes: "Guards template exclusion contract."
+  "missing:table-cell-separator": {
+    title: "Table cell separator",
+    residualClassId: "missing-table-cell-separator",
+    syntheticHtml: "<table><tr><td>A</td><td>B</td></tr></table>",
+    expectedText: "A\tB",
+    notes: "Covers tab separator semantics for table cells."
   },
-  "script-style-exclusion": {
-    title: "Script and style content remain excluded",
-    syntheticHtml: "<main><style>.x{}</style><script>var x = 1;</script><p>Shown</p></main>",
-    expectedDefaultText: "Shown",
-    expectedCandidateText: "Shown",
-    notes: "Guards script/style exclusion contract."
+  "missing:br-break": {
+    title: "Line break element",
+    residualClassId: "missing-br-break",
+    syntheticHtml: "<main>alpha<br>beta</main>",
+    expectedText: "alpha\nbeta",
+    notes: "Covers explicit `<br>` newline semantics."
   }
 });
 
-function getAttribute(node, name) {
-  if (!node || node.kind !== "element") {
-    return null;
-  }
-  const lowerName = name.toLowerCase();
-  for (const attribute of node.attributes) {
-    if (attribute.name.toLowerCase() === lowerName) {
-      return attribute.value;
-    }
-  }
-  return null;
+async function readRequiredJson(path) {
+  const source = await readFile(path, "utf8");
+  return JSON.parse(source);
 }
 
-function subtreeHasVisibleText(node) {
-  if (!node || typeof node !== "object") {
-    return false;
+function createFixtureCandidate(bucket) {
+  const template = FIXTURE_TEMPLATES[bucket.bucketId] ?? null;
+  if (!template) {
+    return {
+      bucketId: bucket.bucketId,
+      residualClassId: bucket.residualClassId,
+      action: "classify-not-in-scope",
+      reason: "No deterministic synthetic fixture template for this residual class.",
+      evidence: {
+        residualShare: bucket.residualShare,
+        tokenCount: bucket.tokenCount,
+        sampleCount: bucket.examples.length
+      },
+      samplePages: bucket.examples.map((entry) => ({
+        pageSha256: entry.pageSha256,
+        finalUrl: entry.finalUrl,
+        tool: entry.tool,
+        width: entry.width,
+        contribution: entry.contribution
+      }))
+    };
   }
-  if (node.kind === "text") {
-    return node.value.trim().length > 0;
-  }
-  if (node.kind !== "element") {
-    return false;
-  }
-  if (getAttribute(node, "hidden") !== null) {
-    return false;
-  }
-  if ((getAttribute(node, "aria-hidden") ?? "").trim().toLowerCase() === "true") {
-    return false;
-  }
-  return node.children.some((child) => subtreeHasVisibleText(child));
+
+  return {
+    bucketId: bucket.bucketId,
+    residualClassId: template.residualClassId,
+    action: "fixture",
+    title: template.title,
+    syntheticHtml: template.syntheticHtml,
+    expectedText: template.expectedText,
+    notes: template.notes,
+    evidence: {
+      residualShare: bucket.residualShare,
+      tokenCount: bucket.tokenCount,
+      sampleCount: bucket.examples.length
+    },
+    samplePages: bucket.examples.map((entry) => ({
+      pageSha256: entry.pageSha256,
+      finalUrl: entry.finalUrl,
+      tool: entry.tool,
+      width: entry.width,
+      contribution: entry.contribution
+    }))
+  };
 }
 
-function detectFeatures(tree) {
-  const features = new Set();
+function markdownForCandidates(report) {
+  const lines = [
+    "# Visible-text fixture candidates",
+    "",
+    `runId: ${report.runId}`,
+    `sourceTaxonomyRunId: ${report.sourceTaxonomyRunId}`,
+    `decisionSurface: ${report.decisionSurface}`,
+    `topBucketCoverageShare: ${String(report.topBucketCoverageShare)}`,
+    `fixtureCandidates: ${String(report.fixtureCandidates.length)}`,
+    `classificationsOnly: ${String(report.classificationsOnly.length)}`,
+    "",
+    "## Candidates"
+  ];
 
-  function visit(node) {
-    if (!node || typeof node !== "object" || node.kind !== "element") {
-      return;
-    }
+  for (const candidate of report.fixtureCandidates) {
+    lines.push(
+      `### ${candidate.bucketId} -> ${candidate.residualClassId}`,
+      `- action: ${candidate.action}`,
+      `- title: ${candidate.title}`,
+      `- residualShare: ${String(candidate.evidence.residualShare)}`,
+      `- sampleCount: ${String(candidate.evidence.sampleCount)}`,
+      "```html",
+      candidate.syntheticHtml,
+      "```",
+      `- expectedText: ${candidate.expectedText}`,
+      `- notes: ${candidate.notes}`,
+      ""
+    );
+  }
 
-    const tagName = node.tagName.toLowerCase();
-    const hiddenValue = getAttribute(node, "hidden");
-    const ariaHiddenValue = (getAttribute(node, "aria-hidden") ?? "").trim().toLowerCase();
-    const ariaLabelValue = (getAttribute(node, "aria-label") ?? "").trim();
-    const titleValue = (getAttribute(node, "title") ?? "").trim();
-    const valueValue = (getAttribute(node, "value") ?? "").trim();
-    const typeValue = (getAttribute(node, "type") ?? "").trim().toLowerCase();
-
-    if (hiddenValue !== null) {
-      features.add("hidden-subtree-suppression");
-    }
-    if (ariaHiddenValue === "true") {
-      features.add("aria-hidden-subtree-suppression");
-    }
-    if (tagName === "table" || tagName === "tr" || tagName === "td" || tagName === "th") {
-      features.add("table-separator-shape");
-    }
-    if (tagName === "template") {
-      features.add("template-exclusion");
-    }
-    if (tagName === "script" || tagName === "style") {
-      features.add("script-style-exclusion");
-    }
-    if (tagName === "svg" || tagName === "math") {
-      features.add("foreign-content-inline-text");
-    }
-    if (tagName === "pre" || tagName === "code" || tagName === "textarea") {
-      features.add("pre-whitespace-preservation");
-    }
-    if ((tagName === "a" || tagName === "button") && !subtreeHasVisibleText(node)) {
-      if (ariaLabelValue.length > 0) {
-        features.add("interactive-aria-label-only");
-      } else if (titleValue.length > 0) {
-        features.add("interactive-title-only");
-      }
-    }
-    if (tagName === "input" && typeValue !== "hidden" && !subtreeHasVisibleText(node)) {
-      if (ariaLabelValue.length > 0) {
-        features.add("interactive-aria-label-only");
-      } else if (titleValue.length > 0) {
-        features.add("interactive-title-only");
-      } else if (valueValue.length > 0) {
-        features.add("input-value-fallback");
-      }
-    }
-
-    for (const child of node.children) {
-      visit(child);
+  if (report.classificationsOnly.length > 0) {
+    lines.push("## Classified without fixture template");
+    for (const candidate of report.classificationsOnly) {
+      lines.push(
+        `- ${candidate.bucketId} (${candidate.residualClassId}): ${candidate.reason} ` +
+        `[residualShare=${String(candidate.evidence.residualShare)}]`
+      );
     }
   }
 
-  for (const node of tree.children) {
-    visit(node);
-  }
-  return features;
-}
-
-function fixed6(value) {
-  return Number(value.toFixed(6));
-}
-
-function mean(values) {
-  if (values.length === 0) {
-    return 0;
-  }
-  return values.reduce((sum, value) => sum + value, 0) / values.length;
-}
-
-async function readOptionalJson(path) {
-  try {
-    const source = await readFile(path, "utf8");
-    return JSON.parse(source);
-  } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
-      return null;
-    }
-    throw error;
-  }
+  return `${lines.join("\n")}\n`;
 }
 
 async function main() {
   const corpusDir = resolveCorpusDir();
   await ensureCorpusDirs(corpusDir);
 
-  const compareRecords = await readNdjson(corpusPath(corpusDir, "reports/visible-text-policy-compare.ndjson"));
-  if (compareRecords.length === 0) {
-    throw new Error("policy compare report missing; run npm run field:visible-text:ab first");
-  }
-  const residualMinimization = await readOptionalJson(
-    corpusPath(corpusDir, "reports/visible-text-residual-minimization.json")
+  const taxonomyReport = await readRequiredJson(
+    corpusPath(corpusDir, "reports/visible-text-residual-taxonomy.json")
   );
-
-  const pageScores = new Map();
-  for (const record of compareRecords) {
-    const key = record.pageSha256;
-    if (!pageScores.has(key)) {
-      pageScores.set(key, {
-        pageSha256: record.pageSha256,
-        finalUrl: record.finalUrl,
-        scores: []
-      });
-    }
-    pageScores.get(key).scores.push(record.delta.normalizedTokenF1);
+  if (taxonomyReport?.taxonomyCoverage?.pass !== true) {
+    throw new Error("taxonomy coverage failed; run npm run field:triage:taxonomy first");
   }
 
-  const pageFeatures = new Map();
-  for (const [pageSha256, scoreEntry] of pageScores.entries()) {
-    const htmlBytes = new Uint8Array(await readFile(corpusPath(corpusDir, `cache/html/${pageSha256}.bin`)));
-    const tree = parseBytes(htmlBytes, {
-      captureSpans: false,
-      trace: false
-    });
-    const features = [...detectFeatures(tree)].sort((left, right) => left.localeCompare(right));
-    const meanDelta = fixed6(mean(scoreEntry.scores));
-    pageFeatures.set(pageSha256, {
-      pageSha256,
-      finalUrl: scoreEntry.finalUrl,
-      meanDelta,
-      features
-    });
+  const sourceBuckets = Array.isArray(taxonomyReport.topBuckets) ? taxonomyReport.topBuckets : [];
+  if (sourceBuckets.length === 0) {
+    throw new Error("taxonomy report has no top buckets");
   }
 
-  const featureEvidence = new Map();
-  for (const page of pageFeatures.values()) {
-    for (const featureId of page.features) {
-      if (!FEATURE_TEMPLATES[featureId]) {
-        continue;
-      }
-      if (!featureEvidence.has(featureId)) {
-        featureEvidence.set(featureId, {
-          featureId,
-          pages: [],
-          deltas: []
-        });
-      }
-      const bucket = featureEvidence.get(featureId);
-      bucket.pages.push({
-        pageSha256: page.pageSha256,
-        finalUrl: page.finalUrl,
-        meanDeltaNormalizedTokenF1: page.meanDelta
-      });
-      bucket.deltas.push(page.meanDelta);
-    }
-  }
-
-  const evidenceList = [...featureEvidence.values()]
-    .map((entry) => ({
-      featureId: entry.featureId,
-      pagesWithFeature: entry.pages.length,
-      meanDeltaNormalizedTokenF1: fixed6(mean(entry.deltas)),
-      maxDeltaNormalizedTokenF1: fixed6(Math.max(...entry.deltas)),
-      minDeltaNormalizedTokenF1: fixed6(Math.min(...entry.deltas)),
-      samplePages: [...entry.pages]
-        .sort((left, right) => right.meanDeltaNormalizedTokenF1 - left.meanDeltaNormalizedTokenF1)
-        .slice(0, 5)
-    }))
-    .sort((left, right) => {
-      if (right.meanDeltaNormalizedTokenF1 !== left.meanDeltaNormalizedTokenF1) {
-        return right.meanDeltaNormalizedTokenF1 - left.meanDeltaNormalizedTokenF1;
-      }
-      if (right.pagesWithFeature !== left.pagesWithFeature) {
-        return right.pagesWithFeature - left.pagesWithFeature;
-      }
-      return left.featureId.localeCompare(right.featureId);
-    });
-
-  const candidateList = evidenceList
-    .filter((entry) => FEATURE_TEMPLATES[entry.featureId])
-    .map((entry, index) => {
-      const template = FEATURE_TEMPLATES[entry.featureId];
-      return {
-        candidateId: `candidate-${String(index + 1).padStart(3, "0")}`,
-        featureId: entry.featureId,
-        title: template.title,
-        evidence: {
-          pagesWithFeature: entry.pagesWithFeature,
-          meanDeltaNormalizedTokenF1: entry.meanDeltaNormalizedTokenF1
-        },
-        syntheticHtml: template.syntheticHtml,
-        expectedDefaultText: template.expectedDefaultText,
-        expectedCandidateText: template.expectedCandidateText,
-        notes: template.notes
-      };
-    });
-
-  const runId = sha256HexString(
-    JSON.stringify({
-      script: "generate-visible-text-fixture-candidates-v1",
-      sourceRunIds: [...new Set(compareRecords.map((record) => record.runId))].sort(),
-      candidateFeatureIds: candidateList.map((candidate) => candidate.featureId)
-    })
+  const candidates = sourceBuckets.map((bucket) => createFixtureCandidate(bucket));
+  const fixtureCandidates = candidates.filter((entry) => entry.action === "fixture");
+  const classificationsOnly = candidates.filter((entry) => entry.action !== "fixture");
+  const linkagePass = candidates.every((entry) =>
+    typeof entry.bucketId === "string"
+    && entry.bucketId.length > 0
+    && typeof entry.residualClassId === "string"
+    && entry.residualClassId.length > 0
   );
+  if (!linkagePass) {
+    throw new Error("fixture candidate linkage failed: bucketId/residualClassId missing");
+  }
 
   const report = {
     suite: "visible-text-fixture-candidates",
-    runId,
+    runId: sha256HexString(
+      JSON.stringify({
+        script: "generate-visible-text-fixture-candidates-v2",
+        taxonomyRunId: taxonomyReport.runId,
+        buckets: sourceBuckets.map((entry) => entry.bucketId)
+      })
+    ),
     generatedAtIso: new Date().toISOString(),
-    comparedPages: pageFeatures.size,
-    comparedRecords: compareRecords.length,
-    residualMinimization: residualMinimization
-      ? {
-        runId: residualMinimization.runId,
-        selectedPageCount: residualMinimization.selectedPageCount,
-        preservedCases: Array.isArray(residualMinimization.minimizedCases)
-          ? residualMinimization.minimizedCases.filter((entry) => entry.preservedDifference === true).length
-          : 0
-      }
-      : null,
-    featureEvidence: evidenceList,
-    candidates: candidateList
+    sourceTaxonomyRunId: taxonomyReport.runId,
+    decisionSurface: taxonomyReport.decisionSurface,
+    topBucketCoverageShare: taxonomyReport.taxonomyCoverage.topBucketsResidualShare,
+    linkagePass,
+    fixtureCandidates,
+    classificationsOnly
   };
 
-  const markdownLines = [
-    "# Visible-text fixture candidates",
-    "",
-    `runId: ${runId}`,
-    `comparedPages: ${String(report.comparedPages)}`,
-    `comparedRecords: ${String(report.comparedRecords)}`,
-    ...(report.residualMinimization
-      ? [
-        `residualMinimizationRunId: ${report.residualMinimization.runId}`,
-        `residualMinimizationSelectedPages: ${String(report.residualMinimization.selectedPageCount)}`,
-        `residualMinimizationPreservedCases: ${String(report.residualMinimization.preservedCases)}`
-      ]
-      : ["residualMinimizationRunId: missing (run npm run field:triage:minimize)"]),
-    "",
-    "## Candidate list",
-    ...candidateList.flatMap((candidate) => ([
-      `### ${candidate.candidateId} ${candidate.featureId}`,
-      `- title: ${candidate.title}`,
-      `- evidence pages: ${String(candidate.evidence.pagesWithFeature)}`,
-      `- evidence meanDeltaNormalizedTokenF1: ${String(candidate.evidence.meanDeltaNormalizedTokenF1)}`,
-      `- notes: ${candidate.notes}`,
-      "- syntheticHtml:",
-      "```html",
-      candidate.syntheticHtml,
-      "```",
-      `- expectedDefaultText: ${candidate.expectedDefaultText}`,
-      `- expectedCandidateText: ${candidate.expectedCandidateText}`,
-      ""
-    ]))
-  ];
-
   await writeJson(corpusPath(corpusDir, "triage/visible-text-fixture-candidates.json"), report);
-  await writeJson(corpusPath(corpusDir, "triage/visible-text-feature-evidence.json"), {
-    suite: report.suite,
-    runId: report.runId,
-    featureEvidence: report.featureEvidence
-  });
   await writeFile(
     corpusPath(corpusDir, "triage/visible-text-fixture-candidates.md"),
-    `${markdownLines.join("\n")}\n`,
+    markdownForCandidates(report),
     "utf8"
   );
-  process.stdout.write(`visible-text-fixture-candidates ok: candidates=${String(candidateList.length)} runId=${runId}\n`);
+  process.stdout.write(
+    `visible-text-fixture-candidates ok: fixtures=${String(fixtureCandidates.length)} ` +
+    `classified=${String(classificationsOnly.length)} runId=${report.runId}\n`
+  );
 }
 
 main().catch((error) => {
