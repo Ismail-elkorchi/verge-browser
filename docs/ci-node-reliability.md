@@ -11,9 +11,9 @@ This report measures `CI` workflow `node` job reliability before and after commi
   - `push`
   - `pull_request`
 - Sample size profile:
-  - `push`: 3 before + 3 after
-  - `pull_request`: 7 before + 7 after
-  - total: 20 runs
+  - `push`: 5 before + 5 after
+  - `pull_request`: 9 before + 9 after
+  - total: 28 runs
 - Confidence interval model:
   - Wilson interval for each failure-rate estimate.
   - Normal approximation interval for failure-rate delta.
@@ -32,9 +32,9 @@ Use:
 to enforce this criterion (`--require-non-overlap`).
 
 ## Latest stratified result
-- Before (overall): failed 2 / total 10, failure rate 0.200000, CI [0.056681, 0.509843]
-- After (overall): failed 0 / total 10, failure rate 0.000000, CI [0.000000, 0.277540]
-- Delta failure rate: -0.200000, CI [-0.447923, 0.047923]
+- Before (overall): failed 2 / total 14, failure rate 0.142857, CI [0.040093, 0.399419]
+- After (overall): failed 0 / total 14, failure rate 0.000000, CI [0.000000, 0.215317]
+- Delta failure rate: -0.142857, CI [-0.326160, 0.040446]
 - Claim status: `false` (interval criterion not met)
 
 ## Sample composition
