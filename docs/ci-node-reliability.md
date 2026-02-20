@@ -8,8 +8,11 @@ This report measures `CI` workflow `node` job reliability before and after commi
 - Job under test: `node` in workflow `CI`.
 - Exclusions: cancelled runs and missing/cancelled `node` jobs.
 - Sample size: 10 runs before pivot + 10 runs after pivot (20 total).
+- Confidence interval model:
+  - Wilson interval for each failure-rate estimate.
+  - Normal approximation interval for failure-rate delta.
 - Command:
-  - `npm run ci:reliability:sample -- --sample-size=10`
+  - `npm run ci:reliability:sample -- --sample-size=10 --confidence=0.95`
 - Artifact:
   - `reports/ci-node-reliability.json`
 
@@ -26,6 +29,7 @@ This report measures `CI` workflow `node` job reliability before and after commi
   - failure rate: 0.000000
 - Delta:
   - failure rate: -0.200000
+  - failure-rate interval (95%): [-0.447923, 0.047923]
 
 ## Sample composition
 - Before sample includes historical `push` and `pull_request` CI runs immediately preceding the pivot run.

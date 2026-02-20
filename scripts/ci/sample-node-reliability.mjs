@@ -7,7 +7,8 @@ function parseArgs(argv) {
     workflow: "CI",
     sampleSize: 20,
     pivotSha: "fd9887b1d9e3577b306deb75c1185be8cd774964",
-    outputPath: resolve("reports/ci-node-reliability.json")
+    outputPath: resolve("reports/ci-node-reliability.json"),
+    confidence: 0.95
   };
 
   for (const arg of argv) {
@@ -29,6 +30,14 @@ function parseArgs(argv) {
     }
     if (arg.startsWith("--output=")) {
       options.outputPath = resolve(arg.slice("--output=".length).trim());
+      continue;
+    }
+    if (arg.startsWith("--confidence=")) {
+      const value = Number.parseFloat(arg.slice("--confidence=".length));
+      if (!(value > 0 && value < 1)) {
+        throw new Error(`invalid --confidence value: ${arg}`);
+      }
+      options.confidence = value;
       continue;
     }
     throw new Error(`unsupported argument: ${arg}`);
@@ -80,6 +89,60 @@ function summarizeSample(entries) {
   };
 }
 
+function zScoreForConfidence(confidence) {
+  // Deterministic lookup for common levels used in CI reliability reporting.
+  if (confidence >= 0.999) return 3.291;
+  if (confidence >= 0.99) return 2.576;
+  if (confidence >= 0.98) return 2.326;
+  if (confidence >= 0.95) return 1.96;
+  if (confidence >= 0.9) return 1.645;
+  return 1.282;
+}
+
+function clamp01(value) {
+  if (value < 0) return 0;
+  if (value > 1) return 1;
+  return value;
+}
+
+function wilsonInterval(successes, total, z) {
+  if (total === 0) {
+    return {
+      lower: 0,
+      upper: 0
+    };
+  }
+  const p = successes / total;
+  const z2 = z * z;
+  const denominator = 1 + (z2 / total);
+  const center = (p + (z2 / (2 * total))) / denominator;
+  const margin = (z * Math.sqrt((p * (1 - p) / total) + (z2 / (4 * total * total)))) / denominator;
+  return {
+    lower: Number(clamp01(center - margin).toFixed(6)),
+    upper: Number(clamp01(center + margin).toFixed(6))
+  };
+}
+
+function differenceInterval(summaryBefore, summaryAfter, z) {
+  const n1 = summaryBefore.total;
+  const n2 = summaryAfter.total;
+  if (n1 === 0 || n2 === 0) {
+    return {
+      lower: 0,
+      upper: 0
+    };
+  }
+  const p1 = summaryBefore.failureRate;
+  const p2 = summaryAfter.failureRate;
+  const delta = p2 - p1;
+  const se = Math.sqrt((p1 * (1 - p1) / n1) + (p2 * (1 - p2) / n2));
+  const margin = z * se;
+  return {
+    lower: Number(Math.max(-1, delta - margin).toFixed(6)),
+    upper: Number(Math.min(1, delta + margin).toFixed(6))
+  };
+}
+
 function compactRun(run, nodeJob) {
   return {
     runId: run.databaseId,
@@ -97,6 +160,7 @@ function compactRun(run, nodeJob) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
+  const z = zScoreForConfidence(options.confidence);
   const allRuns = listCiRuns(options.workflow)
     .filter((run) => run.status === "completed")
     .filter((run) => run.conclusion !== "cancelled");
@@ -142,13 +206,18 @@ async function main() {
 
   const beforeSummary = summarizeSample(beforeSample);
   const afterSummary = summarizeSample(afterSample);
+  const beforeCi = wilsonInterval(beforeSummary.failed, beforeSummary.total, z);
+  const afterCi = wilsonInterval(afterSummary.failed, afterSummary.total, z);
   const deltaFailureRate = Number((afterSummary.failureRate - beforeSummary.failureRate).toFixed(6));
+  const deltaCi = differenceInterval(beforeSummary, afterSummary, z);
 
   const report = {
     suite: "ci-node-reliability-sample",
     timestamp: new Date().toISOString(),
     workflow: options.workflow,
     sampleSize: options.sampleSize,
+    confidence: options.confidence,
+    zScore: z,
     pivot: {
       sha: options.pivotSha,
       runId: pivotRun.databaseId,
@@ -157,20 +226,26 @@ async function main() {
     },
     before: {
       summary: beforeSummary,
+      failureRateInterval: beforeCi,
       runs: beforeSample
     },
     after: {
       summary: afterSummary,
+      failureRateInterval: afterCi,
       runs: afterSample
     },
     delta: {
-      failureRate: deltaFailureRate
+      failureRate: deltaFailureRate,
+      failureRateInterval: deltaCi
     }
   };
 
   await writeFile(options.outputPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   process.stdout.write(
-    `ci node reliability sample ok: beforeFailureRate=${String(beforeSummary.failureRate)} afterFailureRate=${String(afterSummary.failureRate)} delta=${String(deltaFailureRate)}\n`
+    `ci node reliability sample ok: beforeFailureRate=${String(beforeSummary.failureRate)} ` +
+    `afterFailureRate=${String(afterSummary.failureRate)} ` +
+    `delta=${String(deltaFailureRate)} ` +
+    `ci=[${String(deltaCi.lower)},${String(deltaCi.upper)}]\n`
   );
 }
 
