@@ -1,6 +1,6 @@
 # Field report
 
-Generated: 2026-02-20T00:09:50.226Z
+Generated: 2026-02-20T00:44:35.760Z
 
 ## Corpus
 - pages: 102
@@ -48,8 +48,10 @@ Generated: 2026-02-20T00:09:50.226Z
 
 ## Oracle availability and fingerprints
 - source mode: image
-- image fingerprint: 5aa7ed1adbada1936af21c573786b4b121e6e9afcf5d604f5eec457a6ad58331
+- image fingerprint: b4cc7fafb433f0ad069cffdd1e73859a63ac60700ac06cbf4bd7fa129b846ac7
 - image package count: 101
+- normalization version: v1
+- normalization mode: side-by-side
 - lynx (image): sha256=a598456aa5c8122453f7074c66233800a4032bf14b1171bccde98f83810ebf9d version=Lynx Version 2.9.2 (31 May 2024)
 libwww-FM 2.14, SSL-MM 1.4.1, GNUTLS 3.8.5, ncurses 6.5.20250216(wide)
 Built on linux-gnu.
@@ -62,27 +64,30 @@ See https://lynx.invisible-island.net/ and the online help for more information.
 - links2 (image): sha256=dc742a769d9b6bea15ae4712a30f5d03356c9f4a4fc396ed1ef02ce4462a90cc version=Links 2.29
 
 ## Worst oracle disagreements
-- links2: meanTokenF1=0.960218
-  worst: e427ac1791eeab4568589fc73ef8fb3971092c92a1f96bee20f68d4b0c6d9841 width=80 tokenF1=0
-- lynx: meanTokenF1=0.937337
-  worst: e427ac1791eeab4568589fc73ef8fb3971092c92a1f96bee20f68d4b0c6d9841 width=80 tokenF1=0
-- w3m: meanTokenF1=0.956068
-  worst: e427ac1791eeab4568589fc73ef8fb3971092c92a1f96bee20f68d4b0c6d9841 width=80 tokenF1=0
+- links2: meanRawTokenF1=0.960218 meanNormalizedTokenF1=0.967322
+  worst raw: e427ac1791eeab4568589fc73ef8fb3971092c92a1f96bee20f68d4b0c6d9841 width=80 rawTokenF1=0 normalizedTokenF1=0
+  worst normalized: e427ac1791eeab4568589fc73ef8fb3971092c92a1f96bee20f68d4b0c6d9841 width=80 rawTokenF1=0 normalizedTokenF1=0
+- lynx: meanRawTokenF1=0.937337 meanNormalizedTokenF1=0.940985
+  worst raw: e427ac1791eeab4568589fc73ef8fb3971092c92a1f96bee20f68d4b0c6d9841 width=80 rawTokenF1=0 normalizedTokenF1=0
+  worst normalized: e427ac1791eeab4568589fc73ef8fb3971092c92a1f96bee20f68d4b0c6d9841 width=80 rawTokenF1=0 normalizedTokenF1=0
+- w3m: meanRawTokenF1=0.956068 meanNormalizedTokenF1=0.956068
+  worst raw: e427ac1791eeab4568589fc73ef8fb3971092c92a1f96bee20f68d4b0c6d9841 width=80 rawTokenF1=0 normalizedTokenF1=0
+  worst normalized: e427ac1791eeab4568589fc73ef8fb3971092c92a1f96bee20f68d4b0c6d9841 width=80 rawTokenF1=0 normalizedTokenF1=0
 
 ## Oracle scores by page surface
 - page surfaces: {"meaningful-content":88,"challenge-shell":13,"redirect-shell":1}
 - challenge-shell: pages=13
-  links2: meanTokenF1=0.99363
-  lynx: meanTokenF1=0.841151
-  w3m: meanTokenF1=0.933545
+  links2: meanRawTokenF1=0.99363 meanNormalizedTokenF1=0.994111
+  lynx: meanRawTokenF1=0.841151 meanNormalizedTokenF1=0.841894
+  w3m: meanRawTokenF1=0.933545 meanNormalizedTokenF1=0.933545
 - meaningful-content: pages=88
-  links2: meanTokenF1=0.966193
-  lynx: meanTokenF1=0.962198
-  w3m: meanTokenF1=0.970259
+  links2: meanRawTokenF1=0.966193 meanNormalizedTokenF1=0.974357
+  lynx: meanRawTokenF1=0.962198 meanNormalizedTokenF1=0.966316
+  w3m: meanRawTokenF1=0.970259 meanNormalizedTokenF1=0.970259
 - redirect-shell: pages=1
-  links2: meanTokenF1=0
-  lynx: meanTokenF1=0
-  w3m: meanTokenF1=0
+  links2: meanRawTokenF1=0 meanNormalizedTokenF1=0
+  lynx: meanRawTokenF1=0 meanNormalizedTokenF1=0
+  w3m: meanRawTokenF1=0 meanNormalizedTokenF1=0
 
 ## Parity checks
 - parseBytes vs parseStream mismatches: 0

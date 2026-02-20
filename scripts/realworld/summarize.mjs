@@ -44,10 +44,20 @@ function formatOracleWorst(toolScores) {
   }
   const lines = [];
   for (const score of toolScores) {
-    lines.push(`- ${score.tool}: meanTokenF1=${String(score.meanTokenF1)}`);
-    if (score.worst.length > 0) {
-      const worstCase = score.worst[0];
-      lines.push(`  worst: ${worstCase.sha256} width=${String(worstCase.width)} tokenF1=${String(worstCase.tokenF1)}`);
+    lines.push(
+      `- ${score.tool}: meanRawTokenF1=${String(score.meanRawTokenF1)} meanNormalizedTokenF1=${String(score.meanNormalizedTokenF1)}`
+    );
+    if (score.worstRaw.length > 0) {
+      const worstRaw = score.worstRaw[0];
+      lines.push(
+        `  worst raw: ${worstRaw.sha256} width=${String(worstRaw.width)} rawTokenF1=${String(worstRaw.rawTokenF1)} normalizedTokenF1=${String(worstRaw.normalizedTokenF1)}`
+      );
+    }
+    if (score.worstNormalized.length > 0) {
+      const worstNormalized = score.worstNormalized[0];
+      lines.push(
+        `  worst normalized: ${worstNormalized.sha256} width=${String(worstNormalized.width)} rawTokenF1=${String(worstNormalized.rawTokenF1)} normalizedTokenF1=${String(worstNormalized.normalizedTokenF1)}`
+      );
     }
   }
   return lines.join("\n");
@@ -65,7 +75,9 @@ function formatOracleBySurface(surfaceScores) {
       continue;
     }
     for (const score of surfaceEntry.toolScores) {
-      lines.push(`  ${score.tool}: meanTokenF1=${String(score.meanTokenF1)}`);
+      lines.push(
+        `  ${score.tool}: meanRawTokenF1=${String(score.meanRawTokenF1)} meanNormalizedTokenF1=${String(score.meanNormalizedTokenF1)}`
+      );
     }
   }
   return lines.join("\n");
@@ -118,6 +130,12 @@ async function main() {
       ? [
         `- image fingerprint: ${oracleSummary.image.fingerprint}`,
         `- image package count: ${String(oracleSummary.image.packageCount)}`
+      ]
+      : []),
+    ...(oracleSummary.normalization
+      ? [
+        `- normalization version: ${oracleSummary.normalization.version}`,
+        `- normalization mode: ${oracleSummary.normalization.mode}`
       ]
       : []),
     formatOracleTools(oracleSummary.tools),
