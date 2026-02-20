@@ -25,3 +25,18 @@ The following semantic patterns were selected for synthetic fixture reproduction
 Mapped fixture additions in `html-parser`:
 - `case-033` .. `case-044`
 
+## Automated triage pipeline
+
+Local-only commands:
+
+1. `npm run field:oracles`
+2. `npm run field:visible-text:ab`
+3. `npm run field:triage:fixtures`
+
+Artifacts are written under ignored paths in `realworld/corpus/`:
+- `reports/visible-text-policy-compare.ndjson`
+- `reports/visible-text-policy-compare.json`
+- `triage/visible-text-fixture-candidates.json`
+- `triage/visible-text-fixture-candidates.md`
+
+The generated candidates contain only synthetic HTML snippets and expected text outputs.
