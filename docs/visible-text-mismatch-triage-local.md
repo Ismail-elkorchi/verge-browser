@@ -40,3 +40,10 @@ Artifacts are written under ignored paths in `realworld/corpus/`:
 - `triage/visible-text-fixture-candidates.md`
 
 The generated candidates contain only synthetic HTML snippets and expected text outputs.
+
+Policy search notes:
+- `field:visible-text:ab` now evaluates multiple fallback policies against offline oracle outputs.
+- The report selects `recommendedCandidatePolicyId` deterministically using:
+  1. highest mean delta from baseline
+  2. highest mean normalized token F1
+  3. lowest worse-count
