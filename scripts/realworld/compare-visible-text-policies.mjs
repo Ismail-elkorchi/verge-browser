@@ -1,7 +1,9 @@
 import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { TextDecoder, TextEncoder } from "node:util";
+import { pathToFileURL } from "node:url";
 
-import { parseBytes, visibleTextTokens } from "html-parser";
+import { findAllByAttr, findAllByTagName, parseBytes, textContent, visibleTextTokens, visibleTextTokensWithProvenance } from "html-parser";
 
 import {
   corpusPath,
@@ -21,6 +23,9 @@ const DECISION_SURFACE = "meaningful-content";
 const CHALLENGE_SURFACE = "challenge-shell";
 const MIN_DECISION_SURFACE_DELTA = 0;
 const MIN_CHALLENGE_SURFACE_DELTA = -0.002;
+const MAX_RENDERED_STYLE_RULES = 512;
+const RENDERED_STYLE_POLICY_ID = "rendered-style-v1";
+const STYLE_DECLARATION_HIDE_VALUES = new Set(["none", "hidden", "collapse"]);
 
 const POLICIES = Object.freeze([
   {
@@ -69,10 +74,41 @@ const POLICIES = Object.freeze([
       stripTitleAll: true,
       stripAriaLabelFromTags: ["a", "button"]
     })
+  },
+  {
+    id: RENDERED_STYLE_POLICY_ID,
+    description: "style-signal filtered rendered-visible approximation",
+    options: Object.freeze({}),
+    mode: "rendered-style-v1",
+    transform: (html) => html
   }
 ]);
 
 const BASELINE_POLICY_ID = "baseline";
+
+async function loadCssParserModule() {
+  const candidates = [];
+  const overridePath = process.env.VERGE_CSS_PARSER_MODULE_PATH;
+  if (overridePath && overridePath.trim().length > 0) {
+    candidates.push(resolve(process.cwd(), overridePath));
+  }
+  candidates.push(resolve(process.cwd(), "../css-parser/dist/mod.js"));
+
+  let lastError = null;
+  for (const candidatePath of candidates) {
+    try {
+      const moduleUrl = pathToFileURL(candidatePath).href;
+      return await import(moduleUrl);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  const detail = lastError instanceof Error ? lastError.message : String(lastError);
+  throw new Error(
+    `css-parser module unavailable; checked ${candidates.join(", ")}; lastError=${detail}`
+  );
+}
 
 function normalizeOracleTextForScoring(value) {
   return value
@@ -133,16 +169,157 @@ function transformHtml(html, transformPolicy) {
   });
 }
 
-function policyTokensFromHtml(htmlText, policy) {
+function normalizeDeclarationValue(value) {
+  return value.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function declarationHidesSubtree(declaration) {
+  const property = typeof declaration.property === "string"
+    ? declaration.property.toLowerCase().trim()
+    : "";
+  const value = typeof declaration.value === "string"
+    ? normalizeDeclarationValue(declaration.value)
+    : "";
+
+  if (property === "display") {
+    return STYLE_DECLARATION_HIDE_VALUES.has(value);
+  }
+  if (property === "visibility") {
+    return STYLE_DECLARATION_HIDE_VALUES.has(value);
+  }
+  if (property === "content-visibility") {
+    return value === "hidden";
+  }
+  return false;
+}
+
+function collectRenderedStyleHiddenNodeIds(tree, cssParser) {
+  const hiddenNodeIds = new Set();
+  let scannedRuleCount = 0;
+  let truncated = false;
+
+  for (const element of findAllByAttr(tree, "style")) {
+    const styleValue = element.attributes.find((attribute) => attribute.name.toLowerCase() === "style")?.value ?? "";
+    if (styleValue.trim().length === 0) {
+      continue;
+    }
+    const declarations = cssParser.extractInlineStyleSignals(styleValue);
+    if (declarations.some((entry) => declarationHidesSubtree(entry))) {
+      hiddenNodeIds.add(element.id);
+    }
+  }
+
+  const styleBlocks = [];
+  for (const styleNode of findAllByTagName(tree, "style")) {
+    const cssText = textContent(styleNode).trim();
+    if (cssText.length > 0) {
+      styleBlocks.push(cssText);
+    }
+  }
+
+  for (const cssText of styleBlocks) {
+    const signals = cssParser.extractStyleRuleSignals(cssText, {
+      includeUnsupportedSelectors: false
+    });
+    for (const signal of signals) {
+      if (scannedRuleCount >= MAX_RENDERED_STYLE_RULES) {
+        truncated = true;
+        break;
+      }
+      scannedRuleCount += 1;
+      if (!signal.selectorSupported || !signal.declarations.some((entry) => declarationHidesSubtree(entry))) {
+        continue;
+      }
+      const matched = cssParser.querySelectorAll(signal.selector, tree);
+      for (const node of matched) {
+        if (node && typeof node === "object" && typeof node.id === "number") {
+          hiddenNodeIds.add(node.id);
+        }
+      }
+    }
+    if (truncated) {
+      break;
+    }
+  }
+
+  return {
+    hiddenNodeIds,
+    styleBlockCount: styleBlocks.length,
+    scannedRuleCount,
+    truncated
+  };
+}
+
+function collectHiddenSubtreeNodeIds(tree, hiddenRootNodeIds) {
+  const hiddenSubtreeNodeIds = new Set();
+  const stack = [
+    {
+      node: tree,
+      hiddenAncestor: false
+    }
+  ];
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current || !current.node || typeof current.node !== "object") {
+      continue;
+    }
+
+    const nodeId = typeof current.node.id === "number" ? current.node.id : null;
+    const isHidden = current.hiddenAncestor || (nodeId !== null && hiddenRootNodeIds.has(nodeId));
+    if (isHidden && nodeId !== null) {
+      hiddenSubtreeNodeIds.add(nodeId);
+    }
+
+    const children = Array.isArray(current.node.children) ? current.node.children : [];
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      const child = children[index];
+      if (!child || typeof child !== "object") {
+        continue;
+      }
+      stack.push({
+        node: child,
+        hiddenAncestor: isHidden
+      });
+    }
+  }
+
+  return hiddenSubtreeNodeIds;
+}
+
+function policyTokensFromHtml(htmlText, policy, cssParser) {
   const transformedHtml = policy.transform(htmlText);
   const tree = parseBytes(UTF8_ENCODER.encode(transformedHtml), {
     captureSpans: false,
     trace: false
   });
+
+  if (policy.mode === "rendered-style-v1") {
+    const hidden = collectRenderedStyleHiddenNodeIds(tree, cssParser);
+    const hiddenSubtreeNodeIds = collectHiddenSubtreeNodeIds(tree, hidden.hiddenNodeIds);
+    const mergedText = visibleTextTokensWithProvenance(tree, policy.options)
+      .filter((token) => token.sourceNodeId === null || !hiddenSubtreeNodeIds.has(token.sourceNodeId))
+      .map((token) => (token.kind === "text" ? token.value : " "))
+      .join(" ");
+    return {
+      tokens: tokenizeText(mergedText),
+      diagnostics: {
+        hiddenRootNodeCount: hidden.hiddenNodeIds.size,
+        hiddenSubtreeNodeCount: hiddenSubtreeNodeIds.size,
+        styleBlockCount: hidden.styleBlockCount,
+        scannedRuleCount: hidden.scannedRuleCount,
+        scannedRuleTruncated: hidden.truncated
+      }
+    };
+  }
+
   const mergedText = visibleTextTokens(tree, policy.options)
     .map((token) => (token.kind === "text" ? token.value : " "))
     .join(" ");
-  return tokenizeText(mergedText);
+  return {
+    tokens: tokenizeText(mergedText),
+    diagnostics: null
+  };
 }
 
 function fixed6(value) {
@@ -257,6 +434,7 @@ function parseSurfaceSummaryList(entries) {
 }
 
 async function main() {
+  const cssParser = await loadCssParserModule();
   const corpusDir = resolveCorpusDir();
   await ensureCorpusDirs(corpusDir);
 
@@ -298,7 +476,7 @@ async function main() {
       tokensByPolicy[policy.id] = policyTokensFromHtml(htmlText, {
         ...policy,
         transform: policy.transform
-      });
+      }, cssParser);
     }
     policyTokensByPageSha.set(pageSha, tokensByPolicy);
   }
@@ -317,7 +495,7 @@ async function main() {
 
     const scores = {};
     for (const policy of POLICIES) {
-      const tokensForPolicy = policyTokens[policy.id];
+      const tokensForPolicy = policyTokens[policy.id]?.tokens ?? [];
       scores[policy.id] = {
         rawTokenF1: fixed6(tokenF1(tokensForPolicy, oracleTokensRaw)),
         normalizedTokenF1: fixed6(tokenF1(tokensForPolicy, oracleTokensNormalized))
@@ -342,6 +520,7 @@ async function main() {
       width: record.width,
       pageSurface: record.pageSurface ?? "unknown",
       pageSurfaceReasons: record.pageSurfaceReasons ?? [],
+      renderedStyleDiagnostics: policyTokens[RENDERED_STYLE_POLICY_ID]?.diagnostics ?? null,
       scores,
       deltasFromBaseline
     });
@@ -442,6 +621,7 @@ async function main() {
       width: record.width,
       pageSurface: record.pageSurface,
       pageSurfaceReasons: record.pageSurfaceReasons,
+      renderedStyleDiagnostics: record.renderedStyleDiagnostics,
       baseline: record.scores[BASELINE_POLICY_ID],
       candidate: record.scores[promotedPolicyId],
       delta,
@@ -449,6 +629,23 @@ async function main() {
       deltasFromBaseline: record.deltasFromBaseline
     };
   });
+
+  const renderedStyleDiagnostics = (() => {
+    const candidates = detailRecords
+      .map((record) => record.renderedStyleDiagnostics)
+      .filter((entry) => entry !== null);
+    if (candidates.length === 0) {
+      return null;
+    }
+    return {
+      records: candidates.length,
+      meanHiddenRootNodeCount: fixed6(mean(candidates.map((entry) => entry.hiddenRootNodeCount))),
+      meanHiddenSubtreeNodeCount: fixed6(mean(candidates.map((entry) => entry.hiddenSubtreeNodeCount))),
+      meanStyleBlockCount: fixed6(mean(candidates.map((entry) => entry.styleBlockCount))),
+      meanScannedRuleCount: fixed6(mean(candidates.map((entry) => entry.scannedRuleCount))),
+      truncatedRecordCount: candidates.filter((entry) => entry.scannedRuleTruncated === true).length
+    };
+  })();
 
   const summary = {
     suite: "visible-text-policy-compare",
@@ -494,6 +691,7 @@ async function main() {
       baseline: decisionSummaryById.get(BASELINE_POLICY_ID),
       candidate: decisionSummaryById.get(promotedPolicyId)
     },
+    renderedStyleDiagnostics,
     byPolicy: policySummaryList,
     bySurface: bySurfaceSummary
   };

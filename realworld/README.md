@@ -36,6 +36,13 @@ npm run field:oracles
 npm run field:report
 ```
 
+Visible-text policy compare dependency:
+
+- `field:visible-text:ab` requires css-parser style-signal helpers.
+- Module lookup order:
+  1. `VERGE_CSS_PARSER_MODULE_PATH`
+  2. `../css-parser/dist/mod.js` (sibling repository default)
+
 Oracle source selection:
 
 - `VERGE_ORACLE_SOURCE=auto` (default): use host binaries if all are installed, otherwise use the rootless oracle image.
