@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { TextDecoder, TextEncoder } from "node:util";
 
 import { parseBytes, visibleTextTokens } from "html-parser";
 
@@ -14,19 +15,60 @@ import {
   writeNdjson
 } from "./lib.mjs";
 
-const NORMALIZATION_VERSION = "v1";
-const POLICY_BASELINE = Object.freeze({
-  id: "baseline",
-  description: "visibleText default options",
-  options: {}
-});
-const POLICY_ACCESSIBLE_FALLBACK = Object.freeze({
-  id: "accessibleNameFallback",
-  description: "visibleText with includeAccessibleNameFallback=true",
-  options: {
-    includeAccessibleNameFallback: true
+const NORMALIZATION_VERSION = "v2";
+const UTF8_ENCODER = new TextEncoder();
+
+const POLICIES = Object.freeze([
+  {
+    id: "baseline",
+    description: "visibleText default options",
+    options: Object.freeze({}),
+    transform: (html) => html
+  },
+  {
+    id: "fallback-all",
+    description: "includeAccessibleNameFallback with aria-label/title on a, button, input",
+    options: Object.freeze({
+      includeAccessibleNameFallback: true
+    }),
+    transform: (html) => html
+  },
+  {
+    id: "fallback-aria-only",
+    description: "fallback enabled with title attributes stripped from all elements",
+    options: Object.freeze({
+      includeAccessibleNameFallback: true
+    }),
+    transform: (html) => transformHtml(html, {
+      stripTitleAll: true,
+      stripAriaLabelFromTags: []
+    })
+  },
+  {
+    id: "fallback-controls-aria-only",
+    description: "fallback enabled with title stripped globally and aria-label stripped on anchors",
+    options: Object.freeze({
+      includeAccessibleNameFallback: true
+    }),
+    transform: (html) => transformHtml(html, {
+      stripTitleAll: true,
+      stripAriaLabelFromTags: ["a"]
+    })
+  },
+  {
+    id: "fallback-input-only-aria",
+    description: "fallback enabled with title stripped globally and aria-label stripped on anchors and buttons",
+    options: Object.freeze({
+      includeAccessibleNameFallback: true
+    }),
+    transform: (html) => transformHtml(html, {
+      stripTitleAll: true,
+      stripAriaLabelFromTags: ["a", "button"]
+    })
   }
-});
+]);
+
+const BASELINE_POLICY_ID = "baseline";
 
 function normalizeOracleTextForScoring(value) {
   return value
@@ -40,76 +82,170 @@ function normalizeOracleTextForScoring(value) {
     .trim();
 }
 
-function policyTokensFromTree(tree, options) {
-  const mergedText = visibleTextTokens(tree, options)
+function normalizeTagName(tagName) {
+  return tagName.toLowerCase();
+}
+
+function removeAttributesFromTagMarkup(tagMarkup, attributeNames) {
+  let next = tagMarkup;
+  for (const attributeName of attributeNames) {
+    const escapedName = attributeName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const attributePattern = new RegExp(
+      `\\s${escapedName}(?:\\s*=\\s*(?:"[^"]*"|'[^']*'|[^\\s"'=<>` + "`" + `]+))?`,
+      "gi"
+    );
+    next = next.replace(attributePattern, "");
+  }
+  return next;
+}
+
+function transformHtml(html, transformPolicy) {
+  const stripAriaLabelFromTags = new Set(
+    (transformPolicy.stripAriaLabelFromTags ?? []).map((tagName) => normalizeTagName(tagName))
+  );
+  return html.replace(/<[^>]+>/g, (tagMarkup) => {
+    if (tagMarkup.startsWith("</") || tagMarkup.startsWith("<!") || tagMarkup.startsWith("<?")) {
+      return tagMarkup;
+    }
+
+    const tagNameMatch = /^<\s*([A-Za-z0-9:-]+)/.exec(tagMarkup);
+    if (!tagNameMatch) {
+      return tagMarkup;
+    }
+
+    const tagName = normalizeTagName(tagNameMatch[1] ?? "");
+    const attributesToStrip = [];
+    if (transformPolicy.stripTitleAll) {
+      attributesToStrip.push("title");
+    }
+    if (stripAriaLabelFromTags.has(tagName)) {
+      attributesToStrip.push("aria-label");
+    }
+    if (attributesToStrip.length === 0) {
+      return tagMarkup;
+    }
+
+    return removeAttributesFromTagMarkup(tagMarkup, attributesToStrip);
+  });
+}
+
+function policyTokensFromHtml(htmlText, policy) {
+  const transformedHtml = policy.transform(htmlText);
+  const tree = parseBytes(UTF8_ENCODER.encode(transformedHtml), {
+    captureSpans: false,
+    trace: false
+  });
+  const mergedText = visibleTextTokens(tree, policy.options)
     .map((token) => (token.kind === "text" ? token.value : " "))
     .join(" ");
   return tokenizeText(mergedText);
-}
-
-function mean(values) {
-  if (values.length === 0) {
-    return 0;
-  }
-  const total = values.reduce((sum, value) => sum + value, 0);
-  return total / values.length;
 }
 
 function fixed6(value) {
   return Number(value.toFixed(6));
 }
 
-function summarizeGroup(records) {
-  const baselineScores = records.map((record) => record.baseline.normalizedTokenF1);
-  const candidateScores = records.map((record) => record.candidate.normalizedTokenF1);
-  const deltas = records.map((record) => record.delta.normalizedTokenF1);
-  const better = deltas.filter((delta) => delta > 0).length;
-  const worse = deltas.filter((delta) => delta < 0).length;
-  const same = records.length - better - worse;
+function mean(values) {
+  if (values.length === 0) {
+    return 0;
+  }
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function summarizePolicy(records, policyId) {
+  const normalizedValues = records.map((record) => record.scores[policyId].normalizedTokenF1);
+  const rawValues = records.map((record) => record.scores[policyId].rawTokenF1);
+  const deltaValues = policyId === BASELINE_POLICY_ID
+    ? []
+    : records.map((record) => record.deltasFromBaseline[policyId].normalizedTokenF1);
+
+  const betterCount = policyId === BASELINE_POLICY_ID
+    ? 0
+    : deltaValues.filter((value) => value > 0).length;
+  const worseCount = policyId === BASELINE_POLICY_ID
+    ? 0
+    : deltaValues.filter((value) => value < 0).length;
+  const sameCount = policyId === BASELINE_POLICY_ID
+    ? records.length
+    : records.length - betterCount - worseCount;
 
   return {
+    policyId,
     compared: records.length,
-    meanBaselineNormalizedTokenF1: fixed6(mean(baselineScores)),
-    meanCandidateNormalizedTokenF1: fixed6(mean(candidateScores)),
-    meanDeltaNormalizedTokenF1: fixed6(mean(deltas)),
-    betterCount: better,
-    worseCount: worse,
-    sameCount: same,
-    bestImprovements: [...records]
-      .sort((left, right) => right.delta.normalizedTokenF1 - left.delta.normalizedTokenF1)
-      .slice(0, 5)
-      .map((record) => ({
-        pageSha256: record.pageSha256,
-        finalUrl: record.finalUrl,
-        tool: record.tool,
-        width: record.width,
-        baselineNormalizedTokenF1: record.baseline.normalizedTokenF1,
-        candidateNormalizedTokenF1: record.candidate.normalizedTokenF1,
-        deltaNormalizedTokenF1: record.delta.normalizedTokenF1
-      })),
-    worstRegressions: [...records]
-      .sort((left, right) => left.delta.normalizedTokenF1 - right.delta.normalizedTokenF1)
-      .slice(0, 5)
-      .map((record) => ({
-        pageSha256: record.pageSha256,
-        finalUrl: record.finalUrl,
-        tool: record.tool,
-        width: record.width,
-        baselineNormalizedTokenF1: record.baseline.normalizedTokenF1,
-        candidateNormalizedTokenF1: record.candidate.normalizedTokenF1,
-        deltaNormalizedTokenF1: record.delta.normalizedTokenF1
-      })),
+    meanRawTokenF1: fixed6(mean(rawValues)),
+    meanNormalizedTokenF1: fixed6(mean(normalizedValues)),
+    meanDeltaNormalizedTokenF1: policyId === BASELINE_POLICY_ID ? 0 : fixed6(mean(deltaValues)),
+    betterCount,
+    worseCount,
+    sameCount,
     worstResiduals: [...records]
-      .sort((left, right) => left.candidate.normalizedTokenF1 - right.candidate.normalizedTokenF1)
-      .slice(0, 5)
+      .sort((left, right) => left.scores[policyId].normalizedTokenF1 - right.scores[policyId].normalizedTokenF1)
+      .slice(0, 10)
       .map((record) => ({
         pageSha256: record.pageSha256,
         finalUrl: record.finalUrl,
         tool: record.tool,
         width: record.width,
-        candidateNormalizedTokenF1: record.candidate.normalizedTokenF1
-      }))
+        normalizedTokenF1: record.scores[policyId].normalizedTokenF1
+      })),
+    bestImprovements: policyId === BASELINE_POLICY_ID
+      ? []
+      : [...records]
+        .sort((left, right) => right.deltasFromBaseline[policyId].normalizedTokenF1 - left.deltasFromBaseline[policyId].normalizedTokenF1)
+        .slice(0, 10)
+        .map((record) => ({
+          pageSha256: record.pageSha256,
+          finalUrl: record.finalUrl,
+          tool: record.tool,
+          width: record.width,
+          deltaNormalizedTokenF1: record.deltasFromBaseline[policyId].normalizedTokenF1
+        })),
+    worstRegressions: policyId === BASELINE_POLICY_ID
+      ? []
+      : [...records]
+        .sort((left, right) => left.deltasFromBaseline[policyId].normalizedTokenF1 - right.deltasFromBaseline[policyId].normalizedTokenF1)
+        .slice(0, 10)
+        .map((record) => ({
+          pageSha256: record.pageSha256,
+          finalUrl: record.finalUrl,
+          tool: record.tool,
+          width: record.width,
+          deltaNormalizedTokenF1: record.deltasFromBaseline[policyId].normalizedTokenF1
+        }))
   };
+}
+
+function summarizePolicies(records, policies) {
+  return policies
+    .map((policy) => summarizePolicy(records, policy.id))
+    .sort((left, right) => {
+      if (right.meanNormalizedTokenF1 !== left.meanNormalizedTokenF1) {
+        return right.meanNormalizedTokenF1 - left.meanNormalizedTokenF1;
+      }
+      return left.policyId.localeCompare(right.policyId);
+    });
+}
+
+function selectRecommendedCandidate(policies, summaryByPolicyId) {
+  const candidatePolicies = policies.filter((policy) => policy.id !== BASELINE_POLICY_ID);
+  const sorted = [...candidatePolicies].sort((left, right) => {
+    const leftSummary = summaryByPolicyId.get(left.id);
+    const rightSummary = summaryByPolicyId.get(right.id);
+    if (!leftSummary || !rightSummary) {
+      return 0;
+    }
+    if (rightSummary.meanDeltaNormalizedTokenF1 !== leftSummary.meanDeltaNormalizedTokenF1) {
+      return rightSummary.meanDeltaNormalizedTokenF1 - leftSummary.meanDeltaNormalizedTokenF1;
+    }
+    if (rightSummary.meanNormalizedTokenF1 !== leftSummary.meanNormalizedTokenF1) {
+      return rightSummary.meanNormalizedTokenF1 - leftSummary.meanNormalizedTokenF1;
+    }
+    if (leftSummary.worseCount !== rightSummary.worseCount) {
+      return leftSummary.worseCount - rightSummary.worseCount;
+    }
+    return left.id.localeCompare(right.id);
+  });
+  return sorted[0] ?? null;
 }
 
 async function main() {
@@ -141,27 +277,28 @@ async function main() {
     }
   }
 
-  const pageTokensBySha = new Map();
+  const policyTokensByPageSha = new Map();
   for (const pageSha of new Set(eligibleRecords.map((record) => record.pageSha256))) {
     const page = pageBySha.get(pageSha);
     if (!page) {
       continue;
     }
     const htmlBytes = new Uint8Array(await readFile(corpusPath(corpusDir, `cache/html/${pageSha}.bin`)));
-    const tree = parseBytes(htmlBytes, {
-      captureSpans: false,
-      trace: false
-    });
-    pageTokensBySha.set(pageSha, {
-      baselineTokens: policyTokensFromTree(tree, POLICY_BASELINE.options),
-      candidateTokens: policyTokensFromTree(tree, POLICY_ACCESSIBLE_FALLBACK.options)
-    });
+    const htmlText = new TextDecoder().decode(htmlBytes);
+    const tokensByPolicy = {};
+    for (const policy of POLICIES) {
+      tokensByPolicy[policy.id] = policyTokensFromHtml(htmlText, {
+        ...policy,
+        transform: policy.transform
+      });
+    }
+    policyTokensByPageSha.set(pageSha, tokensByPolicy);
   }
 
-  const detailRecords = [];
+  const baseRecords = [];
   for (const record of eligibleRecords) {
-    const pageTokens = pageTokensBySha.get(record.pageSha256);
-    if (!pageTokens) {
+    const policyTokens = policyTokensByPageSha.get(record.pageSha256);
+    if (!policyTokens) {
       continue;
     }
 
@@ -170,38 +307,44 @@ async function main() {
     const oracleTokensRaw = tokenizeText(oracleOutput);
     const oracleTokensNormalized = tokenizeText(normalizeOracleTextForScoring(oracleOutput));
 
-    const baselineRaw = fixed6(tokenF1(pageTokens.baselineTokens, oracleTokensRaw));
-    const baselineNormalized = fixed6(tokenF1(pageTokens.baselineTokens, oracleTokensNormalized));
-    const candidateRaw = fixed6(tokenF1(pageTokens.candidateTokens, oracleTokensRaw));
-    const candidateNormalized = fixed6(tokenF1(pageTokens.candidateTokens, oracleTokensNormalized));
+    const scores = {};
+    for (const policy of POLICIES) {
+      const tokensForPolicy = policyTokens[policy.id];
+      scores[policy.id] = {
+        rawTokenF1: fixed6(tokenF1(tokensForPolicy, oracleTokensRaw)),
+        normalizedTokenF1: fixed6(tokenF1(tokensForPolicy, oracleTokensNormalized))
+      };
+    }
+    const baselineScore = scores[BASELINE_POLICY_ID];
+    const deltasFromBaseline = {};
+    for (const policy of POLICIES) {
+      if (policy.id === BASELINE_POLICY_ID) {
+        continue;
+      }
+      deltasFromBaseline[policy.id] = {
+        rawTokenF1: fixed6(scores[policy.id].rawTokenF1 - baselineScore.rawTokenF1),
+        normalizedTokenF1: fixed6(scores[policy.id].normalizedTokenF1 - baselineScore.normalizedTokenF1)
+      };
+    }
 
-    detailRecords.push({
+    baseRecords.push({
       pageSha256: record.pageSha256,
       finalUrl: record.finalUrl,
       tool: record.tool,
       width: record.width,
       pageSurface: record.pageSurface ?? "unknown",
       pageSurfaceReasons: record.pageSurfaceReasons ?? [],
-      baseline: {
-        rawTokenF1: baselineRaw,
-        normalizedTokenF1: baselineNormalized
-      },
-      candidate: {
-        rawTokenF1: candidateRaw,
-        normalizedTokenF1: candidateNormalized
-      },
-      delta: {
-        rawTokenF1: fixed6(candidateRaw - baselineRaw),
-        normalizedTokenF1: fixed6(candidateNormalized - baselineNormalized)
-      }
+      scores,
+      deltasFromBaseline
     });
   }
 
   const runId = sha256HexString(
     JSON.stringify({
-      script: "compare-visible-text-policies-v1",
+      script: "compare-visible-text-policies-v2",
       oracleRunIds: [...new Set(eligibleRecords.map((record) => record.runId))].sort(),
-      compared: detailRecords.map((record) => ({
+      policies: POLICIES.map((policy) => policy.id),
+      compared: baseRecords.map((record) => ({
         sha256: record.pageSha256,
         tool: record.tool,
         width: record.width
@@ -209,14 +352,30 @@ async function main() {
     })
   );
 
-  const groupedByTool = new Map();
-  const groupedBySurface = new Map();
-  for (const record of detailRecords) {
-    if (!groupedByTool.has(record.tool)) {
-      groupedByTool.set(record.tool, []);
-    }
-    groupedByTool.get(record.tool).push(record);
+  const policySummaryList = summarizePolicies(baseRecords, POLICIES);
+  const policySummaryById = new Map(policySummaryList.map((item) => [item.policyId, item]));
+  const recommendedCandidate = selectRecommendedCandidate(POLICIES, policySummaryById);
+  if (!recommendedCandidate) {
+    throw new Error("candidate policy selection failed");
+  }
 
+  const detailRecords = baseRecords.map((record) => ({
+    runId,
+    pageSha256: record.pageSha256,
+    finalUrl: record.finalUrl,
+    tool: record.tool,
+    width: record.width,
+    pageSurface: record.pageSurface,
+    pageSurfaceReasons: record.pageSurfaceReasons,
+    baseline: record.scores[BASELINE_POLICY_ID],
+    candidate: record.scores[recommendedCandidate.id],
+    delta: record.deltasFromBaseline[recommendedCandidate.id],
+    scores: record.scores,
+    deltasFromBaseline: record.deltasFromBaseline
+  }));
+
+  const groupedBySurface = new Map();
+  for (const record of baseRecords) {
     if (!groupedBySurface.has(record.pageSurface)) {
       groupedBySurface.set(record.pageSurface, []);
     }
@@ -227,35 +386,35 @@ async function main() {
     suite: "visible-text-policy-compare",
     runId,
     generatedAtIso: new Date().toISOString(),
-    policies: {
-      baseline: POLICY_BASELINE,
-      candidate: POLICY_ACCESSIBLE_FALLBACK
-    },
     normalizationVersion: NORMALIZATION_VERSION,
+    baselinePolicyId: BASELINE_POLICY_ID,
+    recommendedCandidatePolicyId: recommendedCandidate.id,
+    recommendedCandidateReason: "Highest mean delta vs baseline, tie-broken by mean score then lower worseCount",
+    policies: POLICIES.map((policy) => ({
+      id: policy.id,
+      description: policy.description,
+      options: policy.options
+    })),
     comparedRecords: detailRecords.length,
     comparedPages: new Set(detailRecords.map((record) => record.pageSha256)).size,
-    overall: summarizeGroup(detailRecords),
-    byTool: [...groupedByTool.entries()]
-      .sort((left, right) => left[0].localeCompare(right[0]))
-      .map(([tool, records]) => ({
-        tool,
-        ...summarizeGroup(records)
-      })),
+    overall: {
+      baseline: policySummaryById.get(BASELINE_POLICY_ID),
+      candidate: policySummaryById.get(recommendedCandidate.id)
+    },
+    byPolicy: policySummaryList,
     bySurface: [...groupedBySurface.entries()]
       .sort((left, right) => left[0].localeCompare(right[0]))
       .map(([surface, records]) => ({
         surface,
-        ...summarizeGroup(records)
+        byPolicy: summarizePolicies(records, POLICIES)
       }))
   };
 
-  const ndjsonRecords = detailRecords.map((record) => ({
-    runId,
-    ...record
-  }));
-  await writeNdjson(corpusPath(corpusDir, "reports/visible-text-policy-compare.ndjson"), ndjsonRecords);
+  await writeNdjson(corpusPath(corpusDir, "reports/visible-text-policy-compare.ndjson"), detailRecords);
   await writeJson(corpusPath(corpusDir, "reports/visible-text-policy-compare.json"), summary);
-  process.stdout.write(`visible-text-policy-compare ok: records=${String(detailRecords.length)} runId=${runId}\n`);
+  process.stdout.write(
+    `visible-text-policy-compare ok: records=${String(detailRecords.length)} candidate=${recommendedCandidate.id} runId=${runId}\n`
+  );
 }
 
 main().catch((error) => {
