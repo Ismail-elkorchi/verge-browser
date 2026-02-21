@@ -33,6 +33,8 @@ Offline replay commands:
 ```bash
 npm run field:offline
 npm run field:oracles
+npm run field:visible-text:ab
+npm run field:governance
 npm run field:report
 ```
 
@@ -56,6 +58,8 @@ Reports are written under ignored paths:
 - `realworld/corpus/layout/reports/layout-wpt-fetch.json`
 - `realworld/corpus/layout/reports/layout-pilot.json`
 - `realworld/corpus/layout/reports/layout-pilot.ndjson`
+- `realworld/corpus/reports/cohort-governance-v4.json`
+- `realworld/corpus/reports/cohort-snapshot-fingerprint-v1.json`
 
 Visible-text policy compare dependency:
 
@@ -76,3 +80,15 @@ Visible-text policy candidates:
 - `baseline`: html-parser default visible-text contract.
 - `rendered-terminal-v1`: terminal-aligned rendered-visible approximation that does not skip `hidden`/`aria-hidden` subtrees.
 - `rendered-style-v1`: style-signal filtered rendered-visible approximation using css-parser selectors and declarations.
+
+Cohort governance policy:
+
+- policy manifest: `scripts/realworld/cohorts/cohort-governance-v4.json`
+- required cohorts:
+  - `standards-reference`
+  - `application-auth-challenge`
+  - `dynamic-interaction-heavy`
+- release decision artifact requirements:
+  - per-cohort score table
+  - weighted aggregate deltas
+  - snapshot fingerprint for replay identity

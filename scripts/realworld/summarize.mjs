@@ -83,15 +83,41 @@ function formatOracleBySurface(surfaceScores) {
   return lines.join("\n");
 }
 
+function formatCohortGovernance(report) {
+  if (!report) {
+    return "- cohort governance report is unavailable";
+  }
+  if (!Array.isArray(report.cohorts) || report.cohorts.length === 0) {
+    return "- no cohort rows available";
+  }
+  const lines = [];
+  for (const cohort of report.cohorts) {
+    lines.push(
+      `- ${cohort.id}: pages=${String(cohort.observed.pages)} records=${String(cohort.observed.records)} weight=${String(cohort.weight)}`
+    );
+    lines.push(
+      `  meanDelta=${String(cohort.scores.meanDeltaNormalizedTokenF1)} residualWeightedDelta=${String(cohort.scores.residualWeightedDeltaNormalizedTokenF1)} quotaPass=${String(cohort.checks.quota.pass)}`
+    );
+  }
+  return lines.join("\n");
+}
+
 async function main() {
   const corpusDir = resolveCorpusDir();
   const pageSummaryPath = corpusPath(corpusDir, "reports/field-summary.json");
   const oracleSummaryPath = corpusPath(corpusDir, "reports/oracle-summary.json");
   const cssManifestPath = corpusPath(corpusDir, "manifests/css.ndjson");
+  const cohortGovernancePath = corpusPath(corpusDir, "reports/cohort-governance-v4.json");
 
   const fieldSummary = JSON.parse(await readFile(pageSummaryPath, "utf8"));
   const oracleSummary = JSON.parse(await readFile(oracleSummaryPath, "utf8"));
   const cssRecords = await readNdjson(cssManifestPath);
+  let cohortGovernance = null;
+  try {
+    cohortGovernance = JSON.parse(await readFile(cohortGovernancePath, "utf8"));
+  } catch {
+    cohortGovernance = null;
+  }
 
   const cssByKind = cssRecords.reduce((acc, record) => {
     const key = record.kind ?? "unknown";
@@ -146,6 +172,13 @@ async function main() {
     "## Oracle scores by page surface",
     `- page surfaces: ${JSON.stringify(oracleSummary.pageSurfaceCounts ?? {})}`,
     formatOracleBySurface(oracleSummary.toolScoresBySurface),
+    "",
+    "## Cohort governance v4",
+    `- report ok: ${String(cohortGovernance?.ok ?? false)}`,
+    `- snapshot fingerprint: ${String(cohortGovernance?.snapshot?.fingerprint ?? "missing")}`,
+    `- weighted mean delta: ${String(cohortGovernance?.weightedAggregate?.meanDeltaNormalizedTokenF1 ?? "missing")}`,
+    `- weighted residual delta: ${String(cohortGovernance?.weightedAggregate?.residualWeightedDeltaNormalizedTokenF1 ?? "missing")}`,
+    formatCohortGovernance(cohortGovernance),
     "",
     "## Parity checks",
     formatList(

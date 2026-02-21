@@ -165,3 +165,26 @@ Executed by:
 - `reports/eval-oracle-supply-chain-summary.json.ok` is `true`.
 - `reports/oracle-supply-chain.json.ok` is `true`.
 - package closure count is bounded by `evaluation.config.json.oracleSupplyChain.maxOraclePackageCount`.
+
+## Local field governance gates
+Executed manually from the local repository root:
+- `npm run field:oracles`
+- `npm run field:visible-text:ab`
+- `npm run field:governance`
+
+### L-601 Cohort governance v4
+- `realworld/corpus/reports/cohort-governance-v4.json` exists.
+- `realworld/corpus/reports/cohort-governance-v4.json.ok` is `true`.
+- required cohorts are present:
+  - `standards-reference`
+  - `application-auth-challenge`
+  - `dynamic-interaction-heavy`
+- all configured cohort quota checks pass.
+- weighted aggregate section includes:
+  - `weightedAggregate.meanDeltaNormalizedTokenF1`
+  - `weightedAggregate.residualWeightedDeltaNormalizedTokenF1`
+- `realworld/corpus/reports/cohort-snapshot-fingerprint-v1.json` exists.
+- snapshot fingerprint report includes:
+  - `snapshotIds`
+  - `inputHashes`
+  - `snapshotFingerprint`
