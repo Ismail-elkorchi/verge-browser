@@ -1,6 +1,6 @@
 # Field report
 
-Generated: 2026-02-20T00:44:35.760Z
+Generated: 2026-02-21T03:25:02.260Z
 
 ## Corpus
 - pages: 102
@@ -48,7 +48,7 @@ Generated: 2026-02-20T00:44:35.760Z
 
 ## Oracle availability and fingerprints
 - source mode: image
-- image fingerprint: b4cc7fafb433f0ad069cffdd1e73859a63ac60700ac06cbf4bd7fa129b846ac7
+- image fingerprint: 2b200b4e27d19d32b33161e1a3cce2e7d265442eff196d3e62963e413f992ef9
 - image package count: 101
 - normalization version: v1
 - normalization mode: side-by-side
@@ -88,6 +88,18 @@ See https://lynx.invisible-island.net/ and the online help for more information.
   links2: meanRawTokenF1=0 meanNormalizedTokenF1=0
   lynx: meanRawTokenF1=0 meanNormalizedTokenF1=0
   w3m: meanRawTokenF1=0 meanNormalizedTokenF1=0
+
+## Cohort governance v4
+- report ok: true
+- snapshot fingerprint: 8370481b01bb0d2a916904a96d5f426a0875f85877d141e9087a2ca8017c7fec
+- weighted mean delta: 0.003551
+- weighted residual delta: 0.00264
+- application-auth-challenge: pages=51 records=306 weight=0.35
+  meanDelta=0.006843 residualWeightedDelta=0.006843 quotaPass=true
+- dynamic-interaction-heavy: pages=26 records=156 weight=0.25
+  meanDelta=0.004625 residualWeightedDelta=0.000979 quotaPass=true
+- standards-reference: pages=25 records=150 weight=0.4
+  meanDelta=0 residualWeightedDelta=0 quotaPass=true
 
 ## Parity checks
 - parseBytes vs parseStream mismatches: 0

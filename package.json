@@ -25,6 +25,7 @@
     "smoke:cli": "node scripts/automation/smoke-cli.mjs",
     "field:offline": "npm run build && node scripts/realworld/run-offline-eval.mjs",
     "field:oracles": "npm run build && node scripts/realworld/run-oracles-offline.mjs",
+    "field:governance": "node scripts/realworld/check-cohort-governance.mjs",
     "field:report": "node scripts/realworld/summarize.mjs",
     "field:visible-text:ab": "npm run build && node scripts/realworld/compare-visible-text-policies.mjs",
     "field:triage:taxonomy": "npm run build && node scripts/realworld/classify-visible-text-residuals.mjs",

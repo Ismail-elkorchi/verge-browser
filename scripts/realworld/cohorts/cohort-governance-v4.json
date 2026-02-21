@@ -1,0 +1,62 @@
+{
+  "suite": "cohort-governance-policy",
+  "version": "v4",
+  "decisionSurface": "meaningful-content",
+  "minSnapshots": 1,
+  "cohorts": [
+    {
+      "id": "standards-reference",
+      "description": "specification and reference surfaces",
+      "weight": 0.4,
+      "quota": {
+        "minPages": 20,
+        "minRecords": 100
+      }
+    },
+    {
+      "id": "application-auth-challenge",
+      "description": "application shells including auth and anti-bot pages",
+      "weight": 0.35,
+      "quota": {
+        "minPages": 20,
+        "minRecords": 100
+      }
+    },
+    {
+      "id": "dynamic-interaction-heavy",
+      "description": "interaction-heavy pages outside reference and auth cohorts",
+      "weight": 0.25,
+      "quota": {
+        "minPages": 15,
+        "minRecords": 80
+      }
+    }
+  ],
+  "rules": {
+    "applicationSurfaces": [
+      "auth-wall",
+      "challenge-shell",
+      "redirect-shell"
+    ],
+    "dynamicSurfaces": [
+      "script-critical"
+    ],
+    "dynamicScriptTagThreshold": 8,
+    "standardsHostsExact": [
+      "www.w3.org",
+      "w3.org",
+      "whatwg.org",
+      "www.whatwg.org",
+      "www.rfc-editor.org",
+      "rfc-editor.org",
+      "www.ietf.org",
+      "ietf.org",
+      "tc39.es",
+      "www.ecma-international.org",
+      "ecma-international.org"
+    ],
+    "standardsHostSuffixes": [
+      ".spec.whatwg.org"
+    ]
+  }
+}

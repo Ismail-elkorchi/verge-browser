@@ -202,3 +202,44 @@ Same shape as `reports/render-score.json` for the sampled oracle runtime run.
 - `workflows`: `string[]`
 - `violations`: `{ path, line, reason }[]`
 - `ok`: boolean
+
+## Local field reports (`realworld/corpus/reports/*`)
+These reports are local-only artifacts and are not part of CI.
+
+### realworld/corpus/reports/cohort-governance-v4.json
+- `suite`: `"cohort-governance-v4"`
+- `generatedAtIso`: ISO-8601
+- `runId`: stable hash from governance inputs
+- `policy`:
+  - `{ configPath, version, promotedPolicyId, decisionSurface }`
+- `counts`: `{ comparedPages, comparedRecords }`
+- `cohorts[]`:
+  - `{ id, description, weight, quota, observed, scores, checks }`
+  - `scores` includes:
+    - `baselineMeanNormalizedTokenF1`
+    - `candidateMeanNormalizedTokenF1`
+    - `meanDeltaNormalizedTokenF1`
+    - `residualWeightedDeltaNormalizedTokenF1`
+- `weightedAggregate`:
+  - `{ baselineMeanNormalizedTokenF1, candidateMeanNormalizedTokenF1, meanDeltaNormalizedTokenF1, residualWeightedDeltaNormalizedTokenF1 }`
+- `snapshot`: `{ ids, fingerprint }`
+- `cohortMembership`: map of cohort id to deterministic page list
+- `checks`: governance checks (`policyGates`, `decisionSurfaceMatch`, `cohortCoverage`, `cohortQuotas`, `weightSum`, `snapshotCoverage`)
+- `ok`: boolean
+
+### realworld/corpus/reports/cohort-snapshot-fingerprint-v1.json
+- `suite`: `"cohort-snapshot-fingerprint"`
+- `version`: `"v1"`
+- `generatedAtIso`: ISO-8601
+- `runId`: stable hash
+- `promotedPolicyId`: policy id used for governance scoring
+- `decisionSurface`: policy decision surface id
+- `snapshotIds`: deterministic sorted list
+- `inputHashes`:
+  - `cohortConfigSha256`
+  - `pageSurfaceReportSha256`
+  - `policySummaryReportSha256`
+  - `policyNdjsonReportSha256`
+  - `residualReportSha256`
+- `cohortMembershipHash`: hash of cohort membership mapping
+- `snapshotFingerprint`: canonical snapshot identity hash
