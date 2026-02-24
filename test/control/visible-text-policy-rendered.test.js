@@ -122,7 +122,11 @@ export function querySelectorAll() {
       summary.policies.some((entry) => entry.id === "rendered-terminal-v1"),
       true
     );
-    assert.equal(summary.recommendedCandidatePolicyId, "rendered-style-v1");
+    assert.equal(summary.recommendedCandidatePolicyId, "baseline");
+    assert.equal(
+      summary.recommendedCandidateReason.includes("baseline retained"),
+      true
+    );
     assert.equal(summary.renderedStyleDiagnostics.records, 1);
     assert.equal(summary.renderedStyleDiagnostics.meanHiddenRootNodeCount, 1);
     assert.equal(summary.renderedStyleDiagnostics.meanHiddenSubtreeNodeCount, 2);
