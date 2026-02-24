@@ -123,6 +123,9 @@ function classifyExtraOracleWord(word) {
   if (EXTRA_ORACLE_UI_WORDS.has(word)) {
     return "extra:oracle:ui-label";
   }
+  if (/^[\p{L}\p{N}]+$/u.test(word) && /[\u0080-\u{10FFFF}]/u.test(word)) {
+    return "extra:oracle:unicode-word";
+  }
   if (/^[a-z]+$/u.test(word)) {
     return "extra:oracle:word";
   }
