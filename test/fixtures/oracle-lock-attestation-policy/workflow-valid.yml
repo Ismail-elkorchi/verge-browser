@@ -1,0 +1,20 @@
+name: Release
+jobs:
+  release:
+    steps:
+      - name: Generate oracle lock provenance attestation
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: scripts/oracles/oracle-image.lock.json
+
+      - name: Verify oracle lock provenance attestation
+        run: |
+          gh attestation verify "scripts/oracles/oracle-image.lock.json" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
+            --source-ref "${GITHUB_REF}" \
+            --source-digest "${GITHUB_SHA}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners \
+            --predicate-type "https://slsa.dev/provenance/v1" \
+            --format json > reports/attestation-oracle-lock-verify.json
