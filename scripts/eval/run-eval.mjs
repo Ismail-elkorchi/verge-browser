@@ -52,6 +52,7 @@ async function main() {
   runNodeScript("scripts/eval/write-agent-report.mjs");
   runNodeScript("scripts/eval/write-stream-report.mjs");
   runNodeScript("scripts/eval/check-runtime-matrix.mjs", [`--profile=${profile}`]);
+  runNodeScript("scripts/eval/check-eval-coherence.mjs", [`--profile=${profile}`]);
   runNodeScript("scripts/eval/write-network-outcomes-report.mjs");
   runNodeScript("scripts/bench/run-bench.mjs");
   runNodeScript("scripts/eval/check-bench-governance.mjs");
@@ -61,10 +62,11 @@ async function main() {
   }
   runNodeScript("scripts/eval/write-capability-ladder-report.mjs", [`--profile=${profile}`]);
 
-  const [agentReport, streamReport, runtimeMatrixReport, networkOutcomesReport, benchGovernanceReport, oracleWorkflowPolicyReport, releaseIntegrityReport, capabilityLadderReport] = await Promise.all([
+  const [agentReport, streamReport, runtimeMatrixReport, evalCoherenceReport, networkOutcomesReport, benchGovernanceReport, oracleWorkflowPolicyReport, releaseIntegrityReport, capabilityLadderReport] = await Promise.all([
     readJson(resolve(reportsDir, "agent.json")),
     readJson(resolve(reportsDir, "stream.json")),
     readJson(resolve(reportsDir, "runtime-matrix.json")),
+    readJson(resolve(reportsDir, "eval-coherence.json")),
     readJson(resolve(reportsDir, "network-outcomes.json")),
     readJson(resolve(reportsDir, "bench-governance.json")),
     readJson(resolve(reportsDir, "oracle-workflow-policy.json")),
@@ -90,6 +92,9 @@ async function main() {
   }
   if (runtimeMatrixReport?.overall?.ok !== true) {
     extraFailures.push("runtime matrix report failed");
+  }
+  if (evalCoherenceReport?.overall?.ok !== true) {
+    extraFailures.push("evaluation coherence report failed");
   }
   if (networkOutcomesReport?.overall?.ok !== true) {
     extraFailures.push("network outcomes report failed");
@@ -123,6 +128,7 @@ async function main() {
       agent: resolve(reportsDir, "agent.json"),
       stream: resolve(reportsDir, "stream.json"),
       runtimeMatrix: resolve(reportsDir, "runtime-matrix.json"),
+      evalCoherence: resolve(reportsDir, "eval-coherence.json"),
       networkOutcomes: resolve(reportsDir, "network-outcomes.json"),
       bench: resolve(reportsDir, "bench.json"),
       benchGovernance: resolve(reportsDir, "bench-governance.json"),

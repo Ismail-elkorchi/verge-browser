@@ -116,6 +116,12 @@ For each metric:
 - all required runtime smoke checks pass
 - required runtime hashes agree
 
+## G-315 Require-flag producer coherence gate
+- `reports/eval-coherence.json` exists
+- every enabled profile `require*` field is recognized
+- every enabled profile `require*` field maps to an existing producer script
+- every enabled profile `require*` field maps to an emitted report artifact
+
 ## Oracle runtime validation gates
 Executed by:
 - `npm run eval:oracle-runtime:ci`
