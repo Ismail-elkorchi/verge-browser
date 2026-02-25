@@ -291,6 +291,18 @@ Same shape as `reports/render-score.json` for the sampled oracle runtime run.
 - `oracle-lock-offline-verify.json`:
   - raw `gh attestation verify --bundle --custom-trusted-root --format json` output for the oracle lock file.
 
+## reports/offline-attestation-content-policy.json
+- `suite`: `"offline-attestation-content-policy"`
+- `timestamp`: ISO-8601
+- `expected`:
+  - `{ sourceRepositoryURI, sourceRepositoryRef, sourceRepositoryDigest, workflowSanPrefix, issuer, predicateType, packageSha256 }`
+- `package`:
+  - `{ inputPath, attestationCount, uniqueSubjects, failures, ok }`
+- `oracleLock`:
+  - `{ inputPath, attestationCount, uniqueSubjects, failures, ok }`
+- `overall`:
+  - `{ ok }`
+
 ## Local field reports (`realworld/corpus/reports/*`)
 These reports are local-only artifacts and are not part of CI.
 

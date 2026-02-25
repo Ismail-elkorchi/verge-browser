@@ -122,6 +122,19 @@ function hasOfflineVerificationReplayStep(sourceText) {
     && sourceDigestMentions.length >= 2;
 }
 
+function hasOfflineContentPolicyStep(sourceText) {
+  const stepText = extractStepBody(sourceText, "Check offline attestation content policy");
+  if (stepText.length === 0) {
+    return false;
+  }
+  return stepText.includes("scripts/eval/check-offline-attestation-content.mjs")
+    && stepText.includes("--package-offline-input=reports/offline-verification/package-offline-verify.json")
+    && stepText.includes("--lock-offline-input=reports/offline-verification/oracle-lock-offline-verify.json")
+    && stepText.includes("--output=reports/offline-attestation-content-policy.json")
+    && stepText.includes("--expected-source-digest=\"${GITHUB_SHA}\"")
+    && stepText.includes("--expected-package-sha256=\"${package_sha256}\"");
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const workflowText = await readFile(resolve(options.workflow), "utf8");
@@ -161,6 +174,11 @@ async function main() {
       id: "release-workflow-replays-offline-verification",
       ok: hasOfflineVerificationReplayStep(workflowText),
       reason: "release workflow must replay package and lock attestation verification against exported bundles and trusted root"
+    },
+    {
+      id: "release-workflow-checks-offline-attestation-content",
+      ok: hasOfflineContentPolicyStep(workflowText),
+      reason: "release workflow must validate offline verification JSON content against expected source and package digest"
     }
   ];
 
