@@ -1,0 +1,72 @@
+{
+  "suite": "oracle-fingerprint-vectors",
+  "version": 1,
+  "vectors": [
+    {
+      "id": "single-package",
+      "packages": [
+        {
+          "name": "links2",
+          "version": "2.30-1build1",
+          "debSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "downloadUrl": "https://snapshot.ubuntu.com/ubuntu/pool/universe/l/links2/links2_2.30-1build1_amd64.deb"
+        }
+      ],
+      "expectedFingerprint": "1f3c7bfe5a4dbb14a1d5e9b3f3cc42a433651b55ad1892382818c06206df234f"
+    },
+    {
+      "id": "ordering-sensitive-hyphen",
+      "packages": [
+        {
+          "name": "fontconfig",
+          "version": "2.15.0-2.3ubuntu1",
+          "debSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "downloadUrl": "https://snapshot.ubuntu.com/ubuntu/pool/main/f/fontconfig/fontconfig_2.15.0-2.3ubuntu1_amd64.deb"
+        },
+        {
+          "name": "fontconfig-config",
+          "version": "2.15.0-2.3ubuntu1",
+          "debSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "downloadUrl": "https://snapshot.ubuntu.com/ubuntu/pool/main/f/fontconfig/fontconfig-config_2.15.0-2.3ubuntu1_all.deb"
+        },
+        {
+          "name": "lynx",
+          "version": "2.9.2-1",
+          "debSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+          "downloadUrl": "https://snapshot.ubuntu.com/ubuntu/pool/universe/l/lynx/lynx_2.9.2-1_amd64.deb"
+        },
+        {
+          "name": "lynx-common",
+          "version": "2.9.2-1",
+          "debSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+          "downloadUrl": "https://snapshot.ubuntu.com/ubuntu/pool/universe/l/lynx/lynx-common_2.9.2-1_all.deb"
+        }
+      ],
+      "expectedFingerprint": "9b492d640c0cee988a714c67dc746fe4120e5528384097bca4f232c4e9ff31d9"
+    },
+    {
+      "id": "three-tools-baseline",
+      "packages": [
+        {
+          "name": "links2",
+          "version": "2.30-1build1",
+          "debSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "downloadUrl": "https://snapshot.ubuntu.com/ubuntu/pool/universe/l/links2/links2_2.30-1build1_amd64.deb"
+        },
+        {
+          "name": "lynx",
+          "version": "2.9.2dev.1-1build1",
+          "debSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "downloadUrl": "https://snapshot.ubuntu.com/ubuntu/pool/universe/l/lynx/lynx_2.9.2dev.1-1build1_amd64.deb"
+        },
+        {
+          "name": "w3m",
+          "version": "0.5.3+git20230121-2",
+          "debSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "downloadUrl": "https://snapshot.ubuntu.com/ubuntu/pool/universe/w/w3m/w3m_0.5.3+git20230121-2_amd64.deb"
+        }
+      ],
+      "expectedFingerprint": "4619d3b871491140d8d3eb0b5961e7cb44445fb6dd22eee3af7da2a13d79a59c"
+    }
+  ]
+}
