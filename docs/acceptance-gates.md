@@ -224,6 +224,9 @@ Executed by:
 - Release workflow replays attestation verification using the exported bundles and trusted root:
   - `reports/offline-verification/package-offline-verify.json`
   - `reports/offline-verification/oracle-lock-offline-verify.json`
+- Release workflow validates offline replay JSON content with:
+  - `reports/offline-attestation-content-policy.json`
+- `reports/offline-attestation-content-policy.json.overall.ok` is `true`.
 - Offline artifacts are uploaded with release package artifacts.
 
 ## Local field governance gates
