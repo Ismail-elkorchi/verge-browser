@@ -34,6 +34,17 @@ function hasRuntimeReportStep(sourceText) {
     && sourceText.includes("--expected-source-digest=\"${GITHUB_SHA}\"");
 }
 
+function hasOfflineVerificationExportStep(sourceText) {
+  return sourceText.includes("Export offline verification materials")
+    && /gh\s+attestation\s+trusted-root\s*>\s*trusted_root\.jsonl/.test(sourceText)
+    && /gh\s+attestation\s+download\s+"\$\{workspace\}\/\$\{package_file\}"\s+--repo\s+"\$\{GITHUB_REPOSITORY\}"/.test(sourceText)
+    && /gh\s+attestation\s+download\s+"\$\{workspace\}\/scripts\/oracles\/oracle-image\.lock\.json"\s+--repo\s+"\$\{GITHUB_REPOSITORY\}"/.test(sourceText)
+    && sourceText.includes("reports/offline-verification/package-attestation-bundle.jsonl")
+    && sourceText.includes("reports/offline-verification/oracle-lock-attestation-bundle.jsonl")
+    && sourceText.includes("reports/offline-verification/trusted_root.jsonl")
+    && sourceText.includes("reports/offline-verification/sha256.txt");
+}
+
 async function main() {
   const workflowText = await readFile(resolve(WORKFLOW_PATH), "utf8");
 
@@ -57,6 +68,11 @@ async function main() {
       id: "release-workflow-writes-attestation-runtime-report",
       ok: hasRuntimeReportStep(workflowText),
       reason: "release workflow must validate and write reports/release-attestation-runtime.json from verification outputs"
+    },
+    {
+      id: "release-workflow-exports-offline-verification-materials",
+      ok: hasOfflineVerificationExportStep(workflowText),
+      reason: "release workflow must export trusted_root and attestation bundles for offline verification"
     }
   ];
 
