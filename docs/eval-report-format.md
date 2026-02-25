@@ -82,6 +82,16 @@ All evaluation outputs are artifacts under `reports/`.
 - `hashesAgree`: `boolean`
 - `overall`: `{ ok, actualOk }`
 
+## reports/eval-coherence.json
+- `suite`: `"eval-coherence"`
+- `profile`: `"ci"` or `"release"`
+- `timestamp`: ISO-8601
+- `requireFlags`: `string[]`
+- `unknownRequireFlags`: `string[]`
+- `missingProducerScripts`: `{ flag, scriptPath }[]`
+- `missingReports`: `{ flag, reportPath }[]`
+- `overall`: `{ ok }`
+
 ## reports/network-outcomes.json
 - `suite`: `"network-outcomes"`
 - `timestamp`: ISO-8601
