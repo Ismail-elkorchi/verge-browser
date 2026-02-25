@@ -219,6 +219,9 @@ Executed by:
   - `reports/offline-verification/oracle-lock-attestation-bundle.jsonl`
   - `reports/offline-verification/trusted_root.jsonl`
   - `reports/offline-verification/sha256.txt`
+- Release workflow replays attestation verification using the exported bundles and trusted root:
+  - `reports/offline-verification/package-offline-verify.json`
+  - `reports/offline-verification/oracle-lock-offline-verify.json`
 - Offline artifacts are uploaded with release package artifacts.
 
 ## Local field governance gates

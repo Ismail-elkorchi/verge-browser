@@ -274,6 +274,10 @@ Same shape as `reports/render-score.json` for the sampled oracle runtime run.
   - output of `gh attestation trusted-root`.
 - `sha256.txt`:
   - SHA-256 checksums for the three offline verification files above.
+- `package-offline-verify.json`:
+  - raw `gh attestation verify --bundle --custom-trusted-root --format json` output for the package tarball.
+- `oracle-lock-offline-verify.json`:
+  - raw `gh attestation verify --bundle --custom-trusted-root --format json` output for the oracle lock file.
 
 ## Local field reports (`realworld/corpus/reports/*`)
 These reports are local-only artifacts and are not part of CI.
