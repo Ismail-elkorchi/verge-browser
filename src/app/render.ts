@@ -9,7 +9,7 @@ import {
 import { resolveHref } from "./url.js";
 import type { RenderInput, RenderedLink, RenderedPage } from "./types.js";
 
-const SKIP_TAGS = new Set(["script", "style", "template", "noscript", "head"]);
+const SKIP_TAGS = new Set(["script", "style", "template", "head"]);
 const PRE_BLOCK_PREFIX = "@@PRE@@";
 const BLOCK_TAGS = new Set([
   "address",
