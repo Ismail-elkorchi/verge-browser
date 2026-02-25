@@ -1,0 +1,155 @@
+{
+  "suite": "wpt-delta-expected",
+  "version": 1,
+  "generatedAtIso": "2026-02-25T23:45:05.610Z",
+  "source": {
+    "repository": "https://github.com/web-platform-tests/wpt",
+    "commit": "3d3a9202727fcceb8da22df8ee0ec86dde8361ce"
+  },
+  "cases": [
+    {
+      "id": "wpt-flow-dialog",
+      "snapshotId": "snapshot-a",
+      "sourcePath": "html/rendering/non-replaced-elements/flow-content-0/dialog.html",
+      "sha256": "adce2e9b6b6d72da66d4085d68b254fe93d7258e9fed42e31e9b580c571f1bcb",
+      "parseErrorCount": 0,
+      "visibleTextSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "render80Sha256": "ef758add3720790daab85836b2f7f57b84a1e47df36df850075d67231463d31e",
+      "render120Sha256": "ef758add3720790daab85836b2f7f57b84a1e47df36df850075d67231463d31e",
+      "linkCount80": 0,
+      "lineCount80": 1
+    },
+    {
+      "id": "wpt-flow-dialog-display",
+      "snapshotId": "snapshot-a",
+      "sourcePath": "html/rendering/non-replaced-elements/flow-content-0/dialog-display.html",
+      "sha256": "db66a234a1a15870b3f8ac0a0805f6a2c32eba0b98d92cd3ad68d491d85beaf1",
+      "parseErrorCount": 0,
+      "visibleTextSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "render80Sha256": "ef758add3720790daab85836b2f7f57b84a1e47df36df850075d67231463d31e",
+      "render120Sha256": "ef758add3720790daab85836b2f7f57b84a1e47df36df850075d67231463d31e",
+      "linkCount80": 0,
+      "lineCount80": 1
+    },
+    {
+      "id": "wpt-flow-div-align",
+      "snapshotId": "snapshot-a",
+      "sourcePath": "html/rendering/non-replaced-elements/flow-content-0/div-align.html",
+      "sha256": "e964c0968c4a13564b9ca83e5d6c63aee02c6d312672e2e9c75402a2e100af90",
+      "parseErrorCount": 0,
+      "visibleTextSha256": "1d2dbf4fa0daf6e7e55c7fc89ee2605f1e3c79d1b4f9260613e922fcb4f15b81",
+      "render80Sha256": "1d2dbf4fa0daf6e7e55c7fc89ee2605f1e3c79d1b4f9260613e922fcb4f15b81",
+      "render120Sha256": "1d2dbf4fa0daf6e7e55c7fc89ee2605f1e3c79d1b4f9260613e922fcb4f15b81",
+      "linkCount80": 0,
+      "lineCount80": 43
+    },
+    {
+      "id": "wpt-flow-figure",
+      "snapshotId": "snapshot-a",
+      "sourcePath": "html/rendering/non-replaced-elements/flow-content-0/figure.html",
+      "sha256": "3f54bef977745553e7fcdb374de5e9acf135a8235af99cf58ea78103d93ea6c6",
+      "parseErrorCount": 0,
+      "visibleTextSha256": "411d9a88476c90312b744559fc1cd3faece48c94a4e5c0d9b0bb5145fb1e1274",
+      "render80Sha256": "e7874d25052fc7f6e1c8a72f6f835f6c87adae72472a72ab879e2b6ce5c03739",
+      "render120Sha256": "e7874d25052fc7f6e1c8a72f6f835f6c87adae72472a72ab879e2b6ce5c03739",
+      "linkCount80": 0,
+      "lineCount80": 3
+    },
+    {
+      "id": "wpt-flow-headings",
+      "snapshotId": "snapshot-a",
+      "sourcePath": "html/rendering/non-replaced-elements/sections-and-headings/headings-styles.html",
+      "sha256": "c76340e0d68575762f9f4bcc51d2c1a36b791e16d869c62a5721231c051ca348",
+      "parseErrorCount": 0,
+      "visibleTextSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "render80Sha256": "ef758add3720790daab85836b2f7f57b84a1e47df36df850075d67231463d31e",
+      "render120Sha256": "ef758add3720790daab85836b2f7f57b84a1e47df36df850075d67231463d31e",
+      "linkCount80": 0,
+      "lineCount80": 1
+    },
+    {
+      "id": "wpt-flow-search-styles",
+      "snapshotId": "snapshot-b",
+      "sourcePath": "html/rendering/non-replaced-elements/flow-content-0/search-styles.html",
+      "sha256": "e50b73dd3118f71f5282697ac896b0188c62e3ca354f2e00be821ef6b3aa8b78",
+      "parseErrorCount": 0,
+      "visibleTextSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "render80Sha256": "ef758add3720790daab85836b2f7f57b84a1e47df36df850075d67231463d31e",
+      "render120Sha256": "ef758add3720790daab85836b2f7f57b84a1e47df36df850075d67231463d31e",
+      "linkCount80": 0,
+      "lineCount80": 1
+    },
+    {
+      "id": "wpt-inline-b-strong",
+      "snapshotId": "snapshot-a",
+      "sourcePath": "html/rendering/non-replaced-elements/phrasing-content-0/b-strong-styles.html",
+      "sha256": "8a437fe558f6165641276ad574ba7298067b86d1582cf965603ec4efe66a0d56",
+      "parseErrorCount": 0,
+      "visibleTextSha256": "f3dbeabab12594335bba411c9b7dd47dcc2fa179412525306043a63bcc3dbbc1",
+      "render80Sha256": "484b0c685858c5c0133a6db804244036850c27ab005866f5a9c00e0762dccffd",
+      "render120Sha256": "484b0c685858c5c0133a6db804244036850c27ab005866f5a9c00e0762dccffd",
+      "linkCount80": 0,
+      "lineCount80": 31
+    },
+    {
+      "id": "wpt-list-li-text-align",
+      "snapshotId": "snapshot-b",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/li-text-align.html",
+      "sha256": "3f248fd5f1a602ad7943ed11598b02bfecd694215a32ef7b88e9086af91350ec",
+      "parseErrorCount": 0,
+      "visibleTextSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "render80Sha256": "c545adad1870bd440ccf8d0c076c2ce0802099ca567f0e2d5d48db45e94ff3b6",
+      "render120Sha256": "c545adad1870bd440ccf8d0c076c2ce0802099ca567f0e2d5d48db45e94ff3b6",
+      "linkCount80": 0,
+      "lineCount80": 3
+    },
+    {
+      "id": "wpt-list-ol-type",
+      "snapshotId": "snapshot-b",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/ol-type-supported.html",
+      "sha256": "bdd921a3e67cdea07bf5a97f90ab775071ea26a55a7c37bbc7a6a02233c0af51",
+      "parseErrorCount": 0,
+      "visibleTextSha256": "40164802ad005c74e145eec9e91ecea1e80a4044d039fc84a1a9d2d8a9e45d2d",
+      "render80Sha256": "89307a7e8aa0783401c0d58ded16b63fc163544d64f597822dca1a2a59592319",
+      "render120Sha256": "89307a7e8aa0783401c0d58ded16b63fc163544d64f597822dca1a2a59592319",
+      "linkCount80": 0,
+      "lineCount80": 19
+    },
+    {
+      "id": "wpt-list-styles",
+      "snapshotId": "snapshot-b",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/lists-styles.html",
+      "sha256": "78580e2a3f190f69f9d5fe5cee018dff6d6a85772f1134de3518924d1f2c8fe9",
+      "parseErrorCount": 0,
+      "visibleTextSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "render80Sha256": "f9cda3d31c1a91da17ae9e7caa6f4b8863020219fb3563dc07407c2321da5f5e",
+      "render120Sha256": "f9cda3d31c1a91da17ae9e7caa6f4b8863020219fb3563dc07407c2321da5f5e",
+      "linkCount80": 0,
+      "lineCount80": 33
+    },
+    {
+      "id": "wpt-list-styles-quirks",
+      "snapshotId": "snapshot-b",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/lists-styles-quirks.html",
+      "sha256": "8669c36f8fc670cfa45760ac2ed6ab1243034c892d97a52580f02b06c13a756c",
+      "parseErrorCount": 0,
+      "visibleTextSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "render80Sha256": "65f63173d228f4db4ba0e36f7ecdbf41e6c17fd86c640874487d72b2bbeddfdf",
+      "render120Sha256": "65f63173d228f4db4ba0e36f7ecdbf41e6c17fd86c640874487d72b2bbeddfdf",
+      "linkCount80": 0,
+      "lineCount80": 35
+    },
+    {
+      "id": "wpt-list-ul-type",
+      "snapshotId": "snapshot-b",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/ul-type-supported.html",
+      "sha256": "f8f2ce4b69e0a24b3658f16f1a986e9b7a02555a86b0754b6d0a8d70bfee7f68",
+      "parseErrorCount": 0,
+      "visibleTextSha256": "787eeaa88cee23dcbf3a1f75b383bfb34a436dc20075fa1c0f981380d6ff1555",
+      "render80Sha256": "f008492429e2acdad2d227f5d517838d0a02965138c5d72d30dc5c7453c1ffdf",
+      "render120Sha256": "f008492429e2acdad2d227f5d517838d0a02965138c5d72d30dc5c7453c1ffdf",
+      "linkCount80": 0,
+      "lineCount80": 15
+    }
+  ]
+}

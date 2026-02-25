@@ -122,6 +122,18 @@ For each metric:
 - every enabled profile `require*` field maps to an existing producer script
 - every enabled profile `require*` field maps to an emitted report artifact
 
+## G-316 WPT-derived delta gate
+- `reports/wpt-delta.json` exists
+- `reports/wpt-delta.json.ok` is `true`
+- WPT-derived corpus has at least 12 deterministic cases
+- expected file and corpus IDs are one-to-one with zero missing/extra entries
+- hash and structural deltas for each case are zero:
+  - `sha256`
+  - `parseErrorCount`
+  - `visibleTextSha256`
+  - `render80Sha256`
+  - `render120Sha256`
+
 ## Oracle runtime validation gates
 Executed by:
 - `npm run eval:oracle-runtime:ci`

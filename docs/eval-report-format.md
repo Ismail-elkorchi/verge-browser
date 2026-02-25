@@ -252,6 +252,18 @@ Same shape as `reports/render-score.json` for the sampled oracle runtime run.
 - `violations`: `{ path, line, reason }[]`
 - `ok`: boolean
 
+## reports/wpt-delta.json
+- `suite`: `"wpt-delta"`
+- `timestamp`: ISO-8601
+- `corpus`:
+  - `{ path, expectedPath, sourceRepository, sourceCommit, caseCount, snapshotIds }`
+- `checks`:
+  - `minimumCaseCount`: `{ required, observed, ok }`
+  - `missingExpected`: `{ count, ids[], ok }`
+  - `extraExpected`: `{ count, ids[], ok }`
+  - `mismatches`: `{ count, items[], ok }`
+- `ok`: boolean
+
 ## reports/release-attestation-policy.json
 - `suite`: `"release-attestation-policy"`
 - `timestamp`: ISO-8601
