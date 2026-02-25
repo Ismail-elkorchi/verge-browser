@@ -23,6 +23,7 @@ function runRuntimeReportScript({
       `--output=${output}`,
       "--expected-repo=Ismail-elkorchi/verge-browser",
       "--expected-source-ref=refs/heads/main",
+      "--expected-source-digest=0123456789abcdef0123456789abcdef01234567",
       "--expected-workflow=Ismail-elkorchi/verge-browser/.github/workflows/release.yml"
     ],
     {
@@ -75,6 +76,9 @@ test("write-release-attestation-runtime-report fails deterministically for inval
     assert.equal(report.oracleLock.ok, false);
     assert.ok(
       report.oracleLock.failures.includes("record[0]: sourceRepositoryRef mismatch")
+    );
+    assert.ok(
+      report.oracleLock.failures.includes("record[0]: sourceRepositoryDigest mismatch")
     );
     assert.ok(
       report.oracleLock.failures.includes("record[0]: subject[0] missing sha256")

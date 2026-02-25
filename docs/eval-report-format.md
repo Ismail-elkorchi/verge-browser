@@ -253,7 +253,7 @@ Same shape as `reports/render-score.json` for the sampled oracle runtime run.
 - `suite`: `"release-attestation-runtime"`
 - `timestamp`: ISO-8601
 - `expected`:
-  - `{ sourceRepositoryURI, sourceRepositoryRef, workflowSanPrefix, issuer, predicateType }`
+  - `{ sourceRepositoryURI, sourceRepositoryRef, sourceRepositoryDigest, workflowSanPrefix, issuer, predicateType }`
 - `package`:
   - `{ inputPath, attestationCount, uniqueSubjects, failures, ok }`
 - `oracleLock`:

@@ -7,7 +7,8 @@
           "issuer": "https://token.actions.githubusercontent.com",
           "runnerEnvironment": "github-hosted",
           "sourceRepositoryURI": "https://github.com/Ismail-elkorchi/verge-browser",
-          "sourceRepositoryRef": "refs/tags/v0.1.0"
+          "sourceRepositoryRef": "refs/tags/v0.1.0",
+          "sourceRepositoryDigest": "fedcba9876543210fedcba9876543210fedcba98"
         }
       },
       "statement": {
