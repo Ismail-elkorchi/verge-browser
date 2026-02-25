@@ -45,6 +45,16 @@ function lockFingerprint(lockFile) {
   return createHash("sha256").update(basis).digest("hex");
 }
 
+function lockFingerprintWithDownloadUrl(lockFile) {
+  const basis = (Array.isArray(lockFile.packages) ? lockFile.packages : [])
+    .map((packageRecord) => {
+      const downloadUrl = typeof packageRecord.downloadUrl === "string" ? packageRecord.downloadUrl : "";
+      return `${packageRecord.name}@${packageRecord.version}:${packageRecord.debSha256}:${downloadUrl}`;
+    })
+    .join("\n");
+  return createHash("sha256").update(basis).digest("hex");
+}
+
 async function main() {
   const forwardedArgs = parseArgs(process.argv.slice(2));
   runOracleRuntimeValidation(forwardedArgs);
@@ -55,6 +65,11 @@ async function main() {
   ]);
 
   const expectedFingerprint = lockFingerprint(lockFile);
+  const expectedFingerprintWithDownloadUrl = lockFingerprintWithDownloadUrl(lockFile);
+  const lockDeclaredFingerprint = typeof lockFile?.fingerprint === "string" ? lockFile.fingerprint : null;
+  const packageRecords = Array.isArray(lockFile?.packages) ? lockFile.packages : [];
+  const packageCount = packageRecords.length;
+  const packagesWithDownloadUrl = packageRecords.filter((packageRecord) => typeof packageRecord?.downloadUrl === "string" && packageRecord.downloadUrl.length > 0).length;
   const runtimeFingerprint = runtimeReport?.image?.fingerprint ?? null;
   const engines = runtimeReport?.engines ?? {};
   const requiredEngines = ["lynx", "w3m", "links2"];
@@ -78,7 +93,16 @@ async function main() {
     fingerprint: {
       runtime: runtimeFingerprint,
       expected: expectedFingerprint,
+      lockDeclared: lockDeclaredFingerprint,
+      expectedWithDownloadUrl: expectedFingerprintWithDownloadUrl,
       match: runtimeFingerprint === expectedFingerprint
+    },
+    diagnostics: {
+      packageCount,
+      packagesWithDownloadUrl,
+      lockDeclaredMatchesExpected: lockDeclaredFingerprint === expectedFingerprint,
+      lockDeclaredMatchesExpectedWithDownloadUrl: lockDeclaredFingerprint === expectedFingerprintWithDownloadUrl,
+      runtimeMatchesLockDeclared: runtimeFingerprint === lockDeclaredFingerprint
     },
     engines: {
       required: requiredEngines,
