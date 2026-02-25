@@ -1,0 +1,26 @@
+[
+  {
+    "verificationResult": {
+      "signature": {
+        "certificate": {
+          "subjectAlternativeName": "https://github.com/Ismail-elkorchi/verge-browser/.github/workflows/release.yml@refs/tags/v0.1.0",
+          "issuer": "https://token.actions.githubusercontent.com",
+          "runnerEnvironment": "github-hosted",
+          "sourceRepositoryURI": "https://github.com/Ismail-elkorchi/verge-browser",
+          "sourceRepositoryRef": "refs/tags/v0.1.0"
+        }
+      },
+      "statement": {
+        "predicateType": "https://slsa.dev/provenance/v1",
+        "subject": [
+          {
+            "name": "oracle-image-lock.json",
+            "digest": {
+              "sha256": "1234"
+            }
+          }
+        ]
+      }
+    }
+  }
+]
