@@ -144,6 +144,11 @@ All evaluation outputs are artifacts under `reports/`.
 - `suite`: `"oracle-runtime"`
 - `timestamp`: ISO-8601
 - `profile`: `"ci"` or `"release"`
+- `runnerPolicy`:
+  - `environment`:
+    - `{ LANG, LC_ALL, LANGUAGE, TZ, TERM, NO_COLOR }`
+  - `argumentTemplates`:
+    - `lynx`, `w3m`, `links2` argument templates with placeholders
 - `image`:
   - `{ rootfsPath, lockPath, fingerprint, packageCount, rootPackages, sourcePolicy, releaseMetadata }`
   - `sourcePolicy`:
@@ -176,6 +181,8 @@ Same shape as `reports/render-score.json` for the sampled oracle runtime run.
   - `hasAllEngineFingerprints`
   - `hasSnapshotPolicy`
   - `hasReleaseMetadata`
+  - `hasRunnerPolicy`
+  - `runnerPolicyMatchesExpected`
   - `engineRecordChecks`
 - `reports`: paths to generated artifacts
 
@@ -199,6 +206,17 @@ Same shape as `reports/render-score.json` for the sampled oracle runtime run.
   - `{ packageCount, packagesWithDownloadUrl, fingerprintInputValidationOk, fingerprintInputValidationIssues, lockDeclaredMatchesExpected, runtimeMatchesLockDeclared }`
 - `engines`:
   - `{ required, missing, weakFingerprints }`
+- `ok`: boolean
+
+## reports/oracle-runner-policy.json
+- `suite`: `"oracle-runner-policy"`
+- `timestamp`: ISO-8601
+- `runtimeReport`: absolute path to `reports/oracle-runtime.json`
+- `expectedPolicy`: deterministic oracle runner policy from repository code
+- `observedPolicy`: policy emitted by runtime validation
+- `checks`:
+  - `hasRunnerPolicy`
+  - `policyMatchesExpected`
 - `ok`: boolean
 
 ## reports/oracle-supply-chain.json

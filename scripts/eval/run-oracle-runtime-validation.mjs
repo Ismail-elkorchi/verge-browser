@@ -2,7 +2,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { evaluateRenderGates, hashInt, readJson, runRenderEvaluation, writeJsonReport } from "./render-eval-lib.mjs";
-import { collectEngineFingerprints, defaultOracleRootPackages, ensureOracleImage, runEngineDump } from "../oracles/real-oracle-lib.mjs";
+import { collectEngineFingerprints, defaultOracleRootPackages, ensureOracleImage, oracleRunnerPolicy, runEngineDump } from "../oracles/real-oracle-lib.mjs";
 
 function parseArgs(argv) {
   const options = {
@@ -191,6 +191,7 @@ async function main() {
     suite: "oracle-runtime",
     timestamp: new Date().toISOString(),
     profile: options.profile,
+    runnerPolicy: oracleRunnerPolicy(),
     image: {
       rootfsPath: imageState.rootfsPath,
       lockPath: imageState.lockPath,
@@ -212,6 +213,21 @@ async function main() {
   };
 
   await writeJsonReport(resolve(reportsDir, "oracle-runtime.json"), runtimeReport);
+  const expectedRunnerPolicy = oracleRunnerPolicy();
+  const runnerPolicyMatchesExpected = JSON.stringify(runtimeReport.runnerPolicy) === JSON.stringify(expectedRunnerPolicy);
+  const runnerPolicyReport = {
+    suite: "oracle-runner-policy",
+    timestamp: new Date().toISOString(),
+    runtimeReport: resolve(reportsDir, "oracle-runtime.json"),
+    expectedPolicy: expectedRunnerPolicy,
+    observedPolicy: runtimeReport.runnerPolicy,
+    checks: {
+      hasRunnerPolicy: runtimeReport.runnerPolicy !== null,
+      policyMatchesExpected: runnerPolicyMatchesExpected
+    },
+    ok: runtimeReport.runnerPolicy !== null && runnerPolicyMatchesExpected
+  };
+  await writeJsonReport(resolve(reportsDir, "oracle-runner-policy.json"), runnerPolicyReport);
   await writeJsonReport(resolve(reportsDir, "render-baselines-real.json"), evaluation.baselineReport);
   await writeJsonReport(resolve(reportsDir, "render-verge-real.json"), evaluation.vergeReport);
   await writeJsonReport(resolve(reportsDir, "render-score-real.json"), evaluation.scoreReport);
@@ -230,10 +246,13 @@ async function main() {
       hasAllEngineFingerprints: Object.keys(engineFingerprints).length === defaultOracleRootPackages().length,
       hasSnapshotPolicy: imageState.lock?.sourcePolicy?.mode === "snapshot-replay",
       hasReleaseMetadata: Array.isArray(imageState.lock?.releaseMetadata) && imageState.lock.releaseMetadata.length > 0,
+      hasRunnerPolicy: runtimeReport.runnerPolicy !== null,
+      runnerPolicyMatchesExpected,
       engineRecordChecks
     },
     reports: {
       runtime: resolve(reportsDir, "oracle-runtime.json"),
+      runnerPolicy: resolve(reportsDir, "oracle-runner-policy.json"),
       baselines: resolve(reportsDir, "render-baselines-real.json"),
       verge: resolve(reportsDir, "render-verge-real.json"),
       score: resolve(reportsDir, "render-score-real.json")
@@ -242,12 +261,15 @@ async function main() {
 
   await writeJsonReport(resolve(reportsDir, "eval-oracle-runtime-summary.json"), summary);
 
-  if (!gateResult.ok || !engineRecordsOk) {
+  if (!gateResult.ok || !engineRecordsOk || !runnerPolicyReport.ok) {
     for (const failure of gateResult.failures) {
       process.stderr.write(`gate-failure: ${failure}\n`);
     }
     if (!engineRecordsOk) {
       process.stderr.write(`record-failure: ${JSON.stringify(engineRecordChecks)}\n`);
+    }
+    if (!runnerPolicyReport.ok) {
+      process.stderr.write(`runner-policy-failure: ${JSON.stringify(runnerPolicyReport.checks)}\n`);
     }
     throw new Error("oracle runtime validation failed");
   }
