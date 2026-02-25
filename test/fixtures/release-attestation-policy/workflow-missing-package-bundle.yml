@@ -1,0 +1,80 @@
+name: Release
+jobs:
+  release:
+    steps:
+      - name: Generate package provenance attestation
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: |
+            *.tgz
+            package.sha256
+
+      - name: Verify package provenance attestation
+        run: |
+          gh attestation verify "${package_file}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
+            --source-ref "${GITHUB_REF}" \
+            --source-digest "${GITHUB_SHA}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners \
+            --predicate-type "https://slsa.dev/provenance/v1" \
+            --format json > reports/attestation-package-verify.json
+
+      - name: Generate oracle lock provenance attestation
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: scripts/oracles/oracle-image.lock.json
+
+      - name: Verify oracle lock provenance attestation
+        run: |
+          gh attestation verify "scripts/oracles/oracle-image.lock.json" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
+            --source-ref "${GITHUB_REF}" \
+            --source-digest "${GITHUB_SHA}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners \
+            --predicate-type "https://slsa.dev/provenance/v1" \
+            --format json > reports/attestation-oracle-lock-verify.json
+
+      - name: Validate attestation runtime reports
+        run: |
+          node scripts/eval/write-release-attestation-runtime-report.mjs \
+            --output=reports/release-attestation-runtime.json \
+            --expected-source-digest="${GITHUB_SHA}"
+
+      - name: Export offline verification materials
+        run: |
+          gh attestation trusted-root > trusted_root.jsonl
+          gh attestation download "${workspace}/${package_file}" --repo "${GITHUB_REPOSITORY}"
+          gh attestation download "${workspace}/scripts/oracles/oracle-image.lock.json" --repo "${GITHUB_REPOSITORY}"
+          mv package.jsonl reports/offline-verification/package-attestation-bundle.jsonl
+          mv lock.jsonl reports/offline-verification/oracle-lock-attestation-bundle.jsonl
+          mv trusted_root.jsonl reports/offline-verification/trusted_root.jsonl
+          echo reports/offline-verification/sha256.txt
+
+      - name: Verify package and lock attestations offline
+        run: |
+          gh attestation verify "${package_file}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --custom-trusted-root "reports/offline-verification/trusted_root.jsonl" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
+            --source-ref "${GITHUB_REF}" \
+            --source-digest "${GITHUB_SHA}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners \
+            --predicate-type "https://slsa.dev/provenance/v1" \
+            --format json > reports/offline-verification/package-offline-verify.json
+
+          gh attestation verify "scripts/oracles/oracle-image.lock.json" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --bundle "reports/offline-verification/oracle-lock-attestation-bundle.jsonl" \
+            --custom-trusted-root "reports/offline-verification/trusted_root.jsonl" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
+            --source-ref "${GITHUB_REF}" \
+            --source-digest "${GITHUB_SHA}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners \
+            --predicate-type "https://slsa.dev/provenance/v1" \
+            --format json > reports/offline-verification/oracle-lock-offline-verify.json

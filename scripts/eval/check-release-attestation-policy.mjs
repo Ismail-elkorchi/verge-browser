@@ -4,6 +4,46 @@ import { resolve } from "node:path";
 import { writeJsonReport } from "./render-eval-lib.mjs";
 
 const WORKFLOW_PATH = ".github/workflows/release.yml";
+const REPORT_PATH = "reports/release-attestation-policy.json";
+
+function parseArgs(argv) {
+  const options = {
+    workflow: WORKFLOW_PATH,
+    output: REPORT_PATH
+  };
+
+  for (const arg of argv) {
+    if (!arg.startsWith("--")) {
+      throw new Error(`unsupported argument: ${arg}`);
+    }
+    const [rawKey, ...rawValueParts] = arg.slice(2).split("=");
+    const value = rawValueParts.join("=").trim();
+    if (value.length === 0) {
+      throw new Error(`missing value for argument: ${arg}`);
+    }
+    if (rawKey === "workflow") {
+      options.workflow = value;
+      continue;
+    }
+    if (rawKey === "output") {
+      options.output = value;
+      continue;
+    }
+    throw new Error(`unsupported argument key: ${rawKey}`);
+  }
+
+  return options;
+}
+
+function escapeRegex(value) {
+  return value.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function extractStepBody(sourceText, stepName) {
+  const pattern = new RegExp(`-\\s+name:\\s+${escapeRegex(stepName)}\\n([\\s\\S]*?)(?=\\n\\s*-\\s+name:|$)`);
+  const match = sourceText.match(pattern);
+  return match?.[1] ?? "";
+}
 
 function hasArtifactAttestationStep(sourceText) {
   return /uses:\s*actions\/attest-build-provenance@v3/.test(sourceText);
@@ -46,18 +86,27 @@ function hasOfflineVerificationExportStep(sourceText) {
 }
 
 function hasOfflineVerificationReplayStep(sourceText) {
-  return sourceText.includes("Verify package and lock attestations offline")
-    && /gh\s+attestation\s+verify\s+"\$\{package_file\}"/.test(sourceText)
-    && /--bundle\s+"reports\/offline-verification\/package-attestation-bundle\.jsonl"/.test(sourceText)
-    && /--custom-trusted-root\s+"reports\/offline-verification\/trusted_root\.jsonl"/.test(sourceText)
-    && /--format\s+json\s*>\s*reports\/offline-verification\/package-offline-verify\.json/.test(sourceText)
-    && /gh\s+attestation\s+verify\s+"scripts\/oracles\/oracle-image\.lock\.json"/.test(sourceText)
-    && /--bundle\s+"reports\/offline-verification\/oracle-lock-attestation-bundle\.jsonl"/.test(sourceText)
-    && /--format\s+json\s*>\s*reports\/offline-verification\/oracle-lock-offline-verify\.json/.test(sourceText);
+  const stepText = extractStepBody(sourceText, "Verify package and lock attestations offline");
+  if (stepText.length === 0) {
+    return false;
+  }
+
+  const trustedRootMentions = stepText.match(/--custom-trusted-root\s+"reports\/offline-verification\/trusted_root\.jsonl"/g) ?? [];
+  const sourceDigestMentions = stepText.match(/--source-digest\s+"\$\{GITHUB_SHA\}"/g) ?? [];
+
+  return /gh\s+attestation\s+verify\s+"\$\{package_file\}"/.test(stepText)
+    && /--bundle\s+"reports\/offline-verification\/package-attestation-bundle\.jsonl"/.test(stepText)
+    && /--format\s+json\s*>\s*reports\/offline-verification\/package-offline-verify\.json/.test(stepText)
+    && /gh\s+attestation\s+verify\s+"scripts\/oracles\/oracle-image\.lock\.json"/.test(stepText)
+    && /--bundle\s+"reports\/offline-verification\/oracle-lock-attestation-bundle\.jsonl"/.test(stepText)
+    && /--format\s+json\s*>\s*reports\/offline-verification\/oracle-lock-offline-verify\.json/.test(stepText)
+    && trustedRootMentions.length >= 2
+    && sourceDigestMentions.length >= 2;
 }
 
 async function main() {
-  const workflowText = await readFile(resolve(WORKFLOW_PATH), "utf8");
+  const options = parseArgs(process.argv.slice(2));
+  const workflowText = await readFile(resolve(options.workflow), "utf8");
 
   const checks = [
     {
@@ -95,12 +144,12 @@ async function main() {
   const report = {
     suite: "release-attestation-policy",
     timestamp: new Date().toISOString(),
-    workflow: WORKFLOW_PATH,
+    workflow: options.workflow,
     checks,
     ok: checks.every((check) => check.ok)
   };
 
-  const reportPath = resolve("reports/release-attestation-policy.json");
+  const reportPath = resolve(options.output);
   await writeJsonReport(reportPath, report);
 
   if (!report.ok) {

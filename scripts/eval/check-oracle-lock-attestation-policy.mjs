@@ -5,6 +5,36 @@ import { writeJsonReport } from "./render-eval-lib.mjs";
 
 const WORKFLOW_PATH = ".github/workflows/release.yml";
 const LOCK_PATH = "scripts/oracles/oracle-image.lock.json";
+const REPORT_PATH = "reports/oracle-lock-attestation-policy.json";
+
+function parseArgs(argv) {
+  const options = {
+    workflow: WORKFLOW_PATH,
+    output: REPORT_PATH
+  };
+
+  for (const arg of argv) {
+    if (!arg.startsWith("--")) {
+      throw new Error(`unsupported argument: ${arg}`);
+    }
+    const [rawKey, ...rawValueParts] = arg.slice(2).split("=");
+    const value = rawValueParts.join("=").trim();
+    if (value.length === 0) {
+      throw new Error(`missing value for argument: ${arg}`);
+    }
+    if (rawKey === "workflow") {
+      options.workflow = value;
+      continue;
+    }
+    if (rawKey === "output") {
+      options.output = value;
+      continue;
+    }
+    throw new Error(`unsupported argument key: ${rawKey}`);
+  }
+
+  return options;
+}
 
 function hasLockAttestationStep(sourceText) {
   return sourceText.includes("uses: actions/attest-build-provenance@v3")
@@ -27,7 +57,8 @@ function hasLockAttestationVerifyStep(sourceText) {
 }
 
 async function main() {
-  const workflowText = await readFile(resolve(WORKFLOW_PATH), "utf8");
+  const options = parseArgs(process.argv.slice(2));
+  const workflowText = await readFile(resolve(options.workflow), "utf8");
 
   const checks = [
     {
@@ -45,13 +76,13 @@ async function main() {
   const report = {
     suite: "oracle-lock-attestation-policy",
     timestamp: new Date().toISOString(),
-    workflow: WORKFLOW_PATH,
+    workflow: options.workflow,
     lockPath: LOCK_PATH,
     checks,
     ok: checks.every((check) => check.ok)
   };
 
-  const reportPath = resolve("reports/oracle-lock-attestation-policy.json");
+  const reportPath = resolve(options.output);
   await writeJsonReport(reportPath, report);
 
   if (!report.ok) {
