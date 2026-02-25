@@ -134,6 +134,14 @@ For each metric:
   - `render80Sha256`
   - `render120Sha256`
 
+## G-317 Deterministic fuzz gate
+- `reports/fuzz.json` exists
+- `reports/fuzz.json.ok` is `true`
+- profile policy from `evaluation.config.json.fuzz.profiles.<profile>` is applied
+- crash count is zero
+- deterministic mismatch count is zero
+- report includes `topSlowest` seeds and durations for triage
+
 ## Oracle runtime validation gates
 Executed by:
 - `npm run eval:oracle-runtime:ci`

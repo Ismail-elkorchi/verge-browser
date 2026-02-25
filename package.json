@@ -38,6 +38,8 @@
     "eval:oracle-supply-chain:ci": "npm run build && node scripts/eval/run-oracle-supply-chain-check.mjs --profile=ci",
     "eval:oracle-supply-chain:release": "npm run build && node scripts/eval/run-oracle-supply-chain-check.mjs --profile=release",
     "eval:wpt-delta": "npm run build && node scripts/eval/check-wpt-delta.mjs",
+    "eval:fuzz:ci": "npm run build && node scripts/eval/run-fuzz-check.mjs --profile=ci",
+    "eval:fuzz:release": "npm run build && node scripts/eval/run-fuzz-check.mjs --profile=release",
     "eval:release": "npm run build && node scripts/eval/run-eval.mjs --profile=release",
     "field:governance": "node scripts/realworld/check-cohort-governance.mjs",
     "field:layout:wpt": "npm run field:layout:wpt:fetch && npm run field:layout:wpt:run",

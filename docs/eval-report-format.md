@@ -264,6 +264,18 @@ Same shape as `reports/render-score.json` for the sampled oracle runtime run.
   - `mismatches`: `{ count, items[], ok }`
 - `ok`: boolean
 
+## reports/fuzz.json
+- `suite`: `"fuzz"`
+- `timestamp`: ISO-8601
+- `profile`: `"ci"` or `"release"`
+- `policy`: `{ seed, caseCount, maxDepth, sectionCount, topSlowest }`
+- `totals`: `{ caseCount, crashes, deterministicMismatches }`
+- `timing`: `{ p50Ms, p95Ms, maxMs }`
+- `topSlowest`: `[{ caseId, seed, durationMs, parseErrorCount, lineCount, linkCount }]`
+- `crashes`: `[{ caseId, seed, durationMs, message }]`
+- `deterministicMismatches`: `[{ caseId, seed, first, second }]`
+- `ok`: boolean
+
 ## reports/release-attestation-policy.json
 - `suite`: `"release-attestation-policy"`
 - `timestamp`: ISO-8601
