@@ -1,0 +1,62 @@
+{
+  "suite": "oracle-supply-chain-policy-cases",
+  "version": 1,
+  "cases": [
+    {
+      "id": "reject-non-snapshot-mode",
+      "mutations": [
+        { "path": "sourcePolicy.mode", "value": "mirror-live" }
+      ],
+      "expectedFailureIncludes": ["snapshot-replay"]
+    },
+    {
+      "id": "reject-non-https-snapshot-root",
+      "mutations": [
+        { "path": "sourcePolicy.snapshotRoot", "value": "http://snapshot.ubuntu.com/ubuntu" }
+      ],
+      "expectedFailureIncludes": ["snapshotRoot must be an https URL"]
+    },
+    {
+      "id": "reject-invalid-snapshot-id",
+      "mutations": [
+        { "path": "sourcePolicy.snapshotId", "value": "2026-02-19" }
+      ],
+      "expectedFailureIncludes": ["snapshotId must match"]
+    },
+    {
+      "id": "reject-unknown-signing-key",
+      "mutations": [
+        { "path": "releaseMetadata.0.signatureKey", "value": "UNKNOWN" }
+      ],
+      "expectedFailureIncludes": ["must not be UNKNOWN"]
+    },
+    {
+      "id": "reject-non-https-index-url",
+      "mutations": [
+        { "path": "releaseMetadata.0.packageIndexes.0.indexUrl", "value": "http://snapshot.ubuntu.com/ubuntu/20260219T043421Z/dists/questing/main/binary-amd64/Packages.xz" }
+      ],
+      "expectedFailureIncludes": ["indexUrl must be an https URL"]
+    },
+    {
+      "id": "reject-invalid-index-sha256",
+      "mutations": [
+        { "path": "releaseMetadata.0.packageIndexes.0.indexSha256", "value": "abc123" }
+      ],
+      "expectedFailureIncludes": ["indexSha256 must be a 64-char hex digest"]
+    },
+    {
+      "id": "reject-non-https-package-download-url",
+      "mutations": [
+        { "path": "packages.0.downloadUrl", "value": "http://snapshot.ubuntu.com/ubuntu/pool/universe/l/lynx/lynx_2.9.2-1_amd64.deb" }
+      ],
+      "expectedFailureIncludes": ["downloadUrl must be an https URL"]
+    },
+    {
+      "id": "reject-empty-package-indexes",
+      "mutations": [
+        { "path": "releaseMetadata.0.packageIndexes", "value": [] }
+      ],
+      "expectedFailureIncludes": ["packageIndexes must be non-empty"]
+    }
+  ]
+}

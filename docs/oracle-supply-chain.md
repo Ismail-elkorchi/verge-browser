@@ -22,3 +22,7 @@ Mechanism:
 
 Pass condition:
 - `reports/eval-oracle-supply-chain-summary.json.ok` is `true`.
+
+Negative drift coverage:
+- `test/fixtures/oracle-supply-chain-policy-cases.json` contains malformed lock scenarios.
+- `test/control/oracle-supply-chain-policy-fixtures.test.js` enforces deterministic failures for each scenario.
