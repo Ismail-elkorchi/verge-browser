@@ -29,6 +29,7 @@ import { BrowserStore } from "./app/storage.js";
 import { clearTerminal, terminalHeight, terminalWidth } from "./app/terminal.js";
 import type { KeyboardKey, PageRequestOptions, PageSnapshot } from "./app/types.js";
 import { resolveInputUrl } from "./app/url.js";
+import { createNodeHost } from "./runtime/node-host.js";
 
 type ViewKind = "page" | "reader" | "help" | "links" | "bookmarks" | "history" | "cookies" | "recall" | "forms" | "diag" | "outline";
 
@@ -302,8 +303,10 @@ function detachKeypressListener(listener: KeypressListener): void {
 
 async function main(): Promise<void> {
   const cliFlags = parseCliFlags(process.argv.slice(2));
+  const runtimeHost = createNodeHost();
   const session = new BrowserSession({
-    widthProvider: terminalWidth
+    widthProvider: terminalWidth,
+    localFileReader: (path) => runtimeHost.readFileText(path)
   });
   const store = await BrowserStore.open();
   const corpusRecorder = cliFlags.recordCorpus ? new CorpusRecorder() : null;
