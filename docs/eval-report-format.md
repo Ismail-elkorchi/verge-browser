@@ -255,19 +255,27 @@ Same shape as `reports/render-score.json` for the sampled oracle runtime run.
 - `expected`:
   - `{ sourceRepositoryURI, sourceRepositoryRef, sourceRepositoryDigest, workflowSanPrefix, issuer, predicateType, packageSha256 }`
 - `package`:
-  - `{ expectedTarballSha256, online, offline, ok }`
-  - `online` and `offline`:
+  - `{ expectedTarballSha256, signerWorkflow, certIdentity, offline, verifierAgreement, ok }`
+  - `signerWorkflow`, `certIdentity`, and `offline`:
     - `{ inputPath, attestationCount, uniqueSubjects, failures, ok }`
+  - `verifierAgreement`:
+    - `{ ok, signerWorkflowKeys, certIdentityKeys }`
 - `oracleLock`:
-  - `{ online, offline, ok }`
-  - `online` and `offline`:
+  - `{ signerWorkflow, certIdentity, offline, verifierAgreement, ok }`
+  - `signerWorkflow`, `certIdentity`, and `offline`:
     - `{ inputPath, attestationCount, uniqueSubjects, failures, ok }`
+  - `verifierAgreement`:
+    - `{ ok, signerWorkflowKeys, certIdentityKeys }`
 - `overall`:
   - `{ ok }`
 
 ## reports/attestation-package-verify.json and reports/attestation-oracle-lock-verify.json
 - Raw `gh attestation verify --format json` outputs captured by the release workflow.
 - Inputs to `reports/release-attestation-runtime.json` validation.
+
+## reports/attestation-package-verify-cert-identity.json and reports/attestation-oracle-lock-verify-cert-identity.json
+- Raw `gh attestation verify --cert-identity --format json` outputs captured by the release workflow.
+- Used to compare signer-workflow and certificate-identity verification subject digests.
 
 ## reports/offline-verification/*
 - `package-attestation-bundle.jsonl`:

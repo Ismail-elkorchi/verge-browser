@@ -67,9 +67,24 @@ function hasAttestationVerifyStep(sourceText) {
     && /--format\s+json\s*>\s*reports\/attestation-package-verify\.json/.test(sourceText);
 }
 
+function hasCertIdentityVerifyStep(sourceText) {
+  const stepText = extractStepBody(sourceText, "Verify attestations with certificate identity");
+  if (stepText.length === 0) {
+    return false;
+  }
+  return /gh\s+attestation\s+verify\s+"\$\{package_file\}"/.test(stepText)
+    && /--cert-identity\s+"\$\{cert_identity\}"/.test(stepText)
+    && /--source-digest\s+"\$\{GITHUB_SHA\}"/.test(stepText)
+    && /--format\s+json\s*>\s*reports\/attestation-package-verify-cert-identity\.json/.test(stepText)
+    && /gh\s+attestation\s+verify\s+"scripts\/oracles\/oracle-image\.lock\.json"/.test(stepText)
+    && /--format\s+json\s*>\s*reports\/attestation-oracle-lock-verify-cert-identity\.json/.test(stepText);
+}
+
 function hasRuntimeReportStep(sourceText) {
   return sourceText.includes("Validate attestation runtime reports")
     && sourceText.includes("scripts/eval/write-release-attestation-runtime-report.mjs")
+    && sourceText.includes("--cert-identity-package-input=reports/attestation-package-verify-cert-identity.json")
+    && sourceText.includes("--cert-identity-lock-input=reports/attestation-oracle-lock-verify-cert-identity.json")
     && sourceText.includes("--offline-package-input=reports/offline-verification/package-offline-verify.json")
     && sourceText.includes("--offline-lock-input=reports/offline-verification/oracle-lock-offline-verify.json")
     && sourceText.includes("--output=reports/release-attestation-runtime.json")
@@ -126,6 +141,11 @@ async function main() {
       id: "release-workflow-verifies-attestation",
       ok: hasAttestationVerifyStep(workflowText),
       reason: "release workflow must verify artifact attestations with repo, signer-workflow, source-ref, source-digest, OIDC issuer, hosted-runner, predicate constraints, and JSON output"
+    },
+    {
+      id: "release-workflow-verifies-attestation-cert-identity",
+      ok: hasCertIdentityVerifyStep(workflowText),
+      reason: "release workflow must verify package and oracle lock attestations using certificate-identity constrained checks"
     },
     {
       id: "release-workflow-writes-attestation-runtime-report",
