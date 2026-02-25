@@ -173,6 +173,8 @@ Executed by:
 Executed by:
 - `npm run eval:oracle-fingerprint:ci`
 - `npm run eval:oracle-fingerprint:release`
+- required in GitHub PR CI (`.github/workflows/ci.yml`, `node` job)
+- required in release checks (`npm run release:check`)
 
 ### V-407 Fingerprint identity gate
 - `reports/eval-oracle-fingerprint-summary.json.ok` is `true`.

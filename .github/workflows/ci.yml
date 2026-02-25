@@ -73,6 +73,9 @@ jobs:
       - name: Real oracle validation
         run: npm run eval:oracle-runtime:ci
 
+      - name: Oracle fingerprint drift validation
+        run: npm run eval:oracle-fingerprint:ci
+
   deno:
     name: deno
     runs-on: ubuntu-latest
