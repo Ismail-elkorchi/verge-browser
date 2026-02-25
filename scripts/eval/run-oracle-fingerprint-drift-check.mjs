@@ -1,8 +1,8 @@
-import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 
 import { readJson, writeJsonReport } from "./render-eval-lib.mjs";
+import { computeOracleLockFingerprint } from "../oracles/real-oracle-lib.mjs";
 
 function parseArgs(argv) {
   const forwardedArgs = [];
@@ -38,23 +38,6 @@ function runOracleRuntimeValidation(forwardedArgs) {
   }
 }
 
-function lockFingerprint(lockFile) {
-  const basis = (Array.isArray(lockFile.packages) ? lockFile.packages : [])
-    .map((packageRecord) => `${packageRecord.name}@${packageRecord.version}:${packageRecord.debSha256}`)
-    .join("\n");
-  return createHash("sha256").update(basis).digest("hex");
-}
-
-function lockFingerprintWithDownloadUrl(lockFile) {
-  const basis = (Array.isArray(lockFile.packages) ? lockFile.packages : [])
-    .map((packageRecord) => {
-      const downloadUrl = typeof packageRecord.downloadUrl === "string" ? packageRecord.downloadUrl : "";
-      return `${packageRecord.name}@${packageRecord.version}:${packageRecord.debSha256}:${downloadUrl}`;
-    })
-    .join("\n");
-  return createHash("sha256").update(basis).digest("hex");
-}
-
 async function main() {
   const forwardedArgs = parseArgs(process.argv.slice(2));
   runOracleRuntimeValidation(forwardedArgs);
@@ -64,8 +47,7 @@ async function main() {
     readJson(resolve("scripts/oracles/oracle-image.lock.json"))
   ]);
 
-  const expectedFingerprint = lockFingerprint(lockFile);
-  const expectedFingerprintWithDownloadUrl = lockFingerprintWithDownloadUrl(lockFile);
+  const expectedFingerprint = computeOracleLockFingerprint(lockFile);
   const lockDeclaredFingerprint = typeof lockFile?.fingerprint === "string" ? lockFile.fingerprint : null;
   const packageRecords = Array.isArray(lockFile?.packages) ? lockFile.packages : [];
   const packageCount = packageRecords.length;
@@ -87,6 +69,10 @@ async function main() {
     );
   });
 
+  const lockFingerprintOk = lockDeclaredFingerprint === null
+    ? expectedFingerprint === runtimeFingerprint
+    : lockDeclaredFingerprint === expectedFingerprint && runtimeFingerprint === lockDeclaredFingerprint;
+
   const report = {
     suite: "oracle-fingerprint-drift-check",
     timestamp: new Date().toISOString(),
@@ -94,14 +80,12 @@ async function main() {
       runtime: runtimeFingerprint,
       expected: expectedFingerprint,
       lockDeclared: lockDeclaredFingerprint,
-      expectedWithDownloadUrl: expectedFingerprintWithDownloadUrl,
-      match: runtimeFingerprint === expectedFingerprint
+      match: lockFingerprintOk
     },
     diagnostics: {
       packageCount,
       packagesWithDownloadUrl,
       lockDeclaredMatchesExpected: lockDeclaredFingerprint === expectedFingerprint,
-      lockDeclaredMatchesExpectedWithDownloadUrl: lockDeclaredFingerprint === expectedFingerprintWithDownloadUrl,
       runtimeMatchesLockDeclared: runtimeFingerprint === lockDeclaredFingerprint
     },
     engines: {
@@ -109,7 +93,7 @@ async function main() {
       missing: missingEngines,
       weakFingerprints
     },
-    ok: runtimeFingerprint === expectedFingerprint && missingEngines.length === 0 && weakFingerprints.length === 0
+    ok: lockFingerprintOk && missingEngines.length === 0 && weakFingerprints.length === 0
   };
 
   const reportPath = resolve("reports/eval-oracle-fingerprint-summary.json");
