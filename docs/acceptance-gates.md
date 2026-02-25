@@ -41,6 +41,7 @@ For each metric:
 - `reports/render-baselines.json` exists and includes pinned baseline versions
 - `reports/render-verge.json` exists and includes per-case output + normalized output
 - `reports/render-score.json` exists with metrics + coverage
+- `reports/runtime-matrix.json` exists with runtime smoke status
 - `reports/eval-summary.json` exists and reports gate status
 
 ## G-307 Agent report gate
@@ -102,6 +103,13 @@ For each metric:
 - `reports/oracle-workflow-policy.json` exists
 - `reports/oracle-workflow-policy.json.ok` is `true`
 - CI/release workflows do not use `--rebuild-lock` for oracle runtime validation
+
+## G-314 Runtime matrix gate
+- `reports/runtime-matrix.json` exists
+- required runtime targets: `node`, `deno`, `bun`
+- when profile policy `requireRuntimeMatrix=true`:
+  - all required runtime smoke checks pass
+  - required runtime hashes agree
 
 ## Oracle runtime validation gates
 Executed by:

@@ -70,6 +70,18 @@ All evaluation outputs are artifacts under `reports/`.
   - entries: `{ id, ok, observed, expected }`
 - `overall`: `{ ok }`
 
+## reports/runtime-matrix.json
+- `suite`: `"runtime-matrix"`
+- `profile`: `"ci"` or `"release"`
+- `timestamp`: ISO-8601
+- `requiredRuntimes`: `string[]`
+- `requireRuntimeMatrix`: `boolean`
+- `runtimes`:
+  - keys: `node`, `deno`, `bun`
+  - values: `{ ok, hash, error, missing }`
+- `hashesAgree`: `boolean`
+- `overall`: `{ ok, actualOk }`
+
 ## reports/network-outcomes.json
 - `suite`: `"network-outcomes"`
 - `timestamp`: ISO-8601
