@@ -18,8 +18,11 @@ Oracle runtime validation checks rendering claims with real terminal browser bin
    - `lynx`
    - `w3m`
    - `links2`
-5. Executes each engine against sampled corpus cases and records baseline outputs.
-6. Evaluates `verge-browser` against those real baselines with the same metric definitions used in the core render eval.
+5. Executes each engine with a deterministic runner policy:
+   - environment: `LANG=C.UTF-8`, `LC_ALL=C.UTF-8`, `LANGUAGE=C`, `TZ=UTC`, `TERM=dumb`, `NO_COLOR=1`
+   - per-engine argument templates are emitted in `reports/oracle-runtime.json.runnerPolicy`.
+6. Executes each engine against sampled corpus cases and records baseline outputs.
+7. Evaluates `verge-browser` against those real baselines with the same metric definitions used in the core render eval.
    - Oracle runtime validation enforces metric floors and coverage.
    - Comparative superiority delta is reported but not a blocking gate in this pass.
 

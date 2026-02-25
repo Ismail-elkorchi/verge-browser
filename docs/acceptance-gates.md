@@ -151,6 +151,17 @@ Executed by:
   - each locked package exists in the signed index with matching `Filename` and `SHA256`
 - `reports/oracle-runtime.json.image.releaseMetadata` is present and non-empty.
 
+### V-413 Deterministic oracle runner policy
+- `reports/oracle-runtime.json.runnerPolicy` is present.
+- `reports/oracle-runtime.json.runnerPolicy.environment` pins:
+  - `LANG=C.UTF-8`
+  - `LC_ALL=C.UTF-8`
+  - `LANGUAGE=C`
+  - `TZ=UTC`
+  - `TERM=dumb`
+  - `NO_COLOR=1`
+- `reports/oracle-runner-policy.json` exists and `ok=true`.
+
 ### V-404 Real-baseline report integrity
 - `reports/render-baselines-real.json` includes case records for all engines.
 - per-engine record counts equal executed surface in `reports/render-score-real.json.coverage.executedSurface`.

@@ -14,6 +14,44 @@ const DEFAULT_LOCK_MIRRORS = [
   "http://archive.ubuntu.com/ubuntu",
   "http://security.ubuntu.com/ubuntu"
 ];
+const ORACLE_RUNNER_ENVIRONMENT = Object.freeze({
+  LANG: "C.UTF-8",
+  LC_ALL: "C.UTF-8",
+  LANGUAGE: "C",
+  TZ: "UTC",
+  TERM: "dumb",
+  NO_COLOR: "1"
+});
+const ORACLE_RUNNER_ARGUMENT_TEMPLATES = Object.freeze({
+  lynx: Object.freeze([
+    "-dump",
+    "-nolist",
+    "-assume_charset=utf-8",
+    "-display_charset=utf-8",
+    "-width={width}",
+    "{fileUrl}"
+  ]),
+  w3m: Object.freeze([
+    "-dump",
+    "-T",
+    "text/html",
+    "-I",
+    "UTF-8",
+    "-O",
+    "UTF-8",
+    "-cols",
+    "{width}",
+    "{htmlPath}"
+  ]),
+  links2: Object.freeze([
+    "-dump",
+    "-codepage",
+    "utf-8",
+    "-width",
+    "{width}",
+    "{fileUrl}"
+  ])
+});
 
 function runCommand(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -163,6 +201,19 @@ function resolveCandidateVersion(packageName) {
 
 function hashString(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+export function oracleRunnerPolicy() {
+  return {
+    environment: {
+      ...ORACLE_RUNNER_ENVIRONMENT
+    },
+    argumentTemplates: {
+      lynx: [...ORACLE_RUNNER_ARGUMENT_TEMPLATES.lynx],
+      w3m: [...ORACLE_RUNNER_ARGUMENT_TEMPLATES.w3m],
+      links2: [...ORACLE_RUNNER_ARGUMENT_TEMPLATES.links2]
+    }
+  };
 }
 
 function formatSnapshotId(dateValue = new Date()) {
@@ -928,7 +979,7 @@ function baseOracleEnv(rootfsPath) {
     HOME: process.env.HOME ?? process.cwd(),
     LD_LIBRARY_PATH: oracleLdLibraryPath(rootfsPath),
     LYNX_CFG: join(rootfsPath, "etc", "lynx", "lynx.cfg"),
-    TERM: process.env.TERM ?? "xterm-256color"
+    ...ORACLE_RUNNER_ENVIRONMENT
   };
 }
 
@@ -967,17 +1018,12 @@ export function runEngineDump(options) {
   const binaryPath = oracleCommandPath(options.rootfsPath, options.engineName);
   const htmlPath = options.htmlPath;
   const fileUrl = `file://${htmlPath}`;
-
-  let args;
-  if (options.engineName === "lynx") {
-    args = ["-dump", "-nolist", `-width=${String(options.width)}`, fileUrl];
-  } else if (options.engineName === "w3m") {
-    args = ["-dump", "-cols", String(options.width), htmlPath];
-  } else if (options.engineName === "links2") {
-    args = ["-dump", "-width", String(options.width), fileUrl];
-  } else {
-    throw new Error(`unsupported engine: ${options.engineName}`);
-  }
+  const args = oracleDumpArgs({
+    engineName: options.engineName,
+    width: options.width,
+    htmlPath,
+    fileUrl
+  });
 
   const result = runOracleBinary(options.rootfsPath, binaryPath, args);
   const output = result.stdout.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
@@ -986,6 +1032,20 @@ export function runEngineDump(options) {
     lines.pop();
   }
   return lines;
+}
+
+export function oracleDumpArgs(input) {
+  const templates = ORACLE_RUNNER_ARGUMENT_TEMPLATES[input.engineName];
+  if (!templates) {
+    throw new Error(`unsupported engine: ${input.engineName}`);
+  }
+  const width = String(input.width);
+  return templates.map((token) =>
+    token
+      .replaceAll("{width}", width)
+      .replaceAll("{htmlPath}", input.htmlPath)
+      .replaceAll("{fileUrl}", input.fileUrl)
+  );
 }
 
 function versionCommandArgs(engineName) {
