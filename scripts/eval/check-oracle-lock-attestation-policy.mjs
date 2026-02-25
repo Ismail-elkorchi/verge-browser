@@ -17,12 +17,12 @@ function hasLockAttestationVerifyStep(sourceText) {
     return false;
   }
   return /--repo\s+"\$\{\s*GITHUB_REPOSITORY\s*\}"/.test(sourceText)
-    && /--signer-repo\s+"\$\{\s*GITHUB_REPOSITORY\s*\}"/.test(sourceText)
     && /--signer-workflow\s+"\$\{\s*GITHUB_REPOSITORY\s*\}\/\.github\/workflows\/release\.yml"/.test(sourceText)
     && /--source-ref\s+"\$\{\s*GITHUB_REF\s*\}"/.test(sourceText)
     && /--cert-oidc-issuer\s+"https:\/\/token\.actions\.githubusercontent\.com"/.test(sourceText)
     && /--deny-self-hosted-runners/.test(sourceText)
-    && /--predicate-type\s+"https:\/\/slsa\.dev\/provenance\/v1"/.test(sourceText);
+    && /--predicate-type\s+"https:\/\/slsa\.dev\/provenance\/v1"/.test(sourceText)
+    && /--format\s+json\s*>\s*reports\/attestation-oracle-lock-verify\.json/.test(sourceText);
 }
 
 async function main() {
@@ -37,7 +37,7 @@ async function main() {
     {
       id: "release-workflow-verifies-oracle-lock-attestation",
       ok: hasLockAttestationVerifyStep(workflowText),
-      reason: "release workflow must verify oracle lock attestation with repo, signer, source-ref, OIDC issuer, hosted-runner, and predicate constraints"
+      reason: "release workflow must verify oracle lock attestation with repo, signer-workflow, source-ref, OIDC issuer, hosted-runner, predicate constraints, and JSON output"
     }
   ];
 
