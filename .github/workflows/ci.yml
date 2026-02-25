@@ -37,6 +37,14 @@ jobs:
           node-version: '24'
           cache: npm
 
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
       - name: Prepare html-parser dependency
         run: |
           set -euo pipefail
@@ -64,3 +72,81 @@ jobs:
 
       - name: Real oracle validation
         run: npm run eval:oracle-runtime:ci
+
+  deno:
+    name: deno
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Checkout html-parser dependency
+        run: |
+          set -euo pipefail
+          if [ ! -d ../html-parser ]; then
+            git clone --depth 1 https://github.com/Ismail-elkorchi/html-parser.git ../html-parser
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Prepare html-parser dependency
+        run: |
+          set -euo pipefail
+          cd ../html-parser
+          npm ci
+          npm run build
+
+      - name: Install
+        run: npm ci
+
+      - name: Runtime smoke (deno)
+        run: npm run smoke:deno
+
+  bun:
+    name: bun
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Checkout html-parser dependency
+        run: |
+          set -euo pipefail
+          if [ ! -d ../html-parser ]; then
+            git clone --depth 1 https://github.com/Ismail-elkorchi/html-parser.git ../html-parser
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Prepare html-parser dependency
+        run: |
+          set -euo pipefail
+          cd ../html-parser
+          npm ci
+          npm run build
+
+      - name: Install
+        run: npm ci
+
+      - name: Runtime smoke (bun)
+        run: npm run smoke:bun

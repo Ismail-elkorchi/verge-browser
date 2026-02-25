@@ -93,6 +93,7 @@ npm test
 npm run build
 npm run ci
 npm run smoke:cli
+npm run smoke:all
 npm run eval:ci
 npm run eval:release
 npm run test:bench
@@ -165,6 +166,7 @@ npm run release:check
 ## Automation
 - CI workflow: `.github/workflows/ci.yml`
   - installs dependencies
+  - runs runtime smoke matrix jobs (`node`, `deno`, `bun`)
   - runs `npm run ci`
   - runs CLI smoke via `npm run smoke:cli`
 - Release workflow: `.github/workflows/release.yml`
