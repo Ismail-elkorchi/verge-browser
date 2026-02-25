@@ -10,6 +10,11 @@ Artifacts are written to `reports/`.
 - Terminal runtime targets are Node, Deno, and Bun.
 - Browser runtime execution is a non-goal for this product.
 
+## Required CI checks
+- `node`
+- `deno`
+- `bun`
+
 ## G-301 Corpus integrity
 - `scripts/oracles/corpus/render-v3.json` exists
 - case count >= 1000
@@ -107,9 +112,9 @@ For each metric:
 ## G-314 Runtime matrix gate
 - `reports/runtime-matrix.json` exists
 - required runtime targets: `node`, `deno`, `bun`
-- when profile policy `requireRuntimeMatrix=true`:
-  - all required runtime smoke checks pass
-  - required runtime hashes agree
+- profile policy `requireRuntimeMatrix=true` in both `ci` and `release`
+- all required runtime smoke checks pass
+- required runtime hashes agree
 
 ## Oracle runtime validation gates
 Executed by:

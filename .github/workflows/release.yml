@@ -36,6 +36,14 @@ jobs:
           node-version: '24'
           cache: npm
 
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
       - name: Install
         run: npm ci
 

@@ -12,13 +12,13 @@
         "includeHoldout": true,
         "minExecutedFraction": 0.9,
         "minCases": 250,
-        "requireRuntimeMatrix": false
+        "requireRuntimeMatrix": true
       },
       "release": {
         "includeHoldout": true,
         "minExecutedFraction": 1,
         "minCases": 1000,
-        "requireRuntimeMatrix": false
+        "requireRuntimeMatrix": true
       }
     },
     "metrics": {
