@@ -152,6 +152,34 @@ jobs:
             "${workspace}/reports/offline-verification/trusted_root.jsonl" \
             > "${workspace}/reports/offline-verification/sha256.txt"
 
+      - name: Verify package and lock attestations offline
+        run: |
+          set -euo pipefail
+          package_file="$(ls -1 ./*.tgz | head -n1)"
+          gh attestation verify "${package_file}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --bundle "reports/offline-verification/package-attestation-bundle.jsonl" \
+            --custom-trusted-root "reports/offline-verification/trusted_root.jsonl" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
+            --source-ref "${GITHUB_REF}" \
+            --source-digest "${GITHUB_SHA}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners \
+            --predicate-type "https://slsa.dev/provenance/v1" \
+            --format json > reports/offline-verification/package-offline-verify.json
+
+          gh attestation verify "scripts/oracles/oracle-image.lock.json" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --bundle "reports/offline-verification/oracle-lock-attestation-bundle.jsonl" \
+            --custom-trusted-root "reports/offline-verification/trusted_root.jsonl" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
+            --source-ref "${GITHUB_REF}" \
+            --source-digest "${GITHUB_SHA}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners \
+            --predicate-type "https://slsa.dev/provenance/v1" \
+            --format json > reports/offline-verification/oracle-lock-offline-verify.json
+
       - name: Upload package artifact
         uses: actions/upload-artifact@v6
         with:
@@ -166,3 +194,5 @@ jobs:
             reports/offline-verification/oracle-lock-attestation-bundle.jsonl
             reports/offline-verification/trusted_root.jsonl
             reports/offline-verification/sha256.txt
+            reports/offline-verification/package-offline-verify.json
+            reports/offline-verification/oracle-lock-offline-verify.json

@@ -45,6 +45,17 @@ function hasOfflineVerificationExportStep(sourceText) {
     && sourceText.includes("reports/offline-verification/sha256.txt");
 }
 
+function hasOfflineVerificationReplayStep(sourceText) {
+  return sourceText.includes("Verify package and lock attestations offline")
+    && /gh\s+attestation\s+verify\s+"\$\{package_file\}"/.test(sourceText)
+    && /--bundle\s+"reports\/offline-verification\/package-attestation-bundle\.jsonl"/.test(sourceText)
+    && /--custom-trusted-root\s+"reports\/offline-verification\/trusted_root\.jsonl"/.test(sourceText)
+    && /--format\s+json\s*>\s*reports\/offline-verification\/package-offline-verify\.json/.test(sourceText)
+    && /gh\s+attestation\s+verify\s+"scripts\/oracles\/oracle-image\.lock\.json"/.test(sourceText)
+    && /--bundle\s+"reports\/offline-verification\/oracle-lock-attestation-bundle\.jsonl"/.test(sourceText)
+    && /--format\s+json\s*>\s*reports\/offline-verification\/oracle-lock-offline-verify\.json/.test(sourceText);
+}
+
 async function main() {
   const workflowText = await readFile(resolve(WORKFLOW_PATH), "utf8");
 
@@ -73,6 +84,11 @@ async function main() {
       id: "release-workflow-exports-offline-verification-materials",
       ok: hasOfflineVerificationExportStep(workflowText),
       reason: "release workflow must export trusted_root and attestation bundles for offline verification"
+    },
+    {
+      id: "release-workflow-replays-offline-verification",
+      ok: hasOfflineVerificationReplayStep(workflowText),
+      reason: "release workflow must replay package and lock attestation verification against exported bundles and trusted root"
     }
   ];
 
