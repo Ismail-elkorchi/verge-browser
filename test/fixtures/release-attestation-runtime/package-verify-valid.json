@@ -1,0 +1,32 @@
+[
+  {
+    "verificationResult": {
+      "signature": {
+        "certificate": {
+          "subjectAlternativeName": "https://github.com/Ismail-elkorchi/verge-browser/.github/workflows/release.yml@refs/heads/main",
+          "issuer": "https://token.actions.githubusercontent.com",
+          "runnerEnvironment": "github-hosted",
+          "sourceRepositoryURI": "https://github.com/Ismail-elkorchi/verge-browser",
+          "sourceRepositoryRef": "refs/heads/main"
+        }
+      },
+      "statement": {
+        "predicateType": "https://slsa.dev/provenance/v1",
+        "subject": [
+          {
+            "name": "verge-browser-0.1.0.tgz",
+            "digest": {
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          {
+            "name": "package.sha256",
+            "digest": {
+              "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+          }
+        ]
+      }
+    }
+  }
+]
