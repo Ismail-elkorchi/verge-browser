@@ -101,7 +101,9 @@ npm run eval:oracle-runtime:release
 npm run eval:oracle-superiority:release
 npm run eval:oracle-fingerprint:release
 npm run eval:oracle-supply-chain:release
+npm run eval:wpt-delta
 npm run oracle:lock:refresh
+npm run oracle:wpt-delta:refresh
 npm run eval:capability-ladder:ci
 npm run eval:capability-ladder:release
 npm run release:check
@@ -122,6 +124,8 @@ npm run release:check
   - `npm run eval:oracle-fingerprint:release`
   - `npm run eval:oracle-supply-chain:ci`
   - `npm run eval:oracle-supply-chain:release`
+  - `npm run eval:wpt-delta`
+  - `npm run oracle:wpt-delta:refresh`
   - `npm run eval:capability-ladder:ci`
   - `npm run eval:capability-ladder:release`
 - Contracts:
@@ -132,6 +136,7 @@ npm run release:check
   - `docs/oracle-superiority.md`
   - `docs/oracle-fingerprint-drift.md`
   - `docs/oracle-supply-chain.md`
+  - `docs/wpt-delta.md`
   - `docs/benchmark-governance.md`
   - `docs/capability-roadmap.md`
 
