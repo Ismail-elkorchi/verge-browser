@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 
 import { readJson, writeJsonReport } from "./render-eval-lib.mjs";
-import { computeOracleLockFingerprint } from "../oracles/real-oracle-lib.mjs";
+import { computeOracleLockFingerprint, validateOracleLockFingerprintInputs } from "../oracles/real-oracle-lib.mjs";
 
 function parseArgs(argv) {
   const forwardedArgs = [];
@@ -47,7 +47,10 @@ async function main() {
     readJson(resolve("scripts/oracles/oracle-image.lock.json"))
   ]);
 
-  const expectedFingerprint = computeOracleLockFingerprint(lockFile);
+  const fingerprintInputValidation = validateOracleLockFingerprintInputs(lockFile);
+  const expectedFingerprint = fingerprintInputValidation.ok
+    ? computeOracleLockFingerprint(lockFile)
+    : null;
   const lockDeclaredFingerprint = typeof lockFile?.fingerprint === "string" ? lockFile.fingerprint : null;
   const packageRecords = Array.isArray(lockFile?.packages) ? lockFile.packages : [];
   const packageCount = packageRecords.length;
@@ -69,9 +72,9 @@ async function main() {
     );
   });
 
-  const lockFingerprintOk = lockDeclaredFingerprint === null
+  const lockFingerprintOk = fingerprintInputValidation.ok && (lockDeclaredFingerprint === null
     ? expectedFingerprint === runtimeFingerprint
-    : lockDeclaredFingerprint === expectedFingerprint && runtimeFingerprint === lockDeclaredFingerprint;
+    : lockDeclaredFingerprint === expectedFingerprint && runtimeFingerprint === lockDeclaredFingerprint);
 
   const report = {
     suite: "oracle-fingerprint-drift-check",
@@ -85,6 +88,8 @@ async function main() {
     diagnostics: {
       packageCount,
       packagesWithDownloadUrl,
+      fingerprintInputValidationOk: fingerprintInputValidation.ok,
+      fingerprintInputValidationIssues: fingerprintInputValidation.issues,
       lockDeclaredMatchesExpected: lockDeclaredFingerprint === expectedFingerprint,
       runtimeMatchesLockDeclared: runtimeFingerprint === lockDeclaredFingerprint
     },

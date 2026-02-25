@@ -512,13 +512,93 @@ async function materializeRootfs(input) {
 }
 
 export function computeOracleLockFingerprint(lockPayload) {
-  const fingerprintBasis = lockPayload.packages
-    .map((packageRecord) => {
-      const downloadUrl = typeof packageRecord.downloadUrl === "string" ? packageRecord.downloadUrl : "";
-      return `${packageRecord.name}@${packageRecord.version}:${packageRecord.debSha256}:${downloadUrl}`;
-    })
+  const validation = validateOracleLockFingerprintInputs(lockPayload);
+  if (!validation.ok) {
+    throw new Error(`invalid oracle lock fingerprint inputs: ${JSON.stringify(validation.issues)}`);
+  }
+  const fingerprintBasis = validation.packages
+    .map((packageRecord) => `${packageRecord.name}@${packageRecord.version}:${packageRecord.debSha256}:${packageRecord.downloadUrl}`)
     .join("\n");
   return hashString(fingerprintBasis);
+}
+
+function packageOrderKey(packageRecord) {
+  return `${packageRecord.name}\u0000${packageRecord.version}`;
+}
+
+function compareTextBinary(left, right) {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
+
+export function validateOracleLockFingerprintInputs(lockPayload) {
+  const issues = [];
+  const packages = Array.isArray(lockPayload?.packages) ? lockPayload.packages : [];
+  if (packages.length === 0) {
+    issues.push("packages must be a non-empty array");
+  }
+
+  const normalizedPackages = [];
+  for (const [index, packageRecord] of packages.entries()) {
+    if (!packageRecord || typeof packageRecord !== "object") {
+      issues.push(`packages[${String(index)}] must be an object`);
+      continue;
+    }
+
+    const name = typeof packageRecord.name === "string" ? packageRecord.name.trim() : "";
+    const version = typeof packageRecord.version === "string" ? packageRecord.version.trim() : "";
+    const debSha256 = typeof packageRecord.debSha256 === "string" ? packageRecord.debSha256.trim().toLowerCase() : "";
+    const downloadUrl = typeof packageRecord.downloadUrl === "string" ? packageRecord.downloadUrl.trim() : "";
+
+    if (name.length === 0) {
+      issues.push(`packages[${String(index)}].name must be a non-empty string`);
+    }
+    if (version.length === 0) {
+      issues.push(`packages[${String(index)}].version must be a non-empty string`);
+    }
+    if (!/^[0-9a-f]{64}$/i.test(debSha256)) {
+      issues.push(`packages[${String(index)}].debSha256 must be a 64-char hex digest`);
+    }
+    if (downloadUrl.length === 0) {
+      issues.push(`packages[${String(index)}].downloadUrl must be a non-empty string`);
+    }
+
+    normalizedPackages.push({
+      name,
+      version,
+      debSha256,
+      downloadUrl
+    });
+  }
+
+  const packageKeys = normalizedPackages.map((packageRecord) => packageOrderKey(packageRecord));
+  const sortedKeys = [...packageKeys].sort(compareTextBinary);
+  const outOfOrderIndexes = [];
+  for (let index = 0; index < packageKeys.length; index += 1) {
+    if (packageKeys[index] !== sortedKeys[index]) {
+      outOfOrderIndexes.push(index);
+    }
+  }
+  if (outOfOrderIndexes.length > 0) {
+    issues.push(`packages must be sorted by name/version; out-of-order indexes: ${outOfOrderIndexes.join(",")}`);
+  }
+
+  const duplicateKeys = [];
+  for (let index = 1; index < sortedKeys.length; index += 1) {
+    if (sortedKeys[index] === sortedKeys[index - 1]) {
+      duplicateKeys.push(sortedKeys[index]);
+    }
+  }
+  if (duplicateKeys.length > 0) {
+    issues.push(`packages contain duplicate name/version keys: ${[...new Set(duplicateKeys)].join(",")}`);
+  }
+
+  return {
+    ok: issues.length === 0,
+    issues,
+    packages: normalizedPackages
+  };
 }
 
 async function withOracleImageLock(imageRoot, operation) {
@@ -562,7 +642,7 @@ async function createLock(input) {
     });
   }
 
-  candidatePackages.sort((left, right) => left.name.localeCompare(right.name));
+  candidatePackages.sort((left, right) => compareTextBinary(packageOrderKey(left), packageOrderKey(right)));
 
   const pkgsDir = join(input.imageRoot, "pkgs");
   await mkdir(pkgsDir, { recursive: true });
