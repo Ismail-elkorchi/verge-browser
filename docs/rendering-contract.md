@@ -2,6 +2,10 @@
 
 This document defines the measurable rendering contract for `verge-browser`.
 
+## Runtime scope
+- Terminal runtime targets: Node, Deno, Bun.
+- Browser runtime target: out of scope for this product.
+
 ## Benchmark definition
 - Corpus file: `scripts/oracles/corpus/render-v3.json`
 - Minimum case count: `1000` (current: `1200`)

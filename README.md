@@ -1,7 +1,7 @@
 # verge-browser
 
 `verge-browser` is a deterministic terminal web browser built with `html-parser`.
-It targets modern Node terminals and focuses on controlled rendering, auditable behavior, and reproducible outputs.
+It targets modern Node, Deno, and Bun terminals and focuses on controlled rendering, auditable behavior, and reproducible outputs.
 
 ## Positioning
 - Terminal-first browsing for HTML content.
@@ -16,7 +16,8 @@ It targets modern Node terminals and focuses on controlled rendering, auditable 
 
 ## Runtime model
 - Runtime dependency: `html-parser` (local file dependency during development).
-- Runtime fetch: Web `fetch` API in Node.
+- Runtime targets: Node, Deno, Bun.
+- Browser runtime target: out of scope.
 - Rendering: parse with `html-parser`, then convert AST to terminal lines and link table.
 
 ## Usage
