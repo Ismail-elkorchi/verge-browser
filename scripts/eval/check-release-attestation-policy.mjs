@@ -20,6 +20,7 @@ function hasAttestationVerifyStep(sourceText) {
   return /--repo\s+"\$\{\s*GITHUB_REPOSITORY\s*\}"/.test(sourceText)
     && /--signer-workflow\s+"\$\{\s*GITHUB_REPOSITORY\s*\}\/\.github\/workflows\/release\.yml"/.test(sourceText)
     && /--source-ref\s+"\$\{\s*GITHUB_REF\s*\}"/.test(sourceText)
+    && /--source-digest\s+"\$\{\s*GITHUB_SHA\s*\}"/.test(sourceText)
     && /--cert-oidc-issuer\s+"https:\/\/token\.actions\.githubusercontent\.com"/.test(sourceText)
     && /--deny-self-hosted-runners/.test(sourceText)
     && /--predicate-type\s+"https:\/\/slsa\.dev\/provenance\/v1"/.test(sourceText)
@@ -29,7 +30,8 @@ function hasAttestationVerifyStep(sourceText) {
 function hasRuntimeReportStep(sourceText) {
   return sourceText.includes("Validate attestation runtime reports")
     && sourceText.includes("scripts/eval/write-release-attestation-runtime-report.mjs")
-    && sourceText.includes("--output=reports/release-attestation-runtime.json");
+    && sourceText.includes("--output=reports/release-attestation-runtime.json")
+    && sourceText.includes("--expected-source-digest=\"${GITHUB_SHA}\"");
 }
 
 async function main() {
@@ -49,7 +51,7 @@ async function main() {
     {
       id: "release-workflow-verifies-attestation",
       ok: hasAttestationVerifyStep(workflowText),
-      reason: "release workflow must verify artifact attestations with repo, signer-workflow, source-ref, OIDC issuer, hosted-runner, predicate constraints, and JSON output"
+      reason: "release workflow must verify artifact attestations with repo, signer-workflow, source-ref, source-digest, OIDC issuer, hosted-runner, predicate constraints, and JSON output"
     },
     {
       id: "release-workflow-writes-attestation-runtime-report",

@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { writeJsonReport } from "./render-eval-lib.mjs";
 
 const HEX_SHA256_PATTERN = /^[a-f0-9]{64}$/i;
+const HEX_SHA1_PATTERN = /^[a-f0-9]{40}$/i;
 
 function parseArgs(argv) {
   const options = {
@@ -12,6 +13,7 @@ function parseArgs(argv) {
     output: "reports/release-attestation-runtime.json",
     expectedRepo: "",
     expectedSourceRef: "",
+    expectedSourceDigest: "",
     expectedWorkflow: "",
     expectedIssuer: "https://token.actions.githubusercontent.com",
     expectedPredicateType: "https://slsa.dev/provenance/v1"
@@ -46,6 +48,10 @@ function parseArgs(argv) {
       options.expectedSourceRef = value;
       continue;
     }
+    if (rawKey === "expected-source-digest") {
+      options.expectedSourceDigest = value;
+      continue;
+    }
     if (rawKey === "expected-workflow") {
       options.expectedWorkflow = value;
       continue;
@@ -66,6 +72,12 @@ function parseArgs(argv) {
   }
   if (options.expectedSourceRef.length === 0) {
     throw new Error("missing --expected-source-ref");
+  }
+  if (options.expectedSourceDigest.length === 0) {
+    throw new Error("missing --expected-source-digest");
+  }
+  if (!HEX_SHA1_PATTERN.test(options.expectedSourceDigest)) {
+    throw new Error("invalid --expected-source-digest");
   }
   if (options.expectedWorkflow.length === 0) {
     throw new Error("missing --expected-workflow");
@@ -102,7 +114,8 @@ function normalizeRecords(payload) {
         issuer: typeof certificate?.issuer === "string" ? certificate.issuer : "",
         runnerEnvironment: typeof certificate?.runnerEnvironment === "string" ? certificate.runnerEnvironment : "",
         sourceRepositoryURI: typeof certificate?.sourceRepositoryURI === "string" ? certificate.sourceRepositoryURI : "",
-        sourceRepositoryRef: typeof certificate?.sourceRepositoryRef === "string" ? certificate.sourceRepositoryRef : ""
+        sourceRepositoryRef: typeof certificate?.sourceRepositoryRef === "string" ? certificate.sourceRepositoryRef : "",
+        sourceRepositoryDigest: typeof certificate?.sourceRepositoryDigest === "string" ? certificate.sourceRepositoryDigest : ""
       },
       predicateType: typeof statement?.predicateType === "string" ? statement.predicateType : "",
       subjects
@@ -124,6 +137,9 @@ function validateRecords(records, expected, subjectMatcher) {
     }
     if (record.certificate.sourceRepositoryRef !== expected.sourceRepositoryRef) {
       failures.push(`${label}: sourceRepositoryRef mismatch`);
+    }
+    if (record.certificate.sourceRepositoryDigest !== expected.sourceRepositoryDigest) {
+      failures.push(`${label}: sourceRepositoryDigest mismatch`);
     }
     if (record.certificate.issuer !== expected.issuer) {
       failures.push(`${label}: issuer mismatch`);
@@ -176,6 +192,7 @@ async function main() {
   const expected = {
     sourceRepositoryURI: `https://github.com/${options.expectedRepo}`,
     sourceRepositoryRef: options.expectedSourceRef,
+    sourceRepositoryDigest: options.expectedSourceDigest,
     workflowSanPrefix: `https://github.com/${options.expectedWorkflow}@`,
     issuer: options.expectedIssuer,
     predicateType: options.expectedPredicateType
@@ -201,6 +218,7 @@ async function main() {
     expected: {
       sourceRepositoryURI: expected.sourceRepositoryURI,
       sourceRepositoryRef: expected.sourceRepositoryRef,
+      sourceRepositoryDigest: expected.sourceRepositoryDigest,
       workflowSanPrefix: expected.workflowSanPrefix,
       issuer: expected.issuer,
       predicateType: expected.predicateType

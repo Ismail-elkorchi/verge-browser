@@ -76,6 +76,7 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
             --source-ref "${GITHUB_REF}" \
+            --source-digest "${GITHUB_SHA}" \
             --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
             --deny-self-hosted-runners \
             --predicate-type "https://slsa.dev/provenance/v1" \
@@ -95,6 +96,7 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
             --source-ref "${GITHUB_REF}" \
+            --source-digest "${GITHUB_SHA}" \
             --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
             --deny-self-hosted-runners \
             --predicate-type "https://slsa.dev/provenance/v1" \
@@ -109,6 +111,7 @@ jobs:
             --output=reports/release-attestation-runtime.json \
             --expected-repo="${GITHUB_REPOSITORY}" \
             --expected-source-ref="${GITHUB_REF}" \
+            --expected-source-digest="${GITHUB_SHA}" \
             --expected-workflow="${GITHUB_REPOSITORY}/.github/workflows/release.yml"
 
       - name: Upload package artifact
