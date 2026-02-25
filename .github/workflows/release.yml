@@ -16,8 +16,8 @@ permissions:
   id-token: write
 
 jobs:
-  release:
-    name: release-check
+  release-producer:
+    name: release-producer
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
@@ -65,6 +65,41 @@ jobs:
             *.tgz
             package.sha256
 
+      - name: Generate oracle lock provenance attestation
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: scripts/oracles/oracle-image.lock.json
+
+      - name: Upload release inputs
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-inputs
+          path: |
+            *.tgz
+            package.sha256
+            scripts/oracles/oracle-image.lock.json
+
+  release-verifier:
+    name: release-verifier
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    needs: release-producer
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Download release inputs
+        uses: actions/download-artifact@v6
+        with:
+          name: release-inputs
+          path: .
+
       - name: Verify package provenance attestation
         env:
           GH_TOKEN: ${{ github.token }}
@@ -81,11 +116,6 @@ jobs:
             --deny-self-hosted-runners \
             --predicate-type "https://slsa.dev/provenance/v1" \
             --format json > reports/attestation-package-verify.json
-
-      - name: Generate oracle lock provenance attestation
-        uses: actions/attest-build-provenance@v3
-        with:
-          subject-path: scripts/oracles/oracle-image.lock.json
 
       - name: Verify oracle lock provenance attestation
         env:
