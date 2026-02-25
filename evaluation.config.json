@@ -1,4 +1,8 @@
 {
+  "runtime": {
+    "targets": ["node", "deno", "bun"],
+    "browserTarget": false
+  },
   "render": {
     "suiteName": "render-v3",
     "widths": [60, 80, 100, 120],

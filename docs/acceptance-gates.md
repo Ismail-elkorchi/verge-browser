@@ -6,6 +6,10 @@ Evaluation is executed through:
 
 Artifacts are written to `reports/`.
 
+## Runtime scope policy
+- Terminal runtime targets are Node, Deno, and Bun.
+- Browser runtime execution is a non-goal for this product.
+
 ## G-301 Corpus integrity
 - `scripts/oracles/corpus/render-v3.json` exists
 - case count >= 1000
