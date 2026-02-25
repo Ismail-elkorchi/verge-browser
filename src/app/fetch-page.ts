@@ -1,5 +1,3 @@
-import { readFile } from "node:fs/promises";
-
 import { formatHelpText } from "./commands.js";
 import { DEFAULT_SECURITY_POLICY, assertAllowedProtocol, isHtmlLikeContentType, type SecurityPolicyOptions } from "./security.js";
 import type {
@@ -53,6 +51,12 @@ const ABOUT_HELP_HTML = `<!doctype html>
 </html>`;
 
 const UTF8_ENCODER = new TextEncoder();
+export type LocalFileReader = (path: string) => Promise<string>;
+
+async function defaultReadLocalFileText(path: string): Promise<string> {
+  const nodeFs = await import("node:fs/promises");
+  return nodeFs.readFile(path, "utf8");
+}
 
 function createNetworkOutcome(
   kind: NetworkOutcomeKind,
@@ -266,12 +270,12 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-async function fetchFileUrl(requestUrl: string): Promise<FetchPageResult> {
+async function fetchFileUrl(requestUrl: string, readLocalFileText: LocalFileReader): Promise<FetchPageResult> {
   const fileUrl = new URL(requestUrl);
   assertAllowedProtocol(fileUrl);
 
   const filePath = decodeURIComponent(fileUrl.pathname);
-  const html = await readFile(filePath, "utf8");
+  const html = await readLocalFileText(filePath);
 
   return {
     requestUrl,
@@ -504,7 +508,8 @@ export async function fetchPage(
   requestUrl: string,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   securityPolicy: SecurityPolicyOptions = DEFAULT_SECURITY_POLICY,
-  requestOptions: PageRequestOptions = {}
+  requestOptions: PageRequestOptions = {},
+  readLocalFileText: LocalFileReader = defaultReadLocalFileText
 ): Promise<FetchPageResult> {
   const policy = {
     ...DEFAULT_SECURITY_POLICY,
@@ -535,7 +540,7 @@ export async function fetchPage(
   }
 
   if (requestUrl.startsWith("file://")) {
-    return fetchFileUrl(requestUrl);
+    return fetchFileUrl(requestUrl, readLocalFileText);
   }
 
   let networkResult: NetworkFetchResult;
@@ -570,7 +575,8 @@ export async function fetchPageStream(
   requestUrl: string,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   securityPolicy: SecurityPolicyOptions = DEFAULT_SECURITY_POLICY,
-  requestOptions: PageRequestOptions = {}
+  requestOptions: PageRequestOptions = {},
+  readLocalFileText: LocalFileReader = defaultReadLocalFileText
 ): Promise<FetchPageStreamResult> {
   const policy = {
     ...DEFAULT_SECURITY_POLICY,
@@ -611,7 +617,7 @@ export async function fetchPageStream(
   }
 
   if (requestUrl.startsWith("file://")) {
-    const filePage = await fetchFileUrl(requestUrl);
+    const filePage = await fetchFileUrl(requestUrl, readLocalFileText);
     const fileBytes = utf8ByteLength(filePage.html);
     if (fileBytes > policy.maxContentBytes) {
       throw new NetworkFetchError(

@@ -9,7 +9,7 @@ import {
   type TraceEvent
 } from "html-parser";
 
-import { fetchPage, fetchPageStream, readByteStreamToText } from "./fetch-page.js";
+import { fetchPage, fetchPageStream, readByteStreamToText, type LocalFileReader } from "./fetch-page.js";
 import { renderDocumentToTerminal } from "./render.js";
 import type {
   FetchPagePayload,
@@ -64,6 +64,7 @@ export interface BrowserSessionOptions {
   readonly widthProvider?: () => number;
   readonly parseOptions?: ParseOptions;
   readonly defaultParseMode?: ParseMode;
+  readonly localFileReader?: LocalFileReader;
 }
 
 function uniqueTraceKinds(trace: readonly TraceEvent[] | undefined): readonly string[] {
@@ -169,15 +170,20 @@ export class BrowserSession {
   private readonly widthProvider: () => number;
   private readonly parseOptions: ParseOptions;
   private readonly defaultParseMode: ParseMode;
+  private readonly localFileReader: LocalFileReader | undefined;
   private readonly historyUrls: string[] = [];
   private readonly historyModes: ParseMode[] = [];
   private historyIndex = -1;
   private currentSnapshot: PageSnapshot | null = null;
 
   public constructor(options: BrowserSessionOptions = {}) {
-    this.loader = options.loader ?? ((requestUrl, requestOptions) => fetchPage(requestUrl, undefined, undefined, requestOptions));
+    this.localFileReader = options.localFileReader;
+    this.loader = options.loader
+      ?? ((requestUrl, requestOptions) =>
+        fetchPage(requestUrl, undefined, undefined, requestOptions, this.localFileReader));
     this.streamLoader = options.streamLoader
-      ?? ((requestUrl, requestOptions) => fetchPageStream(requestUrl, undefined, undefined, requestOptions));
+      ?? ((requestUrl, requestOptions) =>
+        fetchPageStream(requestUrl, undefined, undefined, requestOptions, this.localFileReader));
     this.renderer = options.renderer ?? renderDocumentToTerminal;
     this.widthProvider = options.widthProvider ?? (() => 100);
     this.parseOptions = options.parseOptions ?? DEFAULT_PARSE_OPTIONS;
