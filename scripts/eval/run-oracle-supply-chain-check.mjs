@@ -53,7 +53,9 @@ async function main() {
       ok: supplyChainReport?.ok === true,
       packageCount: supplyChainReport?.packageCount ?? null,
       maxOraclePackageCount: supplyChainReport?.maxOraclePackageCount ?? null,
-      missingRootPackages: supplyChainReport?.missingRootPackages ?? []
+      missingRootPackages: supplyChainReport?.missingRootPackages ?? [],
+      provenanceOk: supplyChainReport?.provenance?.ok === true,
+      provenanceFailures: supplyChainReport?.provenance?.failures ?? []
     },
     ok: runtimeValidationSummary?.gates?.ok === true && supplyChainReport?.ok === true
   };

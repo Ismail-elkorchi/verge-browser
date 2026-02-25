@@ -191,6 +191,11 @@ Executed by:
 - `reports/oracle-supply-chain.json.ok` is `true`.
 - package closure count is bounded by `evaluation.config.json.oracleSupplyChain.maxOraclePackageCount`.
 
+### V-409 Provenance policy gate
+- `reports/oracle-supply-chain.json.provenance.ok` is `true`.
+- `reports/oracle-supply-chain.json.provenance.failures` is empty.
+- `reports/eval-oracle-supply-chain-summary.json.supplyChain.provenanceOk` is `true`.
+
 ## Local field governance gates
 Executed manually from the local repository root:
 - `npm run field:oracles`
