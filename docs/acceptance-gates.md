@@ -204,12 +204,12 @@ Executed by:
 ### V-410 Release artifact attestation policy
 - `reports/release-attestation-policy.json.ok` is `true`.
 - Release workflow generates provenance via `actions/attest-build-provenance@v3`.
-- Release workflow verifies attestation with `gh attestation verify` constrained by repository and signer workflow.
+- Release workflow verifies attestation with `gh attestation verify` constrained by repository, signer repository, signer workflow, source ref, OIDC issuer, hosted-runner, and SLSA provenance predicate.
 
 ### V-411 Oracle lock attestation policy
 - `reports/oracle-lock-attestation-policy.json.ok` is `true`.
 - Release workflow generates provenance attestation for `scripts/oracles/oracle-image.lock.json`.
-- Release workflow verifies lock attestation with `gh attestation verify` constrained by repository and signer workflow.
+- Release workflow verifies lock attestation with `gh attestation verify` constrained by repository, signer repository, signer workflow, source ref, OIDC issuer, hosted-runner, and SLSA provenance predicate.
 
 ## Local field governance gates
 Executed manually from the local repository root:
