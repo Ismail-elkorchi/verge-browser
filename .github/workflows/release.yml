@@ -75,6 +75,20 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml"
 
+      - name: Generate oracle lock provenance attestation
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: scripts/oracles/oracle-image.lock.json
+
+      - name: Verify oracle lock provenance attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh attestation verify "scripts/oracles/oracle-image.lock.json" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml"
+
       - name: Upload package artifact
         uses: actions/upload-artifact@v6
         with:

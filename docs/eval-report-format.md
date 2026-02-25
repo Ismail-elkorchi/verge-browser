@@ -241,6 +241,14 @@ Same shape as `reports/render-score.json` for the sampled oracle runtime run.
 - `checks`: `{ id, ok, reason }[]`
 - `ok`: boolean
 
+## reports/oracle-lock-attestation-policy.json
+- `suite`: `"oracle-lock-attestation-policy"`
+- `timestamp`: ISO-8601
+- `workflow`: release workflow path
+- `lockPath`: oracle lock path
+- `checks`: `{ id, ok, reason }[]`
+- `ok`: boolean
+
 ## Local field reports (`realworld/corpus/reports/*`)
 These reports are local-only artifacts and are not part of CI.
 
