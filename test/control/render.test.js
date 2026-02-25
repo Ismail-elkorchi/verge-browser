@@ -140,3 +140,29 @@ test("renderDocumentToTerminal reports anti-bot challenge pages", () => {
   assert.ok(joined.includes("Blocked by anti-bot challenge."));
   assert.ok(joined.includes("cannot be rendered in CLI mode"));
 });
+
+test("renderDocumentToTerminal includes noscript fallback content", () => {
+  const tree = parse(`
+    <html>
+      <head><title>Noscript sample</title></head>
+      <body>
+        <p>visible text</p>
+        <noscript>fallback text for non-script clients</noscript>
+      </body>
+    </html>
+  `);
+
+  const renderedPage = renderDocumentToTerminal({
+    tree,
+    requestUrl: "https://example.com/noscript",
+    finalUrl: "https://example.com/noscript",
+    status: 200,
+    statusText: "OK",
+    fetchedAtIso: "2026-01-01T00:00:00.000Z",
+    width: 80
+  });
+
+  const joined = renderedPage.lines.join("\n");
+  assert.ok(joined.includes("visible text"));
+  assert.ok(joined.includes("fallback text for non-script clients"));
+});
