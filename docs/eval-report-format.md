@@ -196,7 +196,7 @@ Same shape as `reports/render-score.json` for the sampled oracle runtime run.
 - `fingerprint`:
   - `{ runtime, expected, lockDeclared, match }`
 - `diagnostics`:
-  - `{ packageCount, packagesWithDownloadUrl, lockDeclaredMatchesExpected, runtimeMatchesLockDeclared }`
+  - `{ packageCount, packagesWithDownloadUrl, fingerprintInputValidationOk, fingerprintInputValidationIssues, lockDeclaredMatchesExpected, runtimeMatchesLockDeclared }`
 - `engines`:
   - `{ required, missing, weakFingerprints }`
 - `ok`: boolean
