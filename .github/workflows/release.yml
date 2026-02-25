@@ -73,7 +73,12 @@ jobs:
           package_file="$(ls -1 ./*.tgz | head -n1)"
           gh attestation verify "${package_file}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml"
+            --signer-repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
+            --source-ref "${GITHUB_REF}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners \
+            --predicate-type "https://slsa.dev/provenance/v1"
 
       - name: Generate oracle lock provenance attestation
         uses: actions/attest-build-provenance@v3
@@ -87,7 +92,12 @@ jobs:
           set -euo pipefail
           gh attestation verify "scripts/oracles/oracle-image.lock.json" \
             --repo "${GITHUB_REPOSITORY}" \
-            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml"
+            --signer-repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
+            --source-ref "${GITHUB_REF}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners \
+            --predicate-type "https://slsa.dev/provenance/v1"
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v6
