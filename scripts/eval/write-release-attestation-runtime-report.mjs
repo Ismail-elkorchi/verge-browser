@@ -10,11 +10,14 @@ function parseArgs(argv) {
   const options = {
     packageInput: "reports/attestation-package-verify.json",
     lockInput: "reports/attestation-oracle-lock-verify.json",
+    offlinePackageInput: "reports/offline-verification/package-offline-verify.json",
+    offlineLockInput: "reports/offline-verification/oracle-lock-offline-verify.json",
     output: "reports/release-attestation-runtime.json",
     expectedRepo: "",
     expectedSourceRef: "",
     expectedSourceDigest: "",
     expectedWorkflow: "",
+    expectedPackageSha256: "",
     expectedIssuer: "https://token.actions.githubusercontent.com",
     expectedPredicateType: "https://slsa.dev/provenance/v1"
   };
@@ -36,6 +39,14 @@ function parseArgs(argv) {
       options.lockInput = value;
       continue;
     }
+    if (rawKey === "offline-package-input") {
+      options.offlinePackageInput = value;
+      continue;
+    }
+    if (rawKey === "offline-lock-input") {
+      options.offlineLockInput = value;
+      continue;
+    }
     if (rawKey === "output") {
       options.output = value;
       continue;
@@ -54,6 +65,10 @@ function parseArgs(argv) {
     }
     if (rawKey === "expected-workflow") {
       options.expectedWorkflow = value;
+      continue;
+    }
+    if (rawKey === "expected-package-sha256") {
+      options.expectedPackageSha256 = value;
       continue;
     }
     if (rawKey === "expected-issuer") {
@@ -81,6 +96,12 @@ function parseArgs(argv) {
   }
   if (options.expectedWorkflow.length === 0) {
     throw new Error("missing --expected-workflow");
+  }
+  if (options.expectedPackageSha256.length === 0) {
+    throw new Error("missing --expected-package-sha256");
+  }
+  if (!HEX_SHA256_PATTERN.test(options.expectedPackageSha256)) {
+    throw new Error("invalid --expected-package-sha256");
   }
 
   return options;
@@ -123,7 +144,7 @@ function normalizeRecords(payload) {
   });
 }
 
-function validateRecords(records, expected, subjectMatcher) {
+function validateRecords(records, expected, subjectMatcher, expectedSubjectSha256 = "") {
   const failures = [];
 
   if (records.length === 0) {
@@ -171,6 +192,16 @@ function validateRecords(records, expected, subjectMatcher) {
     failures.push("no subject matched expected identity");
   }
 
+  if (expectedSubjectSha256.length > 0) {
+    const normalizedDigest = expectedSubjectSha256.toLowerCase();
+    const matchedDigest = records.some((record) =>
+      record.subjects.some((subject) => subjectMatcher(subject.name) && subject.sha256.toLowerCase() === normalizedDigest)
+    );
+    if (!matchedDigest) {
+      failures.push("no subject matched expected digest");
+    }
+  }
+
   return failures;
 }
 
@@ -182,11 +213,22 @@ function summarize(records) {
   };
 }
 
+function summarizeSource(inputPath, records, failures) {
+  return {
+    inputPath,
+    ...summarize(records),
+    failures,
+    ok: failures.length === 0
+  };
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const [packagePayload, lockPayload] = await Promise.all([
+  const [packagePayload, lockPayload, offlinePackagePayload, offlineLockPayload] = await Promise.all([
     readJson(options.packageInput),
-    readJson(options.lockInput)
+    readJson(options.lockInput),
+    readJson(options.offlinePackageInput),
+    readJson(options.offlineLockInput)
   ]);
 
   const expected = {
@@ -195,19 +237,34 @@ async function main() {
     sourceRepositoryDigest: options.expectedSourceDigest,
     workflowSanPrefix: `https://github.com/${options.expectedWorkflow}@`,
     issuer: options.expectedIssuer,
-    predicateType: options.expectedPredicateType
+    predicateType: options.expectedPredicateType,
+    packageSha256: options.expectedPackageSha256.toLowerCase()
   };
 
   const packageRecords = normalizeRecords(packagePayload);
   const lockRecords = normalizeRecords(lockPayload);
+  const offlinePackageRecords = normalizeRecords(offlinePackagePayload);
+  const offlineLockRecords = normalizeRecords(offlineLockPayload);
 
   const packageFailures = validateRecords(
     packageRecords,
     expected,
-    (subjectName) => subjectName.endsWith(".tgz")
+    (subjectName) => subjectName.endsWith(".tgz"),
+    expected.packageSha256
   );
   const lockFailures = validateRecords(
     lockRecords,
+    expected,
+    (subjectName) => subjectName === "oracle-image.lock.json"
+  );
+  const offlinePackageFailures = validateRecords(
+    offlinePackageRecords,
+    expected,
+    (subjectName) => subjectName.endsWith(".tgz"),
+    expected.packageSha256
+  );
+  const offlineLockFailures = validateRecords(
+    offlineLockRecords,
     expected,
     (subjectName) => subjectName === "oracle-image.lock.json"
   );
@@ -221,21 +278,22 @@ async function main() {
       sourceRepositoryDigest: expected.sourceRepositoryDigest,
       workflowSanPrefix: expected.workflowSanPrefix,
       issuer: expected.issuer,
-      predicateType: expected.predicateType
+      predicateType: expected.predicateType,
+      packageSha256: expected.packageSha256
     },
     package: {
-      inputPath: options.packageInput,
-      ...summarize(packageRecords),
-      failures: packageFailures,
-      ok: packageFailures.length === 0
+      expectedTarballSha256: expected.packageSha256,
+      online: summarizeSource(options.packageInput, packageRecords, packageFailures),
+      offline: summarizeSource(options.offlinePackageInput, offlinePackageRecords, offlinePackageFailures)
     },
     oracleLock: {
-      inputPath: options.lockInput,
-      ...summarize(lockRecords),
-      failures: lockFailures,
-      ok: lockFailures.length === 0
+      online: summarizeSource(options.lockInput, lockRecords, lockFailures),
+      offline: summarizeSource(options.offlineLockInput, offlineLockRecords, offlineLockFailures)
     }
   };
+
+  report.package.ok = report.package.online.ok && report.package.offline.ok;
+  report.oracleLock.ok = report.oracleLock.online.ok && report.oracleLock.offline.ok;
   report.overall = {
     ok: report.package.ok && report.oracleLock.ok
   };

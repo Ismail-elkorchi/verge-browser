@@ -70,8 +70,11 @@ function hasAttestationVerifyStep(sourceText) {
 function hasRuntimeReportStep(sourceText) {
   return sourceText.includes("Validate attestation runtime reports")
     && sourceText.includes("scripts/eval/write-release-attestation-runtime-report.mjs")
+    && sourceText.includes("--offline-package-input=reports/offline-verification/package-offline-verify.json")
+    && sourceText.includes("--offline-lock-input=reports/offline-verification/oracle-lock-offline-verify.json")
     && sourceText.includes("--output=reports/release-attestation-runtime.json")
-    && sourceText.includes("--expected-source-digest=\"${GITHUB_SHA}\"");
+    && sourceText.includes("--expected-source-digest=\"${GITHUB_SHA}\"")
+    && sourceText.includes("--expected-package-sha256=\"${package_sha256}\"");
 }
 
 function hasOfflineVerificationExportStep(sourceText) {
