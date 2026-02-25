@@ -60,6 +60,11 @@ jobs:
             --predicate-type "https://slsa.dev/provenance/v1" \
             --format json > reports/attestation-oracle-lock-verify-cert-identity.json
 
+      - name: Check release verifier hermetic imports
+        run: |
+          node scripts/eval/check-release-verifier-hermetic.mjs \
+            --output=reports/release-verifier-hermetic.json
+
       - name: Validate attestation runtime reports
         run: |
           node scripts/eval/write-release-attestation-runtime-report.mjs \

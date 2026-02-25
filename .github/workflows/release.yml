@@ -94,6 +94,12 @@ jobs:
         with:
           node-version: '24'
 
+      - name: Check release verifier hermetic imports
+        run: |
+          set -euo pipefail
+          node scripts/eval/check-release-verifier-hermetic.mjs \
+            --output=reports/release-verifier-hermetic.json
+
       - name: Download release inputs
         uses: actions/download-artifact@v6
         with:
@@ -273,6 +279,7 @@ jobs:
             reports/attestation-oracle-lock-verify.json
             reports/attestation-package-verify-cert-identity.json
             reports/attestation-oracle-lock-verify-cert-identity.json
+            reports/release-verifier-hermetic.json
             reports/release-attestation-runtime.json
             reports/offline-attestation-content-policy.json
             reports/offline-verification/package-attestation-bundle.jsonl
