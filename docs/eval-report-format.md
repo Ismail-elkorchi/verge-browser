@@ -253,11 +253,15 @@ Same shape as `reports/render-score.json` for the sampled oracle runtime run.
 - `suite`: `"release-attestation-runtime"`
 - `timestamp`: ISO-8601
 - `expected`:
-  - `{ sourceRepositoryURI, sourceRepositoryRef, sourceRepositoryDigest, workflowSanPrefix, issuer, predicateType }`
+  - `{ sourceRepositoryURI, sourceRepositoryRef, sourceRepositoryDigest, workflowSanPrefix, issuer, predicateType, packageSha256 }`
 - `package`:
-  - `{ inputPath, attestationCount, uniqueSubjects, failures, ok }`
+  - `{ expectedTarballSha256, online, offline, ok }`
+  - `online` and `offline`:
+    - `{ inputPath, attestationCount, uniqueSubjects, failures, ok }`
 - `oracleLock`:
-  - `{ inputPath, attestationCount, uniqueSubjects, failures, ok }`
+  - `{ online, offline, ok }`
+  - `online` and `offline`:
+    - `{ inputPath, attestationCount, uniqueSubjects, failures, ok }`
 - `overall`:
   - `{ ok }`
 
