@@ -70,15 +70,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          mkdir -p reports
           package_file="$(ls -1 ./*.tgz | head -n1)"
           gh attestation verify "${package_file}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --signer-repo "${GITHUB_REPOSITORY}" \
             --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
             --source-ref "${GITHUB_REF}" \
             --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
             --deny-self-hosted-runners \
-            --predicate-type "https://slsa.dev/provenance/v1"
+            --predicate-type "https://slsa.dev/provenance/v1" \
+            --format json > reports/attestation-package-verify.json
 
       - name: Generate oracle lock provenance attestation
         uses: actions/attest-build-provenance@v3
@@ -92,12 +93,23 @@ jobs:
           set -euo pipefail
           gh attestation verify "scripts/oracles/oracle-image.lock.json" \
             --repo "${GITHUB_REPOSITORY}" \
-            --signer-repo "${GITHUB_REPOSITORY}" \
             --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
             --source-ref "${GITHUB_REF}" \
             --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
             --deny-self-hosted-runners \
-            --predicate-type "https://slsa.dev/provenance/v1"
+            --predicate-type "https://slsa.dev/provenance/v1" \
+            --format json > reports/attestation-oracle-lock-verify.json
+
+      - name: Validate attestation runtime reports
+        run: |
+          set -euo pipefail
+          node scripts/eval/write-release-attestation-runtime-report.mjs \
+            --package-input=reports/attestation-package-verify.json \
+            --lock-input=reports/attestation-oracle-lock-verify.json \
+            --output=reports/release-attestation-runtime.json \
+            --expected-repo="${GITHUB_REPOSITORY}" \
+            --expected-source-ref="${GITHUB_REF}" \
+            --expected-workflow="${GITHUB_REPOSITORY}/.github/workflows/release.yml"
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v6
@@ -106,3 +118,6 @@ jobs:
           path: |
             *.tgz
             package.sha256
+            reports/attestation-package-verify.json
+            reports/attestation-oracle-lock-verify.json
+            reports/release-attestation-runtime.json
