@@ -203,6 +203,8 @@ Executed by:
 
 ### V-410 Release artifact attestation policy
 - `reports/release-attestation-policy.json.ok` is `true`.
+- Release workflow is split into producer and verifier jobs.
+- Verifier consumes uploaded release inputs from producer before attestation verification.
 - Release workflow generates provenance via `actions/attest-build-provenance@v3`.
 - Release workflow verifies attestation with `gh attestation verify` constrained by repository, signer workflow, source ref, source digest, OIDC issuer, hosted-runner, and SLSA provenance predicate.
 - Release workflow runs a second verification path constrained by certificate identity and source digest.
