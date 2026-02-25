@@ -12,6 +12,8 @@ concurrency:
 
 permissions:
   contents: read
+  attestations: write
+  id-token: write
 
 jobs:
   release:
@@ -55,6 +57,23 @@ jobs:
 
       - name: Generate checksums
         run: sha256sum ./*.tgz > package.sha256
+
+      - name: Generate package provenance attestation
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: |
+            *.tgz
+            package.sha256
+
+      - name: Verify package provenance attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          package_file="$(ls -1 ./*.tgz | head -n1)"
+          gh attestation verify "${package_file}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml"
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v6

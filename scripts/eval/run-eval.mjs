@@ -53,6 +53,7 @@ async function main() {
   runNodeScript("scripts/eval/write-stream-report.mjs");
   runNodeScript("scripts/eval/check-runtime-matrix.mjs", [`--profile=${profile}`]);
   runNodeScript("scripts/eval/check-eval-coherence.mjs", [`--profile=${profile}`]);
+  runNodeScript("scripts/eval/check-release-attestation-policy.mjs");
   runNodeScript("scripts/eval/write-network-outcomes-report.mjs");
   runNodeScript("scripts/bench/run-bench.mjs");
   runNodeScript("scripts/eval/check-bench-governance.mjs");
@@ -62,11 +63,12 @@ async function main() {
   }
   runNodeScript("scripts/eval/write-capability-ladder-report.mjs", [`--profile=${profile}`]);
 
-  const [agentReport, streamReport, runtimeMatrixReport, evalCoherenceReport, networkOutcomesReport, benchGovernanceReport, oracleWorkflowPolicyReport, releaseIntegrityReport, capabilityLadderReport] = await Promise.all([
+  const [agentReport, streamReport, runtimeMatrixReport, evalCoherenceReport, releaseAttestationPolicyReport, networkOutcomesReport, benchGovernanceReport, oracleWorkflowPolicyReport, releaseIntegrityReport, capabilityLadderReport] = await Promise.all([
     readJson(resolve(reportsDir, "agent.json")),
     readJson(resolve(reportsDir, "stream.json")),
     readJson(resolve(reportsDir, "runtime-matrix.json")),
     readJson(resolve(reportsDir, "eval-coherence.json")),
+    readJson(resolve(reportsDir, "release-attestation-policy.json")),
     readJson(resolve(reportsDir, "network-outcomes.json")),
     readJson(resolve(reportsDir, "bench-governance.json")),
     readJson(resolve(reportsDir, "oracle-workflow-policy.json")),
@@ -95,6 +97,9 @@ async function main() {
   }
   if (evalCoherenceReport?.overall?.ok !== true) {
     extraFailures.push("evaluation coherence report failed");
+  }
+  if (releaseAttestationPolicyReport?.ok !== true) {
+    extraFailures.push("release attestation policy report failed");
   }
   if (networkOutcomesReport?.overall?.ok !== true) {
     extraFailures.push("network outcomes report failed");
@@ -129,6 +134,7 @@ async function main() {
       stream: resolve(reportsDir, "stream.json"),
       runtimeMatrix: resolve(reportsDir, "runtime-matrix.json"),
       evalCoherence: resolve(reportsDir, "eval-coherence.json"),
+      releaseAttestationPolicy: resolve(reportsDir, "release-attestation-policy.json"),
       networkOutcomes: resolve(reportsDir, "network-outcomes.json"),
       bench: resolve(reportsDir, "bench.json"),
       benchGovernance: resolve(reportsDir, "bench-governance.json"),

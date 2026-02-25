@@ -196,6 +196,16 @@ Executed by:
 - `reports/oracle-supply-chain.json.provenance.failures` is empty.
 - `reports/eval-oracle-supply-chain-summary.json.supplyChain.provenanceOk` is `true`.
 
+## Release attestation policy gate
+Executed by:
+- `npm run eval:ci`
+- `npm run eval:release`
+
+### V-410 Release artifact attestation policy
+- `reports/release-attestation-policy.json.ok` is `true`.
+- Release workflow generates provenance via `actions/attest-build-provenance@v3`.
+- Release workflow verifies attestation with `gh attestation verify` constrained by repository and signer workflow.
+
 ## Local field governance gates
 Executed manually from the local repository root:
 - `npm run field:oracles`
