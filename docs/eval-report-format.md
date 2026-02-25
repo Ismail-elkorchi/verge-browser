@@ -194,7 +194,9 @@ Same shape as `reports/render-score.json` for the sampled oracle runtime run.
 - `suite`: `"oracle-fingerprint-drift-check"`
 - `timestamp`: ISO-8601
 - `fingerprint`:
-  - `{ runtime, expected, match }`
+  - `{ runtime, expected, lockDeclared, expectedWithDownloadUrl, match }`
+- `diagnostics`:
+  - `{ packageCount, packagesWithDownloadUrl, lockDeclaredMatchesExpected, lockDeclaredMatchesExpectedWithDownloadUrl, runtimeMatchesLockDeclared }`
 - `engines`:
   - `{ required, missing, weakFingerprints }`
 - `ok`: boolean
