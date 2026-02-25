@@ -48,7 +48,21 @@
   },
   "oracleSupplyChain": {
     "maxOraclePackageCount": 110,
-    "requiredRootPackages": ["lynx", "w3m", "links2"]
+    "requiredRootPackages": ["lynx", "w3m", "links2"],
+    "provenancePolicy": {
+      "requireSnapshotReplayMode": true,
+      "requireHttpsSnapshotRoot": true,
+      "requireSnapshotId": true,
+      "requireKeyringPath": true,
+      "requireReleaseMetadata": true,
+      "requireSignatureKeyHex": true,
+      "rejectUnknownSignatureKey": true,
+      "requirePackageIndexes": true,
+      "requireHttpsReleaseUrls": true,
+      "requireHttpsIndexUrls": true,
+      "requireIndexSha256": true,
+      "requireHttpsPackageDownloadUrls": true
+    }
   },
   "benchmarks": {
     "required": ["render-width-80", "render-width-120"],

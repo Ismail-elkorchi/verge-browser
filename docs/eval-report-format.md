@@ -210,6 +210,13 @@ Same shape as `reports/render-score.json` for the sampled oracle runtime run.
 - `missingRootPackages`: `string[]`
 - `hasAllEngineFingerprints`: boolean
 - `imageFingerprint`: string
+- `provenance`:
+  - `policy`: object from `evaluation.config.json.oracleSupplyChain.provenancePolicy`
+  - `releaseMetadataCount`: number
+  - `packageIndexesCount`: number
+  - `unknownSignatureKeys`: `string[]`
+  - `failures`: `string[]`
+  - `ok`: boolean
 - `ok`: boolean
 
 ## reports/eval-oracle-supply-chain-summary.json
@@ -217,7 +224,7 @@ Same shape as `reports/render-score.json` for the sampled oracle runtime run.
 - `timestamp`: ISO-8601
 - `runtimeValidation`: `{ ok }`
 - `supplyChain`:
-  - `{ ok, packageCount, maxOraclePackageCount, missingRootPackages }`
+  - `{ ok, packageCount, maxOraclePackageCount, missingRootPackages, provenanceOk, provenanceFailures }`
 - `ok`: boolean
 
 ## reports/oracle-workflow-policy.json

@@ -76,6 +76,9 @@ jobs:
       - name: Oracle fingerprint drift validation
         run: npm run eval:oracle-fingerprint:ci
 
+      - name: Oracle supply-chain validation
+        run: npm run eval:oracle-supply-chain:ci
+
   deno:
     name: deno
     runs-on: ubuntu-latest

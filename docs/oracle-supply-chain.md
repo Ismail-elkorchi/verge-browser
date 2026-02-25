@@ -11,6 +11,11 @@ Mechanism:
    - package closure count bound from `evaluation.config.json.oracleSupplyChain.maxOraclePackageCount`
    - required root packages present (`lynx`, `w3m`, `links2`)
    - runtime fingerprints available for each required engine
+   - provenance policy from `evaluation.config.json.oracleSupplyChain.provenancePolicy`:
+     - snapshot replay source mode
+     - HTTPS-only snapshot and package index URLs
+     - signed release metadata key presence/format
+     - HTTPS-only package download URLs
 4. Writes:
    - `reports/oracle-supply-chain.json`
    - `reports/eval-oracle-supply-chain-summary.json`
