@@ -1,11 +1,17 @@
 import { resolve } from "node:path";
 
 import { writeJsonReport } from "./json-report-io.mjs";
-import { DEFAULT_VERIFIER_ENTRY_SCRIPTS, scanVerifierHermeticity } from "./release-verifier-hermetic-lib.mjs";
+import {
+  DEFAULT_VERIFIER_ENTRY_SCRIPTS,
+  discoverVerifierEntryScriptsFromWorkflow,
+  scanVerifierHermeticity
+} from "./release-verifier-hermetic-lib.mjs";
 
 function parseArgs(argv) {
   const options = {
-    output: "reports/release-verifier-hermetic.json"
+    output: "reports/release-verifier-hermetic.json",
+    workflow: ".github/workflows/release.yml",
+    entryScripts: []
   };
 
   for (const arg of argv) {
@@ -21,6 +27,14 @@ function parseArgs(argv) {
       options.output = value;
       continue;
     }
+    if (rawKey === "workflow") {
+      options.workflow = value;
+      continue;
+    }
+    if (rawKey === "entry-script") {
+      options.entryScripts.push(value);
+      continue;
+    }
     throw new Error(`unsupported argument key: ${rawKey}`);
   }
 
@@ -29,11 +43,17 @@ function parseArgs(argv) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const result = await scanVerifierHermeticity(DEFAULT_VERIFIER_ENTRY_SCRIPTS, process.cwd());
+  const discoveredScripts = options.entryScripts.length > 0
+    ? options.entryScripts
+    : await discoverVerifierEntryScriptsFromWorkflow(options.workflow, process.cwd());
+  const entryScripts = discoveredScripts.length > 0 ? discoveredScripts : DEFAULT_VERIFIER_ENTRY_SCRIPTS;
+  const result = await scanVerifierHermeticity(entryScripts, process.cwd());
 
   const report = {
     suite: "release-verifier-hermetic",
     timestamp: new Date().toISOString(),
+    workflow: options.workflow,
+    scriptSource: options.entryScripts.length > 0 ? "cli-entry-script" : "workflow-discovery",
     entryScripts: result.entryScripts,
     scannedFileCount: result.scannedFiles.length,
     violations: result.violations,

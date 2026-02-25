@@ -244,6 +244,8 @@ Same shape as `reports/render-score.json` for the sampled oracle runtime run.
 ## reports/release-verifier-hermetic.json
 - `suite`: `"release-verifier-hermetic"`
 - `timestamp`: ISO-8601
+- `workflow`: workflow path used for script discovery
+- `scriptSource`: `"workflow-discovery"` or `"cli-entry-script"`
 - `entryScripts`: `string[]`
 - `scannedFileCount`: number
 - `violations`: `{ type, importer, specifier }[]`
