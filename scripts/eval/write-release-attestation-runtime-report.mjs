@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import { writeJsonReport } from "./render-eval-lib.mjs";
+import { writeJsonReport } from "./json-report-io.mjs";
 
 const HEX_SHA256_PATTERN = /^[a-f0-9]{64}$/i;
 const HEX_SHA1_PATTERN = /^[a-f0-9]{40}$/i;

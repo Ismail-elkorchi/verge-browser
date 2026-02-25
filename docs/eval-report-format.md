@@ -241,6 +241,14 @@ Same shape as `reports/render-score.json` for the sampled oracle runtime run.
 - `checks`: `{ id, ok, reason }[]`
 - `ok`: boolean
 
+## reports/release-verifier-hermetic.json
+- `suite`: `"release-verifier-hermetic"`
+- `timestamp`: ISO-8601
+- `entryScripts`: `string[]`
+- `scannedFileCount`: number
+- `violations`: `{ type, importer, specifier }[]`
+- `ok`: boolean
+
 ## reports/oracle-lock-attestation-policy.json
 - `suite`: `"oracle-lock-attestation-policy"`
 - `timestamp`: ISO-8601

@@ -1,0 +1,91 @@
+import { access, readFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { dirname, resolve } from "node:path";
+
+const IMPORT_PATTERN = /(?:^|\n)\s*import(?:[\s\w{},*]+from\s+)?["']([^"']+)["']/g;
+const RE_EXPORT_PATTERN = /(?:^|\n)\s*export\s+[^"'\\n]*\sfrom\s+["']([^"']+)["']/g;
+
+export const DEFAULT_VERIFIER_ENTRY_SCRIPTS = [
+  "scripts/eval/write-release-attestation-runtime-report.mjs",
+  "scripts/eval/check-offline-attestation-content.mjs"
+];
+
+function collectModuleSpecifiers(sourceText) {
+  const specifiers = [];
+  for (const pattern of [IMPORT_PATTERN, RE_EXPORT_PATTERN]) {
+    for (const match of sourceText.matchAll(pattern)) {
+      specifiers.push(match[1]);
+    }
+  }
+  return specifiers;
+}
+
+async function resolveRelativeImportPath(importerPath, specifier) {
+  const basePath = resolve(dirname(importerPath), specifier);
+  const candidates = [
+    basePath,
+    `${basePath}.mjs`,
+    `${basePath}.js`,
+    resolve(basePath, "index.mjs"),
+    resolve(basePath, "index.js")
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      await access(candidate, fsConstants.R_OK);
+      return candidate;
+    } catch {
+      // try next
+    }
+  }
+  return null;
+}
+
+export async function scanVerifierHermeticity(entryScripts, repoRoot = process.cwd()) {
+  const visited = new Set();
+  const pending = entryScripts.map((entryScript) => resolve(repoRoot, entryScript));
+  const violations = [];
+
+  while (pending.length > 0) {
+    const currentPath = pending.pop();
+    if (!currentPath || visited.has(currentPath)) {
+      continue;
+    }
+    visited.add(currentPath);
+
+    const sourceText = await readFile(currentPath, "utf8");
+    const specifiers = collectModuleSpecifiers(sourceText);
+    for (const specifier of specifiers) {
+      if (specifier.startsWith("node:")) {
+        continue;
+      }
+      if (specifier.startsWith("./") || specifier.startsWith("../")) {
+        const resolvedImportPath = await resolveRelativeImportPath(currentPath, specifier);
+        if (!resolvedImportPath) {
+          violations.push({
+            type: "unresolved-relative-import",
+            importer: currentPath,
+            specifier
+          });
+          continue;
+        }
+        if (!visited.has(resolvedImportPath)) {
+          pending.push(resolvedImportPath);
+        }
+        continue;
+      }
+
+      violations.push({
+        type: "bare-import",
+        importer: currentPath,
+        specifier
+      });
+    }
+  }
+
+  return {
+    entryScripts: entryScripts.map((entryScript) => resolve(repoRoot, entryScript)),
+    scannedFiles: [...visited].sort(),
+    violations
+  };
+}

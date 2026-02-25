@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import { writeJsonReport } from "./render-eval-lib.mjs";
+import { writeJsonReport } from "./json-report-io.mjs";
 
 const WORKFLOW_PATH = ".github/workflows/release.yml";
 const REPORT_PATH = "reports/release-attestation-policy.json";
@@ -135,6 +135,15 @@ function hasOfflineContentPolicyStep(sourceText) {
     && stepText.includes("--expected-package-sha256=\"${package_sha256}\"");
 }
 
+function hasVerifierHermeticStep(sourceText) {
+  const stepText = extractStepBody(sourceText, "Check release verifier hermetic imports");
+  if (stepText.length === 0) {
+    return false;
+  }
+  return stepText.includes("scripts/eval/check-release-verifier-hermetic.mjs")
+    && stepText.includes("--output=reports/release-verifier-hermetic.json");
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const workflowText = await readFile(resolve(options.workflow), "utf8");
@@ -179,6 +188,11 @@ async function main() {
       id: "release-workflow-checks-offline-attestation-content",
       ok: hasOfflineContentPolicyStep(workflowText),
       reason: "release workflow must validate offline verification JSON content against expected source and package digest"
+    },
+    {
+      id: "release-workflow-checks-verifier-hermetic-imports",
+      ok: hasVerifierHermeticStep(workflowText),
+      reason: "release workflow verifier must enforce hermetic imports for verifier scripts"
     }
   ];
 

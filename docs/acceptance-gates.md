@@ -208,6 +208,7 @@ Executed by:
 - Release workflow generates provenance via `actions/attest-build-provenance@v3`.
 - Release workflow verifies attestation with `gh attestation verify` constrained by repository, signer workflow, source ref, source digest, OIDC issuer, hosted-runner, and SLSA provenance predicate.
 - Release workflow runs a second verification path constrained by certificate identity and source digest.
+- Release verifier enforces hermetic imports for verifier scripts and writes `reports/release-verifier-hermetic.json`.
 - Release workflow writes `reports/attestation-package-verify.json` and validates `reports/release-attestation-runtime.json`.
 - Runtime report validation must bind expected source digest and expected tarball SHA-256 to both online and offline verification outputs.
 
