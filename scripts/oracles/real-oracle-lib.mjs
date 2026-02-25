@@ -511,7 +511,7 @@ async function materializeRootfs(input) {
   };
 }
 
-function lockFingerprint(lockPayload) {
+export function computeOracleLockFingerprint(lockPayload) {
   const fingerprintBasis = lockPayload.packages
     .map((packageRecord) => {
       const downloadUrl = typeof packageRecord.downloadUrl === "string" ? packageRecord.downloadUrl : "";
@@ -687,7 +687,7 @@ async function createLock(input) {
     packages: hydratedPackages
   };
 
-  lockPayload.fingerprint = lockFingerprint(lockPayload);
+  lockPayload.fingerprint = computeOracleLockFingerprint(lockPayload);
   await mkdir(dirname(input.lockPath), { recursive: true });
   await writeFile(input.lockPath, `${JSON.stringify(lockPayload, null, 2)}\n`, "utf8");
   return lockPayload;
@@ -802,7 +802,7 @@ export async function ensureOracleImage(options = {}) {
       imageRoot,
       lockPath,
       rootfsPath: materialized.rootfsDir,
-      fingerprint: lock.fingerprint ?? lockFingerprint(lock),
+      fingerprint: lock.fingerprint ?? computeOracleLockFingerprint(lock),
       rootPackages: lock.rootPackages,
       packageCount: lock.packages.length,
       osRelease: osReleaseRaw.trim()
