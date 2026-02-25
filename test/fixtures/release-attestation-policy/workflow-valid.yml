@@ -38,9 +38,33 @@ jobs:
             --predicate-type "https://slsa.dev/provenance/v1" \
             --format json > reports/attestation-oracle-lock-verify.json
 
+      - name: Verify attestations with certificate identity
+        run: |
+          gh attestation verify "${package_file}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --cert-identity "${cert_identity}" \
+            --source-ref "${GITHUB_REF}" \
+            --source-digest "${GITHUB_SHA}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners \
+            --predicate-type "https://slsa.dev/provenance/v1" \
+            --format json > reports/attestation-package-verify-cert-identity.json
+
+          gh attestation verify "scripts/oracles/oracle-image.lock.json" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --cert-identity "${cert_identity}" \
+            --source-ref "${GITHUB_REF}" \
+            --source-digest "${GITHUB_SHA}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners \
+            --predicate-type "https://slsa.dev/provenance/v1" \
+            --format json > reports/attestation-oracle-lock-verify-cert-identity.json
+
       - name: Validate attestation runtime reports
         run: |
           node scripts/eval/write-release-attestation-runtime-report.mjs \
+            --cert-identity-package-input=reports/attestation-package-verify-cert-identity.json \
+            --cert-identity-lock-input=reports/attestation-oracle-lock-verify-cert-identity.json \
             --offline-package-input=reports/offline-verification/package-offline-verify.json \
             --offline-lock-input=reports/offline-verification/oracle-lock-offline-verify.json \
             --output=reports/release-attestation-runtime.json \

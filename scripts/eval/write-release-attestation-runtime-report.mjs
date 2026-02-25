@@ -10,6 +10,8 @@ function parseArgs(argv) {
   const options = {
     packageInput: "reports/attestation-package-verify.json",
     lockInput: "reports/attestation-oracle-lock-verify.json",
+    certIdentityPackageInput: "reports/attestation-package-verify-cert-identity.json",
+    certIdentityLockInput: "reports/attestation-oracle-lock-verify-cert-identity.json",
     offlinePackageInput: "reports/offline-verification/package-offline-verify.json",
     offlineLockInput: "reports/offline-verification/oracle-lock-offline-verify.json",
     output: "reports/release-attestation-runtime.json",
@@ -37,6 +39,14 @@ function parseArgs(argv) {
     }
     if (rawKey === "lock-input") {
       options.lockInput = value;
+      continue;
+    }
+    if (rawKey === "cert-identity-package-input") {
+      options.certIdentityPackageInput = value;
+      continue;
+    }
+    if (rawKey === "cert-identity-lock-input") {
+      options.certIdentityLockInput = value;
       continue;
     }
     if (rawKey === "offline-package-input") {
@@ -222,11 +232,28 @@ function summarizeSource(inputPath, records, failures) {
   };
 }
 
+function collectIdentityKeys(records, subjectMatcher) {
+  return records
+    .flatMap((record) => record.subjects
+      .filter((subject) => subjectMatcher(subject.name))
+      .map((subject) => `${subject.name}:${subject.sha256.toLowerCase()}`))
+    .sort();
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const [packagePayload, lockPayload, offlinePackagePayload, offlineLockPayload] = await Promise.all([
+  const [
+    packagePayload,
+    lockPayload,
+    certIdentityPackagePayload,
+    certIdentityLockPayload,
+    offlinePackagePayload,
+    offlineLockPayload
+  ] = await Promise.all([
     readJson(options.packageInput),
     readJson(options.lockInput),
+    readJson(options.certIdentityPackageInput),
+    readJson(options.certIdentityLockInput),
     readJson(options.offlinePackageInput),
     readJson(options.offlineLockInput)
   ]);
@@ -243,31 +270,70 @@ async function main() {
 
   const packageRecords = normalizeRecords(packagePayload);
   const lockRecords = normalizeRecords(lockPayload);
+  const certIdentityPackageRecords = normalizeRecords(certIdentityPackagePayload);
+  const certIdentityLockRecords = normalizeRecords(certIdentityLockPayload);
   const offlinePackageRecords = normalizeRecords(offlinePackagePayload);
   const offlineLockRecords = normalizeRecords(offlineLockPayload);
+
+  const packageSubjectMatcher = (subjectName) => subjectName.endsWith(".tgz");
+  const lockSubjectMatcher = (subjectName) => subjectName === "oracle-image.lock.json";
 
   const packageFailures = validateRecords(
     packageRecords,
     expected,
-    (subjectName) => subjectName.endsWith(".tgz"),
+    packageSubjectMatcher,
     expected.packageSha256
   );
   const lockFailures = validateRecords(
     lockRecords,
     expected,
-    (subjectName) => subjectName === "oracle-image.lock.json"
+    lockSubjectMatcher
+  );
+  const certIdentityPackageFailures = validateRecords(
+    certIdentityPackageRecords,
+    expected,
+    packageSubjectMatcher,
+    expected.packageSha256
+  );
+  const certIdentityLockFailures = validateRecords(
+    certIdentityLockRecords,
+    expected,
+    lockSubjectMatcher
   );
   const offlinePackageFailures = validateRecords(
     offlinePackageRecords,
     expected,
-    (subjectName) => subjectName.endsWith(".tgz"),
+    packageSubjectMatcher,
     expected.packageSha256
   );
   const offlineLockFailures = validateRecords(
     offlineLockRecords,
     expected,
-    (subjectName) => subjectName === "oracle-image.lock.json"
+    lockSubjectMatcher
   );
+
+  const packageSignerKeys = collectIdentityKeys(packageRecords, packageSubjectMatcher);
+  const packageCertKeys = collectIdentityKeys(certIdentityPackageRecords, packageSubjectMatcher);
+  const lockSignerKeys = collectIdentityKeys(lockRecords, lockSubjectMatcher);
+  const lockCertKeys = collectIdentityKeys(certIdentityLockRecords, lockSubjectMatcher);
+
+  const packageAgreement = {
+    ok: JSON.stringify(packageSignerKeys) === JSON.stringify(packageCertKeys),
+    signerWorkflowKeys: packageSignerKeys,
+    certIdentityKeys: packageCertKeys
+  };
+  const lockAgreement = {
+    ok: JSON.stringify(lockSignerKeys) === JSON.stringify(lockCertKeys),
+    signerWorkflowKeys: lockSignerKeys,
+    certIdentityKeys: lockCertKeys
+  };
+
+  if (!packageAgreement.ok) {
+    packageFailures.push("signer-workflow and cert-identity package subjects disagree");
+  }
+  if (!lockAgreement.ok) {
+    lockFailures.push("signer-workflow and cert-identity lock subjects disagree");
+  }
 
   const report = {
     suite: "release-attestation-runtime",
@@ -283,17 +349,27 @@ async function main() {
     },
     package: {
       expectedTarballSha256: expected.packageSha256,
-      online: summarizeSource(options.packageInput, packageRecords, packageFailures),
-      offline: summarizeSource(options.offlinePackageInput, offlinePackageRecords, offlinePackageFailures)
+      signerWorkflow: summarizeSource(options.packageInput, packageRecords, packageFailures),
+      certIdentity: summarizeSource(options.certIdentityPackageInput, certIdentityPackageRecords, certIdentityPackageFailures),
+      offline: summarizeSource(options.offlinePackageInput, offlinePackageRecords, offlinePackageFailures),
+      verifierAgreement: packageAgreement
     },
     oracleLock: {
-      online: summarizeSource(options.lockInput, lockRecords, lockFailures),
-      offline: summarizeSource(options.offlineLockInput, offlineLockRecords, offlineLockFailures)
+      signerWorkflow: summarizeSource(options.lockInput, lockRecords, lockFailures),
+      certIdentity: summarizeSource(options.certIdentityLockInput, certIdentityLockRecords, certIdentityLockFailures),
+      offline: summarizeSource(options.offlineLockInput, offlineLockRecords, offlineLockFailures),
+      verifierAgreement: lockAgreement
     }
   };
 
-  report.package.ok = report.package.online.ok && report.package.offline.ok;
-  report.oracleLock.ok = report.oracleLock.online.ok && report.oracleLock.offline.ok;
+  report.package.ok = report.package.signerWorkflow.ok
+    && report.package.certIdentity.ok
+    && report.package.offline.ok
+    && report.package.verifierAgreement.ok;
+  report.oracleLock.ok = report.oracleLock.signerWorkflow.ok
+    && report.oracleLock.certIdentity.ok
+    && report.oracleLock.offline.ok
+    && report.oracleLock.verifierAgreement.ok;
   report.overall = {
     ok: report.package.ok && report.oracleLock.ok
   };
