@@ -10,16 +10,15 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
-  attestations: write
-  id-token: write
-
 jobs:
   release-producer:
     name: release-producer
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
 
     steps:
       - name: Checkout
@@ -84,6 +83,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     needs: release-producer
+    permissions:
+      contents: read
+      attestations: read
 
     steps:
       - name: Checkout

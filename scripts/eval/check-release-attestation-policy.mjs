@@ -45,6 +45,64 @@ function extractStepBody(sourceText, stepName) {
   return match?.[1] ?? "";
 }
 
+function extractJobBody(sourceText, jobName) {
+  const startPattern = new RegExp(`^\\s{2}${escapeRegex(jobName)}:\\n`, "m");
+  const startMatch = startPattern.exec(sourceText);
+  if (!startMatch || typeof startMatch.index !== "number") {
+    return "";
+  }
+  const startIndex = startMatch.index + startMatch[0].length;
+  const tail = sourceText.slice(startIndex);
+  const endMatch = /^\s{2}[a-zA-Z0-9_-]+:\n/m.exec(tail);
+  if (!endMatch || typeof endMatch.index !== "number") {
+    return tail;
+  }
+  return tail.slice(0, endMatch.index);
+}
+
+function hasTopLevelPermissionsBlock(sourceText) {
+  return /^permissions:\n/m.test(sourceText);
+}
+
+function hasJobScopedPermissions(jobBody) {
+  return /^\s{4}permissions:\n/m.test(jobBody)
+    && /\n\s{6}contents:\s+read\b/.test(jobBody);
+}
+
+function hasLeastPrivilegePermissions(sourceText) {
+  if (hasTopLevelPermissionsBlock(sourceText)) {
+    return false;
+  }
+
+  const producerBody = extractJobBody(sourceText, "release-producer");
+  const verifierBody = extractJobBody(sourceText, "release-verifier");
+
+  if (producerBody.length > 0 || verifierBody.length > 0) {
+    if (
+      !hasJobScopedPermissions(producerBody)
+      || !/\n\s{6}attestations:\s+write\b/.test(producerBody)
+      || !/\n\s{6}id-token:\s+write\b/.test(producerBody)
+    ) {
+      return false;
+    }
+    if (
+      !hasJobScopedPermissions(verifierBody)
+      || !/\n\s{6}attestations:\s+read\b/.test(verifierBody)
+      || /\n\s{6}id-token:\s+write\b/.test(verifierBody)
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  const genericJobNameMatch = /^\s{2}([a-zA-Z0-9_-]+):\n/m.exec(sourceText);
+  if (!genericJobNameMatch || typeof genericJobNameMatch[1] !== "string") {
+    return false;
+  }
+  const genericBody = extractJobBody(sourceText, genericJobNameMatch[1]);
+  return hasJobScopedPermissions(genericBody);
+}
+
 function hasArtifactAttestationStep(sourceText) {
   return /uses:\s*actions\/attest-build-provenance@v3/.test(sourceText);
 }
@@ -193,6 +251,11 @@ async function main() {
       id: "release-workflow-checks-verifier-hermetic-imports",
       ok: hasVerifierHermeticStep(workflowText),
       reason: "release workflow verifier must enforce hermetic imports for verifier scripts"
+    },
+    {
+      id: "release-workflow-enforces-job-scoped-permissions",
+      ok: hasLeastPrivilegePermissions(workflowText),
+      reason: "release workflow must use job-scoped least-privilege token permissions"
     }
   ];
 

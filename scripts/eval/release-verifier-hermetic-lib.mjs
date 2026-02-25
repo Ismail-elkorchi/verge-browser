@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 
 const IMPORT_PATTERN = /(?:^|\n)\s*import(?:[\s\w{},*]+from\s+)?["']([^"']+)["']/g;
 const RE_EXPORT_PATTERN = /(?:^|\n)\s*export\s+[^"'\\n]*\sfrom\s+["']([^"']+)["']/g;
+const DYNAMIC_IMPORT_PATTERN = /import\s*\(\s*["']([^"']+)["']\s*\)/g;
 
 export const DEFAULT_VERIFIER_ENTRY_SCRIPTS = [
   "scripts/eval/write-release-attestation-runtime-report.mjs",
@@ -12,12 +13,44 @@ export const DEFAULT_VERIFIER_ENTRY_SCRIPTS = [
 
 function collectModuleSpecifiers(sourceText) {
   const specifiers = [];
-  for (const pattern of [IMPORT_PATTERN, RE_EXPORT_PATTERN]) {
+  for (const pattern of [IMPORT_PATTERN, RE_EXPORT_PATTERN, DYNAMIC_IMPORT_PATTERN]) {
     for (const match of sourceText.matchAll(pattern)) {
       specifiers.push(match[1]);
     }
   }
   return specifiers;
+}
+
+function extractReleaseVerifierBlock(workflowText) {
+  const startMatch = /^\s{2}release-verifier:\n/m.exec(workflowText);
+  if (!startMatch || typeof startMatch.index !== "number") {
+    return "";
+  }
+  const startIndex = startMatch.index + startMatch[0].length;
+  const tail = workflowText.slice(startIndex);
+  const endMatch = /^\s{2}[a-zA-Z0-9_-]+:\n/m.exec(tail);
+  if (!endMatch || typeof endMatch.index !== "number") {
+    return tail;
+  }
+  return tail.slice(0, endMatch.index);
+}
+
+export async function discoverVerifierEntryScriptsFromWorkflow(workflowPath, repoRoot = process.cwd()) {
+  const workflowText = await readFile(resolve(repoRoot, workflowPath), "utf8");
+  const verifierBlock = extractReleaseVerifierBlock(workflowText);
+  if (verifierBlock.length === 0) {
+    return [];
+  }
+
+  const scripts = new Set();
+  const scriptPattern = /\bnode\s+(scripts\/eval\/[a-zA-Z0-9/_-]+\.mjs)\b/g;
+  for (const match of verifierBlock.matchAll(scriptPattern)) {
+    scripts.add(match[1]);
+  }
+
+  return [...scripts]
+    .filter((scriptPath) => scriptPath !== "scripts/eval/check-release-verifier-hermetic.mjs")
+    .sort();
 }
 
 async function resolveRelativeImportPath(importerPath, specifier) {

@@ -1,6 +1,10 @@
 name: Release
 jobs:
   release:
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
     steps:
       - name: Generate package provenance attestation
         uses: actions/attest-build-provenance@v3
