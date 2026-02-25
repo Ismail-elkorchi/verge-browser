@@ -114,6 +114,44 @@ jobs:
             --expected-source-digest="${GITHUB_SHA}" \
             --expected-workflow="${GITHUB_REPOSITORY}/.github/workflows/release.yml"
 
+      - name: Export offline verification materials
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p reports/offline-verification
+          workspace="$(pwd)"
+          package_file="$(ls -1 ./*.tgz | head -n1)"
+
+          scratch_dir="$(mktemp -d)"
+          trap 'rm -rf "${scratch_dir}"' EXIT
+          cd "${scratch_dir}"
+
+          gh attestation trusted-root > trusted_root.jsonl
+
+          gh attestation download "${workspace}/${package_file}" --repo "${GITHUB_REPOSITORY}"
+          package_bundle="$(find . -maxdepth 1 -type f -name '*.jsonl' ! -name 'trusted_root.jsonl' | sort | head -n1)"
+          if [ -z "${package_bundle}" ]; then
+            echo "missing package attestation bundle"
+            exit 1
+          fi
+          mv "${package_bundle}" "${workspace}/reports/offline-verification/package-attestation-bundle.jsonl"
+          find . -maxdepth 1 -type f -name '*.jsonl' ! -name 'trusted_root.jsonl' -delete
+
+          gh attestation download "${workspace}/scripts/oracles/oracle-image.lock.json" --repo "${GITHUB_REPOSITORY}"
+          lock_bundle="$(find . -maxdepth 1 -type f -name '*.jsonl' ! -name 'trusted_root.jsonl' | sort | head -n1)"
+          if [ -z "${lock_bundle}" ]; then
+            echo "missing oracle lock attestation bundle"
+            exit 1
+          fi
+          mv "${lock_bundle}" "${workspace}/reports/offline-verification/oracle-lock-attestation-bundle.jsonl"
+          mv trusted_root.jsonl "${workspace}/reports/offline-verification/trusted_root.jsonl"
+          sha256sum \
+            "${workspace}/reports/offline-verification/package-attestation-bundle.jsonl" \
+            "${workspace}/reports/offline-verification/oracle-lock-attestation-bundle.jsonl" \
+            "${workspace}/reports/offline-verification/trusted_root.jsonl" \
+            > "${workspace}/reports/offline-verification/sha256.txt"
+
       - name: Upload package artifact
         uses: actions/upload-artifact@v6
         with:
@@ -124,3 +162,7 @@ jobs:
             reports/attestation-package-verify.json
             reports/attestation-oracle-lock-verify.json
             reports/release-attestation-runtime.json
+            reports/offline-verification/package-attestation-bundle.jsonl
+            reports/offline-verification/oracle-lock-attestation-bundle.jsonl
+            reports/offline-verification/trusted_root.jsonl
+            reports/offline-verification/sha256.txt

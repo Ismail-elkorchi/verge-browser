@@ -265,6 +265,16 @@ Same shape as `reports/render-score.json` for the sampled oracle runtime run.
 - Raw `gh attestation verify --format json` outputs captured by the release workflow.
 - Inputs to `reports/release-attestation-runtime.json` validation.
 
+## reports/offline-verification/*
+- `package-attestation-bundle.jsonl`:
+  - output of `gh attestation download` for the package tarball.
+- `oracle-lock-attestation-bundle.jsonl`:
+  - output of `gh attestation download` for `scripts/oracles/oracle-image.lock.json`.
+- `trusted_root.jsonl`:
+  - output of `gh attestation trusted-root`.
+- `sha256.txt`:
+  - SHA-256 checksums for the three offline verification files above.
+
 ## Local field reports (`realworld/corpus/reports/*`)
 These reports are local-only artifacts and are not part of CI.
 

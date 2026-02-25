@@ -213,6 +213,14 @@ Executed by:
 - Release workflow verifies lock attestation with `gh attestation verify` constrained by repository, signer workflow, source ref, source digest, OIDC issuer, hosted-runner, and SLSA provenance predicate.
 - Release workflow writes `reports/attestation-oracle-lock-verify.json` and includes it in runtime attestation validation.
 
+### V-412 Offline attestation verification materials
+- Release workflow exports:
+  - `reports/offline-verification/package-attestation-bundle.jsonl`
+  - `reports/offline-verification/oracle-lock-attestation-bundle.jsonl`
+  - `reports/offline-verification/trusted_root.jsonl`
+  - `reports/offline-verification/sha256.txt`
+- Offline artifacts are uploaded with release package artifacts.
+
 ## Local field governance gates
 Executed manually from the local repository root:
 - `npm run field:oracles`
