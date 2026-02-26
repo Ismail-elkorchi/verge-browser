@@ -50,12 +50,16 @@ jobs:
       - name: Run oracle runtime validation
         run: npm run eval:oracle-runtime:release
 
+      - name: Run oracle lock refresh diff validation
+        run: npm run eval:oracle-lock-refresh-diff:release
+
       - name: Upload oracle runtime reports
         uses: actions/upload-artifact@v6
         with:
           name: oracle-runtime-reports
           path: |
             reports/oracle-runtime.json
+            reports/oracle-lock-refresh-diff.json
             reports/render-baselines-real.json
             reports/render-verge-real.json
             reports/render-score-real.json

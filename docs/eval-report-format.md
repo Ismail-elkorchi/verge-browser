@@ -280,6 +280,22 @@ Same shape as `reports/render-score.json` for the sampled oracle runtime run.
   - `{ addedCount, removedCount, changedCount, added[], removed[], changed[] }`
 - `ok`: boolean
 
+## reports/oracle-lock-refresh-diff.json
+- `suite`: `"oracle-lock-refresh-diff"`
+- `timestamp`: ISO-8601
+- `profile`: `"ci"` or `"release"`
+- `lockPath`: committed lock path
+- `candidateLockPath`: temporary refresh candidate path
+- `fingerprint`:
+  - `{ current, candidate, match }`
+- `packageCounts`:
+  - `{ current, candidate, match }`
+- `sourcePolicyMatches`: boolean
+- `releaseMetadataMatches`: boolean
+- `packageDiff`:
+  - `{ addedCount, removedCount, changedCount, added[], removed[], changed[] }`
+- `ok`: boolean
+
 ## reports/fuzz.json
 - `suite`: `"fuzz"`
 - `timestamp`: ISO-8601

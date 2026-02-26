@@ -13,14 +13,16 @@
         "minExecutedFraction": 0.9,
         "minCases": 250,
         "requireRuntimeMatrix": true,
-        "requireFuzzGuided": false
+        "requireFuzzGuided": false,
+        "requireOracleLockRefreshDiff": false
       },
       "release": {
         "includeHoldout": true,
         "minExecutedFraction": 1,
         "minCases": 1000,
         "requireRuntimeMatrix": true,
-        "requireFuzzGuided": true
+        "requireFuzzGuided": true,
+        "requireOracleLockRefreshDiff": true
       }
     },
     "metrics": {

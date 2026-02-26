@@ -50,6 +50,9 @@ jobs:
       - name: Run oracle runtime validation
         run: npm run eval:oracle-runtime:release
 
+      - name: Run oracle lock refresh diff validation
+        run: npm run eval:oracle-lock-refresh-diff:release
+
       - name: Run oracle superiority check
         run: npm run eval:oracle-superiority:release
 
@@ -69,5 +72,6 @@ jobs:
             reports/eval-oracle-fingerprint-summary.json
             reports/eval-oracle-supply-chain-summary.json
             reports/oracle-runtime.json
+            reports/oracle-lock-refresh-diff.json
             reports/oracle-supply-chain.json
             scripts/oracles/oracle-image.lock.json
