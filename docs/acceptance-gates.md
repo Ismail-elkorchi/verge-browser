@@ -143,6 +143,15 @@ For each metric:
 - deterministic mismatch count is zero
 - report includes `topSlowest` seeds and durations for triage
 
+## G-318 Coverage-guided fuzz gate
+- `reports/fuzz-guided.json` exists
+- `reports/fuzz-guided.json.ok` is `true` when enabled by profile policy
+- profile policy from `evaluation.config.json.fuzzGuided.profiles.<profile>` is applied
+- release profile enables `requireFuzzGuided=true`
+- crash count is zero
+- deterministic mismatch count is zero
+- novel coverage signatures meet configured floor (`minNovelSignatures`)
+
 ## Oracle runtime validation gates
 Executed by:
 - `npm run eval:oracle-runtime:ci`

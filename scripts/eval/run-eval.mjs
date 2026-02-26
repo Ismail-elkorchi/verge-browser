@@ -61,12 +61,13 @@ async function main() {
   runNodeScript("scripts/eval/check-oracle-workflow-policy.mjs");
   runNodeScript("scripts/eval/check-wpt-delta.mjs");
   runNodeScript("scripts/eval/run-fuzz-check.mjs", [`--profile=${profile}`]);
+  runNodeScript("scripts/eval/run-fuzz-guided-check.mjs", [`--profile=${profile}`]);
   if (profile === "release") {
     runNodeScript("scripts/eval/check-release-integrity.mjs");
   }
   runNodeScript("scripts/eval/write-capability-ladder-report.mjs", [`--profile=${profile}`]);
 
-  const [agentReport, streamReport, runtimeMatrixReport, evalCoherenceReport, releaseAttestationPolicyReport, oracleLockAttestationPolicyReport, networkOutcomesReport, benchGovernanceReport, oracleWorkflowPolicyReport, wptDeltaReport, fuzzReport, releaseIntegrityReport, capabilityLadderReport] = await Promise.all([
+  const [agentReport, streamReport, runtimeMatrixReport, evalCoherenceReport, releaseAttestationPolicyReport, oracleLockAttestationPolicyReport, networkOutcomesReport, benchGovernanceReport, oracleWorkflowPolicyReport, wptDeltaReport, fuzzReport, fuzzGuidedReport, releaseIntegrityReport, capabilityLadderReport] = await Promise.all([
     readJson(resolve(reportsDir, "agent.json")),
     readJson(resolve(reportsDir, "stream.json")),
     readJson(resolve(reportsDir, "runtime-matrix.json")),
@@ -78,6 +79,7 @@ async function main() {
     readJson(resolve(reportsDir, "oracle-workflow-policy.json")),
     readJson(resolve(reportsDir, "wpt-delta.json")),
     readJson(resolve(reportsDir, "fuzz.json")),
+    readJson(resolve(reportsDir, "fuzz-guided.json")),
     profile === "release"
       ? readJson(resolve(reportsDir, "release-integrity.json"))
       : Promise.resolve(null),
@@ -125,6 +127,9 @@ async function main() {
   if (fuzzReport?.ok !== true) {
     extraFailures.push("fuzz report failed");
   }
+  if (config?.render?.profiles?.[profile]?.requireFuzzGuided === true && fuzzGuidedReport?.ok !== true) {
+    extraFailures.push("fuzz-guided report failed");
+  }
   if (profile === "release" && releaseIntegrityReport?.ok !== true) {
     extraFailures.push("release integrity report failed");
   }
@@ -157,6 +162,7 @@ async function main() {
       oracleWorkflowPolicy: resolve(reportsDir, "oracle-workflow-policy.json"),
       wptDelta: resolve(reportsDir, "wpt-delta.json"),
       fuzz: resolve(reportsDir, "fuzz.json"),
+      fuzzGuided: resolve(reportsDir, "fuzz-guided.json"),
       capabilityLadder: resolve(reportsDir, "capability-ladder.json"),
       ...(profile === "release" ? { releaseIntegrity: resolve(reportsDir, "release-integrity.json") } : {})
     },

@@ -145,6 +145,8 @@ export function evaluateFuzzCase(caseEntry) {
     trace: false,
     captureSpans: false
   });
+  const parseErrors = Array.isArray(tree.parseErrors) ? tree.parseErrors : [];
+  const parseErrorIds = [...new Set(parseErrors.map((entry) => entry?.parseErrorId ?? "unknown"))].sort();
 
   const rendered = renderDocumentToTerminal({
     tree,
@@ -167,8 +169,10 @@ export function evaluateFuzzCase(caseEntry) {
     caseId: caseEntry.caseId,
     seed: caseEntry.seed,
     htmlSha256: sha256(caseEntry.html),
-    parseErrorCount: Array.isArray(tree.parseErrors) ? tree.parseErrors.length : 0,
+    parseErrorCount: parseErrors.length,
+    parseErrorIds,
     visibleTextSha256: sha256(visible),
+    visibleTextLength: visible.length,
     renderSha256: sha256(rendered.lines.join("\n")),
     lineCount: rendered.lines.length,
     linkCount: rendered.links.length

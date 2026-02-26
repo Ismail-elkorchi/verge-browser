@@ -277,6 +277,28 @@ Same shape as `reports/render-score.json` for the sampled oracle runtime run.
 - `deterministicMismatches`: `[{ caseId, seed, first, second }]`
 - `ok`: boolean
 
+## reports/fuzz-guided.json
+- `suite`: `"fuzz-guided"`
+- `timestamp`: ISO-8601
+- `profile`: `"ci"` or `"release"`
+- `policy`:
+  - `{ seed, initialCorpusSize, maxDepth, sectionCount, maxIterations, mutationsPerInput, frontierLimit, topSlowest, minNovelSignatures }`
+- `totals`:
+  - `{ executedCases, novelSignatures, crashes, deterministicMismatches }`
+- `coverage`:
+  - `{ uniqueSignatures, noveltyRate, minNovelSignaturesRequired }`
+- `timing`:
+  - `{ p50Ms, p95Ms, maxMs }`
+- `topSlowest`:
+  - `[{ caseId, seed, durationMs, parseErrorCount, lineCount, linkCount, novel }]`
+- `topNovelFindings`:
+  - `[{ caseId, seed, signature, parseErrorCount, lineCount, linkCount }]`
+- `crashes`:
+  - `[{ caseId, seed, durationMs, message }]`
+- `deterministicMismatches`:
+  - `[{ caseId, seed, first, second }]`
+- `ok`: boolean
+
 ## reports/release-attestation-policy.json
 - `suite`: `"release-attestation-policy"`
 - `timestamp`: ISO-8601
