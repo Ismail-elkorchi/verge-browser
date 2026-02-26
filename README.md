@@ -105,6 +105,7 @@ npm run eval:wpt-delta
 npm run eval:fuzz:ci
 npm run eval:fuzz:release
 npm run oracle:lock:refresh
+npm run oracle:wpt-delta:corpus
 npm run oracle:wpt-delta:refresh
 npm run eval:capability-ladder:ci
 npm run eval:capability-ladder:release
@@ -129,6 +130,7 @@ npm run release:check
   - `npm run eval:wpt-delta`
   - `npm run eval:fuzz:ci`
   - `npm run eval:fuzz:release`
+  - `npm run oracle:wpt-delta:corpus`
   - `npm run oracle:wpt-delta:refresh`
   - `npm run eval:capability-ladder:ci`
   - `npm run eval:capability-ladder:release`

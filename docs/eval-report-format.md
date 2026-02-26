@@ -256,9 +256,10 @@ Same shape as `reports/render-score.json` for the sampled oracle runtime run.
 - `suite`: `"wpt-delta"`
 - `timestamp`: ISO-8601
 - `corpus`:
-  - `{ path, expectedPath, sourceRepository, sourceCommit, caseCount, snapshotIds }`
+  - `{ path, expectedPath, sourceRepository, sourceCommit, caseCount, categories, snapshotIds }`
 - `checks`:
   - `minimumCaseCount`: `{ required, observed, ok }`
+  - `categoryCoverage`: `{ requiredCategories, observedCategories, missingCategories, ok }`
   - `missingExpected`: `{ count, ids[], ok }`
   - `extraExpected`: `{ count, ids[], ok }`
   - `mismatches`: `{ count, items[], ok }`
