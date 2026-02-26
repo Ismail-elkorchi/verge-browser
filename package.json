@@ -31,6 +31,8 @@
     "eval:ci": "npm run build && node scripts/eval/run-eval.mjs --profile=ci",
     "eval:oracle-fingerprint:ci": "npm run build && node scripts/eval/run-oracle-fingerprint-drift-check.mjs --profile=ci",
     "eval:oracle-fingerprint:release": "npm run build && node scripts/eval/run-oracle-fingerprint-drift-check.mjs --profile=release",
+    "eval:oracle-lock-refresh-diff:ci": "npm run build && node scripts/eval/check-oracle-lock-refresh-diff.mjs --profile=ci",
+    "eval:oracle-lock-refresh-diff:release": "npm run build && node scripts/eval/check-oracle-lock-refresh-diff.mjs --profile=release",
     "eval:oracle-runtime:ci": "npm run build && node scripts/eval/run-oracle-runtime-validation.mjs --profile=ci",
     "eval:oracle-runtime:release": "npm run build && node scripts/eval/run-oracle-runtime-validation.mjs --profile=release",
     "eval:oracle-superiority:ci": "npm run build && node scripts/eval/run-oracle-superiority-check.mjs --profile=ci",

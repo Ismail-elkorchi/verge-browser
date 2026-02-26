@@ -31,11 +31,13 @@ async function main() {
 
   const requireFlagReportMap = {
     requireRuntimeMatrix: ["reports/runtime-matrix.json"],
-    requireFuzzGuided: ["reports/fuzz-guided.json"]
+    requireFuzzGuided: ["reports/fuzz-guided.json"],
+    requireOracleLockRefreshDiff: ["reports/oracle-lock-refresh-diff.json"]
   };
   const requireFlagProducerMap = {
     requireRuntimeMatrix: ["scripts/eval/check-runtime-matrix.mjs"],
-    requireFuzzGuided: ["scripts/eval/run-fuzz-guided-check.mjs"]
+    requireFuzzGuided: ["scripts/eval/run-fuzz-guided-check.mjs"],
+    requireOracleLockRefreshDiff: ["scripts/eval/check-oracle-lock-refresh-diff.mjs"]
   };
 
   const unknownRequireFlags = requireFlags.filter((flag) => !(flag in requireFlagReportMap));

@@ -223,6 +223,15 @@ Executed by:
 - lock-derived fingerprint equals runtime image fingerprint.
 - engine fingerprints for `lynx`, `w3m`, `links2` are present and complete.
 
+### V-414 Lock refresh diff gate
+- `reports/oracle-lock-refresh-diff.json` exists.
+- release profile enables `requireOracleLockRefreshDiff=true`.
+- `reports/oracle-lock-refresh-diff.json.ok` is `true`.
+- refreshed lock generated from the pinned snapshot (`sourcePolicy.snapshotId`) matches committed lock:
+  - fingerprint unchanged
+  - package set unchanged
+  - release metadata unchanged
+
 ## Oracle supply-chain validation gates
 Executed by:
 - `npm run eval:oracle-supply-chain:ci`
