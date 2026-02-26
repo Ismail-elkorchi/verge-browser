@@ -58,6 +58,7 @@
     "oracle:image:prepare": "node scripts/oracles/prepare-image.mjs",
     "oracle:lock:refresh": "node scripts/oracles/refresh-oracle-lock.mjs",
     "oracle:wpt-delta:corpus": "node scripts/oracles/corpus/refresh-wpt-delta-corpus.mjs",
+    "oracle:wpt-delta:diff": "node scripts/oracles/corpus/diff-wpt-delta-refresh.mjs",
     "oracle:wpt-delta:refresh": "npm run build && node scripts/oracles/corpus/refresh-wpt-delta-expected.mjs",
     "release:check": "npm run check && npm run eval:release && npm run eval:oracle-runtime:release && npm run eval:oracle-superiority:release && npm run eval:oracle-fingerprint:release && npm run eval:oracle-supply-chain:release && npm pack --dry-run",
     "smoke:all": "npm run smoke:node && npm run smoke:deno && npm run smoke:bun",

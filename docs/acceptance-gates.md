@@ -125,6 +125,7 @@ For each metric:
 ## G-316 WPT-derived delta gate
 - `reports/wpt-delta.json` exists
 - `reports/wpt-delta.json.ok` is `true`
+- corpus source repository, source commit, and case plan match `scripts/oracles/corpus/wpt-delta-refresh-policy.json`
 - WPT-derived corpus has at least 100 deterministic cases
 - all planned categories are present in observed corpus coverage
 - expected file and corpus IDs are one-to-one with zero missing/extra entries

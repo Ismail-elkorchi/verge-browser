@@ -258,11 +258,26 @@ Same shape as `reports/render-score.json` for the sampled oracle runtime run.
 - `corpus`:
   - `{ path, expectedPath, sourceRepository, sourceCommit, caseCount, categories, snapshotIds }`
 - `checks`:
+  - `refreshPolicy`: `{ policyPath, sourceRepositoryMatches, sourceCommitMatches, casePlanMatches, policyCaseIdsMatch, ok }`
   - `minimumCaseCount`: `{ required, observed, ok }`
   - `categoryCoverage`: `{ requiredCategories, observedCategories, missingCategories, ok }`
   - `missingExpected`: `{ count, ids[], ok }`
   - `extraExpected`: `{ count, ids[], ok }`
   - `mismatches`: `{ count, items[], ok }`
+- `ok`: boolean
+
+## reports/wpt-delta-refresh-diff.json
+- Produced by: `npm run oracle:wpt-delta:diff` (manual triage workflow)
+- `suite`: `"wpt-delta-refresh-diff"`
+- `timestamp`: ISO-8601
+- `policyPath`: refresh policy path
+- `currentCorpusPath`: committed corpus path
+- `refreshedCorpusPath`: temporary refreshed candidate path
+- `sourceDiff`: `{ repositoryChanged, commitChanged, currentRepository, refreshedRepository, currentCommit, refreshedCommit }`
+- `casePlanChanged`: boolean
+- `policyChanged`: boolean
+- `caseDiff`:
+  - `{ addedCount, removedCount, changedCount, added[], removed[], changed[] }`
 - `ok`: boolean
 
 ## reports/fuzz.json
