@@ -12,13 +12,15 @@
         "includeHoldout": true,
         "minExecutedFraction": 0.9,
         "minCases": 250,
-        "requireRuntimeMatrix": true
+        "requireRuntimeMatrix": true,
+        "requireFuzzGuided": false
       },
       "release": {
         "includeHoldout": true,
         "minExecutedFraction": 1,
         "minCases": 1000,
-        "requireRuntimeMatrix": true
+        "requireRuntimeMatrix": true,
+        "requireFuzzGuided": true
       }
     },
     "metrics": {
@@ -83,6 +85,32 @@
         "maxDepth": 6,
         "sectionCount": 10,
         "topSlowest": 20
+      }
+    }
+  },
+  "fuzzGuided": {
+    "profiles": {
+      "ci": {
+        "seed": 20260227,
+        "initialCorpusSize": 16,
+        "maxDepth": 5,
+        "sectionCount": 8,
+        "maxIterations": 48,
+        "mutationsPerInput": 2,
+        "frontierLimit": 40,
+        "topSlowest": 10,
+        "minNovelSignatures": 12
+      },
+      "release": {
+        "seed": 20260227,
+        "initialCorpusSize": 32,
+        "maxDepth": 6,
+        "sectionCount": 10,
+        "maxIterations": 160,
+        "mutationsPerInput": 2,
+        "frontierLimit": 80,
+        "topSlowest": 20,
+        "minNovelSignatures": 18
       }
     }
   }

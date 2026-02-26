@@ -30,10 +30,12 @@ async function main() {
   const requireFlags = Object.keys(profilePolicy).filter((key) => key.startsWith("require"));
 
   const requireFlagReportMap = {
-    requireRuntimeMatrix: ["reports/runtime-matrix.json"]
+    requireRuntimeMatrix: ["reports/runtime-matrix.json"],
+    requireFuzzGuided: ["reports/fuzz-guided.json"]
   };
   const requireFlagProducerMap = {
-    requireRuntimeMatrix: ["scripts/eval/check-runtime-matrix.mjs"]
+    requireRuntimeMatrix: ["scripts/eval/check-runtime-matrix.mjs"],
+    requireFuzzGuided: ["scripts/eval/run-fuzz-guided-check.mjs"]
   };
 
   const unknownRequireFlags = requireFlags.filter((flag) => !(flag in requireFlagReportMap));
