@@ -5,6 +5,7 @@ This repository tracks a deterministic, offline subset of Web Platform Tests for
 ## Inputs
 - Corpus file: `scripts/oracles/corpus/wpt-delta-v1.json`
 - Expected outputs: `scripts/oracles/corpus/wpt-delta-v1.expected.json`
+- Corpus refresh command: `npm run oracle:wpt-delta:corpus`
 
 ## Command
 - `npm run eval:wpt-delta`
@@ -17,10 +18,12 @@ For each case, the check recomputes and compares:
 - render output hash at width 80 (`render80Sha256`)
 - render output hash at width 120 (`render120Sha256`)
 
-The check fails on any mismatch, missing expected entry, extra expected entry, or case-count under 12.
+The check fails on any mismatch, missing expected entry, extra expected entry, category coverage loss, or case-count under 100.
 
 ## Refresh workflow
 - Refresh expected outputs after intentional renderer/parser changes:
   - `npm run oracle:wpt-delta:refresh`
+- Refresh corpus from pinned WPT commit when expanding or updating the subset:
+  - `npm run oracle:wpt-delta:corpus`
 - Re-run gate:
   - `npm run eval:wpt-delta`

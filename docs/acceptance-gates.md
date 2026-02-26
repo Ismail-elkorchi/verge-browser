@@ -125,7 +125,8 @@ For each metric:
 ## G-316 WPT-derived delta gate
 - `reports/wpt-delta.json` exists
 - `reports/wpt-delta.json.ok` is `true`
-- WPT-derived corpus has at least 12 deterministic cases
+- WPT-derived corpus has at least 100 deterministic cases
+- all planned categories are present in observed corpus coverage
 - expected file and corpus IDs are one-to-one with zero missing/extra entries
 - hash and structural deltas for each case are zero:
   - `sha256`

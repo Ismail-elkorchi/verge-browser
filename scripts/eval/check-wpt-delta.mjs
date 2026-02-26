@@ -18,14 +18,16 @@ async function main() {
   }
 
   const expectedById = normalizeExpectedById(expectedPayload.cases);
+  const expectedCasePlan = Array.isArray(corpus.casePlan) ? corpus.casePlan : [];
   const mismatches = [];
   const missingExpected = [];
   const extraExpected = [];
-  const evaluated = [];
+  const categoryCounts = new Map();
 
   for (const caseEntry of corpus.cases) {
     const actual = evaluateWptDeltaCase(caseEntry);
-    evaluated.push(actual);
+    const category = typeof caseEntry.category === "string" ? caseEntry.category : "unknown";
+    categoryCounts.set(category, (categoryCounts.get(category) ?? 0) + 1);
     const expected = expectedById.get(caseEntry.id);
     if (!expected) {
       missingExpected.push(caseEntry.id);
@@ -68,13 +70,24 @@ async function main() {
       sourceRepository: corpus.source?.repository ?? null,
       sourceCommit: corpus.source?.commit ?? null,
       caseCount: corpus.cases.length,
+      categories: Object.fromEntries([...categoryCounts.entries()].sort((left, right) => left[0].localeCompare(right[0]))),
       snapshotIds: [...new Set(corpus.cases.map((entry) => entry.snapshotId))].sort()
     },
     checks: {
       minimumCaseCount: {
-        required: 12,
+        required: 100,
         observed: corpus.cases.length,
-        ok: corpus.cases.length >= 12
+        ok: corpus.cases.length >= 100
+      },
+      categoryCoverage: {
+        requiredCategories: expectedCasePlan.map((entry) => entry.category),
+        observedCategories: [...categoryCounts.keys()].sort(),
+        missingCategories: expectedCasePlan
+          .map((entry) => entry.category)
+          .filter((category) => !categoryCounts.has(category)),
+        ok: expectedCasePlan
+          .map((entry) => entry.category)
+          .every((category) => categoryCounts.has(category))
       },
       missingExpected: {
         count: missingExpected.length,
@@ -97,6 +110,7 @@ async function main() {
 
   report.ok =
     report.checks.minimumCaseCount.ok
+    && report.checks.categoryCoverage.ok
     && report.checks.missingExpected.ok
     && report.checks.extraExpected.ok
     && report.checks.mismatches.ok;
