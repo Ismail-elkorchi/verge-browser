@@ -6,11 +6,13 @@ import { evaluateWptDeltaCase, normalizeExpectedById, readWptDeltaCorpus } from 
 async function main() {
   const corpusPath = resolve("scripts/oracles/corpus/wpt-delta-v1.json");
   const expectedPath = resolve("scripts/oracles/corpus/wpt-delta-v1.expected.json");
+  const policyPath = resolve("scripts/oracles/corpus/wpt-delta-refresh-policy.json");
   const reportPath = resolve("reports/wpt-delta.json");
 
-  const [corpus, expectedPayload] = await Promise.all([
+  const [corpus, expectedPayload, refreshPolicy] = await Promise.all([
     readWptDeltaCorpus(corpusPath),
-    readJson(expectedPath)
+    readJson(expectedPath),
+    readJson(policyPath)
   ]);
 
   if (!Array.isArray(expectedPayload?.cases) || expectedPayload.cases.length === 0) {
@@ -19,6 +21,13 @@ async function main() {
 
   const expectedById = normalizeExpectedById(expectedPayload.cases);
   const expectedCasePlan = Array.isArray(corpus.casePlan) ? corpus.casePlan : [];
+  const refreshPolicyCaseIds = Array.isArray(refreshPolicy?.cases)
+    ? refreshPolicy.cases
+      .map((entry) => entry?.id)
+      .filter((entry) => typeof entry === "string")
+      .sort()
+    : [];
+  const corpusCaseIds = corpus.cases.map((entry) => entry.id).sort();
   const mismatches = [];
   const missingExpected = [];
   const extraExpected = [];
@@ -74,6 +83,22 @@ async function main() {
       snapshotIds: [...new Set(corpus.cases.map((entry) => entry.snapshotId))].sort()
     },
     checks: {
+      refreshPolicy: {
+        policyPath,
+        sourceRepositoryMatches:
+          corpus.source?.repository === refreshPolicy?.source?.repository,
+        sourceCommitMatches:
+          corpus.source?.commit === refreshPolicy?.source?.commit,
+        casePlanMatches:
+          JSON.stringify(corpus.casePlan ?? []) === JSON.stringify(refreshPolicy?.casePlan ?? []),
+        policyCaseIdsMatch:
+          JSON.stringify(corpusCaseIds) === JSON.stringify(refreshPolicyCaseIds),
+        ok:
+          corpus.source?.repository === refreshPolicy?.source?.repository
+          && corpus.source?.commit === refreshPolicy?.source?.commit
+          && JSON.stringify(corpus.casePlan ?? []) === JSON.stringify(refreshPolicy?.casePlan ?? [])
+          && JSON.stringify(corpusCaseIds) === JSON.stringify(refreshPolicyCaseIds)
+      },
       minimumCaseCount: {
         required: 100,
         observed: corpus.cases.length,
@@ -109,7 +134,8 @@ async function main() {
   };
 
   report.ok =
-    report.checks.minimumCaseCount.ok
+    report.checks.refreshPolicy.ok
+    && report.checks.minimumCaseCount.ok
     && report.checks.categoryCoverage.ok
     && report.checks.missingExpected.ok
     && report.checks.extraExpected.ok

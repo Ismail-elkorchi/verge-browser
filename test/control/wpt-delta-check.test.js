@@ -4,9 +4,10 @@ import assert from "node:assert/strict";
 import { readJson } from "../../scripts/eval/render-eval-lib.mjs";
 
 test("wpt delta corpus and expected have aligned IDs with >=100 cases", async () => {
-  const [corpus, expected] = await Promise.all([
+  const [corpus, expected, refreshPolicy] = await Promise.all([
     readJson("scripts/oracles/corpus/wpt-delta-v1.json"),
-    readJson("scripts/oracles/corpus/wpt-delta-v1.expected.json")
+    readJson("scripts/oracles/corpus/wpt-delta-v1.expected.json"),
+    readJson("scripts/oracles/corpus/wpt-delta-refresh-policy.json")
   ]);
 
   assert.ok(Array.isArray(corpus.cases));
@@ -23,4 +24,11 @@ test("wpt delta corpus and expected have aligned IDs with >=100 cases", async ()
   for (const category of plannedCategories) {
     assert.ok(categories.has(category));
   }
+
+  assert.equal(corpus.source.repository, refreshPolicy.source.repository);
+  assert.equal(corpus.source.commit, refreshPolicy.source.commit);
+  assert.deepEqual(corpus.casePlan, refreshPolicy.casePlan);
+
+  const policyIds = refreshPolicy.cases.map((entry) => entry.id).sort();
+  assert.deepEqual(corpusIds, policyIds);
 });

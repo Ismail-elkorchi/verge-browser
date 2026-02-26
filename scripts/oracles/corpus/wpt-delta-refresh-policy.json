@@ -1,0 +1,652 @@
+{
+  "suite": "wpt-delta-refresh-policy",
+  "version": 2,
+  "source": {
+    "repository": "https://github.com/web-platform-tests/wpt",
+    "commit": "3d3a9202727fcceb8da22df8ee0ec86dde8361ce"
+  },
+  "casePlan": [
+    {
+      "category": "flow-content",
+      "root": "html/rendering/non-replaced-elements/flow-content-0",
+      "targetCount": 10
+    },
+    {
+      "category": "lists",
+      "root": "html/rendering/non-replaced-elements/lists",
+      "targetCount": 25
+    },
+    {
+      "category": "phrasing",
+      "root": "html/rendering/non-replaced-elements/phrasing-content-0",
+      "targetCount": 8
+    },
+    {
+      "category": "tables",
+      "root": "html/rendering/non-replaced-elements/tables",
+      "targetCount": 25
+    },
+    {
+      "category": "replaced-elements",
+      "root": "html/rendering/replaced-elements",
+      "targetCount": 45
+    },
+    {
+      "category": "ua-style",
+      "root": "html/rendering/the-css-user-agent-style-sheet-and-presentational-hints",
+      "targetCount": 5
+    },
+    {
+      "category": "sections-headings",
+      "root": "html/rendering/non-replaced-elements/sections-and-headings",
+      "targetCount": 1
+    },
+    {
+      "category": "sections",
+      "root": "html/rendering/sections",
+      "targetCount": 1
+    }
+  ],
+  "cases": [
+    {
+      "id": "wpt-flow-content-dialog-908886e5ef02",
+      "category": "flow-content",
+      "sourcePath": "html/rendering/non-replaced-elements/flow-content-0/dialog.html"
+    },
+    {
+      "id": "wpt-flow-content-dialog-display-eeb0bc6cb483",
+      "category": "flow-content",
+      "sourcePath": "html/rendering/non-replaced-elements/flow-content-0/dialog-display.html"
+    },
+    {
+      "id": "wpt-flow-content-div-align-2f685f63e90d",
+      "category": "flow-content",
+      "sourcePath": "html/rendering/non-replaced-elements/flow-content-0/div-align.html"
+    },
+    {
+      "id": "wpt-flow-content-figure-c3aa046174bd",
+      "category": "flow-content",
+      "sourcePath": "html/rendering/non-replaced-elements/flow-content-0/figure.html"
+    },
+    {
+      "id": "wpt-flow-content-form-margin-quirk-3d670fce8c7b",
+      "category": "flow-content",
+      "sourcePath": "html/rendering/non-replaced-elements/flow-content-0/form-margin-quirk.html"
+    },
+    {
+      "id": "wpt-flow-content-search-styles-ac196c399a3e",
+      "category": "flow-content",
+      "sourcePath": "html/rendering/non-replaced-elements/flow-content-0/search-styles.html"
+    },
+    {
+      "id": "wpt-flow-content-search-styles-iso-8859-8-4d1f5e39ab7a",
+      "category": "flow-content",
+      "sourcePath": "html/rendering/non-replaced-elements/flow-content-0/search-styles-iso-8859-8.html"
+    },
+    {
+      "id": "wpt-flow-content-slot-element-default-display-97c1b87e5dab",
+      "category": "flow-content",
+      "sourcePath": "html/rendering/non-replaced-elements/flow-content-0/slot-element-default-display.html"
+    },
+    {
+      "id": "wpt-flow-content-slot-element-focusable-tentative-bdb4556c54a0",
+      "category": "flow-content",
+      "sourcePath": "html/rendering/non-replaced-elements/flow-content-0/slot-element-focusable.tentative.html"
+    },
+    {
+      "id": "wpt-flow-content-slot-element-tabbable-tentative-64c53b5fe1fc",
+      "category": "flow-content",
+      "sourcePath": "html/rendering/non-replaced-elements/flow-content-0/slot-element-tabbable.tentative.html"
+    },
+    {
+      "id": "wpt-lists-dir-type-09826743df72",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/dir-type.html"
+    },
+    {
+      "id": "wpt-lists-li-text-align-ac07dff47cbb",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/li-text-align.html"
+    },
+    {
+      "id": "wpt-lists-li-type-supported-28918552e1a5",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/li-type-supported.html"
+    },
+    {
+      "id": "wpt-lists-li-type-supported-xhtml-487957db30e3",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/li-type-supported-xhtml.xhtml"
+    },
+    {
+      "id": "wpt-lists-li-type-unsupported-lower-alpha-d04191454874",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/li-type-unsupported-lower-alpha.html"
+    },
+    {
+      "id": "wpt-lists-li-type-unsupported-lower-roman-29d8635b3df8",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/li-type-unsupported-lower-roman.html"
+    },
+    {
+      "id": "wpt-lists-li-type-unsupported-upper-alpha-0bf0eebcac9c",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/li-type-unsupported-upper-alpha.html"
+    },
+    {
+      "id": "wpt-lists-li-type-unsupported-upper-roman-4ce4c74f8903",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/li-type-unsupported-upper-roman.html"
+    },
+    {
+      "id": "wpt-lists-list-style-position-quirks-mode-28358e54645b",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/list-style-position-quirks-mode.html"
+    },
+    {
+      "id": "wpt-lists-lists-presentational-hints-ascii-case-insensitive-76ca8dc32788",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/lists-presentational-hints-ascii-case-insensitive.html"
+    },
+    {
+      "id": "wpt-lists-lists-styles-8af5bca821d3",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/lists-styles.html"
+    },
+    {
+      "id": "wpt-lists-lists-styles-quirks-8c78e00fb431",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/lists-styles-quirks.html"
+    },
+    {
+      "id": "wpt-lists-ol-start-display-contents-3e8bad84453a",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/ol-start-display-contents.html"
+    },
+    {
+      "id": "wpt-lists-ol-start-reversed-display-contents-34e237db4189",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/ol-start-reversed-display-contents.html"
+    },
+    {
+      "id": "wpt-lists-ol-type-supported-f08521e01182",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/ol-type-supported.html"
+    },
+    {
+      "id": "wpt-lists-ol-type-supported-xhtml-5878139b2b58",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/ol-type-supported-xhtml.xhtml"
+    },
+    {
+      "id": "wpt-lists-ol-type-unsupported-circle-b4a30477aa81",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/ol-type-unsupported-circle.html"
+    },
+    {
+      "id": "wpt-lists-ol-type-unsupported-disc-11e379670caa",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/ol-type-unsupported-disc.html"
+    },
+    {
+      "id": "wpt-lists-ol-type-unsupported-invalid-fab21c2b5a34",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/ol-type-unsupported-invalid.html"
+    },
+    {
+      "id": "wpt-lists-ol-type-unsupported-lower-alpha-db0148c05ee1",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/ol-type-unsupported-lower-alpha.html"
+    },
+    {
+      "id": "wpt-lists-ol-type-unsupported-lower-roman-d758346c096a",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/ol-type-unsupported-lower-roman.html"
+    },
+    {
+      "id": "wpt-lists-ol-type-unsupported-none-89930e6b20a3",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/ol-type-unsupported-none.html"
+    },
+    {
+      "id": "wpt-lists-ol-type-unsupported-round-ba3fc585d735",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/ol-type-unsupported-round.html"
+    },
+    {
+      "id": "wpt-lists-ol-type-unsupported-square-dc11d3695e65",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/ol-type-unsupported-square.html"
+    },
+    {
+      "id": "wpt-lists-ol-type-unsupported-upper-alpha-bf530df2d1aa",
+      "category": "lists",
+      "sourcePath": "html/rendering/non-replaced-elements/lists/ol-type-unsupported-upper-alpha.html"
+    },
+    {
+      "id": "wpt-phrasing-001-a-e03382c1ae48",
+      "category": "phrasing",
+      "sourcePath": "html/rendering/non-replaced-elements/phrasing-content-0/font-element-text-decoration-color/001-a.html"
+    },
+    {
+      "id": "wpt-phrasing-001-q-871da4516a8b",
+      "category": "phrasing",
+      "sourcePath": "html/rendering/non-replaced-elements/phrasing-content-0/font-element-text-decoration-color/001-q.html"
+    },
+    {
+      "id": "wpt-phrasing-001-s-b7e6b9079ac0",
+      "category": "phrasing",
+      "sourcePath": "html/rendering/non-replaced-elements/phrasing-content-0/font-element-text-decoration-color/001-s.html"
+    },
+    {
+      "id": "wpt-phrasing-001-x-5d47811f9b76",
+      "category": "phrasing",
+      "sourcePath": "html/rendering/non-replaced-elements/phrasing-content-0/font-element-text-decoration-color/001-x.xhtml"
+    },
+    {
+      "id": "wpt-phrasing-b-strong-styles-9f5450f31cfa",
+      "category": "phrasing",
+      "sourcePath": "html/rendering/non-replaced-elements/phrasing-content-0/b-strong-styles.html"
+    },
+    {
+      "id": "wpt-phrasing-content-property-tentative-de1461e5f094",
+      "category": "phrasing",
+      "sourcePath": "html/rendering/non-replaced-elements/phrasing-content-0/br-wbr-content/content-property.tentative.html"
+    },
+    {
+      "id": "wpt-phrasing-font-face-1e20ca07d971",
+      "category": "phrasing",
+      "sourcePath": "html/rendering/non-replaced-elements/phrasing-content-0/font-element-text-decoration-color/font-face.html"
+    },
+    {
+      "id": "wpt-phrasing-font-size-68be270431fc",
+      "category": "phrasing",
+      "sourcePath": "html/rendering/non-replaced-elements/phrasing-content-0/font-element-text-decoration-color/font-size.html"
+    },
+    {
+      "id": "wpt-replaced-elements-align-84a856fd49dd",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/align.html"
+    },
+    {
+      "id": "wpt-replaced-elements-audio-controls-001-487a5968b3ee",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/embedded-content-rendering-rules/audio-controls-001.html"
+    },
+    {
+      "id": "wpt-replaced-elements-audio-controls-002-7ff8f2a1c622",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/embedded-content-rendering-rules/audio-controls-002.html"
+    },
+    {
+      "id": "wpt-replaced-elements-audio-controls-intrinsic-size-4d62d420f466",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/embedded-content/audio-controls-intrinsic-size.html"
+    },
+    {
+      "id": "wpt-replaced-elements-audio-without-controls-eee9ac4362d3",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/embedded-content-rendering-rules/audio-without-controls.html"
+    },
+    {
+      "id": "wpt-replaced-elements-canvas-aspect-ratio-1888c22d8b5b",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/canvas-aspect-ratio.html"
+    },
+    {
+      "id": "wpt-replaced-elements-canvas-dimension-attributes-a222b4e4e421",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/canvas-dimension-attributes.html"
+    },
+    {
+      "id": "wpt-replaced-elements-canvas-fallback-f7e94e06d3dc",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/embedded-content-rendering-rules/canvas-fallback.html"
+    },
+    {
+      "id": "wpt-replaced-elements-canvas-scale-e475d64bcd1a",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/embedded-content-rendering-rules/canvas_scale.html"
+    },
+    {
+      "id": "wpt-replaced-elements-canvas-scale-ref-f45338a5c439",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/embedded-content-rendering-rules/canvas_scale_ref.html"
+    },
+    {
+      "id": "wpt-replaced-elements-canvas-update-with-border-object-fit-999889282e13",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/embedded-content-rendering-rules/canvas-update-with-border-object-fit.html"
+    },
+    {
+      "id": "wpt-replaced-elements-canvas-without-context-a-ad16b28e2f76",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/embedded-content-rendering-rules/canvas_without_context_a.html"
+    },
+    {
+      "id": "wpt-replaced-elements-canvas-without-context-ref-ee3c9795e542",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/embedded-content-rendering-rules/canvas_without_context_ref.html"
+    },
+    {
+      "id": "wpt-replaced-elements-change-src-while-not-displayed-367e64984196",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/embedded-content/change-src-while-not-displayed.html"
+    },
+    {
+      "id": "wpt-replaced-elements-content-aspect-ratio-fac3f3adcf05",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/content-aspect-ratio.html"
+    },
+    {
+      "id": "wpt-replaced-elements-cross-domain-iframe-in-multicol-sub-9d21d680d48e",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/embedded-content/cross-domain-iframe-in-multicol.sub.html"
+    },
+    {
+      "id": "wpt-replaced-elements-cross-domain-iframe-sub-6da775c59a3c",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/embedded-content/cross-domain-iframe.sub.html"
+    },
+    {
+      "id": "wpt-replaced-elements-embedded-and-images-presentational-hints-ascii-case-insensitive-4161d37a0856",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/embedded-and-images-presentational-hints-ascii-case-insensitive.html"
+    },
+    {
+      "id": "wpt-replaced-elements-iframe-frameborder-0007b67fb8a3",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/embedded-content/iframe-frameborder.html"
+    },
+    {
+      "id": "wpt-replaced-elements-img-alt-crash-001-d5d92dab9275",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/img-alt-crash-001.html"
+    },
+    {
+      "id": "wpt-replaced-elements-img-aspect-ratio-b5d3b675793c",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/img-aspect-ratio.html"
+    },
+    {
+      "id": "wpt-replaced-elements-img-aspect-ratio-lazy-581280d3bece",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/img-aspect-ratio-lazy.html"
+    },
+    {
+      "id": "wpt-replaced-elements-img-border-percent-70e9692e48be",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/img_border_percent.xhtml"
+    },
+    {
+      "id": "wpt-replaced-elements-img-dim-9f59faf59707",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/img-dim.html"
+    },
+    {
+      "id": "wpt-replaced-elements-img-empty-alt-replaced-82c299395bca",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/img-empty-alt-replaced.html"
+    },
+    {
+      "id": "wpt-replaced-elements-img-no-alt-replaced-417bec3423e4",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/img-no-alt-replaced.html"
+    },
+    {
+      "id": "wpt-replaced-elements-img-replaced-box-while-loading-5567d237af59",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/img-replaced-box-while-loading.html"
+    },
+    {
+      "id": "wpt-replaced-elements-img-title-only-w-sizing-0be35e236b24",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/img-title-only-w-sizing.html"
+    },
+    {
+      "id": "wpt-replaced-elements-input-align-right-1-8260c69053e4",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/input-align-right-1.html"
+    },
+    {
+      "id": "wpt-replaced-elements-input-align-right-2-051dae488bcb",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/input-align-right-2.html"
+    },
+    {
+      "id": "wpt-replaced-elements-input-image-content-crash-591924d9f77f",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/input-image-content-crash.html"
+    },
+    {
+      "id": "wpt-replaced-elements-input-image-inline-alt-5f52bc500cbd",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/input-image-inline-alt.html"
+    },
+    {
+      "id": "wpt-replaced-elements-input-type-change-from-image-1-1fd20991578e",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/input-type-change-from-image-1.html"
+    },
+    {
+      "id": "wpt-replaced-elements-number-placeholder-right-aligned-26c0d42e1ac6",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/number-placeholder-right-aligned.html"
+    },
+    {
+      "id": "wpt-replaced-elements-object-border-perc-079678c0d3a5",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/object_border_perc.xhtml"
+    },
+    {
+      "id": "wpt-replaced-elements-object-border-pixel-0b7b03e26bca",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/object_border_pixel.xhtml"
+    },
+    {
+      "id": "wpt-replaced-elements-object-fallback-text-decoration-b9bd30b54408",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/embedded-content/object-fallback-text-decoration.html"
+    },
+    {
+      "id": "wpt-replaced-elements-picture-aspect-ratio-0eb0373ea6f5",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/picture-aspect-ratio.html"
+    },
+    {
+      "id": "wpt-replaced-elements-tall-cross-domain-iframe-in-scrolled-sub-cf1060a3adac",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/embedded-content/tall-cross-domain-iframe-in-scrolled.sub.html"
+    },
+    {
+      "id": "wpt-replaced-elements-video-aspect-ratio-85a85636dc59",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/video-aspect-ratio.html"
+    },
+    {
+      "id": "wpt-replaced-elements-video-controls-vertical-writing-mode-9afb03f7d71c",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/embedded-content/video-controls-vertical-writing-mode.html"
+    },
+    {
+      "id": "wpt-replaced-elements-video-default-object-height-constrained-by-max-width-4c37eeca5846",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/video-default-object-height-constrained-by-max-width.html"
+    },
+    {
+      "id": "wpt-replaced-elements-video-default-object-width-constrained-by-max-height-437035cd506e",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/video-default-object-width-constrained-by-max-height.html"
+    },
+    {
+      "id": "wpt-replaced-elements-video-inline-size-containment-no-crash-aca8554e4604",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/video-inline-size-containment-no-crash.html"
+    },
+    {
+      "id": "wpt-replaced-elements-video-intrinsic-width-height-a7bf2ae2bc2d",
+      "category": "replaced-elements",
+      "sourcePath": "html/rendering/replaced-elements/attributes-for-embedded-content-and-images/video-intrinsic-width-height.html"
+    },
+    {
+      "id": "wpt-sections-headingoffset-and-headingreset-c76fa4931ae8",
+      "category": "sections",
+      "sourcePath": "html/rendering/sections/headingoffset-and-headingreset.html"
+    },
+    {
+      "id": "wpt-sections-headings-headings-styles-12b0d33f4b1f",
+      "category": "sections-headings",
+      "sourcePath": "html/rendering/non-replaced-elements/sections-and-headings/headings-styles.html"
+    },
+    {
+      "id": "wpt-tables-colgroup-valign-bottom-349e56763df7",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/colgroup_valign_bottom.xhtml"
+    },
+    {
+      "id": "wpt-tables-colgroup-valign-top-7813c5dd224f",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/colgroup_valign_top.xhtml"
+    },
+    {
+      "id": "wpt-tables-form-in-tables-4c6b57cb60a0",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/form-in-tables.html"
+    },
+    {
+      "id": "wpt-tables-form-in-tables-xhtml-ae3fce1318df",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/form-in-tables-xhtml.xhtml"
+    },
+    {
+      "id": "wpt-tables-hidden-attr-08f24b3fccf0",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/hidden-attr.html"
+    },
+    {
+      "id": "wpt-tables-table-align-float-000f8ea921b9",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/table-align-float.xhtml"
+    },
+    {
+      "id": "wpt-tables-table-attribute-0ac886510542",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/table-attribute.html"
+    },
+    {
+      "id": "wpt-tables-table-background-print-e9f0c525b210",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/table-background-print.html"
+    },
+    {
+      "id": "wpt-tables-table-border-1-9829ef647d4b",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/table-border-1.html"
+    },
+    {
+      "id": "wpt-tables-table-border-2-12c9cc84d524",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/table-border-2.html"
+    },
+    {
+      "id": "wpt-tables-table-border-2-notref-c34b0689ff68",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/table-border-2-notref.html"
+    },
+    {
+      "id": "wpt-tables-table-border-3q-325441d29002",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/table-border-3q.html"
+    },
+    {
+      "id": "wpt-tables-table-border-3s-b99e6d711d0b",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/table-border-3s.html"
+    },
+    {
+      "id": "wpt-tables-table-border-presentational-hints-ascii-case-insensitive-b9ba10f716a0",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/table-border-presentational-hints-ascii-case-insensitive.html"
+    },
+    {
+      "id": "wpt-tables-table-bordercolor-001-726c86ee1e71",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/table-bordercolor-001.html"
+    },
+    {
+      "id": "wpt-tables-table-cell-nowrap-with-fixed-width-7524094058c0",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/table-cell-nowrap-with-fixed-width.html"
+    },
+    {
+      "id": "wpt-tables-table-cell-width-47b386b46241",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/table-cell-width.html"
+    },
+    {
+      "id": "wpt-tables-table-cell-width-s-d16574b43c90",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/table-cell-width-s.html"
+    },
+    {
+      "id": "wpt-tables-table-column-width-9db550bad92d",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/table-column-width.html"
+    },
+    {
+      "id": "wpt-tables-table-direction-ce61b88f0ab4",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/table-direction.html"
+    },
+    {
+      "id": "wpt-tables-table-layout-138b91524717",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/table-layout.html"
+    },
+    {
+      "id": "wpt-tables-table-layout-notref-4bf0e871cc7f",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/table-layout-notref.html"
+    },
+    {
+      "id": "wpt-tables-table-row-direction-ee97f94e78a3",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/table-row-direction.html"
+    },
+    {
+      "id": "wpt-tables-table-row-group-direction-3248b9dc87ec",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/table-row-group-direction.html"
+    },
+    {
+      "id": "wpt-tables-table-row-group-height-e898ad3331dd",
+      "category": "tables",
+      "sourcePath": "html/rendering/non-replaced-elements/tables/table-row-group-height.html"
+    },
+    {
+      "id": "wpt-ua-style-body-bgcolor-attribute-change-84503762ff12",
+      "category": "ua-style",
+      "sourcePath": "html/rendering/the-css-user-agent-style-sheet-and-presentational-hints/body-bgcolor-attribute-change.html"
+    },
+    {
+      "id": "wpt-ua-style-mouse-cursor-imagemap-7db015b904e7",
+      "category": "ua-style",
+      "sourcePath": "html/rendering/the-css-user-agent-style-sheet-and-presentational-hints/mouse-cursor-imagemap.html"
+    },
+    {
+      "id": "wpt-ua-style-no-help-cursor-on-links-historical-a2af18df8ea6",
+      "category": "ua-style",
+      "sourcePath": "html/rendering/the-css-user-agent-style-sheet-and-presentational-hints/no-help-cursor-on-links.historical.html"
+    },
+    {
+      "id": "wpt-ua-style-no-help-cursor-on-links-wrapped-in-svg-historical-2a97a2d2007f",
+      "category": "ua-style",
+      "sourcePath": "html/rendering/the-css-user-agent-style-sheet-and-presentational-hints/no-help-cursor-on-links-wrapped-in-svg.historical.html"
+    },
+    {
+      "id": "wpt-ua-style-pre-margin-block-71ea71051389",
+      "category": "ua-style",
+      "sourcePath": "html/rendering/the-css-user-agent-style-sheet-and-presentational-hints/pre-margin-block.html"
+    }
+  ]
+}

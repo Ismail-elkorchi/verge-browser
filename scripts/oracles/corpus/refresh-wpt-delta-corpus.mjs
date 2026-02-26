@@ -1,56 +1,34 @@
 import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 const { fetch, TextDecoder } = globalThis;
 
-const WPT_COMMIT = "3d3a9202727fcceb8da22df8ee0ec86dde8361ce";
-const REPOSITORY = "https://github.com/web-platform-tests/wpt";
-const OUTPUT_PATH = resolve("scripts/oracles/corpus/wpt-delta-v1.json");
+const DEFAULT_POLICY_PATH = resolve("scripts/oracles/corpus/wpt-delta-refresh-policy.json");
+const DEFAULT_OUTPUT_PATH = resolve("scripts/oracles/corpus/wpt-delta-v1.json");
 const USER_AGENT = "verge-browser-wpt-delta-refresh/1.0";
-const EXCLUDED_SEGMENTS = new Set(["support", "resources"]);
-const CASE_PLAN = Object.freeze([
-  {
-    category: "flow-content",
-    root: "html/rendering/non-replaced-elements/flow-content-0",
-    targetCount: 10
-  },
-  {
-    category: "lists",
-    root: "html/rendering/non-replaced-elements/lists",
-    targetCount: 25
-  },
-  {
-    category: "phrasing",
-    root: "html/rendering/non-replaced-elements/phrasing-content-0",
-    targetCount: 8
-  },
-  {
-    category: "tables",
-    root: "html/rendering/non-replaced-elements/tables",
-    targetCount: 25
-  },
-  {
-    category: "replaced-elements",
-    root: "html/rendering/replaced-elements",
-    targetCount: 45
-  },
-  {
-    category: "ua-style",
-    root: "html/rendering/the-css-user-agent-style-sheet-and-presentational-hints",
-    targetCount: 5
-  },
-  {
-    category: "sections-headings",
-    root: "html/rendering/non-replaced-elements/sections-and-headings",
-    targetCount: 1
-  },
-  {
-    category: "sections",
-    root: "html/rendering/sections",
-    targetCount: 1
+const OPTIONAL_GITHUB_TOKEN = process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN ?? null;
+
+function parseArgs(argv) {
+  const options = {
+    policyPath: DEFAULT_POLICY_PATH,
+    outputPath: DEFAULT_OUTPUT_PATH
+  };
+
+  for (const argument of argv) {
+    if (argument.startsWith("--policy=")) {
+      options.policyPath = resolve(argument.slice("--policy=".length).trim());
+      continue;
+    }
+    if (argument.startsWith("--output=")) {
+      options.outputPath = resolve(argument.slice("--output=".length).trim());
+      continue;
+    }
+    throw new Error(`unsupported argument: ${argument}`);
   }
-]);
+
+  return options;
+}
 
 function sha256HexBytes(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -60,84 +38,28 @@ function sha256HexText(text) {
   return createHash("sha256").update(text).digest("hex");
 }
 
-function rawUrl(path) {
-  return `https://raw.githubusercontent.com/web-platform-tests/wpt/${WPT_COMMIT}/${path}`;
+function rawUrl(commit, path) {
+  return `https://raw.githubusercontent.com/web-platform-tests/wpt/${commit}/${path}`;
 }
 
-function apiUrl(path) {
-  return `https://api.github.com/repos/web-platform-tests/wpt/contents/${path}?ref=${WPT_COMMIT}`;
-}
-
-function isRenderableFixture(path) {
-  const lower = path.toLowerCase();
-  if (!(lower.endsWith(".html") || lower.endsWith(".xhtml"))) {
-    return false;
+function requestHeaders() {
+  const headers = {
+    "user-agent": USER_AGENT
+  };
+  if (typeof OPTIONAL_GITHUB_TOKEN === "string" && OPTIONAL_GITHUB_TOKEN.length > 0) {
+    headers.authorization = `Bearer ${OPTIONAL_GITHUB_TOKEN}`;
   }
-  if (lower.includes("-ref.")) {
-    return false;
-  }
-  if (lower.includes("-manual.")) {
-    return false;
-  }
-  return true;
-}
-
-async function fetchJson(url) {
-  const response = await fetch(url, {
-    headers: {
-      "user-agent": USER_AGENT
-    }
-  });
-  if (!response.ok) {
-    throw new Error(`fetch failed (${response.status}) for ${url}`);
-  }
-  return response.json();
+  return headers;
 }
 
 async function fetchBytes(url) {
   const response = await fetch(url, {
-    headers: {
-      "user-agent": USER_AGENT
-    }
+    headers: requestHeaders()
   });
   if (!response.ok) {
     throw new Error(`fetch failed (${response.status}) for ${url}`);
   }
   return new Uint8Array(await response.arrayBuffer());
-}
-
-async function collectPaths(rootPath) {
-  const stack = [rootPath];
-  const collected = [];
-
-  while (stack.length > 0) {
-    const current = stack.pop();
-    if (!current) {
-      continue;
-    }
-    const entries = await fetchJson(apiUrl(current));
-    if (!Array.isArray(entries)) {
-      throw new Error(`unexpected directory payload for ${current}`);
-    }
-
-    const sortedEntries = entries.slice().sort((left, right) => left.path.localeCompare(right.path));
-    for (const entry of sortedEntries) {
-      if (entry.type === "file") {
-        if (isRenderableFixture(entry.path)) {
-          collected.push(entry.path);
-        }
-        continue;
-      }
-      if (entry.type === "dir") {
-        if (EXCLUDED_SEGMENTS.has(entry.name)) {
-          continue;
-        }
-        stack.push(entry.path);
-      }
-    }
-  }
-
-  return collected.sort((left, right) => left.localeCompare(right));
 }
 
 function caseId(category, path) {
@@ -152,29 +74,101 @@ function caseId(category, path) {
   return `wpt-${category}-${slug}-${digest}`;
 }
 
-async function main() {
-  const selected = [];
+async function readPolicy(policyPath) {
+  const source = await readFile(policyPath, "utf8");
+  const policy = JSON.parse(source);
+  const repository = policy?.source?.repository;
+  const commit = policy?.source?.commit;
+  if (typeof repository !== "string" || !repository.startsWith("https://github.com/web-platform-tests/wpt")) {
+    throw new Error("invalid WPT refresh policy repository");
+  }
+  if (typeof commit !== "string" || !/^[0-9a-f]{40}$/i.test(commit)) {
+    throw new Error("invalid WPT refresh policy commit");
+  }
+  if (!Array.isArray(policy?.casePlan) || policy.casePlan.length === 0) {
+    throw new Error("invalid WPT refresh policy case plan");
+  }
+  if (!Array.isArray(policy?.cases) || policy.cases.length === 0) {
+    throw new Error("invalid WPT refresh policy cases");
+  }
 
-  for (const plan of CASE_PLAN) {
-    const candidates = await collectPaths(plan.root);
-    const picked = candidates.slice(0, plan.targetCount);
-    if (picked.length < plan.targetCount) {
+  for (const entry of policy.casePlan) {
+    if (typeof entry?.category !== "string" || entry.category.length === 0) {
+      throw new Error("invalid WPT refresh policy category");
+    }
+    if (typeof entry?.root !== "string" || entry.root.length === 0) {
+      throw new Error(`invalid WPT refresh policy root for ${entry?.category ?? "unknown"}`);
+    }
+    if (!Number.isSafeInteger(entry?.targetCount) || entry.targetCount < 1) {
+      throw new Error(`invalid WPT refresh policy targetCount for ${entry.category}`);
+    }
+  }
+
+  const caseIds = new Set();
+  for (const entry of policy.cases) {
+    if (typeof entry?.id !== "string" || entry.id.length === 0) {
+      throw new Error("invalid WPT refresh policy case id");
+    }
+    if (caseIds.has(entry.id)) {
+      throw new Error(`duplicate WPT refresh policy case id: ${entry.id}`);
+    }
+    caseIds.add(entry.id);
+    if (typeof entry?.category !== "string" || entry.category.length === 0) {
+      throw new Error(`invalid WPT refresh policy category for case ${entry.id}`);
+    }
+    if (typeof entry?.sourcePath !== "string" || entry.sourcePath.length === 0) {
+      throw new Error(`invalid WPT refresh policy sourcePath for case ${entry.id}`);
+    }
+    if (!entry.sourcePath.startsWith("html/")) {
+      throw new Error(`invalid WPT refresh policy sourcePath scope for case ${entry.id}`);
+    }
+  }
+
+  return {
+    policy,
+    policySha256: sha256HexText(source)
+  };
+}
+
+function checkCasePlanCounts(policy) {
+  const counts = new Map();
+  for (const caseEntry of policy.cases) {
+    counts.set(caseEntry.category, (counts.get(caseEntry.category) ?? 0) + 1);
+  }
+  for (const planEntry of policy.casePlan) {
+    const observed = counts.get(planEntry.category) ?? 0;
+    if (observed !== planEntry.targetCount) {
       throw new Error(
-        `insufficient fixtures in ${plan.root}: expected ${String(plan.targetCount)}, got ${String(picked.length)}`
+        `policy case count mismatch for ${planEntry.category}: expected ${String(planEntry.targetCount)}, got ${String(observed)}`
       );
     }
+  }
+}
 
-    for (const path of picked) {
-      const bytes = await fetchBytes(rawUrl(path));
-      const html = new TextDecoder("utf-8").decode(bytes);
-      selected.push({
-        id: caseId(plan.category, path),
-        category: plan.category,
-        sourcePath: path,
-        sha256: sha256HexBytes(bytes),
-        html
-      });
+async function main() {
+  const options = parseArgs(process.argv.slice(2));
+  const { policy, policySha256 } = await readPolicy(options.policyPath);
+  checkCasePlanCounts(policy);
+
+  const selected = [];
+  const commit = policy.source.commit;
+
+  for (const policyCase of policy.cases) {
+    const expectedId = caseId(policyCase.category, policyCase.sourcePath);
+    if (expectedId !== policyCase.id) {
+      throw new Error(
+        `policy case id mismatch for ${policyCase.sourcePath}: expected ${expectedId}, got ${policyCase.id}`
+      );
     }
+    const bytes = await fetchBytes(rawUrl(commit, policyCase.sourcePath));
+    const html = new TextDecoder("utf-8").decode(bytes);
+    selected.push({
+      id: policyCase.id,
+      category: policyCase.category,
+      sourcePath: policyCase.sourcePath,
+      sha256: sha256HexBytes(bytes),
+      html
+    });
   }
 
   selected.sort((left, right) => left.id.localeCompare(right.id));
@@ -183,19 +177,23 @@ async function main() {
     suite: "wpt-delta-v1",
     version: 1,
     source: {
-      repository: REPOSITORY,
-      commit: WPT_COMMIT,
+      repository: policy.source.repository,
+      commit,
       retrievedAtIso: new Date().toISOString()
     },
-    casePlan: CASE_PLAN,
+    policy: {
+      path: options.policyPath,
+      sha256: policySha256
+    },
+    casePlan: policy.casePlan,
     cases: selected
   };
 
-  await mkdir(dirname(OUTPUT_PATH), { recursive: true });
-  await writeFile(OUTPUT_PATH, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  await mkdir(dirname(options.outputPath), { recursive: true });
+  await writeFile(options.outputPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 
   process.stdout.write(
-    `wrote ${OUTPUT_PATH} with ${String(selected.length)} cases from ${String(CASE_PLAN.length)} categories\n`
+    `wrote ${options.outputPath} with ${String(selected.length)} cases from ${String(policy.casePlan.length)} categories\n`
   );
 }
 
