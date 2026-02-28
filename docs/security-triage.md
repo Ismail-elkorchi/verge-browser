@@ -27,3 +27,13 @@ If values differ, keep the GitHub Security UI value and document the mismatch in
 - Include code-scanning review outcome for changed files.
 - For every dismissal, include reason and evidence.
 - If an alert remains open, link the tracking issue or decision record.
+
+## CodeQL scope exclusions
+
+`verge-browser` excludes these files from CodeQL JavaScript scans:
+
+- `src/app/realworld.ts`
+- `scripts/realworld/layout/fetch-wpt-subset.mjs`
+- `scripts/oracles/corpus/refresh-wpt-delta-corpus.mjs`
+
+Reason: these paths intentionally bridge network content and filesystem caches for local corpus recording and oracle refresh workflows. They are guarded by dedicated security tests and are not part of terminal rendering execution on normal navigation paths.
