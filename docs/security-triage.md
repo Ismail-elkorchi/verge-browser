@@ -28,6 +28,15 @@ If values differ, keep the GitHub Security UI value and document the mismatch in
 - For every dismissal, include reason and evidence.
 - If an alert remains open, link the tracking issue or decision record.
 
+## Governance-class scorecard signals
+
+In solo-maintainer mode, treat these as governance signals with periodic re-evaluation:
+
+- `CodeReviewID`: tracked quarterly while branch protection does not require peer review.
+- `MaintainedID`: expected for repositories younger than 90 days; re-check after age threshold.
+
+Compensating controls remain mandatory: required CI checks, dependency review, and CodeQL on pull requests.
+
 ## CodeQL scope exclusions
 
 `verge-browser` excludes these files from CodeQL JavaScript scans:
