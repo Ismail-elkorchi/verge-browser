@@ -15,6 +15,12 @@ Artifacts are written to `reports/`.
 - `deno`
 - `bun`
 
+## Code scanning policy
+- CodeQL runs on pull requests, pushes to `main`, and weekly schedule.
+- CodeQL query lanes:
+  - `security-extended` (merge-blocking security lane)
+  - `security-and-quality` (additional triage lane)
+
 ## G-301 Corpus integrity
 - `scripts/oracles/corpus/render-v3.json` exists
 - case count >= 1000

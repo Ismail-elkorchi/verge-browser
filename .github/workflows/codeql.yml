@@ -5,6 +5,8 @@ on:
   push:
     branches:
       - main
+  schedule:
+    - cron: "23 4 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -14,12 +16,18 @@ permissions:
 
 jobs:
   analyze:
-    name: codeql-analyze
+    name: codeql-${{ matrix.lane }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        language: ["javascript-typescript"]
+        include:
+          - lane: security-extended
+            queries: security-extended
+            category: "/language:javascript-typescript/security-extended"
+          - lane: security-and-quality
+            queries: security-and-quality
+            category: "/language:javascript-typescript/security-and-quality"
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -27,11 +35,13 @@ jobs:
       - name: Initialize CodeQL
         uses: github/codeql-action/init@9e907b5e64f6b83e7804b09294d44122997950d6 # v4.32.3
         with:
-          languages: ${{ matrix.language }}
-          queries: security-extended
+          languages: javascript-typescript
+          queries: ${{ matrix.queries }}
 
       - name: Autobuild
         uses: github/codeql-action/autobuild@9e907b5e64f6b83e7804b09294d44122997950d6 # v4.32.3
 
       - name: Analyze
         uses: github/codeql-action/analyze@9e907b5e64f6b83e7804b09294d44122997950d6 # v4.32.3
+        with:
+          category: ${{ matrix.category }}
