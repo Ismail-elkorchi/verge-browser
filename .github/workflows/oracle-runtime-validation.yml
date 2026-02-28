@@ -20,7 +20,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Checkout html-parser dependency
         run: |
@@ -30,7 +30,7 @@ jobs:
           fi
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
         with:
           node-version: "24"
           cache: npm
@@ -39,7 +39,7 @@ jobs:
         run: npm ci
 
       - name: Restore oracle image cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: tmp/oracle-image
           key: ${{ runner.os }}-oracle-image-${{ hashFiles('scripts/oracles/oracle-image.lock.json') }}
@@ -54,7 +54,7 @@ jobs:
         run: npm run eval:oracle-lock-refresh-diff:release
 
       - name: Upload oracle runtime reports
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: oracle-runtime-reports
           path: |

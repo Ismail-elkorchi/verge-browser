@@ -37,7 +37,7 @@ function parseArgs(argv) {
 }
 
 function hasLockAttestationStep(sourceText) {
-  return sourceText.includes("uses: actions/attest-build-provenance@v3")
+  return /uses:\s*actions\/attest-build-provenance@[^\s#]+/.test(sourceText)
     && sourceText.includes("Generate oracle lock provenance attestation")
     && sourceText.includes(`subject-path: ${LOCK_PATH}`);
 }

@@ -104,7 +104,7 @@ function hasLeastPrivilegePermissions(sourceText) {
 }
 
 function hasArtifactAttestationStep(sourceText) {
-  return /uses:\s*actions\/attest-build-provenance@v3/.test(sourceText);
+  return /uses:\s*actions\/attest-build-provenance@[^\s#]+/.test(sourceText);
 }
 
 function hasTarballSubjectPath(sourceText) {
