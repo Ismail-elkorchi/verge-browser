@@ -1,13 +1,21 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, posix, relative, resolve } from "node:path";
 
 const { fetch, TextDecoder } = globalThis;
 
 const DEFAULT_POLICY_PATH = resolve("scripts/oracles/corpus/wpt-delta-refresh-policy.json");
 const DEFAULT_OUTPUT_PATH = resolve("scripts/oracles/corpus/wpt-delta-v1.json");
+const ALLOWED_OUTPUT_ROOT = resolve("scripts/oracles/corpus");
+const WPT_REPOSITORY = "https://github.com/web-platform-tests/wpt";
+const RAW_WPT_HOST = "raw.githubusercontent.com";
+const RAW_WPT_PATH_PREFIX = "/web-platform-tests/wpt/";
 const USER_AGENT = "verge-browser-wpt-delta-refresh/1.0";
 const OPTIONAL_GITHUB_TOKEN = process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN ?? null;
+
+function reject(code, detail) {
+  throw new Error(`${code}:${detail}`);
+}
 
 function parseArgs(argv) {
   const options = {
@@ -27,6 +35,11 @@ function parseArgs(argv) {
     throw new Error(`unsupported argument: ${argument}`);
   }
 
+  const outputRel = relative(ALLOWED_OUTPUT_ROOT, options.outputPath);
+  if (outputRel !== "" && (outputRel.startsWith("..") || isAbsolute(outputRel))) {
+    reject("SECURITY_REJECT_OUTPUT_PATH", options.outputPath);
+  }
+
   return options;
 }
 
@@ -39,7 +52,14 @@ function sha256HexText(text) {
 }
 
 function rawUrl(commit, path) {
-  return `https://raw.githubusercontent.com/web-platform-tests/wpt/${commit}/${path}`;
+  const url = new globalThis.URL(`https://${RAW_WPT_HOST}${RAW_WPT_PATH_PREFIX}${commit}/${path}`);
+  if (url.protocol !== "https:" || url.hostname !== RAW_WPT_HOST) {
+    reject("SECURITY_REJECT_FETCH_URL", "host-or-scheme");
+  }
+  if (!url.pathname.startsWith(`${RAW_WPT_PATH_PREFIX}${commit}/`)) {
+    reject("SECURITY_REJECT_FETCH_URL", "path-prefix");
+  }
+  return url.toString();
 }
 
 function requestHeaders() {
@@ -54,8 +74,12 @@ function requestHeaders() {
 
 async function fetchBytes(url) {
   const response = await fetch(url, {
+    redirect: "manual",
     headers: requestHeaders()
   });
+  if (response.status >= 300 && response.status < 400) {
+    reject("SECURITY_REJECT_FETCH_REDIRECT", String(response.status));
+  }
   if (!response.ok) {
     throw new Error(`fetch failed (${response.status}) for ${url}`);
   }
@@ -74,16 +98,36 @@ function caseId(category, path) {
   return `wpt-${category}-${slug}-${digest}`;
 }
 
+function normalizeSourcePath(rawPath, label) {
+  if (typeof rawPath !== "string" || rawPath.length === 0) {
+    reject("SECURITY_REJECT_POLICY_SOURCE_PATH", `${label}:empty`);
+  }
+  if (rawPath.includes("\\")) {
+    reject("SECURITY_REJECT_POLICY_SOURCE_PATH", `${label}:backslash`);
+  }
+  const normalized = posix.normalize(rawPath);
+  if (isAbsolute(normalized) || normalized.startsWith("../") || normalized === ".." || normalized.startsWith("/")) {
+    reject("SECURITY_REJECT_POLICY_SOURCE_PATH", `${label}:outside-root`);
+  }
+  if (normalized.includes("/../") || normalized.includes("/./") || normalized === ".") {
+    reject("SECURITY_REJECT_POLICY_SOURCE_PATH", `${label}:dot-segment`);
+  }
+  if (!normalized.startsWith("html/")) {
+    reject("SECURITY_REJECT_POLICY_SOURCE_PATH", `${label}:scope`);
+  }
+  return normalized;
+}
+
 async function readPolicy(policyPath) {
   const source = await readFile(policyPath, "utf8");
   const policy = JSON.parse(source);
   const repository = policy?.source?.repository;
   const commit = policy?.source?.commit;
-  if (typeof repository !== "string" || !repository.startsWith("https://github.com/web-platform-tests/wpt")) {
-    throw new Error("invalid WPT refresh policy repository");
+  if (repository !== WPT_REPOSITORY) {
+    reject("SECURITY_REJECT_POLICY_REPOSITORY", "source.repository");
   }
   if (typeof commit !== "string" || !/^[0-9a-f]{40}$/i.test(commit)) {
-    throw new Error("invalid WPT refresh policy commit");
+    reject("SECURITY_REJECT_POLICY_COMMIT", "source.commit");
   }
   if (!Array.isArray(policy?.casePlan) || policy.casePlan.length === 0) {
     throw new Error("invalid WPT refresh policy case plan");
@@ -102,8 +146,10 @@ async function readPolicy(policyPath) {
     if (!Number.isSafeInteger(entry?.targetCount) || entry.targetCount < 1) {
       throw new Error(`invalid WPT refresh policy targetCount for ${entry.category}`);
     }
+    entry.root = normalizeSourcePath(entry.root, `root:${entry.category}`);
   }
 
+  const rootsByCategory = new Map(policy.casePlan.map((entry) => [entry.category, entry.root]));
   const caseIds = new Set();
   for (const entry of policy.cases) {
     if (typeof entry?.id !== "string" || entry.id.length === 0) {
@@ -119,9 +165,15 @@ async function readPolicy(policyPath) {
     if (typeof entry?.sourcePath !== "string" || entry.sourcePath.length === 0) {
       throw new Error(`invalid WPT refresh policy sourcePath for case ${entry.id}`);
     }
-    if (!entry.sourcePath.startsWith("html/")) {
-      throw new Error(`invalid WPT refresh policy sourcePath scope for case ${entry.id}`);
+    const normalizedSourcePath = normalizeSourcePath(entry.sourcePath, entry.id);
+    const categoryRoot = rootsByCategory.get(entry.category);
+    if (!categoryRoot) {
+      reject("SECURITY_REJECT_POLICY_CATEGORY_ROOT", `${entry.id}:missing-root`);
     }
+    if (!normalizedSourcePath.startsWith(categoryRoot)) {
+      reject("SECURITY_REJECT_POLICY_CATEGORY_ROOT", `${entry.id}:outside-category-root`);
+    }
+    entry.sourcePath = normalizedSourcePath;
   }
 
   return {
@@ -197,4 +249,8 @@ async function main() {
   );
 }
 
-await main();
+await main().catch((error) => {
+  const message = error instanceof Error ? error.message : String(error);
+  process.stderr.write(`wpt-delta-refresh failed: ${message}\n`);
+  process.exit(1);
+});
