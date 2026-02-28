@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 
 import { findAllByAttr, findAllByTagName, textContent, type ElementNode } from "html-parser";
 
@@ -13,6 +13,7 @@ const DEFAULT_CSS_FETCH_CONCURRENCY = 4;
 const DEFAULT_MAX_CSS_BYTES_PER_SHEET = 512 * 1024;
 const DEFAULT_MAX_LINKED_CSS_PER_PAGE = 20;
 const DEFAULT_MAX_TOTAL_BYTES_PER_PAGE = 3 * 1024 * 1024;
+const ALLOWED_LINKED_CSS_SCHEMES = new Set(["http:", "https:"]);
 
 interface PageManifestRecord {
   readonly url: string;
@@ -45,6 +46,7 @@ interface CssManifestRecord {
 
 interface LinkedCssCandidate {
   readonly hrefUrl: string;
+  readonly skipReason: string | null;
 }
 
 interface LinkedCssFetchResult {
@@ -74,6 +76,7 @@ export interface CorpusRecorderOptions {
   readonly maxCssBytesPerSheet?: number;
   readonly maxLinkedSheetsPerPage?: number;
   readonly maxTotalBytesPerPage?: number;
+  readonly extraAllowedCssHosts?: readonly string[];
 }
 
 function hashSha256Bytes(bytes: Uint8Array): string {
@@ -153,6 +156,16 @@ async function appendNdjsonRecord(path: string, value: object): Promise<void> {
   await appendFile(path, `${JSON.stringify(value)}\n`, "utf8");
 }
 
+function assertPathWithinRoot(rootPath: string, targetPath: string, label: string): void {
+  const resolvedRoot = resolve(rootPath);
+  const resolvedTarget = resolve(targetPath);
+  const rel = relative(resolvedRoot, resolvedTarget);
+  if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) {
+    return;
+  }
+  throw new Error(`corpus-path-outside-root:${label}`);
+}
+
 function canonicalizeHeaders(headers: Readonly<Record<string, string>> | undefined): readonly [string, string][] {
   const entries = Object.entries(headers ?? {})
     .map(([name, value]) => [name.toLowerCase(), value] as [string, string])
@@ -169,7 +182,22 @@ function getAttrValue(node: ElementNode, attrName: string): string | null {
   return null;
 }
 
-function linkedStylesheetCandidates(snapshot: PageSnapshot, maxLinkedSheetsPerPage: number): readonly LinkedCssCandidate[] {
+function parseExtraAllowedCssHosts(rawValue: string | undefined): readonly string[] {
+  if (!rawValue) {
+    return [];
+  }
+  const values = rawValue
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter((value) => value.length > 0);
+  return Array.from(new Set(values));
+}
+
+function linkedStylesheetCandidates(
+  snapshot: PageSnapshot,
+  maxLinkedSheetsPerPage: number,
+  allowedHosts: ReadonlySet<string>
+): readonly LinkedCssCandidate[] {
   const candidates: LinkedCssCandidate[] = [];
   for (const node of findAllByTagName(snapshot.tree, "link")) {
     if (candidates.length >= maxLinkedSheetsPerPage) {
@@ -187,12 +215,23 @@ function linkedStylesheetCandidates(snapshot: PageSnapshot, maxLinkedSheetsPerPa
 
     let hrefUrl: string;
     try {
-      hrefUrl = new URL(href, snapshot.finalUrl).toString();
+      const resolvedUrl = new URL(href, snapshot.finalUrl);
+      if (!ALLOWED_LINKED_CSS_SCHEMES.has(resolvedUrl.protocol)) {
+        candidates.push({ hrefUrl: resolvedUrl.toString(), skipReason: `blocked-url-scheme:${resolvedUrl.protocol}` });
+        continue;
+      }
+      const host = resolvedUrl.hostname.toLowerCase();
+      if (!allowedHosts.has(host)) {
+        candidates.push({ hrefUrl: resolvedUrl.toString(), skipReason: `blocked-url-host:${host}` });
+        continue;
+      }
+      hrefUrl = resolvedUrl.toString();
     } catch {
+      candidates.push({ hrefUrl: href, skipReason: "blocked-url-parse" });
       continue;
     }
 
-    candidates.push({ hrefUrl: stripUrlFragment(hrefUrl) });
+    candidates.push({ hrefUrl: stripUrlFragment(hrefUrl), skipReason: null });
   }
   return candidates;
 }
@@ -290,7 +329,7 @@ async function fetchLinkedCss(
       contentType: null,
       fetchedAtIso: startedAtIso,
       cssBytes: null,
-      skipReason: error instanceof Error ? `request-error:${error.name}` : "request-error:unknown"
+      skipReason: "request-error"
     };
   } finally {
     clearTimeout(timeoutHandle);
@@ -337,6 +376,7 @@ export class CorpusRecorder {
   private readonly maxCssBytesPerSheet: number;
   private readonly maxLinkedSheetsPerPage: number;
   private readonly maxTotalBytesPerPage: number;
+  private readonly extraAllowedCssHosts: ReadonlySet<string>;
   private layoutReady = false;
 
   public constructor(options: CorpusRecorderOptions = {}) {
@@ -349,6 +389,8 @@ export class CorpusRecorder {
     this.maxCssBytesPerSheet = options.maxCssBytesPerSheet ?? DEFAULT_MAX_CSS_BYTES_PER_SHEET;
     this.maxLinkedSheetsPerPage = options.maxLinkedSheetsPerPage ?? DEFAULT_MAX_LINKED_CSS_PER_PAGE;
     this.maxTotalBytesPerPage = options.maxTotalBytesPerPage ?? DEFAULT_MAX_TOTAL_BYTES_PER_PAGE;
+    const extraAllowedHosts = options.extraAllowedCssHosts ?? parseExtraAllowedCssHosts(process.env.VERGE_CSS_HOST_ALLOWLIST);
+    this.extraAllowedCssHosts = new Set(extraAllowedHosts.map((host) => host.toLowerCase()));
   }
 
   public get corpusDir(): string {
@@ -379,6 +421,7 @@ export class CorpusRecorder {
         encodingHint: parseEncodingHint(snapshot.contentType),
         skipped: "source-html-unavailable"
       };
+      assertPathWithinRoot(this.layout.baseDir, this.layout.pagesManifestPath, "pages-manifest");
       await appendNdjsonRecord(this.layout.pagesManifestPath, skippedRecord);
       return;
     }
@@ -386,6 +429,7 @@ export class CorpusRecorder {
     const htmlBytes = UTF8_ENCODER.encode(snapshot.sourceHtml);
     const pageSha256 = hashSha256Bytes(htmlBytes);
     const htmlPath = resolve(this.layout.htmlCacheDir, `${pageSha256}.bin`);
+    assertPathWithinRoot(this.layout.baseDir, htmlPath, "html-cache");
     await writeBlobIfMissing(htmlPath, htmlBytes);
 
     const headersCanonical = canonicalizeHeaders(snapshot.responseHeaders);
@@ -404,6 +448,7 @@ export class CorpusRecorder {
       headersSha256,
       encodingHint: parseEncodingHint(snapshot.contentType)
     };
+    assertPathWithinRoot(this.layout.baseDir, this.layout.pagesManifestPath, "pages-manifest");
     await appendNdjsonRecord(this.layout.pagesManifestPath, pageRecord);
 
     let totalBytes = htmlBytes.byteLength;
@@ -430,6 +475,7 @@ export class CorpusRecorder {
         cssSha256 = hashSha256Bytes(cssBytes);
         const suffix = kind === "style-attr" ? ".decl" : ".css";
         const cssPath = resolve(this.layout.cssCacheDir, `${cssSha256}${suffix}`);
+        assertPathWithinRoot(this.layout.baseDir, cssPath, "css-cache");
         await writeBlobIfMissing(cssPath, cssBytes);
         totalBytes += cssBytes.byteLength;
       }
@@ -461,14 +507,38 @@ export class CorpusRecorder {
       await appendInlineCssRecord("style-attr", value, snapshot.fetchedAtIso, normalizedFinalUrl);
     }
 
-    const linkedCandidates = linkedStylesheetCandidates(snapshot, this.maxLinkedSheetsPerPage);
+    let finalHost: string | null = null;
+    try {
+      finalHost = new URL(normalizedFinalUrl).hostname.toLowerCase();
+    } catch {
+      finalHost = null;
+    }
+    const allowedHosts = new Set(this.extraAllowedCssHosts);
+    if (finalHost) {
+      allowedHosts.add(finalHost);
+    }
+    const linkedCandidates = linkedStylesheetCandidates(snapshot, this.maxLinkedSheetsPerPage, allowedHosts);
     const linkedResults = await mapWithConcurrency(
       linkedCandidates,
       this.cssFetchConcurrency,
-      async (candidate) => ({
-        candidate,
-        fetchResult: await fetchLinkedCss(candidate.hrefUrl, this.cssFetchTimeoutMs, this.maxCssBytesPerSheet)
-      })
+      async (candidate) => {
+        if (candidate.skipReason) {
+          return {
+            candidate,
+            fetchResult: {
+              status: null,
+              contentType: null,
+              fetchedAtIso: snapshot.fetchedAtIso,
+              cssBytes: null,
+              skipReason: candidate.skipReason
+            } as LinkedCssFetchResult
+          };
+        }
+        return {
+          candidate,
+          fetchResult: await fetchLinkedCss(candidate.hrefUrl, this.cssFetchTimeoutMs, this.maxCssBytesPerSheet)
+        };
+      }
     );
 
     for (const linkedResult of linkedResults) {
@@ -483,6 +553,7 @@ export class CorpusRecorder {
         } else {
           sha256 = hashSha256Bytes(cssBytes);
           const cssPath = resolve(this.layout.cssCacheDir, `${sha256}.css`);
+          assertPathWithinRoot(this.layout.baseDir, cssPath, "css-cache");
           await writeBlobIfMissing(cssPath, cssBytes);
           totalBytes += cssBytes.byteLength;
         }
@@ -504,6 +575,7 @@ export class CorpusRecorder {
     }
 
     for (const cssRecord of cssRecords) {
+      assertPathWithinRoot(this.layout.baseDir, this.layout.cssManifestPath, "css-manifest");
       await appendNdjsonRecord(this.layout.cssManifestPath, cssRecord);
     }
   }
