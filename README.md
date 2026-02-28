@@ -174,6 +174,7 @@ npm run release:check
 - Network operations are bounded by timeout, redirect cap, protocol allowlist, content-type checks, and max-content-bytes.
 - Parsing is delegated to `html-parser` and remains deterministic for equal input/options.
 - Persistent state writes use atomic file replacement (`.tmp` + rename).
+- Vulnerability disclosure policy and support window: `SECURITY.md`.
 
 ## Automation
 - CI workflow: `.github/workflows/ci.yml`
