@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
 
-import { parse } from "html-parser";
+import { parse } from "@ismail-elkorchi/html-parser";
 
 import { CorpusRecorder } from "../../dist/app/realworld.js";
 

@@ -1,6 +1,6 @@
 import process from "node:process";
 
-import { parse } from "html-parser";
+import { parse } from "@ismail-elkorchi/html-parser";
 
 import { formatHelpText, parseCommand, renderDocumentToTerminal, resolveInputUrl } from "../dist/mod.js";
 

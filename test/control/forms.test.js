@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parse } from "html-parser";
+import { parse } from "@ismail-elkorchi/html-parser";
 
 import { buildFormSubmissionRequest, buildGetSubmissionUrl, extractForms } from "../../dist/app/forms.js";
 

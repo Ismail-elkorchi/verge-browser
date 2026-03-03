@@ -1,4 +1,4 @@
-import { findAllByTagName, textContent, type DocumentTree, type ElementNode } from "html-parser";
+import { findAllByTagName, textContent, type DocumentTree, type ElementNode } from "@ismail-elkorchi/html-parser";
 
 import { resolveHref } from "./url.js";
 import type { PageRequestOptions } from "./types.js";

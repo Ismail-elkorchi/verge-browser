@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { URL } from "node:url";
 
-import { parse } from "html-parser";
+import { parse } from "@ismail-elkorchi/html-parser";
 
 import { parseCommand } from "../../dist/app/commands.js";
 import { cookieHeaderForUrl, mergeSetCookieHeaders, parseSetCookie } from "../../dist/app/cookies.js";

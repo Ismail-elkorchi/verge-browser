@@ -3,7 +3,7 @@ import test from "node:test";
 import { TextEncoder } from "node:util";
 import { ReadableStream } from "node:stream/web";
 
-import { findAllByTagName } from "html-parser";
+import { findAllByTagName } from "@ismail-elkorchi/html-parser";
 
 import { BrowserSession } from "../../dist/app/session.js";
 

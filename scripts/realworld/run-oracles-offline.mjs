@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { TextDecoder } from "node:util";
 
-import { parseBytes, visibleTextTokens } from "html-parser";
+import { parseBytes, visibleTextTokens } from "@ismail-elkorchi/html-parser";
 import { collectEngineFingerprints, ensureOracleImage, runEngineDump } from "../oracles/real-oracle-lib.mjs";
 
 import {

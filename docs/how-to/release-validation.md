@@ -22,8 +22,8 @@ npx -y jsr publish --dry-run
 ```
 
 During `npm pack` and `npm publish`, `prepack` rewrites the local development dependency:
-- from: `html-parser: file:../html-parser`
-- to: `html-parser: npm:@ismail-elkorchi/html-parser@0.1.0`
+- from: `@ismail-elkorchi/html-parser: file:../html-parser`
+- to: `@ismail-elkorchi/html-parser: 0.1.0`
 
 `postpack` restores the development manifest after packing.
 

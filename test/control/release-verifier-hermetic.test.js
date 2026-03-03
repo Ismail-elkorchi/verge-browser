@@ -25,14 +25,14 @@ test("release verifier hermetic scan rejects bare imports", async () => {
     await writeFile(localPath, "export const ok = true;\n", "utf8");
     await writeFile(
       entryPath,
-      "import './local.mjs';\nimport { parse } from 'html-parser';\nvoid parse;\n",
+      "import './local.mjs';\nimport { parse } from '@ismail-elkorchi/html-parser';\nvoid parse;\n",
       "utf8"
     );
 
     const result = await scanVerifierHermeticity([entryPath], tempDir);
     assert.equal(result.violations.length, 1);
     assert.equal(result.violations[0].type, "bare-import");
-    assert.equal(result.violations[0].specifier, "html-parser");
+    assert.equal(result.violations[0].specifier, "@ismail-elkorchi/html-parser");
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -44,14 +44,14 @@ test("release verifier hermetic scan rejects bare dynamic imports", async () => 
     const entryPath = resolve(tempDir, "entry.mjs");
     await writeFile(
       entryPath,
-      "const mod = await import('html-parser');\nvoid mod;\n",
+      "const mod = await import('@ismail-elkorchi/html-parser');\nvoid mod;\n",
       "utf8"
     );
 
     const result = await scanVerifierHermeticity([entryPath], tempDir);
     assert.equal(result.violations.length, 1);
     assert.equal(result.violations[0].type, "bare-import");
-    assert.equal(result.violations[0].specifier, "html-parser");
+    assert.equal(result.violations[0].specifier, "@ismail-elkorchi/html-parser");
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { TextDecoder, TextEncoder } from "node:util";
 
-import { parseBytes, visibleTextTokens } from "html-parser";
+import { parseBytes, visibleTextTokens } from "@ismail-elkorchi/html-parser";
 
 import {
   corpusPath,

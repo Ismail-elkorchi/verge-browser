@@ -1,4 +1,4 @@
-import { parseBytes, parseStream, serialize, tokenizeStream } from "html-parser";
+import { parseBytes, parseStream, serialize, tokenizeStream } from "@ismail-elkorchi/html-parser";
 import { resolve } from "node:path";
 import { TextEncoder } from "node:util";
 import { ReadableStream } from "node:stream/web";

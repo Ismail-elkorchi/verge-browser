@@ -1,4 +1,4 @@
-import type { DocumentTree } from "html-parser";
+import type { DocumentTree } from "@ismail-elkorchi/html-parser";
 
 export type NetworkOutcomeKind =
   | "ok"
