@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { TextEncoder } from "node:util";
 
-import { parseBytes, visibleText } from "html-parser";
+import { parseBytes, visibleText } from "@ismail-elkorchi/html-parser";
 
 import {
   corpusPath,

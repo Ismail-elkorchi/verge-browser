@@ -1,8 +1,8 @@
 {
-  "name": "verge-browser",
+  "name": "@ismail-elkorchi/verge-browser",
   "version": "0.1.0",
   "private": true,
-  "description": "Deterministic terminal web browser powered by html-parser.",
+  "description": "Deterministic terminal web browser powered by @ismail-elkorchi/html-parser.",
   "type": "module",
   "packageManager": "npm@11.10.0",
   "engines": {
@@ -77,7 +77,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.build.json"
   },
   "dependencies": {
-    "html-parser": "file:../html-parser"
+    "@ismail-elkorchi/html-parser": "file:../html-parser"
   },
   "devDependencies": {
     "@eslint/js": "9.39.3",

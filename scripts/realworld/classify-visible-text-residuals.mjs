@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { parseBytes, visibleTextTokensWithProvenance } from "html-parser";
+import { parseBytes, visibleTextTokensWithProvenance } from "@ismail-elkorchi/html-parser";
 
 import {
   corpusPath,

@@ -3,7 +3,7 @@ import { performance } from "node:perf_hooks";
 import { ReadableStream } from "node:stream/web";
 import { TextEncoder } from "node:util";
 
-import { parseBytes, parseStream, visibleText, visibleTextTokens } from "html-parser";
+import { parseBytes, parseStream, visibleText, visibleTextTokens } from "@ismail-elkorchi/html-parser";
 
 import { renderDocumentToTerminal } from "../../dist/app/render.js";
 import {

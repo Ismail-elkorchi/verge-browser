@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { parse, visibleText } from "html-parser";
+import { parse, visibleText } from "@ismail-elkorchi/html-parser";
 
 import { renderDocumentToTerminal } from "../../dist/app/render.js";
 

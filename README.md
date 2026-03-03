@@ -1,6 +1,6 @@
 # verge-browser
 
-`verge-browser` is a deterministic terminal web browser built with `html-parser`.
+`verge-browser` is a deterministic terminal web browser built with `@ismail-elkorchi/html-parser`.
 It targets modern Node, Deno, and Bun terminals and focuses on controlled rendering, auditable behavior, and reproducible outputs.
 
 ## Positioning
@@ -15,11 +15,11 @@ It targets modern Node, Deno, and Bun terminals and focuses on controlled render
 `verge-browser` is not a JavaScript runtime, not a CSS engine, and not a full browser engine.
 
 ## Runtime model
-- Runtime dependency: `html-parser` (local `file:../html-parser` during development).
-- Pack/publish path rewrites `html-parser` to `npm:@ismail-elkorchi/html-parser@0.1.0` via `prepack`/`postpack`.
+- Runtime dependency: `@ismail-elkorchi/html-parser` (local `file:../html-parser` during development).
+- Pack/publish path rewrites `@ismail-elkorchi/html-parser` to `0.1.0` via `prepack`/`postpack`.
 - Runtime targets: Node, Deno, Bun.
 - Browser runtime target: out of scope.
-- Rendering: parse with `html-parser`, then convert AST to terminal lines and link table.
+- Rendering: parse with `@ismail-elkorchi/html-parser`, then convert AST to terminal lines and link table.
 
 ## Usage
 
@@ -180,7 +180,7 @@ npm run release:check
 ## Security posture
 - No dynamic code execution in rendering.
 - Network operations are bounded by timeout, redirect cap, protocol allowlist, content-type checks, and max-content-bytes.
-- Parsing is delegated to `html-parser` and remains deterministic for equal input/options.
+- Parsing is delegated to `@ismail-elkorchi/html-parser` and remains deterministic for equal input/options.
 - Persistent state writes use atomic file replacement (`.tmp` + rename).
 - Vulnerability disclosure policy and support window: `SECURITY.md`.
 

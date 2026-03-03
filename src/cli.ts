@@ -3,7 +3,7 @@ import { writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { emitKeypressEvents } from "node:readline";
 import { stdin, stdout } from "node:process";
-import { outline as buildOutline, type Edit } from "html-parser";
+import { outline as buildOutline, type Edit } from "@ismail-elkorchi/html-parser";
 
 import { formatHelpText, parseCommand, type BrowserCommand } from "./app/commands.js";
 import {

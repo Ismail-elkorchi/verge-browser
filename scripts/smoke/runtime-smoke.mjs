@@ -1,4 +1,4 @@
-import { parse, parseBytes, parseStream, serialize } from "html-parser";
+import { parse, parseBytes, parseStream, serialize } from "@ismail-elkorchi/html-parser";
 
 import { renderDocumentToTerminal } from "../../dist/app/render.js";
 

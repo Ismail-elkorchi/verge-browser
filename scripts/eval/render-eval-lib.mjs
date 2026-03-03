@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { URL } from "node:url";
 
-import { findAllByTagName, parse, textContent, visibleText as extractVisibleText, visibleTextTokens } from "html-parser";
+import { findAllByTagName, parse, textContent, visibleText as extractVisibleText, visibleTextTokens } from "@ismail-elkorchi/html-parser";
 
 import { renderDocumentToTerminal } from "../../dist/app/render.js";
 

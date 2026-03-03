@@ -7,7 +7,7 @@ import {
   type Edit,
   type ParseOptions,
   type TraceEvent
-} from "html-parser";
+} from "@ismail-elkorchi/html-parser";
 
 import { fetchPage, fetchPageStream, readByteStreamToText, type LocalFileReader } from "./fetch-page.js";
 import { renderDocumentToTerminal } from "./render.js";

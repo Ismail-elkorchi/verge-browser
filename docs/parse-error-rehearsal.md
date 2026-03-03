@@ -8,7 +8,7 @@ Use `parseErrorId` from `html-parser` in local mismatch triage output.
 ```bash
 node --input-type=module <<'NODE'
 import { resolve } from 'node:path';
-import { parse } from 'html-parser';
+import { parse } from '@ismail-elkorchi/html-parser';
 import { runRenderEvaluation, readJson } from './scripts/eval/render-eval-lib.mjs';
 
 const configPath = resolve('evaluation.config.json');
@@ -36,7 +36,7 @@ NODE
 node --input-type=module <<'NODE'
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
-import { parse } from 'html-parser';
+import { parse } from '@ismail-elkorchi/html-parser';
 import { runRenderEvaluation, readJson } from './scripts/eval/render-eval-lib.mjs';
 
 const config = await readJson(resolve('evaluation.config.json'));

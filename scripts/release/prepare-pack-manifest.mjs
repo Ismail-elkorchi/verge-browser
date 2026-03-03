@@ -5,7 +5,7 @@ import process from "node:process";
 const PACKAGE_JSON_PATH = resolve(process.cwd(), "package.json");
 const BACKUP_PATH = resolve(process.cwd(), "tmp", "pack-manifest.package.json.backup");
 const DEV_DEPENDENCY_SPEC = "file:../html-parser";
-const PUBLISH_DEPENDENCY_SPEC = "npm:@ismail-elkorchi/html-parser@0.1.0";
+const PUBLISH_DEPENDENCY_SPEC = "0.1.0";
 
 function parsePackageJson(rawText) {
   return JSON.parse(rawText);
@@ -24,14 +24,14 @@ async function main() {
   const rawManifestText = await readFile(PACKAGE_JSON_PATH, "utf8");
   const manifest = parsePackageJson(rawManifestText);
   const dependencies = manifest.dependencies ?? {};
-  const currentSpec = dependencies["html-parser"];
+  const currentSpec = dependencies["@ismail-elkorchi/html-parser"];
 
   if (currentSpec !== DEV_DEPENDENCY_SPEC) {
     return;
   }
 
   await writeBackup(rawManifestText);
-  dependencies["html-parser"] = PUBLISH_DEPENDENCY_SPEC;
+  dependencies["@ismail-elkorchi/html-parser"] = PUBLISH_DEPENDENCY_SPEC;
   manifest.dependencies = dependencies;
   await writePackageJson(manifest);
 }

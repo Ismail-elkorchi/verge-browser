@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 
-import { parse } from "html-parser";
+import { parse } from "@ismail-elkorchi/html-parser";
 
 import { renderDocumentToTerminal } from "../../dist/app/render.js";
 import { hashInt, readJson, writeJsonReport } from "../eval/render-eval-lib.mjs";

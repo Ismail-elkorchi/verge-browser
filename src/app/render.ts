@@ -4,7 +4,7 @@ import {
   type DocumentTree,
   type ElementNode,
   type HtmlNode
-} from "html-parser";
+} from "@ismail-elkorchi/html-parser";
 
 import { resolveHref } from "./url.js";
 import type { RenderInput, RenderedLink, RenderedPage } from "./types.js";

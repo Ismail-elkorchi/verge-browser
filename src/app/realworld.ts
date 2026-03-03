@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 
-import { findAllByAttr, findAllByTagName, textContent, type ElementNode } from "html-parser";
+import { findAllByAttr, findAllByTagName, textContent, type ElementNode } from "@ismail-elkorchi/html-parser";
 
 import type { PageSnapshot } from "./types.js";
 
