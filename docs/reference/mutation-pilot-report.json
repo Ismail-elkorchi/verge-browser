@@ -1,0 +1,43 @@
+{
+  "schema": "mutation-pilot/v1",
+  "generatedAt": "2026-03-03T13:09:00.047Z",
+  "config": "scripts/mutation/pilot-config.json",
+  "targetFile": "dist/app/security.js",
+  "testCommand": [
+    "node",
+    "--test",
+    "test/mutation/security.test.js"
+  ],
+  "mutants": [
+    {
+      "id": "blocked-protocol-allow",
+      "description": "Disable blocked-protocol enforcement in assertAllowedProtocol.",
+      "status": "killed",
+      "testExitCode": 1
+    },
+    {
+      "id": "file-protocol-removed",
+      "description": "Remove file: from allowed protocol set.",
+      "status": "killed",
+      "testExitCode": 1
+    },
+    {
+      "id": "html-content-type-disabled",
+      "description": "Disable text/html content-type acceptance.",
+      "status": "killed",
+      "testExitCode": 1
+    },
+    {
+      "id": "null-content-type-default-deny",
+      "description": "Disable default allow for missing content type.",
+      "status": "killed",
+      "testExitCode": 1
+    }
+  ],
+  "totals": {
+    "total": 4,
+    "killed": 4,
+    "survived": 0,
+    "invalid": 0
+  }
+}
