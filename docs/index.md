@@ -5,6 +5,7 @@
 ## Start here
 - Tutorial: `docs/tutorial/first-session.md`
 - How-to: `docs/how-to/release-validation.md`
+- How-to: `docs/how-to/mutation-pilot.md`
 - Reference: `docs/reference/api-overview.md`
 - Explanation: `docs/explanation/architecture-and-tradeoffs.md`
 

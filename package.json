@@ -57,6 +57,7 @@
     "field:triage:minimize": "npm run build && node scripts/realworld/minimize-visible-text-residuals.mjs",
     "field:triage:taxonomy": "npm run build && node scripts/realworld/classify-visible-text-residuals.mjs",
     "field:visible-text:ab": "npm run build && node scripts/realworld/compare-visible-text-policies.mjs",
+    "mutation:pilot": "npm run build && node scripts/mutation/run-pilot.mjs --config=scripts/mutation/pilot-config.json --out=docs/reference/mutation-pilot-report.json",
     "deps:freshness": "npm outdated || true",
     "lint": "eslint . --max-warnings=0",
     "oracle:image:prepare": "node scripts/oracles/prepare-image.mjs",

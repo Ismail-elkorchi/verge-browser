@@ -1,0 +1,30 @@
+{
+  "targetFile": "dist/app/security.js",
+  "testCommand": ["node", "--test", "test/mutation/security-baseline.test.js"],
+  "mutants": [
+    {
+      "id": "blocked-protocol-allow",
+      "description": "Disable blocked-protocol enforcement in assertAllowedProtocol.",
+      "search": "throw new Error(`Blocked unsupported protocol: ${urlValue.protocol}`);",
+      "replace": "return;"
+    },
+    {
+      "id": "file-protocol-removed",
+      "description": "Remove file: from allowed protocol set.",
+      "search": "const ALLOWED_PROTOCOLS = new Set([\"http:\", \"https:\", \"file:\", \"about:\"]);",
+      "replace": "const ALLOWED_PROTOCOLS = new Set([\"http:\", \"https:\", \"about:\"]);"
+    },
+    {
+      "id": "html-content-type-disabled",
+      "description": "Disable text/html content-type acceptance.",
+      "search": "normalized.includes(\"text/html\")",
+      "replace": "false"
+    },
+    {
+      "id": "null-content-type-default-deny",
+      "description": "Disable default allow for missing content type.",
+      "search": "if (!contentType)",
+      "replace": "if (false && !contentType)"
+    }
+  ]
+}
