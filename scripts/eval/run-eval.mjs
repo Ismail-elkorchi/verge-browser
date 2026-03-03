@@ -53,7 +53,6 @@ async function main() {
   runNodeScript("scripts/eval/write-agent-report.mjs");
   runNodeScript("scripts/eval/write-stream-report.mjs");
   runNodeScript("scripts/eval/check-runtime-matrix.mjs", [`--profile=${profile}`]);
-  runNodeScript("scripts/eval/check-eval-coherence.mjs", [`--profile=${profile}`]);
   runNodeScript("scripts/eval/check-release-attestation-policy.mjs");
   runNodeScript("scripts/eval/check-oracle-lock-attestation-policy.mjs");
   runNodeScript("scripts/eval/write-network-outcomes-report.mjs");
@@ -66,6 +65,7 @@ async function main() {
   if (profilePolicy.requireOracleLockRefreshDiff === true) {
     runNodeScript("scripts/eval/check-oracle-lock-refresh-diff.mjs", [`--profile=${profile}`]);
   }
+  runNodeScript("scripts/eval/check-eval-coherence.mjs", [`--profile=${profile}`]);
   if (profile === "release") {
     runNodeScript("scripts/eval/check-release-integrity.mjs");
   }
