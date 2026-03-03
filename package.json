@@ -1,8 +1,15 @@
 {
   "name": "@ismail-elkorchi/verge-browser",
   "version": "0.1.0",
-  "private": true,
   "description": "Deterministic terminal web browser powered by @ismail-elkorchi/html-parser.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ismail-elkorchi/verge-browser.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "packageManager": "npm@11.10.0",
   "engines": {
@@ -12,6 +19,14 @@
   "bin": {
     "verge": "./dist/cli.js"
   },
+  "main": "./dist/mod.js",
+  "types": "./dist/mod.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/mod.d.ts",
+      "import": "./dist/mod.js"
+    }
+  },
   "files": [
     "dist/",
     "README.md",
@@ -20,6 +35,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "check": "npm run lint && npm run typecheck && npm test && npm run smoke:cli && npm run eval:ci",
+    "check:fast": "npm run lint && npm run typecheck && npm test && npm run examples:run",
     "ci": "npm run check",
     "ci:reliability:claim": "node scripts/ci/sample-node-reliability.mjs --mode=rolling --window-count=3 --events=push,pull_request --event-sample-sizes=push:5,pull_request:9 --confidence=0.95 --require-non-overlap",
     "ci:reliability:sample": "node scripts/ci/sample-node-reliability.mjs --mode=rolling --window-count=3",
@@ -65,8 +81,8 @@
     "oracle:wpt-delta:corpus": "node scripts/oracles/corpus/refresh-wpt-delta-corpus.mjs",
     "oracle:wpt-delta:diff": "node scripts/oracles/corpus/diff-wpt-delta-refresh.mjs",
     "oracle:wpt-delta:refresh": "npm run build && node scripts/oracles/corpus/refresh-wpt-delta-expected.mjs",
-    "postpack": "node scripts/release/restore-pack-manifest.mjs",
-    "prepack": "node scripts/release/prepare-pack-manifest.mjs",
+    "docs:lint:jsr": "deno doc --lint --sloppy-imports jsr/mod.ts",
+    "docs:test:jsr": "deno test --doc --no-check --sloppy-imports jsr/mod.ts",
     "release:check": "npm run check && npm run eval:release && npm run eval:oracle-runtime:release && npm run eval:oracle-superiority:release && npm run eval:oracle-fingerprint:release && npm run eval:oracle-supply-chain:release && npm pack --dry-run",
     "smoke:all": "npm run smoke:node && npm run smoke:deno && npm run smoke:bun",
     "smoke:bun": "npm run build && bun scripts/smoke/runtime-smoke.mjs --runtime=bun --report=reports/smoke-bun.json",
@@ -79,7 +95,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.build.json"
   },
   "dependencies": {
-    "@ismail-elkorchi/html-parser": "file:../html-parser"
+    "@ismail-elkorchi/html-parser": "^0.1.0"
   },
   "devDependencies": {
     "@eslint/js": "9.39.3",
