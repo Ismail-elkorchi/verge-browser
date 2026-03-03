@@ -15,7 +15,8 @@ It targets modern Node, Deno, and Bun terminals and focuses on controlled render
 `verge-browser` is not a JavaScript runtime, not a CSS engine, and not a full browser engine.
 
 ## Runtime model
-- Runtime dependency: `html-parser` (local file dependency during development).
+- Runtime dependency: `html-parser` (local `file:../html-parser` during development).
+- Pack/publish path rewrites `html-parser` to `npm:@ismail-elkorchi/html-parser@0.1.0` via `prepack`/`postpack`.
 - Runtime targets: Node, Deno, Bun.
 - Browser runtime target: out of scope.
 - Rendering: parse with `html-parser`, then convert AST to terminal lines and link table.
@@ -91,6 +92,7 @@ npm run lint
 npm run typecheck
 npm test
 npm run build
+npm run examples:run
 npm run ci
 npm run smoke:cli
 npm run smoke:all
@@ -145,7 +147,13 @@ npm run release:check
   - `docs/wpt-delta.md`
   - `docs/fuzz.md`
   - `docs/benchmark-governance.md`
-  - `docs/capability-roadmap.md`
+
+## Docs map
+- Entry index: `docs/index.md`
+- Tutorial: `docs/tutorial/first-session.md`
+- How-to: `docs/how-to/release-validation.md`
+- Reference: `docs/reference/api-overview.md`
+- Explanation: `docs/explanation/architecture-and-tradeoffs.md`
 
 ## Persistence model
 - State file stores bookmarks, history, cookies, and indexed recall documents as JSON.

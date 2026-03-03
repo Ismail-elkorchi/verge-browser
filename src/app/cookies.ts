@@ -64,7 +64,7 @@ function parseExpires(value: string): string | null {
 export function parseSetCookie(
   headerValue: string,
   requestUrl: string,
-  nowMs = Date.now()
+  nowMs: number = Date.now()
 ): CookieEntry | null {
   const parts = headerValue.split(";").map((part) => part.trim()).filter((part) => part.length > 0);
   if (parts.length === 0) {
@@ -179,7 +179,7 @@ function identityKey(cookie: CookieEntry): string {
   return `${cookie.name}\u0000${cookie.domain}\u0000${cookie.path}`;
 }
 
-export function pruneExpiredCookies(cookies: readonly CookieEntry[], nowMs = Date.now()): CookieEntry[] {
+export function pruneExpiredCookies(cookies: readonly CookieEntry[], nowMs: number = Date.now()): CookieEntry[] {
   return cookies.filter((cookie) => !isExpired(cookie, nowMs));
 }
 
@@ -187,7 +187,7 @@ export function mergeSetCookieHeaders(
   existingCookies: readonly CookieEntry[],
   setCookieHeaders: readonly string[],
   requestUrl: string,
-  nowMs = Date.now()
+  nowMs: number = Date.now()
 ): CookieEntry[] {
   const liveCookies = pruneExpiredCookies(existingCookies, nowMs);
   const byKey = new Map<string, CookieEntry>(liveCookies.map((cookie) => [identityKey(cookie), cookie]));
@@ -214,7 +214,7 @@ export function mergeSetCookieHeaders(
 export function cookieHeaderForUrl(
   cookies: readonly CookieEntry[],
   requestUrl: string,
-  nowMs = Date.now()
+  nowMs: number = Date.now()
 ): string | null {
   const request = new URL(requestUrl);
   const requestHost = request.hostname.toLowerCase();

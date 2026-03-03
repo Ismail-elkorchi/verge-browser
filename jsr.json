@@ -1,0 +1,17 @@
+{
+  "$schema": "https://jsr.io/schema/config-file.v1.json",
+  "name": "@ismail-elkorchi/verge-browser",
+  "version": "0.1.0",
+  "exports": {
+    ".": "./jsr/mod.ts"
+  },
+  "exclude": [
+    "src/**",
+    "scripts/**",
+    "examples/**",
+    "test/**",
+    "reports/**",
+    "tmp/**",
+    "realworld/**"
+  ]
+}
