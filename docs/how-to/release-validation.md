@@ -2,6 +2,27 @@
 
 Use this sequence before requesting a release cut.
 
+## Package identity
+
+- Intended public npm package name: `@ismail-elkorchi/verge-browser`
+- Intended public JSR package name: `@ismail-elkorchi/verge-browser`
+- Versioning policy: `0.x` while hardening is active.
+
+## Registry ownership status (March 3, 2026)
+
+- npm: `npm view @ismail-elkorchi/verge-browser` returns `404` (package not claimed/published yet).
+- JSR: `jsr info @ismail-elkorchi/verge-browser` returns `404` (package not claimed/published yet).
+
+## Release workflow publish policy
+
+`.github/workflows/release.yml` intentionally does not run `npm publish` or `jsr publish`.
+The release workflow only produces and verifies signed artifacts plus attestation evidence.
+
+If registry publishing is enabled later, require all of the following first:
+1. Confirm package ownership in npm and JSR.
+2. Configure npm Trusted Publishing (OIDC) or token fallback with explicit approval.
+3. Configure JSR OIDC repository trust (or token fallback) with explicit approval.
+
 ## Required checks
 
 ```bash
