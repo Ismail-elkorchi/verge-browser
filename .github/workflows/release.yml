@@ -48,8 +48,16 @@ jobs:
       - name: Install
         run: npm ci
 
+      - name: Dependency freshness check
+        run: npm run deps:freshness
+
       - name: Release checks
         run: npm run release:check
+
+      - name: Publish policy (explicit)
+        run: |
+          echo "Registry publish is intentionally disabled in this workflow."
+          echo "This lane produces and verifies release artifacts only."
 
       - name: Pack
         run: npm pack

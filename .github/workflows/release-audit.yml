@@ -1,0 +1,57 @@
+name: Release Audit
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "29 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  release-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Checkout html-parser dependency
+        run: |
+          set -euo pipefail
+          if [ ! -d ../html-parser ]; then
+            git clone --depth 1 https://github.com/Ismail-elkorchi/html-parser.git ../html-parser
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@e95548e56dfa95d4e1a28d6f422fafe75c4c26fb # v2
+        with:
+          deno-version: v2.x
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@3d267786b128fe76c2f16a390aa2448b815359f3 # v2
+
+      - name: Prepare html-parser dependency
+        run: |
+          set -euo pipefail
+          cd ../html-parser
+          npm ci
+          npm run build
+
+      - name: Install
+        run: npm ci
+
+      - name: Dependency freshness check
+        run: npm run deps:freshness
+
+      - name: Release checks
+        run: npm run release:check
+
+      - name: JSR dry-run
+        run: npx -y jsr publish --dry-run --allow-dirty
