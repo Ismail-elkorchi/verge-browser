@@ -57,6 +57,7 @@
     "field:triage:minimize": "npm run build && node scripts/realworld/minimize-visible-text-residuals.mjs",
     "field:triage:taxonomy": "npm run build && node scripts/realworld/classify-visible-text-residuals.mjs",
     "field:visible-text:ab": "npm run build && node scripts/realworld/compare-visible-text-policies.mjs",
+    "deps:freshness": "npm outdated || true",
     "lint": "eslint . --max-warnings=0",
     "oracle:image:prepare": "node scripts/oracles/prepare-image.mjs",
     "oracle:lock:refresh": "node scripts/oracles/refresh-oracle-lock.mjs",
