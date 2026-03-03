@@ -199,6 +199,58 @@ function resolveCandidateVersion(packageName) {
   return null;
 }
 
+function normalizePinnedPackageRecord(packageRecord, index) {
+  if (!packageRecord || typeof packageRecord !== "object") {
+    throw new Error(`invalid pinned package at index ${String(index)}`);
+  }
+
+  const name = typeof packageRecord.name === "string" ? packageRecord.name.trim() : "";
+  const version = typeof packageRecord.version === "string" ? packageRecord.version.trim() : "";
+  const aptSourceUrl = typeof packageRecord.aptSourceUrl === "string" ? packageRecord.aptSourceUrl.trim() : "";
+  const suite = typeof packageRecord.suite === "string" ? packageRecord.suite.trim() : "";
+  const component = typeof packageRecord.component === "string" ? packageRecord.component.trim() : "";
+  const indexType = typeof packageRecord.indexType === "string" ? packageRecord.indexType.trim() : "";
+  const filename = typeof packageRecord.filename === "string" ? ensureRelativePath(packageRecord.filename) : "";
+  const debSha256 =
+    typeof packageRecord.debSha256 === "string" ? packageRecord.debSha256.trim().toLowerCase() : "";
+
+  if (name.length === 0) {
+    throw new Error(`pinned package ${String(index)} missing name`);
+  }
+  if (version.length === 0) {
+    throw new Error(`pinned package ${String(index)} missing version`);
+  }
+  if (!(aptSourceUrl.startsWith("http://") || aptSourceUrl.startsWith("https://"))) {
+    throw new Error(`pinned package ${String(index)} has invalid aptSourceUrl`);
+  }
+  if (suite.length === 0) {
+    throw new Error(`pinned package ${String(index)} missing suite`);
+  }
+  if (component.length === 0) {
+    throw new Error(`pinned package ${String(index)} missing component`);
+  }
+  if (indexType.length === 0) {
+    throw new Error(`pinned package ${String(index)} missing indexType`);
+  }
+  if (filename.length === 0) {
+    throw new Error(`pinned package ${String(index)} missing filename`);
+  }
+  if (!/^[0-9a-f]{64}$/i.test(debSha256)) {
+    throw new Error(`pinned package ${String(index)} has invalid debSha256`);
+  }
+
+  return {
+    name,
+    version,
+    aptSourceUrl: aptSourceUrl.replace(/\/+$/, ""),
+    suite,
+    component,
+    indexType,
+    pinnedFilename: filename,
+    pinnedSha256: debSha256
+  };
+}
+
 function hashString(value) {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -674,23 +726,36 @@ async function withOracleImageLock(imageRoot, operation) {
 }
 
 async function createLock(input) {
-  const dependencyNames = dependencyClosure(input.rootPackages);
   const candidatePackages = [];
-
-  for (const packageName of dependencyNames) {
-    const version = resolveCandidateVersion(packageName);
-    if (!version) {
-      continue;
+  const hasPinnedPackages = Array.isArray(input.pinnedPackages) && input.pinnedPackages.length > 0;
+  if (hasPinnedPackages) {
+    const seenPinnedKeys = new Set();
+    for (const [index, packageRecord] of input.pinnedPackages.entries()) {
+      const normalizedPinnedPackage = normalizePinnedPackageRecord(packageRecord, index);
+      const key = packageOrderKey(normalizedPinnedPackage);
+      if (seenPinnedKeys.has(key)) {
+        throw new Error(`duplicate pinned package key: ${normalizedPinnedPackage.name}@${normalizedPinnedPackage.version}`);
+      }
+      seenPinnedKeys.add(key);
+      candidatePackages.push(normalizedPinnedPackage);
     }
-    const sourceRecord = resolvePolicySourceRecord(packageName, version);
-    if (!sourceRecord) {
-      throw new Error(`unable to resolve apt policy source for ${packageName}=${version}`);
+  } else {
+    const dependencyNames = dependencyClosure(input.rootPackages);
+    for (const packageName of dependencyNames) {
+      const version = resolveCandidateVersion(packageName);
+      if (!version) {
+        continue;
+      }
+      const sourceRecord = resolvePolicySourceRecord(packageName, version);
+      if (!sourceRecord) {
+        throw new Error(`unable to resolve apt policy source for ${packageName}=${version}`);
+      }
+      candidatePackages.push({
+        name: packageName,
+        version,
+        ...sourceRecord
+      });
     }
-    candidatePackages.push({
-      name: packageName,
-      version,
-      ...sourceRecord
-    });
   }
 
   candidatePackages.sort((left, right) => compareTextBinary(packageOrderKey(left), packageOrderKey(right)));
@@ -724,7 +789,13 @@ async function createLock(input) {
   const packageIndexCache = new Map();
   const hydratedPackages = [];
   for (const packageRecord of candidatePackages) {
-    const metadata = resolvePackageMetadata(packageRecord.name, packageRecord.version);
+    const metadata =
+      typeof packageRecord.pinnedFilename === "string" && typeof packageRecord.pinnedSha256 === "string"
+        ? {
+            filename: packageRecord.pinnedFilename,
+            sha256: packageRecord.pinnedSha256
+          }
+        : resolvePackageMetadata(packageRecord.name, packageRecord.version);
     if (!metadata) {
       throw new Error(`unable to resolve package metadata for ${packageRecord.name}=${packageRecord.version}`);
     }
@@ -773,11 +844,13 @@ async function createLock(input) {
     }
 
     hydratedPackages.push({
-      ...packageRecord,
+      name: packageRecord.name,
+      version: packageRecord.version,
       filename: filenamePath,
       aptSourceUrl: packageRecord.aptSourceUrl,
       downloadUrl,
       debSha256: debSha,
+      indexType: packageRecord.indexType,
       suite: packageRecord.suite,
       component: packageRecord.component
     });
@@ -956,13 +1029,15 @@ export async function refreshOracleLock(options = {}) {
     const lockPath = resolve(options.lockPath ?? DEFAULT_LOCK_PATH);
     const rootPackages = [...(options.rootPackages ?? DEFAULT_ROOT_PACKAGES)];
     const snapshotId = typeof options.snapshotId === "string" ? validateSnapshotId(options.snapshotId) : undefined;
+    const pinnedPackages = Array.isArray(options.pinnedPackages) ? options.pinnedPackages : undefined;
     const lock = await createLock({
       imageRoot,
       lockPath,
       rootPackages,
       snapshotId,
       snapshotRoot: options.snapshotRoot,
-      keyringPath: options.keyringPath
+      keyringPath: options.keyringPath,
+      pinnedPackages
     });
     return {
       lockPath,

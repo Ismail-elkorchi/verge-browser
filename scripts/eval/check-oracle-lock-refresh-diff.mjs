@@ -90,7 +90,19 @@ async function main() {
       rootPackages: currentLock.rootPackages,
       snapshotId: currentLock?.sourcePolicy?.snapshotId,
       snapshotRoot: currentLock?.sourcePolicy?.snapshotRoot,
-      keyringPath: currentLock?.sourcePolicy?.keyringPath
+      keyringPath: currentLock?.sourcePolicy?.keyringPath,
+      pinnedPackages: Array.isArray(currentLock.packages)
+        ? currentLock.packages.map((packageRecord) => ({
+            name: packageRecord.name,
+            version: packageRecord.version,
+            aptSourceUrl: packageRecord.aptSourceUrl,
+            suite: packageRecord.suite,
+            component: packageRecord.component,
+            indexType: packageRecord.indexType,
+            filename: packageRecord.filename,
+            debSha256: packageRecord.debSha256
+          }))
+        : []
     });
 
     const candidateLock = await readJson(candidateLockPath);
