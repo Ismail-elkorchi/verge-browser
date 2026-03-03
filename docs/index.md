@@ -1,28 +1,20 @@
 # Documentation Index
 
-`verge-browser` documentation is organized by purpose.
+Use this index to choose docs by intent.
 
-## Start here
-- Tutorial: `docs/tutorial/first-session.md`
-- How-to: `docs/how-to/release-validation.md`
-- How-to: `docs/how-to/mutation-pilot.md`
-- Reference: `docs/reference/api-overview.md`
-- Explanation: `docs/explanation/architecture-and-tradeoffs.md`
+## Tutorial
+- [First session](./tutorial/first-session.md)
 
-## Core contracts
-- Rendering contract: `docs/rendering-contract.md`
-- Acceptance gates: `docs/acceptance-gates.md`
-- Eval report format: `docs/eval-report-format.md`
-- Oracle runtime validation: `docs/oracle-runtime-validation.md`
-- Oracle superiority: `docs/oracle-superiority.md`
-- Oracle fingerprint drift: `docs/oracle-fingerprint-drift.md`
-- Oracle supply chain: `docs/oracle-supply-chain.md`
-- WPT delta: `docs/wpt-delta.md`
-- Fuzz checks: `docs/fuzz.md`
+## How-to
+- [Release validation](./how-to/release-validation.md)
+- [Mutation pilot workflow](./how-to/mutation-pilot.md)
 
-## Field evidence and operations
-- Field report: `docs/field-report.md`
-- Benchmark governance: `docs/benchmark-governance.md`
-- CI node reliability: `docs/ci-node-reliability.md`
-- Repository settings: `docs/repo-settings.md`
-- Security triage: `docs/security-triage.md`
+## Reference
+- [Options and API reference](./reference/options.md)
+- [Rendering contract](./rendering-contract.md)
+- [Acceptance gates](./acceptance-gates.md)
+- [Evaluation report format](./eval-report-format.md)
+
+## Explanation
+- [Architecture and tradeoffs](./explanation/architecture-and-tradeoffs.md)
+- [Oracle runtime validation](./oracle-runtime-validation.md)

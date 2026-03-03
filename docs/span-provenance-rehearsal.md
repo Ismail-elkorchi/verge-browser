@@ -6,7 +6,7 @@ Validate that patch workflows in `html-parser` succeed on input spans and reject
 ## Command
 ```bash
 node --input-type=module <<'NODE'
-import { applyPatchPlan, computePatch, parse, PatchPlanningError } from '/home/ismail-el-korchi/Documents/Projects/html-parser/dist/mod.js';
+import { applyPatchPlan, computePatch, parse, PatchPlanningError } from '@ismail-elkorchi/html-parser';
 
 function findNode(nodes, predicate) {
   for (const node of nodes) {
