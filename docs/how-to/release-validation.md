@@ -61,3 +61,28 @@ node tmp/pack-check/package/dist/cli.js about:help
 Expected outcome:
 - archive contains `package/dist/cli.js`
 - CLI entrypoint runs from extracted artifact
+
+## 0.1.0 dry-run evidence snapshot (March 3, 2026)
+
+Dry-runs:
+- `npm pack --dry-run --json`: pass
+- `npm publish --dry-run --json --access public`: pass
+- `npx -y jsr publish --dry-run --allow-dirty`: pass
+
+Canary packed-artifact check:
+- packed artifact extracted and CLI entrypoint run from archive
+- `node package/dist/cli.js about:help` passes
+
+Manual artifact sample review:
+- required entries present: `package.json`, `dist/mod.js`, `dist/cli.js`, `README.md`, `LICENSE`
+- forbidden content absent: `scripts/`, `test*/`, `docs/`, `reports/`, `realworld/`
+
+Automation freshness evidence:
+- Release Audit: failure (run `22622280903`)  
+  <https://github.com/Ismail-elkorchi/verge-browser/actions/runs/22622280903>
+- Runtime Latest (Non-blocking): success (run `22622280911`)  
+  <https://github.com/Ismail-elkorchi/verge-browser/actions/runs/22622280911>
+
+Residual risk from latest release-audit run:
+- CI release-audit currently fails `evaluation coherence check` in release lane despite local pass
+- release-audit lane must be stabilized before `0.1.0` go/no-go can be marked green
