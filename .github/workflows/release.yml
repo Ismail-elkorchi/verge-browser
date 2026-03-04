@@ -1,42 +1,48 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (x.y.z)"
+        description: 'Release version (x.y.z)'
         required: true
         type: string
+  push:
+    tags:
+      - 'v*.*.*'
 
 concurrency:
-  group: release-${{ github.repository }}-${{ github.ref }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
-permissions:
-  contents: read
-
 jobs:
-  verify:
+  release-producer:
+    name: release-producer
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
+    timeout-minutes: 120
     outputs:
       package_name: ${{ steps.meta.outputs.package_name }}
       version: ${{ steps.meta.outputs.version }}
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          submodules: recursive
+
+      - name: Checkout html-parser dependency
+        run: |
+          set -euo pipefail
+          if [ ! -d ../html-parser ]; then
+            git clone --depth 1 https://github.com/Ismail-elkorchi/html-parser.git ../html-parser
+          fi
 
       - name: Setup Node
         uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
         with:
-          node-version: 24
+          node-version: '24'
           cache: npm
 
       - name: Setup Deno
@@ -47,7 +53,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@3d267786b128fe76c2f16a390aa2448b815359f3 # v2
 
-      - name: Install dependencies
+      - name: Install
         run: npm ci
 
       - name: Resolve release metadata
@@ -62,12 +68,12 @@ jobs:
           jsr_version="$(jq -r '.version' jsr.json)"
 
           if [ -z "${package_name}" ] || [ "${package_name}" = "null" ]; then
-            echo "::error::Missing package name in package.json"
+            echo "missing package name in package.json"
             exit 1
           fi
 
           if [ "${package_version}" != "${jsr_version}" ]; then
-            echo "::error::Version mismatch: package.json=${package_version} jsr.json=${jsr_version}"
+            echo "version mismatch: package.json=${package_version} jsr.json=${jsr_version}"
             exit 1
           fi
 
@@ -77,17 +83,17 @@ jobs:
           elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
             expected_version="${VERSION_INPUT#v}"
           else
-            echo "::error::Unsupported event ${GITHUB_EVENT_NAME}"
+            echo "unsupported event ${GITHUB_EVENT_NAME}"
             exit 1
           fi
 
           if ! printf '%s' "${expected_version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::Expected semantic version x.y.z, got '${expected_version}'"
+            echo "expected semantic version x.y.z, got '${expected_version}'"
             exit 1
           fi
 
           if [ "${expected_version}" != "${package_version}" ]; then
-            echo "::error::Version mismatch: expected=${expected_version} package.json=${package_version}"
+            echo "version mismatch: expected=${expected_version} package.json=${package_version}"
             exit 1
           fi
 
@@ -111,6 +117,29 @@ jobs:
           echo "version=${{ steps.meta.outputs.version }}"
           echo "commit=${GITHUB_SHA}"
 
+      - name: Dependency freshness check
+        run: npm run deps:freshness
+
+      - name: Release checks
+        run: npm run release:check
+
+      - name: Publish policy (explicit)
+        run: |
+          echo "Registry publish runs only in the publish job after verifier gates pass."
+
+      - name: Pack
+        run: npm pack
+
+      - name: Generate npm pack manifest
+        run: |
+          set -euo pipefail
+          mkdir -p release-artifacts
+          tarball="$(ls -1 ./*.tgz | head -n1)"
+          tar -tzf "${tarball}" | sort > release-artifacts/npm-pack-file-list.txt
+
+      - name: Generate checksums
+        run: sha256sum ./*.tgz > package.sha256
+
       - name: Validate required publish secrets
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -118,26 +147,311 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${NPM_TOKEN}" ]; then
-            echo "::error::Missing required secret NPM_TOKEN"
+            echo "missing required secret NPM_TOKEN"
             exit 1
           fi
           if [ -z "${JSR_TOKEN}" ]; then
-            echo "::error::Missing required secret JSR_TOKEN"
+            echo "missing required secret JSR_TOKEN"
             exit 1
           fi
 
-      - name: Run release gates
+      - name: Generate package provenance attestation
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: |
+            *.tgz
+            package.sha256
+
+      - name: Generate oracle lock provenance attestation
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: scripts/oracles/oracle-image.lock.json
+
+      - name: Run JSR publish dry-run
+        env:
+          JSR_TOKEN: ${{ secrets.JSR_TOKEN }}
         run: |
           set -euo pipefail
-          npm run check:fast
-          npm run docs:lint:jsr
-          npm run docs:test:jsr
-          npm run examples:run
+          npx -y jsr publish --dry-run --token "${JSR_TOKEN}" 2>&1 | tee release-artifacts/jsr-publish-dry-run.txt
+
+      - name: Upload release inputs
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-inputs
+          path: |
+            *.tgz
+            package.sha256
+            scripts/oracles/oracle-image.lock.json
+            release-artifacts/release-summary.txt
+            release-artifacts/npm-pack-file-list.txt
+            release-artifacts/jsr-publish-dry-run.txt
+
+  release-verifier:
+    name: release-verifier
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    needs: release-producer
+    permissions:
+      contents: read
+      attestations: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Node
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+        with:
+          node-version: '24'
+
+      - name: Check release verifier hermetic imports
+        run: |
+          set -euo pipefail
+          node scripts/eval/check-release-verifier-hermetic.mjs \
+            --output=reports/release-verifier-hermetic.json
+
+      - name: Download release inputs
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8
+        with:
+          name: release-inputs
+          path: .
+
+      - name: Verify package provenance attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          package_file="$(ls -1 ./*.tgz | head -n1)"
+          gh attestation verify "${package_file}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
+            --source-ref "${GITHUB_REF}" \
+            --source-digest "${GITHUB_SHA}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners \
+            --predicate-type "https://slsa.dev/provenance/v1" \
+            --format json > reports/attestation-package-verify.json
+
+      - name: Verify oracle lock provenance attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh attestation verify "scripts/oracles/oracle-image.lock.json" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
+            --source-ref "${GITHUB_REF}" \
+            --source-digest "${GITHUB_SHA}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners \
+            --predicate-type "https://slsa.dev/provenance/v1" \
+            --format json > reports/attestation-oracle-lock-verify.json
+
+      - name: Verify attestations with certificate identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          package_file="$(ls -1 ./*.tgz | head -n1)"
+          cert_identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
+
+          gh attestation verify "${package_file}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --cert-identity "${cert_identity}" \
+            --source-ref "${GITHUB_REF}" \
+            --source-digest "${GITHUB_SHA}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners \
+            --predicate-type "https://slsa.dev/provenance/v1" \
+            --format json > reports/attestation-package-verify-cert-identity.json
+
+          gh attestation verify "scripts/oracles/oracle-image.lock.json" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --cert-identity "${cert_identity}" \
+            --source-ref "${GITHUB_REF}" \
+            --source-digest "${GITHUB_SHA}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners \
+            --predicate-type "https://slsa.dev/provenance/v1" \
+            --format json > reports/attestation-oracle-lock-verify-cert-identity.json
+
+      - name: Export offline verification materials
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p reports/offline-verification
+          workspace="$(pwd)"
+          package_file="$(ls -1 ./*.tgz | head -n1)"
+
+          scratch_dir="$(mktemp -d)"
+          trap 'rm -rf "${scratch_dir}"' EXIT
+          cd "${scratch_dir}"
+
+          gh attestation trusted-root > trusted_root.jsonl
+
+          gh attestation download "${workspace}/${package_file}" --repo "${GITHUB_REPOSITORY}"
+          package_bundle="$(find . -maxdepth 1 -type f -name '*.jsonl' ! -name 'trusted_root.jsonl' | sort | head -n1)"
+          if [ -z "${package_bundle}" ]; then
+            echo "missing package attestation bundle"
+            exit 1
+          fi
+          mv "${package_bundle}" "${workspace}/reports/offline-verification/package-attestation-bundle.jsonl"
+          find . -maxdepth 1 -type f -name '*.jsonl' ! -name 'trusted_root.jsonl' -delete
+
+          gh attestation download "${workspace}/scripts/oracles/oracle-image.lock.json" --repo "${GITHUB_REPOSITORY}"
+          lock_bundle="$(find . -maxdepth 1 -type f -name '*.jsonl' ! -name 'trusted_root.jsonl' | sort | head -n1)"
+          if [ -z "${lock_bundle}" ]; then
+            echo "missing oracle lock attestation bundle"
+            exit 1
+          fi
+          mv "${lock_bundle}" "${workspace}/reports/offline-verification/oracle-lock-attestation-bundle.jsonl"
+          mv trusted_root.jsonl "${workspace}/reports/offline-verification/trusted_root.jsonl"
+          sha256sum \
+            "${workspace}/reports/offline-verification/package-attestation-bundle.jsonl" \
+            "${workspace}/reports/offline-verification/oracle-lock-attestation-bundle.jsonl" \
+            "${workspace}/reports/offline-verification/trusted_root.jsonl" \
+            > "${workspace}/reports/offline-verification/sha256.txt"
+
+      - name: Verify package and lock attestations offline
+        run: |
+          set -euo pipefail
+          package_file="$(ls -1 ./*.tgz | head -n1)"
+          gh attestation verify "${package_file}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --bundle "reports/offline-verification/package-attestation-bundle.jsonl" \
+            --custom-trusted-root "reports/offline-verification/trusted_root.jsonl" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
+            --source-ref "${GITHUB_REF}" \
+            --source-digest "${GITHUB_SHA}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners \
+            --predicate-type "https://slsa.dev/provenance/v1" \
+            --format json > reports/offline-verification/package-offline-verify.json
+
+          gh attestation verify "scripts/oracles/oracle-image.lock.json" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --bundle "reports/offline-verification/oracle-lock-attestation-bundle.jsonl" \
+            --custom-trusted-root "reports/offline-verification/trusted_root.jsonl" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
+            --source-ref "${GITHUB_REF}" \
+            --source-digest "${GITHUB_SHA}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners \
+            --predicate-type "https://slsa.dev/provenance/v1" \
+            --format json > reports/offline-verification/oracle-lock-offline-verify.json
+
+      - name: Validate attestation runtime reports
+        run: |
+          set -euo pipefail
+          package_sha256="$(awk 'NR==1 {print $1}' package.sha256)"
+          if [ -z "${package_sha256}" ]; then
+            echo "missing package sha256"
+            exit 1
+          fi
+          node scripts/eval/write-release-attestation-runtime-report.mjs \
+            --package-input=reports/attestation-package-verify.json \
+            --lock-input=reports/attestation-oracle-lock-verify.json \
+            --cert-identity-package-input=reports/attestation-package-verify-cert-identity.json \
+            --cert-identity-lock-input=reports/attestation-oracle-lock-verify-cert-identity.json \
+            --offline-package-input=reports/offline-verification/package-offline-verify.json \
+            --offline-lock-input=reports/offline-verification/oracle-lock-offline-verify.json \
+            --output=reports/release-attestation-runtime.json \
+            --expected-repo="${GITHUB_REPOSITORY}" \
+            --expected-source-ref="${GITHUB_REF}" \
+            --expected-source-digest="${GITHUB_SHA}" \
+            --expected-package-sha256="${package_sha256}" \
+            --expected-workflow="${GITHUB_REPOSITORY}/.github/workflows/release.yml"
+
+      - name: Check offline attestation content policy
+        run: |
+          set -euo pipefail
+          package_sha256="$(awk 'NR==1 {print $1}' package.sha256)"
+          node scripts/eval/check-offline-attestation-content.mjs \
+            --package-offline-input=reports/offline-verification/package-offline-verify.json \
+            --lock-offline-input=reports/offline-verification/oracle-lock-offline-verify.json \
+            --output=reports/offline-attestation-content-policy.json \
+            --expected-repo="${GITHUB_REPOSITORY}" \
+            --expected-source-ref="${GITHUB_REF}" \
+            --expected-source-digest="${GITHUB_SHA}" \
+            --expected-workflow="${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
+            --expected-package-sha256="${package_sha256}"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: npm-package
+          path: |
+            *.tgz
+            package.sha256
+            reports/attestation-package-verify.json
+            reports/attestation-oracle-lock-verify.json
+            reports/attestation-package-verify-cert-identity.json
+            reports/attestation-oracle-lock-verify-cert-identity.json
+            reports/release-verifier-hermetic.json
+            reports/release-attestation-runtime.json
+            reports/offline-attestation-content-policy.json
+            reports/offline-verification/package-attestation-bundle.jsonl
+            reports/offline-verification/oracle-lock-attestation-bundle.jsonl
+            reports/offline-verification/trusted_root.jsonl
+            reports/offline-verification/sha256.txt
+            reports/offline-verification/package-offline-verify.json
+            reports/offline-verification/oracle-lock-offline-verify.json
+
+  publish:
+    name: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    needs:
+      - release-producer
+      - release-verifier
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Node
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@e95548e56dfa95d4e1a28d6f422fafe75c4c26fb # v2
+        with:
+          deno-version: v2.x
+
+      - name: Install
+        run: npm ci
+
+      - name: Validate required publish secrets
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          JSR_TOKEN: ${{ secrets.JSR_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NPM_TOKEN}" ]; then
+            echo "missing required secret NPM_TOKEN"
+            exit 1
+          fi
+          if [ -z "${JSR_TOKEN}" ]; then
+            echo "missing required secret JSR_TOKEN"
+            exit 1
+          fi
+
+      - name: Print publish metadata
+        run: |
+          echo "package=${{ needs.release-producer.outputs.package_name }}"
+          echo "version=${{ needs.release-producer.outputs.version }}"
+          echo "commit=${GITHUB_SHA}"
 
       - name: Ensure npm version does not already exist
         env:
-          PACKAGE_NAME: ${{ steps.meta.outputs.package_name }}
-          VERSION: ${{ steps.meta.outputs.version }}
+          PACKAGE_NAME: ${{ needs.release-producer.outputs.package_name }}
+          VERSION: ${{ needs.release-producer.outputs.version }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
@@ -147,7 +461,7 @@ jobs:
           set -e
 
           if [ ${npm_view_status} -eq 0 ]; then
-            echo "::error::npm version already exists: ${PACKAGE_NAME}@${VERSION}"
+            echo "npm version already exists: ${PACKAGE_NAME}@${VERSION}"
             echo "${npm_view_output}"
             exit 1
           fi
@@ -155,15 +469,15 @@ jobs:
           if printf '%s' "${npm_view_output}" | grep -Eqi 'E404|404 Not Found|not found'; then
             echo "npm version does not exist yet: ${PACKAGE_NAME}@${VERSION}"
           else
-            echo "::error::Unable to verify npm version state for ${PACKAGE_NAME}@${VERSION}"
+            echo "unable to verify npm version state for ${PACKAGE_NAME}@${VERSION}"
             echo "${npm_view_output}"
             exit 1
           fi
 
       - name: Ensure JSR version does not already exist
         env:
-          PACKAGE_NAME: ${{ steps.meta.outputs.package_name }}
-          VERSION: ${{ steps.meta.outputs.version }}
+          PACKAGE_NAME: ${{ needs.release-producer.outputs.package_name }}
+          VERSION: ${{ needs.release-producer.outputs.version }}
         run: |
           set -euo pipefail
           set +e
@@ -172,7 +486,7 @@ jobs:
           set -e
 
           if [ ${jsr_info_status} -eq 0 ]; then
-            echo "::error::JSR version already exists: ${PACKAGE_NAME}@${VERSION}"
+            echo "JSR version already exists: ${PACKAGE_NAME}@${VERSION}"
             echo "${jsr_info_output}"
             exit 1
           fi
@@ -180,65 +494,33 @@ jobs:
           if printf '%s' "${jsr_info_output}" | grep -Eqi '404|not found|Received 404'; then
             echo "JSR version does not exist yet: ${PACKAGE_NAME}@${VERSION}"
           else
-            echo "::error::Unable to verify JSR version state for ${PACKAGE_NAME}@${VERSION}"
+            echo "unable to verify JSR version state for ${PACKAGE_NAME}@${VERSION}"
             echo "${jsr_info_output}"
             exit 1
           fi
 
-      - name: Generate npm pack manifest
+      - name: Generate publish manifest
         run: |
           set -euo pipefail
           mkdir -p release-artifacts
+          {
+            echo "package_name=${{ needs.release-producer.outputs.package_name }}"
+            echo "version=${{ needs.release-producer.outputs.version }}"
+            echo "commit_sha=${GITHUB_SHA}"
+            echo "ref=${GITHUB_REF}"
+            echo "event=${GITHUB_EVENT_NAME}"
+          } > release-artifacts/publish-summary.txt
           pack_json="$(npm pack --json)"
           printf '%s\n' "${pack_json}" > release-artifacts/npm-pack.json
-          tarball="$(printf '%s\n' "${pack_json}" | node -e 'const fs=require("fs");const input=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(input[0].filename);')"
-          tar -tzf "${tarball}" | sort > release-artifacts/npm-pack-file-list.txt
+          tarball="$(printf '%s\n' "${pack_json}" | node -e 'const fs=require(\"node:fs\");const data=JSON.parse(fs.readFileSync(0,\"utf8\"));process.stdout.write(data[0].filename);')"
+          tar -tzf "${tarball}" | sort > release-artifacts/publish-npm-pack-file-list.txt
           rm -f "${tarball}"
 
-      - name: Run JSR publish dry-run
-        env:
-          JSR_TOKEN: ${{ secrets.JSR_TOKEN }}
-        run: |
-          set -euo pipefail
-          npx -y jsr publish --dry-run --token "${JSR_TOKEN}" 2>&1 | tee release-artifacts/jsr-publish-dry-run.txt
-
-      - name: Upload release verification artifacts
+      - name: Upload publish artifacts
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: release-verification-${{ steps.meta.outputs.version }}
+          name: publish-manifest-${{ needs.release-producer.outputs.version }}
           path: release-artifacts/
-
-  publish:
-    runs-on: ubuntu-latest
-    needs: verify
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          submodules: recursive
-
-      - name: Setup Node
-        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
-        with:
-          node-version: 24
-          cache: npm
-
-      - name: Setup Deno
-        uses: denoland/setup-deno@e95548e56dfa95d4e1a28d6f422fafe75c4c26fb # v2
-        with:
-          deno-version: v2.x
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Print publish metadata
-        run: |
-          echo "package=${{ needs.verify.outputs.package_name }}"
-          echo "version=${{ needs.verify.outputs.version }}"
-          echo "commit=${GITHUB_SHA}"
 
       - name: Publish npm
         env:
