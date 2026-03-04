@@ -1,6 +1,6 @@
 {
   "name": "@ismail-elkorchi/verge-browser",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Deterministic terminal web browser powered by @ismail-elkorchi/html-parser.",
   "license": "MIT",
   "repository": {
