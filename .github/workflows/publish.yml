@@ -175,7 +175,7 @@ jobs:
       - name: Run JSR publish dry-run
         run: |
           set -euo pipefail
-          npx -y jsr publish --dry-run 2>&1 | tee publish-artifacts/jsr-publish-dry-run.txt
+          npx -y jsr publish --dry-run --allow-dirty 2>&1 | tee publish-artifacts/jsr-publish-dry-run.txt
 
       - name: Upload publish artifacts
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -189,4 +189,4 @@ jobs:
         run: npm publish --provenance --access public
 
       - name: Publish JSR
-        run: npx -y jsr publish --provenance
+        run: npx -y jsr publish --allow-dirty --provenance
