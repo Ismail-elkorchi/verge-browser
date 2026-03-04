@@ -1,0 +1,192 @@
+name: Publish
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (x.y.z or vX.Y.Z)"
+        required: true
+        type: string
+
+concurrency:
+  group: publish-${{ github.repository }}-${{ github.event_name == 'release' && github.event.release.tag_name || inputs.version }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
+
+      - name: Setup Node
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+        with:
+          node-version: 24
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@e95548e56dfa95d4e1a28d6f422fafe75c4c26fb # v2
+        with:
+          deno-version: v2.x
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Resolve publish metadata
+        id: meta
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+
+          package_name="$(jq -r '.name' package.json)"
+          package_version="$(jq -r '.version' package.json)"
+          jsr_version="$(jq -r '.version' jsr.json)"
+
+          if [ -z "${package_name}" ] || [ "${package_name}" = "null" ]; then
+            echo "::error::Missing package name in package.json"
+            exit 1
+          fi
+
+          if [ "${package_version}" != "${jsr_version}" ]; then
+            echo "::error::Version mismatch: package.json=${package_version} jsr.json=${jsr_version}"
+            exit 1
+          fi
+
+          expected_version=""
+          if [ "${GITHUB_EVENT_NAME}" = "release" ]; then
+            expected_version="${RELEASE_TAG#v}"
+          elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            expected_version="${VERSION_INPUT#v}"
+          else
+            echo "::error::Unsupported event ${GITHUB_EVENT_NAME}"
+            exit 1
+          fi
+
+          if ! printf '%s' "${expected_version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Expected semantic version x.y.z, got '${expected_version}'"
+            exit 1
+          fi
+
+          if [ "${expected_version}" != "${package_version}" ]; then
+            echo "::error::Version mismatch: expected=${expected_version} package=${package_version}"
+            exit 1
+          fi
+
+          mkdir -p publish-artifacts
+          {
+            echo "package_name=${package_name}"
+            echo "version=${package_version}"
+            echo "commit_sha=${GITHUB_SHA}"
+            echo "ref=${GITHUB_REF}"
+            echo "event=${GITHUB_EVENT_NAME}"
+          } | tee publish-artifacts/publish-summary.txt
+
+          {
+            echo "package_name=${package_name}"
+            echo "version=${package_version}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Print publish metadata
+        run: |
+          echo "package=${{ steps.meta.outputs.package_name }}"
+          echo "version=${{ steps.meta.outputs.version }}"
+          echo "commit=${GITHUB_SHA}"
+
+      - name: Run publish gates
+        run: |
+          set -euo pipefail
+          npm run check:fast
+          npm run docs:lint:jsr
+          npm run docs:test:jsr
+          npm run examples:run
+
+      - name: Ensure npm version does not already exist
+        env:
+          PACKAGE_NAME: ${{ steps.meta.outputs.package_name }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          set +e
+          npm_view_output="$(npm view "${PACKAGE_NAME}@${VERSION}" version 2>&1)"
+          npm_view_status=$?
+          set -e
+
+          if [ ${npm_view_status} -eq 0 ]; then
+            echo "::error::npm version already exists: ${PACKAGE_NAME}@${VERSION}"
+            echo "${npm_view_output}"
+            exit 1
+          fi
+
+          if printf '%s' "${npm_view_output}" | grep -Eqi 'E404|404 Not Found|not found'; then
+            echo "npm version does not exist yet: ${PACKAGE_NAME}@${VERSION}"
+          else
+            echo "::error::Unable to verify npm version state for ${PACKAGE_NAME}@${VERSION}"
+            echo "${npm_view_output}"
+            exit 1
+          fi
+
+      - name: Ensure JSR version does not already exist
+        env:
+          PACKAGE_NAME: ${{ steps.meta.outputs.package_name }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          set +e
+          jsr_info_output="$(npx -y jsr info "${PACKAGE_NAME}@${VERSION}" 2>&1)"
+          jsr_info_status=$?
+          set -e
+
+          if [ ${jsr_info_status} -eq 0 ]; then
+            echo "::error::JSR version already exists: ${PACKAGE_NAME}@${VERSION}"
+            echo "${jsr_info_output}"
+            exit 1
+          fi
+
+          if printf '%s' "${jsr_info_output}" | grep -Eqi '404|not found|Received 404'; then
+            echo "JSR version does not exist yet: ${PACKAGE_NAME}@${VERSION}"
+          else
+            echo "::error::Unable to verify JSR version state for ${PACKAGE_NAME}@${VERSION}"
+            echo "${jsr_info_output}"
+            exit 1
+          fi
+
+      - name: Generate npm pack manifest
+        run: |
+          set -euo pipefail
+          pack_json="$(npm pack --json)"
+          printf '%s\n' "${pack_json}" > publish-artifacts/npm-pack.json
+          tarball="$(printf '%s\n' "${pack_json}" | node -e 'const fs=require("node:fs");const data=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(data[0].filename);')"
+          tar -tzf "${tarball}" | sort > publish-artifacts/npm-pack-file-list.txt
+          rm -f "${tarball}"
+
+      - name: Run JSR publish dry-run
+        run: |
+          set -euo pipefail
+          npx -y jsr publish --dry-run 2>&1 | tee publish-artifacts/jsr-publish-dry-run.txt
+
+      - name: Upload publish artifacts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: publish-${{ steps.meta.outputs.version }}
+          path: publish-artifacts/
+
+      - name: Publish npm (trusted publishing)
+        env:
+          NPM_CONFIG_PROVENANCE: true
+        run: npm publish --provenance --access public
+
+      - name: Publish JSR
+        run: npx -y jsr publish --provenance
