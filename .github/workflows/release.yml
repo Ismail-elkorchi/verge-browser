@@ -2,19 +2,27 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (x.y.z)'
+        required: true
+        type: string
   push:
     tags:
-      - 'v*'
+      - 'v*.*.*'
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   release-producer:
     name: release-producer
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    outputs:
+      package_name: ${{ steps.meta.outputs.package_name }}
+      version: ${{ steps.meta.outputs.version }}
     permissions:
       contents: read
       attestations: write
@@ -48,6 +56,67 @@ jobs:
       - name: Install
         run: npm ci
 
+      - name: Resolve release metadata
+        id: meta
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          package_name="$(jq -r '.name' package.json)"
+          package_version="$(jq -r '.version' package.json)"
+          jsr_version="$(jq -r '.version' jsr.json)"
+
+          if [ -z "${package_name}" ] || [ "${package_name}" = "null" ]; then
+            echo "missing package name in package.json"
+            exit 1
+          fi
+
+          if [ "${package_version}" != "${jsr_version}" ]; then
+            echo "version mismatch: package.json=${package_version} jsr.json=${jsr_version}"
+            exit 1
+          fi
+
+          expected_version=""
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            expected_version="${GITHUB_REF_NAME#v}"
+          elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            expected_version="${VERSION_INPUT#v}"
+          else
+            echo "unsupported event ${GITHUB_EVENT_NAME}"
+            exit 1
+          fi
+
+          if ! printf '%s' "${expected_version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "expected semantic version x.y.z, got '${expected_version}'"
+            exit 1
+          fi
+
+          if [ "${expected_version}" != "${package_version}" ]; then
+            echo "version mismatch: expected=${expected_version} package.json=${package_version}"
+            exit 1
+          fi
+
+          mkdir -p release-artifacts
+          {
+            echo "package_name=${package_name}"
+            echo "version=${package_version}"
+            echo "commit_sha=${GITHUB_SHA}"
+            echo "ref=${GITHUB_REF}"
+            echo "event=${GITHUB_EVENT_NAME}"
+          } | tee release-artifacts/release-summary.txt
+
+          {
+            echo "package_name=${package_name}"
+            echo "version=${package_version}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Print release metadata
+        run: |
+          echo "package=${{ steps.meta.outputs.package_name }}"
+          echo "version=${{ steps.meta.outputs.version }}"
+          echo "commit=${GITHUB_SHA}"
+
       - name: Dependency freshness check
         run: npm run deps:freshness
 
@@ -56,14 +125,35 @@ jobs:
 
       - name: Publish policy (explicit)
         run: |
-          echo "Registry publish is intentionally disabled in this workflow."
-          echo "This lane produces and verifies release artifacts only."
+          echo "Registry publish runs only in the publish job after verifier gates pass."
 
       - name: Pack
         run: npm pack
 
+      - name: Generate npm pack manifest
+        run: |
+          set -euo pipefail
+          mkdir -p release-artifacts
+          tarball="$(ls -1 ./*.tgz | head -n1)"
+          tar -tzf "${tarball}" | sort > release-artifacts/npm-pack-file-list.txt
+
       - name: Generate checksums
         run: sha256sum ./*.tgz > package.sha256
+
+      - name: Validate required publish secrets
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          JSR_TOKEN: ${{ secrets.JSR_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NPM_TOKEN}" ]; then
+            echo "missing required secret NPM_TOKEN"
+            exit 1
+          fi
+          if [ -z "${JSR_TOKEN}" ]; then
+            echo "missing required secret JSR_TOKEN"
+            exit 1
+          fi
 
       - name: Generate package provenance attestation
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
@@ -77,6 +167,13 @@ jobs:
         with:
           subject-path: scripts/oracles/oracle-image.lock.json
 
+      - name: Run JSR publish dry-run
+        env:
+          JSR_TOKEN: ${{ secrets.JSR_TOKEN }}
+        run: |
+          set -euo pipefail
+          npx -y jsr publish --dry-run --token "${JSR_TOKEN}" 2>&1 | tee release-artifacts/jsr-publish-dry-run.txt
+
       - name: Upload release inputs
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
@@ -85,6 +182,9 @@ jobs:
             *.tgz
             package.sha256
             scripts/oracles/oracle-image.lock.json
+            release-artifacts/release-summary.txt
+            release-artifacts/npm-pack-file-list.txt
+            release-artifacts/jsr-publish-dry-run.txt
 
   release-verifier:
     name: release-verifier
@@ -298,3 +398,136 @@ jobs:
             reports/offline-verification/sha256.txt
             reports/offline-verification/package-offline-verify.json
             reports/offline-verification/oracle-lock-offline-verify.json
+
+  publish:
+    name: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    needs:
+      - release-producer
+      - release-verifier
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Node
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@e95548e56dfa95d4e1a28d6f422fafe75c4c26fb # v2
+        with:
+          deno-version: v2.x
+
+      - name: Install
+        run: npm ci
+
+      - name: Validate required publish secrets
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          JSR_TOKEN: ${{ secrets.JSR_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NPM_TOKEN}" ]; then
+            echo "missing required secret NPM_TOKEN"
+            exit 1
+          fi
+          if [ -z "${JSR_TOKEN}" ]; then
+            echo "missing required secret JSR_TOKEN"
+            exit 1
+          fi
+
+      - name: Print publish metadata
+        run: |
+          echo "package=${{ needs.release-producer.outputs.package_name }}"
+          echo "version=${{ needs.release-producer.outputs.version }}"
+          echo "commit=${GITHUB_SHA}"
+
+      - name: Ensure npm version does not already exist
+        env:
+          PACKAGE_NAME: ${{ needs.release-producer.outputs.package_name }}
+          VERSION: ${{ needs.release-producer.outputs.version }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          set +e
+          npm_view_output="$(npm view "${PACKAGE_NAME}@${VERSION}" version 2>&1)"
+          npm_view_status=$?
+          set -e
+
+          if [ ${npm_view_status} -eq 0 ]; then
+            echo "npm version already exists: ${PACKAGE_NAME}@${VERSION}"
+            echo "${npm_view_output}"
+            exit 1
+          fi
+
+          if printf '%s' "${npm_view_output}" | grep -Eqi 'E404|404 Not Found|not found'; then
+            echo "npm version does not exist yet: ${PACKAGE_NAME}@${VERSION}"
+          else
+            echo "unable to verify npm version state for ${PACKAGE_NAME}@${VERSION}"
+            echo "${npm_view_output}"
+            exit 1
+          fi
+
+      - name: Ensure JSR version does not already exist
+        env:
+          PACKAGE_NAME: ${{ needs.release-producer.outputs.package_name }}
+          VERSION: ${{ needs.release-producer.outputs.version }}
+        run: |
+          set -euo pipefail
+          set +e
+          jsr_info_output="$(npx -y jsr info "${PACKAGE_NAME}@${VERSION}" 2>&1)"
+          jsr_info_status=$?
+          set -e
+
+          if [ ${jsr_info_status} -eq 0 ]; then
+            echo "JSR version already exists: ${PACKAGE_NAME}@${VERSION}"
+            echo "${jsr_info_output}"
+            exit 1
+          fi
+
+          if printf '%s' "${jsr_info_output}" | grep -Eqi '404|not found|Received 404'; then
+            echo "JSR version does not exist yet: ${PACKAGE_NAME}@${VERSION}"
+          else
+            echo "unable to verify JSR version state for ${PACKAGE_NAME}@${VERSION}"
+            echo "${jsr_info_output}"
+            exit 1
+          fi
+
+      - name: Generate publish manifest
+        run: |
+          set -euo pipefail
+          mkdir -p release-artifacts
+          {
+            echo "package_name=${{ needs.release-producer.outputs.package_name }}"
+            echo "version=${{ needs.release-producer.outputs.version }}"
+            echo "commit_sha=${GITHUB_SHA}"
+            echo "ref=${GITHUB_REF}"
+            echo "event=${GITHUB_EVENT_NAME}"
+          } > release-artifacts/publish-summary.txt
+          pack_json="$(npm pack --json)"
+          printf '%s\n' "${pack_json}" > release-artifacts/npm-pack.json
+          tarball="$(printf '%s\n' "${pack_json}" | node -e 'const fs=require(\"node:fs\");const data=JSON.parse(fs.readFileSync(0,\"utf8\"));process.stdout.write(data[0].filename);')"
+          tar -tzf "${tarball}" | sort > release-artifacts/publish-npm-pack-file-list.txt
+          rm -f "${tarball}"
+
+      - name: Upload publish artifacts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: publish-manifest-${{ needs.release-producer.outputs.version }}
+          path: release-artifacts/
+
+      - name: Publish npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public
+
+      - name: Publish JSR
+        env:
+          JSR_TOKEN: ${{ secrets.JSR_TOKEN }}
+        run: npx -y jsr publish --token "${JSR_TOKEN}" --provenance

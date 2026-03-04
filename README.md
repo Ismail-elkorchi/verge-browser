@@ -67,3 +67,7 @@ npm run examples:run
 ## Security Note
 
 Network access is policy-constrained (protocol allowlist, content checks, bounded fetch behavior). HTML parsing is deterministic but does not sanitize untrusted content for downstream rendering contexts. See [SECURITY.md](./SECURITY.md).
+
+## Release Trigger
+
+See [RELEASING.md](./RELEASING.md) for required secrets, trigger methods, and post-publish checks.
