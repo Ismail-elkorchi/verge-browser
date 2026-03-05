@@ -20,6 +20,15 @@ on:
         required: false
         default: false
         type: boolean
+      publish_target:
+        description: "Registries to publish"
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - npm
+          - jsr
 
 concurrency:
   group: publish-${{ github.repository }}-${{ github.event_name == 'release' && github.event.release.tag_name || inputs.version }}-${{ github.event_name == 'workflow_dispatch' && inputs.ref || 'release' }}
@@ -58,6 +67,7 @@ jobs:
           VERSION_INPUT: ${{ inputs.version }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           DRY_RUN_INPUT: ${{ inputs.dry_run }}
+          PUBLISH_TARGET_INPUT: ${{ inputs.publish_target }}
         run: |
           set -euo pipefail
 
@@ -100,6 +110,30 @@ jobs:
             dry_run="true"
           fi
 
+          publish_target="all"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ -n "${PUBLISH_TARGET_INPUT}" ]; then
+            publish_target="${PUBLISH_TARGET_INPUT}"
+          fi
+
+          case "${publish_target}" in
+            all)
+              publish_npm="true"
+              publish_jsr="true"
+              ;;
+            npm)
+              publish_npm="true"
+              publish_jsr="false"
+              ;;
+            jsr)
+              publish_npm="false"
+              publish_jsr="true"
+              ;;
+            *)
+              echo "::error::Unsupported publish target '${publish_target}'"
+              exit 1
+              ;;
+          esac
+
           mkdir -p publish-artifacts
           {
             echo "package_name=${package_name}"
@@ -108,12 +142,18 @@ jobs:
             echo "ref=${GITHUB_REF}"
             echo "event=${GITHUB_EVENT_NAME}"
             echo "dry_run=${dry_run}"
+            echo "publish_target=${publish_target}"
+            echo "publish_npm=${publish_npm}"
+            echo "publish_jsr=${publish_jsr}"
           } | tee publish-artifacts/publish-summary.txt
 
           {
             echo "package_name=${package_name}"
             echo "version=${package_version}"
             echo "dry_run=${dry_run}"
+            echo "publish_target=${publish_target}"
+            echo "publish_npm=${publish_npm}"
+            echo "publish_jsr=${publish_jsr}"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Print publish metadata
@@ -122,6 +162,9 @@ jobs:
           echo "version=${{ steps.meta.outputs.version }}"
           echo "commit=${GITHUB_SHA}"
           echo "dry_run=${{ steps.meta.outputs.dry_run }}"
+          echo "publish_target=${{ steps.meta.outputs.publish_target }}"
+          echo "publish_npm=${{ steps.meta.outputs.publish_npm }}"
+          echo "publish_jsr=${{ steps.meta.outputs.publish_jsr }}"
 
       - name: Run publish gates
         run: |
@@ -131,8 +174,8 @@ jobs:
           npm run docs:test:jsr
           npm run examples:run
 
-      - name: Check npm version state
-        id: npm_version
+      - name: Ensure npm version does not already exist
+        if: ${{ steps.meta.outputs.publish_npm == 'true' }}
         env:
           PACKAGE_NAME: ${{ steps.meta.outputs.package_name }}
           VERSION: ${{ steps.meta.outputs.version }}
@@ -144,11 +187,12 @@ jobs:
           set -e
 
           if [ ${npm_view_status} -eq 0 ]; then
-            echo "exists=true" >> "${GITHUB_OUTPUT}"
-            echo "npm version already exists: ${PACKAGE_NAME}@${VERSION}; skipping npm publish."
+            echo "::error::npm version already exists: ${PACKAGE_NAME}@${VERSION}"
             echo "${npm_view_output}"
-          elif printf '%s' "${npm_view_output}" | grep -Eqi 'E404|404 Not Found|not found'; then
-            echo "exists=false" >> "${GITHUB_OUTPUT}"
+            exit 1
+          fi
+
+          if printf '%s' "${npm_view_output}" | grep -Eqi 'E404|404 Not Found|not found'; then
             echo "npm version does not exist yet: ${PACKAGE_NAME}@${VERSION}"
           else
             echo "::error::Unable to verify npm version state for ${PACKAGE_NAME}@${VERSION}"
@@ -157,6 +201,7 @@ jobs:
           fi
 
       - name: Ensure JSR version does not already exist
+        if: ${{ steps.meta.outputs.publish_jsr == 'true' }}
         env:
           PACKAGE_NAME: ${{ steps.meta.outputs.package_name }}
           VERSION: ${{ steps.meta.outputs.version }}
@@ -191,12 +236,13 @@ jobs:
           rm -f "${tarball}"
 
       - name: Run JSR publish dry-run
+        if: ${{ steps.meta.outputs.publish_jsr == 'true' }}
         run: |
           set -euo pipefail
           npx -y jsr publish --dry-run --allow-dirty 2>&1 | tee publish-artifacts/jsr-publish-dry-run.txt
 
       - name: Run npm publish dry-run
-        if: ${{ steps.meta.outputs.dry_run == 'true' }}
+        if: ${{ steps.meta.outputs.dry_run == 'true' && steps.meta.outputs.publish_npm == 'true' }}
         run: npm publish --dry-run
 
       - name: Upload publish artifacts
@@ -206,13 +252,13 @@ jobs:
           path: publish-artifacts/
 
       - name: Ensure tokenless npm auth for OIDC publish
-        if: ${{ steps.meta.outputs.dry_run != 'true' }}
+        if: ${{ steps.meta.outputs.dry_run != 'true' && steps.meta.outputs.publish_npm == 'true' }}
         run: |
           unset NODE_AUTH_TOKEN
           npm config delete //registry.npmjs.org/:_authToken || true
 
       - name: Publish npm (trusted publishing)
-        if: ${{ steps.meta.outputs.dry_run != 'true' && steps.npm_version.outputs.exists != 'true' }}
+        if: ${{ steps.meta.outputs.dry_run != 'true' && steps.meta.outputs.publish_npm == 'true' }}
         env:
           NPM_CONFIG_PROVENANCE: true
         run: |
@@ -220,5 +266,5 @@ jobs:
           npm publish --provenance --access public
 
       - name: Publish JSR
-        if: ${{ steps.meta.outputs.dry_run != 'true' }}
+        if: ${{ steps.meta.outputs.dry_run != 'true' && steps.meta.outputs.publish_jsr == 'true' }}
         run: npx -y jsr publish --allow-dirty
