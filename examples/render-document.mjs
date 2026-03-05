@@ -1,5 +1,7 @@
 /**
- * Demonstrates HTML-to-terminal rendering through verge-browser primitives.
+ * What it does: renders parsed HTML into deterministic terminal lines.
+ * Expected output: prints "render-document ok" and asserts heading/body text visibility.
+ * Constraints: requires `@ismail-elkorchi/html-parser` plus built verge-browser output.
  * Run: npm run build && node examples/render-document.mjs
  */
 import { parse } from "@ismail-elkorchi/html-parser";

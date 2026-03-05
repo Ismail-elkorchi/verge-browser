@@ -18,3 +18,5 @@ Use this index to choose docs by intent.
 ## Explanation
 - [Architecture and tradeoffs](./explanation/architecture-and-tradeoffs.md)
 - [Oracle runtime validation](./oracle-runtime-validation.md)
+- [Design constraints and non-goals](./explanation/design-constraints-and-non-goals.md)
+- [v0.1.1 CI failure postmortem](./explanation/ci-failure-postmortem-v0.1.1.md)

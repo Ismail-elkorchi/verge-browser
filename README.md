@@ -2,17 +2,29 @@
 
 Deterministic terminal browsing utilities and CLI workflows for turning HTML input into auditable, reproducible terminal output.
 
+## When To Use
+
+- You need deterministic terminal rendering for HTML content.
+- You need scriptable command parsing and URL resolution utilities.
+- You need a CLI-oriented browsing flow with reproducible behavior.
+
+## When Not To Use
+
+- You need JavaScript execution or a full browser engine.
+- You need pixel-accurate visual rendering.
+- You need unrestricted network protocols or unbounded content ingestion.
+
 ## Install
 
 ```bash
 npm install @ismail-elkorchi/verge-browser @ismail-elkorchi/html-parser
 ```
 
-```ts
-import { resolveInputUrl } from "jsr:@ismail-elkorchi/verge-browser";
+```bash
+deno add jsr:@ismail-elkorchi/verge-browser
 ```
 
-## Success Path
+## Quickstart
 
 ```ts
 import { parse } from "@ismail-elkorchi/html-parser";
@@ -48,26 +60,52 @@ Runnable examples:
 npm run examples:run
 ```
 
-## Options / API Reference
+## Options and Config Reference
 
-- [Options and API reference](./docs/reference/options.md)
+- [Options and API reference](https://github.com/Ismail-elkorchi/verge-browser/blob/main/docs/reference/options.md)
+- [API overview](https://github.com/Ismail-elkorchi/verge-browser/blob/main/docs/reference/api-overview.md)
 
-## When To Use
+## Error Handling and Gotchas
 
-- You need deterministic terminal rendering for HTML content.
-- You need scriptable command parsing and URL resolution utilities.
-- You need a CLI-oriented browsing flow with reproducible behavior.
+- `NetworkFetchError` includes structured diagnostics; log and expose it as an expected network failure class.
+- URL policy checks (`assertAllowedUrl`) intentionally block unsupported protocols.
+- Rendering is deterministic text output, not a visual browser layout pipeline.
+- CLI helpers assume bounded input; set policies before feeding untrusted content.
 
-## When Not To Use
+## Compatibility Matrix
 
-- You need JavaScript execution or a full browser engine.
-- You need pixel-accurate visual rendering.
-- You need unrestricted network protocols or unbounded content ingestion.
+| Runtime | Status | Notes |
+| --- | --- | --- |
+| Node.js | ✅ | CI + smoke coverage |
+| Deno | ✅ | CI + smoke coverage |
+| Bun | ✅ | CI + smoke coverage |
+| Browser | ⚠️ | Library primitives are reusable; CLI entrypoint is Node-first |
 
-## Security Note
+## Security Notes
 
-Network access is policy-constrained (protocol allowlist, content checks, bounded fetch behavior). HTML parsing is deterministic but does not sanitize untrusted content for downstream rendering contexts. See [SECURITY.md](./SECURITY.md).
+Network access is policy-constrained (protocol allowlist, content checks, bounded fetch behavior). HTML parsing is deterministic but does not sanitize untrusted content for downstream rendering contexts. See [SECURITY.md](https://github.com/Ismail-elkorchi/verge-browser/blob/main/SECURITY.md).
 
-## Release Trigger
+## Design Constraints / Non-goals
 
-See [RELEASING.md](./RELEASING.md) for required secrets, trigger methods, and post-publish checks.
+- Deterministic terminal output is prioritized over full browser fidelity.
+- The package does not execute page JavaScript.
+- The package does not bypass URL and protocol policy controls.
+
+## Documentation Map
+
+- [Tutorial](https://github.com/Ismail-elkorchi/verge-browser/blob/main/docs/tutorial/first-session.md)
+- [How-to guides](https://github.com/Ismail-elkorchi/verge-browser/tree/main/docs/how-to)
+- [Reference](https://github.com/Ismail-elkorchi/verge-browser/tree/main/docs/reference)
+- [Explanation](https://github.com/Ismail-elkorchi/verge-browser/tree/main/docs/explanation)
+
+## Release Validation
+
+```bash
+npm run check:fast
+npm run docs:lint:jsr
+npm run docs:test:jsr
+npm run examples:run
+npm pack --dry-run
+```
+
+Release workflow details: [RELEASING.md](https://github.com/Ismail-elkorchi/verge-browser/blob/main/RELEASING.md)

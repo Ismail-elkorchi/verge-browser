@@ -1,5 +1,7 @@
 /**
- * Runs all public examples used by README and release checks.
+ * What it does: runs all public verge-browser examples in one smoke check.
+ * Expected output: prints "examples:run ok" after every example assertion passes.
+ * Constraints: examples must be deterministic and safe to execute in a shared process.
  * Run: npm run build && node examples/run-all.mjs
  */
 import { runCommandHelp } from "./command-help.mjs";
