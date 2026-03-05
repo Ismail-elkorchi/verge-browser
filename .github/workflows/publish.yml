@@ -10,9 +10,19 @@ on:
         description: "Release version (x.y.z or vX.Y.Z)"
         required: true
         type: string
+      ref:
+        description: "Git ref to publish from when manually dispatched"
+        required: false
+        default: main
+        type: string
+      dry_run:
+        description: "Run publish in dry-run mode"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
-  group: publish-${{ github.repository }}-${{ github.event_name == 'release' && github.event.release.tag_name || inputs.version }}
+  group: publish-${{ github.repository }}-${{ github.event_name == 'release' && github.event.release.tag_name || inputs.version }}-${{ github.event_name == 'workflow_dispatch' && inputs.ref || 'release' }}
   cancel-in-progress: false
 
 permissions:
@@ -26,7 +36,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.ref || github.ref }}
 
       - name: Setup Node
         uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
@@ -47,6 +57,7 @@ jobs:
         env:
           VERSION_INPUT: ${{ inputs.version }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
 
@@ -84,6 +95,11 @@ jobs:
             exit 1
           fi
 
+          dry_run="false"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${DRY_RUN_INPUT}" = "true" ]; then
+            dry_run="true"
+          fi
+
           mkdir -p publish-artifacts
           {
             echo "package_name=${package_name}"
@@ -91,11 +107,13 @@ jobs:
             echo "commit_sha=${GITHUB_SHA}"
             echo "ref=${GITHUB_REF}"
             echo "event=${GITHUB_EVENT_NAME}"
+            echo "dry_run=${dry_run}"
           } | tee publish-artifacts/publish-summary.txt
 
           {
             echo "package_name=${package_name}"
             echo "version=${package_version}"
+            echo "dry_run=${dry_run}"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Print publish metadata
@@ -103,6 +121,7 @@ jobs:
           echo "package=${{ steps.meta.outputs.package_name }}"
           echo "version=${{ steps.meta.outputs.version }}"
           echo "commit=${GITHUB_SHA}"
+          echo "dry_run=${{ steps.meta.outputs.dry_run }}"
 
       - name: Run publish gates
         run: |
@@ -177,6 +196,10 @@ jobs:
           set -euo pipefail
           npx -y jsr publish --dry-run --allow-dirty 2>&1 | tee publish-artifacts/jsr-publish-dry-run.txt
 
+      - name: Run npm publish dry-run
+        if: ${{ steps.meta.outputs.dry_run == 'true' }}
+        run: npm publish --dry-run
+
       - name: Upload publish artifacts
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
@@ -184,11 +207,13 @@ jobs:
           path: publish-artifacts/
 
       - name: Ensure tokenless npm auth for OIDC publish
+        if: ${{ steps.meta.outputs.dry_run != 'true' }}
         run: |
           unset NODE_AUTH_TOKEN
           npm config delete //registry.npmjs.org/:_authToken || true
 
       - name: Publish npm (trusted publishing)
+        if: ${{ steps.meta.outputs.dry_run != 'true' }}
         env:
           NPM_CONFIG_PROVENANCE: true
         run: |
@@ -196,4 +221,5 @@ jobs:
           npm publish --provenance --access public
 
       - name: Publish JSR
+        if: ${{ steps.meta.outputs.dry_run != 'true' }}
         run: npx -y jsr publish --allow-dirty --provenance
