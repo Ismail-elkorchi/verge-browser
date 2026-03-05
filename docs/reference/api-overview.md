@@ -1,97 +1,36 @@
 # API Overview
 
-All exported runtime entrypoints from `src/mod.ts`.
+## JSR Surface
 
-## Commands
-- `formatHelpText`
-- `parseCommand`
+JSR exports are defined by [`jsr/mod.ts`](../../jsr/mod.ts).
 
-## Cookies
-- `parseSetCookie`
-- `mergeSetCookieHeaders`
-- `pruneExpiredCookies`
-- `cookieHeaderForUrl`
-
-## Network fetch
-- `fetchPage`
-- `fetchPageStream`
-- `readByteStreamToText`
-- `classifyNetworkFailure`
-- `NetworkFetchError`
-
-## Forms
-- `extractForms`
-- `buildGetSubmissionUrl`
-- `buildFormSubmissionRequest`
-
-## Paging and search
-- `createPager`
-- `pagerViewport`
-- `pagerTop`
-- `pagerBottom`
-- `pagerLineDown`
-- `pagerLineUp`
-- `pagerPageDown`
-- `pagerPageUp`
-- `pagerJumpToLine`
-- `setPagerLines`
-- `createSearchState`
-- `hasSearchMatches`
-- `activeSearchLineIndex`
-- `moveSearchMatch`
-
-## Rendering and terminal formatting
-- `renderDocumentToTerminal`
-- `terminalWidth`
-- `terminalHeight`
-- `clearTerminal`
-- `formatRenderedPage`
-- `formatLinkTable`
-
-## Security and URL helpers
+JSR exports:
 - `DEFAULT_SECURITY_POLICY`
-- `assertAllowedProtocol`
-- `assertAllowedUrl`
-- `isHtmlLikeContentType`
-- `resolveInputUrl`
-- `resolveHref`
+- `assertAllowedProtocol(url)`
+- `assertAllowedUrl(rawUrl)`
+- `isHtmlLikeContentType(contentType)`
+- `resolveInputUrl(rawInput, currentUrl?)`
+- `resolveHref(href, baseUrl)`
+- `SecurityPolicyOptions` (type)
 
-## Session and shortcuts
-- `BrowserSession`
-- `resolveShortcutAction`
+## Node/npm Surface
 
-## Runtime hosts
-- `createNodeHost`
-- `createDenoHost`
-- `createBunHost`
+Node/npm type surface is shipped from `dist/mod.d.ts` (source module: `src/mod.ts`).
 
-## Exported types
-- `BrowserCommand`
-- `CookieEntry`
-- `LocalFileReader`
-- `FormEntry`
-- `FormField`
-- `FormSubmissionRequest`
-- `PagerState`
-- `PagerViewport`
-- `SearchState`
-- `SecurityPolicyOptions`
-- `BrowserSessionOptions`
-- `PageLoader`
-- `PageStreamLoader`
-- `PageRenderer`
-- `ShortcutAction`
-- `NetworkOutcome`
-- `NetworkOutcomeKind`
-- `RenderedLink`
-- `RenderedPage`
-- `FetchPageResult`
-- `FetchPageStreamResult`
-- `FetchPagePayload`
-- `PageRequestOptions`
-- `PageDiagnostics`
-- `RenderInput`
-- `PageSnapshot`
-- `KeyboardKey`
-- `RuntimeHost`
-- `RuntimeName`
+Node/npm includes the full browser runtime stack:
+- command parsing and formatting
+- cookie parsing/merging
+- fetch + stream fetch adapters
+- session, paging, search, rendering, shortcuts
+- runtime hosts (Node/Deno/Bun)
+- exported runtime and diagnostics types
+
+## JSR Surface vs Node Surface
+
+- JSR intentionally exposes a small URL/security utility surface for permission-light Deno usage.
+- Node/npm exposes the complete interactive/browser runtime API.
+- Shared concepts (URL resolution and protocol safety) are behaviorally aligned.
+
+## Related
+- [Options](./options.md)
+- [Error model](./error-model.md)
