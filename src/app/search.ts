@@ -20,7 +20,10 @@ function findMatches(lines: readonly string[], query: string): number[] {
     }
   }
   return matches;
-}
+}/**
+ * Computes deterministic public output for `createSearchState`.
+ */
+
 
 export function createSearchState(lines: readonly string[], query: string): SearchState {
   const matchLineIndices = findMatches(lines, query);
@@ -29,18 +32,27 @@ export function createSearchState(lines: readonly string[], query: string): Sear
     matchLineIndices,
     activeMatchIndex: matchLineIndices.length > 0 ? 0 : -1
   };
-}
+}/**
+ * Provides deterministic public behavior for `hasSearchMatches`.
+ */
+
 
 export function hasSearchMatches(state: SearchState): boolean {
   return state.matchLineIndices.length > 0 && state.activeMatchIndex >= 0;
-}
+}/**
+ * Provides deterministic public behavior for `activeSearchLineIndex`.
+ */
+
 
 export function activeSearchLineIndex(state: SearchState): number | null {
   if (!hasSearchMatches(state)) {
     return null;
   }
   return state.matchLineIndices[state.activeMatchIndex] ?? null;
-}
+}/**
+ * Provides deterministic public behavior for `moveSearchMatch`.
+ */
+
 
 export function moveSearchMatch(state: SearchState, direction: "next" | "prev"): SearchState {
   if (!hasSearchMatches(state)) {

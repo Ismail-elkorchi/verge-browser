@@ -18,7 +18,10 @@ export type ShortcutAction =
 
 function isShiftedKey(key: KeyboardKey, baseName: string): boolean {
   return key.name === baseName && key.shift === true;
-}
+}/**
+ * Formats or resolves deterministic public output for `resolveShortcutAction`.
+ */
+
 
 export function resolveShortcutAction(character: string, key: KeyboardKey): ShortcutAction | null {
   if (key.ctrl && key.name === "c") {

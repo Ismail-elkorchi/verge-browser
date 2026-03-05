@@ -116,7 +116,7 @@ export function renderPullRequestBullets(pullRequests) {
   }
 
   return pullRequests
-    .map((pullRequest) => `- ${pullRequest.title} ([#${pullRequest.number}](${pullRequest.url}))`)
+    .map((pullRequest) => `- [${pullRequest.title}](${pullRequest.url}) (#${pullRequest.number})`)
     .join("\n");
 }
 

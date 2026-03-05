@@ -19,7 +19,10 @@ function resolveDenoApi(): DenoApi | null {
   return {
     readTextFile: readTextFile as (path: string) => Promise<string>
   };
-}
+}/**
+ * Computes deterministic public output for `createDenoHost`.
+ */
+
 
 export function createDenoHost(): RuntimeHost {
   return {

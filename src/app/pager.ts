@@ -26,7 +26,10 @@ function normalizedPageSize(pageSize: number): number {
 
 function maxOffset(lineCount: number, pageSize: number): number {
   return Math.max(0, lineCount - pageSize);
-}
+}/**
+ * Computes deterministic public output for `createPager`.
+ */
+
 
 export function createPager(lines: readonly string[], pageSize: number): PagerState {
   return {
@@ -34,7 +37,10 @@ export function createPager(lines: readonly string[], pageSize: number): PagerSt
     pageSize: normalizedPageSize(pageSize),
     offset: 0
   };
-}
+}/**
+ * Provides deterministic public behavior for `setPagerLines`.
+ */
+
 
 export function setPagerLines(pager: PagerState, lines: readonly string[], pageSize: number): PagerState {
   const nextPageSize = normalizedPageSize(pageSize);
@@ -42,44 +48,68 @@ export function setPagerLines(pager: PagerState, lines: readonly string[], pageS
   pager.pageSize = nextPageSize;
   pager.offset = clamp(pager.offset, 0, maxOffset(pager.lines.length, nextPageSize));
   return pager;
-}
+}/**
+ * Provides deterministic public behavior for `pagerTop`.
+ */
+
 
 export function pagerTop(pager: PagerState): PagerState {
   pager.offset = 0;
   return pager;
-}
+}/**
+ * Provides deterministic public behavior for `pagerBottom`.
+ */
+
 
 export function pagerBottom(pager: PagerState): PagerState {
   pager.offset = maxOffset(pager.lines.length, pager.pageSize);
   return pager;
-}
+}/**
+ * Provides deterministic public behavior for `pagerLineDown`.
+ */
+
 
 export function pagerLineDown(pager: PagerState): PagerState {
   pager.offset = clamp(pager.offset + 1, 0, maxOffset(pager.lines.length, pager.pageSize));
   return pager;
-}
+}/**
+ * Provides deterministic public behavior for `pagerLineUp`.
+ */
+
 
 export function pagerLineUp(pager: PagerState): PagerState {
   pager.offset = clamp(pager.offset - 1, 0, maxOffset(pager.lines.length, pager.pageSize));
   return pager;
-}
+}/**
+ * Provides deterministic public behavior for `pagerPageDown`.
+ */
+
 
 export function pagerPageDown(pager: PagerState): PagerState {
   pager.offset = clamp(pager.offset + pager.pageSize, 0, maxOffset(pager.lines.length, pager.pageSize));
   return pager;
-}
+}/**
+ * Provides deterministic public behavior for `pagerPageUp`.
+ */
+
 
 export function pagerPageUp(pager: PagerState): PagerState {
   pager.offset = clamp(pager.offset - pager.pageSize, 0, maxOffset(pager.lines.length, pager.pageSize));
   return pager;
-}
+}/**
+ * Provides deterministic public behavior for `pagerJumpToLine`.
+ */
+
 
 export function pagerJumpToLine(pager: PagerState, lineIndex: number): PagerState {
   const normalizedLineIndex = Number.isFinite(lineIndex) ? Math.floor(lineIndex) : 0;
   const boundedLineIndex = clamp(normalizedLineIndex, 0, Math.max(0, pager.lines.length - 1));
   pager.offset = clamp(boundedLineIndex, 0, maxOffset(pager.lines.length, pager.pageSize));
   return pager;
-}
+}/**
+ * Provides deterministic public behavior for `pagerViewport`.
+ */
+
 
 export function pagerViewport(pager: PagerState): PagerViewport {
   const totalLines = pager.lines.length;
