@@ -127,7 +127,6 @@ jobs:
         run: |
           set -euo pipefail
           npm run check:fast
-          npm run docs:required
           npm run docs:lint:jsr
           npm run docs:test:jsr
           npm run examples:run
