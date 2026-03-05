@@ -1,32 +1,31 @@
-name: Publish
+name: Publish Manual
 
 on:
-  release:
-    types:
-      - published
   workflow_dispatch:
     inputs:
-      version:
-        description: "Release version (x.y.z or vX.Y.Z)"
+      ref:
+        description: "Git ref to publish from (tag, branch, or SHA)"
         required: true
+        default: main
         type: string
-
-concurrency:
-  group: publish-${{ github.repository }}-${{ github.event_name == 'release' && github.event.release.tag_name || inputs.version }}
-  cancel-in-progress: false
+      dry_run:
+        description: "Run publish in dry-run mode"
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
   id-token: write
 
 jobs:
-  publish:
+  publish-manual:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout selected ref
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
+          ref: ${{ inputs.ref }}
 
       - name: Setup Node
         uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
@@ -44,43 +43,14 @@ jobs:
 
       - name: Resolve publish metadata
         id: meta
-        env:
-          VERSION_INPUT: ${{ inputs.version }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-
           package_name="$(jq -r '.name' package.json)"
           package_version="$(jq -r '.version' package.json)"
           jsr_version="$(jq -r '.version' jsr.json)"
 
-          if [ -z "${package_name}" ] || [ "${package_name}" = "null" ]; then
-            echo "::error::Missing package name in package.json"
-            exit 1
-          fi
-
           if [ "${package_version}" != "${jsr_version}" ]; then
             echo "::error::Version mismatch: package.json=${package_version} jsr.json=${jsr_version}"
-            exit 1
-          fi
-
-          expected_version=""
-          if [ "${GITHUB_EVENT_NAME}" = "release" ]; then
-            expected_version="${RELEASE_TAG#v}"
-          elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            expected_version="${VERSION_INPUT#v}"
-          else
-            echo "::error::Unsupported event ${GITHUB_EVENT_NAME}"
-            exit 1
-          fi
-
-          if ! printf '%s' "${expected_version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::Expected semantic version x.y.z, got '${expected_version}'"
-            exit 1
-          fi
-
-          if [ "${expected_version}" != "${package_version}" ]; then
-            echo "::error::Version mismatch: expected=${expected_version} package=${package_version}"
             exit 1
           fi
 
@@ -88,21 +58,14 @@ jobs:
           {
             echo "package_name=${package_name}"
             echo "version=${package_version}"
-            echo "commit_sha=${GITHUB_SHA}"
-            echo "ref=${GITHUB_REF}"
-            echo "event=${GITHUB_EVENT_NAME}"
-          } | tee publish-artifacts/publish-summary.txt
+            echo "ref=${{ inputs.ref }}"
+            echo "dry_run=${{ inputs.dry_run }}"
+          } | tee publish-artifacts/publish-manual-summary.txt
 
           {
             echo "package_name=${package_name}"
             echo "version=${package_version}"
           } >> "${GITHUB_OUTPUT}"
-
-      - name: Print publish metadata
-        run: |
-          echo "package=${{ steps.meta.outputs.package_name }}"
-          echo "version=${{ steps.meta.outputs.version }}"
-          echo "commit=${GITHUB_SHA}"
 
       - name: Run publish gates
         run: |
@@ -172,23 +135,22 @@ jobs:
           tar -tzf "${tarball}" | sort > publish-artifacts/npm-pack-file-list.txt
           rm -f "${tarball}"
 
-      - name: Run JSR publish dry-run
-        run: |
-          set -euo pipefail
-          npx -y jsr publish --dry-run --allow-dirty 2>&1 | tee publish-artifacts/jsr-publish-dry-run.txt
+      - name: Run npm publish dry-run
+        if: ${{ inputs.dry_run }}
+        run: npm publish --dry-run
 
-      - name: Upload publish artifacts
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        with:
-          name: publish-${{ steps.meta.outputs.version }}
-          path: publish-artifacts/
+      - name: Run JSR publish dry-run
+        if: ${{ inputs.dry_run }}
+        run: npx -y jsr publish --dry-run --allow-dirty
 
       - name: Ensure tokenless npm auth for OIDC publish
+        if: ${{ !inputs.dry_run }}
         run: |
           unset NODE_AUTH_TOKEN
           npm config delete //registry.npmjs.org/:_authToken || true
 
       - name: Publish npm (trusted publishing)
+        if: ${{ !inputs.dry_run }}
         env:
           NPM_CONFIG_PROVENANCE: true
         run: |
@@ -196,4 +158,11 @@ jobs:
           npm publish --provenance --access public
 
       - name: Publish JSR
+        if: ${{ !inputs.dry_run }}
         run: npx -y jsr publish --allow-dirty --provenance
+
+      - name: Upload manual publish artifacts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: publish-manual-${{ steps.meta.outputs.version }}
+          path: publish-artifacts/

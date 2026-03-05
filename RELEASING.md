@@ -1,19 +1,30 @@
 # Releasing
 
-## Required Secrets
+## Publish model
 
-- `NPM_TOKEN`
-- `JSR_TOKEN`
+Publishing is performed via GitHub Actions OIDC (tokenless):
+- npm Trusted Publishing
+- JSR OIDC publishing
 
-## Trigger Release
+Use `.github/workflows/publish.yml` for release-driven publish and `.github/workflows/publish-manual.yml` for manual dry-runs or controlled publish runs.
 
-- Push an annotated tag: `vX.Y.Z`
-- Or run `release.yml` with `workflow_dispatch` and input `version: X.Y.Z`
+## Required checks before publish
 
-Both paths require the requested version to match `package.json` and `jsr.json`.
+```bash
+npm ci
+npm run check:fast
+npm run docs:lint:jsr
+npm run docs:test:jsr
+npm run examples:run
+npm pack --dry-run
+node scripts/quality/doc-required.mjs
+```
 
-## Post-Publish Verification
+## Release notes and changelog
 
-- `npm view @ismail-elkorchi/verge-browser version`
-- `npx -y jsr info @ismail-elkorchi/verge-browser@X.Y.Z`
-- Open npm and JSR package pages to verify README and docs rendering.
+```bash
+node scripts/release/render-notes.mjs --dry-run
+node scripts/release/update-changelog.mjs --dry-run
+```
+
+Reference details: `docs/reference/releasing.md`.
