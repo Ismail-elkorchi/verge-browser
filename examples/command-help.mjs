@@ -1,5 +1,7 @@
 /**
- * Demonstrates deterministic command parsing and help text generation.
+ * What it does: parses a CLI command and generates deterministic help output.
+ * Expected output: prints "command-help ok" when parse/help assertions pass.
+ * Constraints: command grammar must stay aligned with `parseCommand` behavior.
  * Run: npm run build && node examples/command-help.mjs
  */
 import { formatHelpText, parseCommand } from "../dist/mod.js";

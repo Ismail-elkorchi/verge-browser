@@ -1,6 +1,20 @@
 # @ismail-elkorchi/verge-browser
 
-Deterministic terminal browsing utilities and CLI workflows for turning HTML input into auditable, reproducible terminal output.
+Deterministic terminal browsing utilities and CLI helpers for auditable text-first browsing workflows.
+
+No runtime dependencies are added beyond declared package dependencies.
+
+## When To Use
+
+- You need deterministic terminal rendering from HTML input.
+- You need command parsing, URL resolution, and policy-checked fetch helpers.
+- You need reproducible output for automation and audits.
+
+## When Not To Use
+
+- You need full browser JavaScript execution.
+- You need pixel-accurate rendering.
+- You need unrestricted network protocol access.
 
 ## Install
 
@@ -8,66 +22,96 @@ Deterministic terminal browsing utilities and CLI workflows for turning HTML inp
 npm install @ismail-elkorchi/verge-browser @ismail-elkorchi/html-parser
 ```
 
-```ts
-import { resolveInputUrl } from "jsr:@ismail-elkorchi/verge-browser";
+```bash
+deno add jsr:@ismail-elkorchi/verge-browser
 ```
 
-## Success Path
+## Import
+
+```ts
+import { parseCommand, renderDocumentToTerminal } from "@ismail-elkorchi/verge-browser";
+```
+
+```txt
+import { parseCommand, renderDocumentToTerminal } from "jsr:@ismail-elkorchi/verge-browser";
+```
+
+## Copy/Paste Examples
+
+### Example 1: Parse command input
+
+```ts
+import { parseCommand } from "@ismail-elkorchi/verge-browser";
+
+const command = parseCommand("open https://example.com");
+console.log(command.kind);
+```
+
+### Example 2: Resolve URLs safely
+
+```ts
+import { resolveHref, resolveInputUrl } from "@ismail-elkorchi/verge-browser";
+
+const base = resolveInputUrl("example.com");
+console.log(resolveHref("/docs", base));
+```
+
+### Example 3: Render HTML to terminal output
 
 ```ts
 import { parse } from "@ismail-elkorchi/html-parser";
-import {
-  formatHelpText,
-  parseCommand,
-  renderDocumentToTerminal,
-  resolveInputUrl
-} from "@ismail-elkorchi/verge-browser";
+import { renderDocumentToTerminal } from "@ismail-elkorchi/verge-browser";
 
-const resolved = resolveInputUrl("example.com");
-const command = parseCommand("bookmark add release-notes");
-
-const tree = parse("<article><h1>Docs</h1><p>Deterministic output.</p></article>");
+const tree = parse("<h1>Hello</h1>");
 const rendered = renderDocumentToTerminal({
   tree,
-  requestUrl: resolved,
-  finalUrl: resolved,
+  requestUrl: "https://example.com",
+  finalUrl: "https://example.com",
   status: 200,
   statusText: "OK",
   fetchedAtIso: "2026-01-01T00:00:00.000Z",
   width: 80
 });
 
-console.log(command.kind);
-console.log(rendered.lines.slice(0, 4).join("\n"));
-console.log(formatHelpText().includes("open <url>"));
+console.log(rendered.lines.length > 0);
 ```
 
-Runnable examples:
+### Example 4: Policy-checked fetch
+
+```ts
+import { DEFAULT_SECURITY_POLICY, assertAllowedUrl, fetchPage } from "@ismail-elkorchi/verge-browser";
+
+const url = "https://example.com";
+assertAllowedUrl(url, DEFAULT_SECURITY_POLICY);
+const page = await fetchPage(url);
+console.log(page.status);
+```
+
+Run packaged examples:
 
 ```bash
 npm run examples:run
 ```
 
-## Options / API Reference
+## Compatibility
 
-- [Options and API reference](./docs/reference/options.md)
+Runtime compatibility matrix:
 
-## When To Use
+| Runtime | Status |
+| --- | --- |
+| Node.js | Supported (CLI and library) |
+| Deno | Supported (library primitives) |
+| Bun | Supported (library primitives) |
+| Browser (evergreen) | Supported (library primitives) |
 
-- You need deterministic terminal rendering for HTML content.
-- You need scriptable command parsing and URL resolution utilities.
-- You need a CLI-oriented browsing flow with reproducible behavior.
+## Security and Safety Notes
 
-## When Not To Use
+- URL and protocol checks are mandatory for network workflows.
+- Parsing/rendering is deterministic but not a sanitizer for downstream HTML execution.
+- Handle `NetworkFetchError` as a first-class expected failure mode.
 
-- You need JavaScript execution or a full browser engine.
-- You need pixel-accurate visual rendering.
-- You need unrestricted network protocols or unbounded content ingestion.
+## Documentation
 
-## Security Note
-
-Network access is policy-constrained (protocol allowlist, content checks, bounded fetch behavior). HTML parsing is deterministic but does not sanitize untrusted content for downstream rendering contexts. See [SECURITY.md](./SECURITY.md).
-
-## Release Trigger
-
-See [RELEASING.md](./RELEASING.md) for required secrets, trigger methods, and post-publish checks.
+- [Docs index](./docs/index.md)
+- [First session tutorial](./docs/tutorial/first-session.md)
+- [Options reference](./docs/reference/options.md)

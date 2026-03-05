@@ -1,57 +1,36 @@
 # API Overview
 
-`verge-browser` exposes a library surface from `src/mod.ts` for deterministic terminal browsing workflows.
+## JSR Surface
 
-JSR dry-run surface currently exports a reduced subset from `jsr/mod.ts`:
-- `resolveInputUrl`, `resolveHref`
-- `DEFAULT_SECURITY_POLICY`, `assertAllowedProtocol`, `assertAllowedUrl`, `isHtmlLikeContentType`
+JSR exports are defined by [`jsr/mod.ts`](../../jsr/mod.ts).
 
-## Session and rendering
-- `BrowserSession`
-- `renderDocumentToTerminal(input)`
-
-## Input normalization and command parsing
-- `resolveInputUrl(rawInput, currentUrl?)`
-- `resolveHref(href, baseUrl)`
-- `parseCommand(rawInput)`
-- `formatHelpText()`
-
-## Form and cookie helpers
-- `extractForms(tree, baseUrl)`
-- `buildGetSubmissionUrl(form, overrides?)`
-- `buildFormSubmissionRequest(form, overrides?)`
-- `parseSetCookie(raw, requestUrl, nowMs?)`
-- `mergeSetCookieHeaders(...)`
-- `pruneExpiredCookies(cookies, nowMs?)`
-- `cookieHeaderForUrl(cookies, requestUrl, nowMs?)`
-
-## Search and paging
-- `createSearchState(lines, query)`
-- `hasSearchMatches(state)`
-- `activeSearchLineIndex(state)`
-- `moveSearchMatch(state, direction)`
-- `createPager(lines, pageSize)`
-- `setPagerLines(pager, lines, pageSize)`
-- `pagerViewport(pager)`
-
-## Security and fetch boundary
+JSR exports:
 - `DEFAULT_SECURITY_POLICY`
 - `assertAllowedProtocol(url)`
 - `assertAllowedUrl(rawUrl)`
 - `isHtmlLikeContentType(contentType)`
-- `NetworkFetchError`
-- `classifyNetworkFailure(error, finalUrl)`
-- `readByteStreamToText(stream)`
-- `fetchPage(url, userAgent?, timeoutMs?, requestOptions?, localFileReader?)`
-- `fetchPageStream(url, userAgent?, timeoutMs?, requestOptions?, localFileReader?)`
+- `resolveInputUrl(rawInput, currentUrl?)`
+- `resolveHref(href, baseUrl)`
+- `SecurityPolicyOptions` (type)
 
-## Runtime host adapters
-- `createNodeHost()`
-- `createDenoHost()`
-- `createBunHost()`
+## Node/npm Surface
 
-## Types
-- `PageSnapshot`, `RenderedPage`, `RenderedLink`, `PageDiagnostics`
-- `NetworkOutcome`, `NetworkOutcomeKind`, `PageRequestOptions`
-- `FormEntry`, `FormField`, `FormSubmissionRequest`
-- `RuntimeHost`, `RuntimeName`
+Node/npm type surface is shipped from `dist/mod.d.ts` (source module: `src/mod.ts`).
+
+Node/npm includes the full browser runtime stack:
+- command parsing and formatting
+- cookie parsing/merging
+- fetch + stream fetch adapters
+- session, paging, search, rendering, shortcuts
+- runtime hosts (Node/Deno/Bun)
+- exported runtime and diagnostics types
+
+## JSR Surface vs Node Surface
+
+- JSR intentionally exposes a small URL/security utility surface for permission-light Deno usage.
+- Node/npm exposes the complete interactive/browser runtime API.
+- Shared concepts (URL resolution and protocol safety) are behaviorally aligned.
+
+## Related
+- [Options](./options.md)
+- [Error model](./error-model.md)

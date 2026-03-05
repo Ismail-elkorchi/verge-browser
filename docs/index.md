@@ -1,20 +1,22 @@
-# Documentation Index
+# Verge Browser Docs
 
-Use this index to choose docs by intent.
+`@ismail-elkorchi/verge-browser` provides deterministic terminal browsing primitives and a Node-first CLI runtime.
 
 ## Tutorial
-- [First session](./tutorial/first-session.md)
+- [First session tutorial](./tutorial/first-session.md)
 
 ## How-to
-- [Release validation](./how-to/release-validation.md)
-- [Mutation pilot workflow](./how-to/mutation-pilot.md)
+- [First session](./how-to/first-session.md)
+- [Extract HTML and CSS snapshot](./how-to/extract-html-css-snapshot.md)
+- [Run a minimal audit](./how-to/run-minimal-audit.md)
+- [Fetch pages safely](./how-to/fetch-pages-safely.md)
 
 ## Reference
-- [Options and API reference](./reference/options.md)
-- [Rendering contract](./rendering-contract.md)
-- [Acceptance gates](./acceptance-gates.md)
-- [Evaluation report format](./eval-report-format.md)
+- [API overview](./reference/api-overview.md)
+- [Options](./reference/options.md)
+- [Error model](./reference/error-model.md)
 
 ## Explanation
-- [Architecture and tradeoffs](./explanation/architecture-and-tradeoffs.md)
-- [Oracle runtime validation](./oracle-runtime-validation.md)
+- [Design constraints](./explanation/design-constraints.md)
+- [Security posture](./explanation/security-posture.md)
+- [Performance characteristics](./explanation/performance-characteristics.md)

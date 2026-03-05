@@ -1,49 +1,36 @@
-# Options and API Reference
+# Options
 
-This page is the primary API surface summary for `@ismail-elkorchi/verge-browser`.
+## JSR options surface (`jsr/mod.ts`)
 
-## CLI entrypoint
+### `DEFAULT_SECURITY_POLICY`
+- Type: `SecurityPolicyOptions`
+- Fields:
+  - `allowHttp`
+  - `allowHttps`
+  - `allowFile`
 
-- Binary: `verge`
-- Start command:
+### `resolveInputUrl(rawInput, currentUrl?)`
+- `rawInput`: user-provided URL input.
+- `currentUrl`: optional base URL used for resolving relative input.
+- Throws when input is empty, invalid, or resolves to unsupported protocol.
 
-```bash
-verge https://example.com
-```
+### `resolveHref(href, baseUrl)`
+- Resolves link-like href values against an absolute base URL.
+- Falls back to returning `href` when resolution fails.
 
-## Programmatic API
+### `assertAllowedUrl(rawUrl)` / `assertAllowedProtocol(url)`
+- Enforce allowed protocols (`https:`, `http:`, `file:`).
+- Throw `Error` for unsupported protocols.
 
-- `parseCommand(input)`
-- `formatHelpText()`
-- `renderDocumentToTerminal(renderInput)`
-- `resolveInputUrl(rawInput, currentUrl?)`
-- `resolveHref(href, baseUrl)`
-- `assertAllowedUrl(rawUrl)`
-- `assertAllowedProtocol(url)`
-- `isHtmlLikeContentType(contentType)`
+## Node/npm options surface (`src/mod.ts`)
 
-## Security policy options
+Node/npm exposes additional option-rich APIs not present in JSR, including:
+- fetch options (`fetchPage`, `fetchPageStream`)
+- renderer input options (`renderDocumentToTerminal`)
+- session options (`BrowserSession` constructor options)
 
-`DEFAULT_SECURITY_POLICY` includes:
+Use the Node/npm API reference for full runtime option contracts.
 
-- `allowHttp: true`
-- `allowHttps: true`
-- `allowFile: true`
-
-Unsupported protocols are rejected by `assertAllowedProtocol`.
-
-## Determinism expectations
-
-- Equal page input and equal render options produce stable terminal line output.
-- Command parsing is deterministic for equal command text.
-- URL normalization rules are deterministic for equal input + base URL.
-
-## Verify these claims
-
-```bash
-npm run check:fast
-npm run examples:run
-npm run smoke:cli
-npm run docs:lint:jsr
-npm run docs:test:jsr
-```
+## Related
+- [API overview](./api-overview.md)
+- [Error model](./error-model.md)

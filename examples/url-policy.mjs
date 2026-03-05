@@ -1,5 +1,7 @@
 /**
- * Demonstrates deterministic URL normalization and protocol policy checks.
+ * What it does: normalizes input URLs and enforces allowed protocol policy.
+ * Expected output: prints "url-policy ok" after normalization and allowlist checks pass.
+ * Constraints: inputs must stay within supported URL protocol policy semantics.
  * Run: npm run build && node examples/url-policy.mjs
  */
 import { assertAllowedUrl, resolveInputUrl } from "../dist/mod.js";
