@@ -131,7 +131,8 @@ jobs:
           npm run docs:test:jsr
           npm run examples:run
 
-      - name: Ensure npm version does not already exist
+      - name: Check npm version state
+        id: npm_version
         env:
           PACKAGE_NAME: ${{ steps.meta.outputs.package_name }}
           VERSION: ${{ steps.meta.outputs.version }}
@@ -143,12 +144,11 @@ jobs:
           set -e
 
           if [ ${npm_view_status} -eq 0 ]; then
-            echo "::error::npm version already exists: ${PACKAGE_NAME}@${VERSION}"
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+            echo "npm version already exists: ${PACKAGE_NAME}@${VERSION}; skipping npm publish."
             echo "${npm_view_output}"
-            exit 1
-          fi
-
-          if printf '%s' "${npm_view_output}" | grep -Eqi 'E404|404 Not Found|not found'; then
+          elif printf '%s' "${npm_view_output}" | grep -Eqi 'E404|404 Not Found|not found'; then
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
             echo "npm version does not exist yet: ${PACKAGE_NAME}@${VERSION}"
           else
             echo "::error::Unable to verify npm version state for ${PACKAGE_NAME}@${VERSION}"
@@ -212,7 +212,7 @@ jobs:
           npm config delete //registry.npmjs.org/:_authToken || true
 
       - name: Publish npm (trusted publishing)
-        if: ${{ steps.meta.outputs.dry_run != 'true' }}
+        if: ${{ steps.meta.outputs.dry_run != 'true' && steps.npm_version.outputs.exists != 'true' }}
         env:
           NPM_CONFIG_PROVENANCE: true
         run: |
@@ -221,4 +221,4 @@ jobs:
 
       - name: Publish JSR
         if: ${{ steps.meta.outputs.dry_run != 'true' }}
-        run: npx -y jsr publish --allow-dirty --provenance
+        run: npx -y jsr publish --allow-dirty
