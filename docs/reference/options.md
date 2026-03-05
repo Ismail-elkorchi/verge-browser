@@ -1,49 +1,39 @@
-# Options and API Reference
+# Options
 
-This page is the primary API surface summary for `@ismail-elkorchi/verge-browser`.
+## Rendering options
 
-## CLI entrypoint
+### `renderDocumentToTerminal(input)`
+Key fields on `input`:
+- `tree`
+- `requestUrl`
+- `finalUrl`
+- `status`
+- `statusText`
+- `fetchedAtIso`
+- `width`
 
-- Binary: `verge`
-- Start command:
+## Fetch options
 
-```bash
-verge https://example.com
-```
+### `fetchPage(url, userAgent?, timeoutMs?, requestOptions?, localFileReader?)`
+- `timeoutMs` bounds request runtime.
+- `requestOptions` controls headers/method details.
+- `localFileReader` enables deterministic local file simulation.
 
-## Programmatic API
+### `fetchPageStream(...)`
+- Same request controls, but returns stream-first response payload.
 
-- `parseCommand(input)`
-- `formatHelpText()`
-- `renderDocumentToTerminal(renderInput)`
-- `resolveInputUrl(rawInput, currentUrl?)`
-- `resolveHref(href, baseUrl)`
-- `assertAllowedUrl(rawUrl)`
-- `assertAllowedProtocol(url)`
-- `isHtmlLikeContentType(contentType)`
+## Security options
 
-## Security policy options
+### `assertAllowedUrl(rawUrl, policy?)`
+- Uses protocol and host rules from `DEFAULT_SECURITY_POLICY` unless overridden.
 
-`DEFAULT_SECURITY_POLICY` includes:
+### `assertAllowedProtocol(url, policy?)`
+- Verifies protocol allowlists.
 
-- `allowHttp: true`
-- `allowHttps: true`
-- `allowFile: true`
+## Session options
 
-Unsupported protocols are rejected by `assertAllowedProtocol`.
-
-## Determinism expectations
-
-- Equal page input and equal render options produce stable terminal line output.
-- Command parsing is deterministic for equal command text.
-- URL normalization rules are deterministic for equal input + base URL.
-
-## Verify these claims
-
-```bash
-npm run check:fast
-npm run examples:run
-npm run smoke:cli
-npm run docs:lint:jsr
-npm run docs:test:jsr
-```
+### `new BrowserSession(options)`
+- `pageLoader`
+- `pageStreamLoader`
+- `pageRenderer`
+- `policy`

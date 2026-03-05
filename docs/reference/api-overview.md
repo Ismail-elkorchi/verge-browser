@@ -1,57 +1,97 @@
 # API Overview
 
-`verge-browser` exposes a library surface from `src/mod.ts` for deterministic terminal browsing workflows.
+All exported runtime entrypoints from `src/mod.ts`.
 
-JSR dry-run surface currently exports a reduced subset from `jsr/mod.ts`:
-- `resolveInputUrl`, `resolveHref`
-- `DEFAULT_SECURITY_POLICY`, `assertAllowedProtocol`, `assertAllowedUrl`, `isHtmlLikeContentType`
+## Commands
+- `formatHelpText`
+- `parseCommand`
 
-## Session and rendering
-- `BrowserSession`
-- `renderDocumentToTerminal(input)`
+## Cookies
+- `parseSetCookie`
+- `mergeSetCookieHeaders`
+- `pruneExpiredCookies`
+- `cookieHeaderForUrl`
 
-## Input normalization and command parsing
-- `resolveInputUrl(rawInput, currentUrl?)`
-- `resolveHref(href, baseUrl)`
-- `parseCommand(rawInput)`
-- `formatHelpText()`
-
-## Form and cookie helpers
-- `extractForms(tree, baseUrl)`
-- `buildGetSubmissionUrl(form, overrides?)`
-- `buildFormSubmissionRequest(form, overrides?)`
-- `parseSetCookie(raw, requestUrl, nowMs?)`
-- `mergeSetCookieHeaders(...)`
-- `pruneExpiredCookies(cookies, nowMs?)`
-- `cookieHeaderForUrl(cookies, requestUrl, nowMs?)`
-
-## Search and paging
-- `createSearchState(lines, query)`
-- `hasSearchMatches(state)`
-- `activeSearchLineIndex(state)`
-- `moveSearchMatch(state, direction)`
-- `createPager(lines, pageSize)`
-- `setPagerLines(pager, lines, pageSize)`
-- `pagerViewport(pager)`
-
-## Security and fetch boundary
-- `DEFAULT_SECURITY_POLICY`
-- `assertAllowedProtocol(url)`
-- `assertAllowedUrl(rawUrl)`
-- `isHtmlLikeContentType(contentType)`
+## Network fetch
+- `fetchPage`
+- `fetchPageStream`
+- `readByteStreamToText`
+- `classifyNetworkFailure`
 - `NetworkFetchError`
-- `classifyNetworkFailure(error, finalUrl)`
-- `readByteStreamToText(stream)`
-- `fetchPage(url, userAgent?, timeoutMs?, requestOptions?, localFileReader?)`
-- `fetchPageStream(url, userAgent?, timeoutMs?, requestOptions?, localFileReader?)`
 
-## Runtime host adapters
-- `createNodeHost()`
-- `createDenoHost()`
-- `createBunHost()`
+## Forms
+- `extractForms`
+- `buildGetSubmissionUrl`
+- `buildFormSubmissionRequest`
 
-## Types
-- `PageSnapshot`, `RenderedPage`, `RenderedLink`, `PageDiagnostics`
-- `NetworkOutcome`, `NetworkOutcomeKind`, `PageRequestOptions`
-- `FormEntry`, `FormField`, `FormSubmissionRequest`
-- `RuntimeHost`, `RuntimeName`
+## Paging and search
+- `createPager`
+- `pagerViewport`
+- `pagerTop`
+- `pagerBottom`
+- `pagerLineDown`
+- `pagerLineUp`
+- `pagerPageDown`
+- `pagerPageUp`
+- `pagerJumpToLine`
+- `setPagerLines`
+- `createSearchState`
+- `hasSearchMatches`
+- `activeSearchLineIndex`
+- `moveSearchMatch`
+
+## Rendering and terminal formatting
+- `renderDocumentToTerminal`
+- `terminalWidth`
+- `terminalHeight`
+- `clearTerminal`
+- `formatRenderedPage`
+- `formatLinkTable`
+
+## Security and URL helpers
+- `DEFAULT_SECURITY_POLICY`
+- `assertAllowedProtocol`
+- `assertAllowedUrl`
+- `isHtmlLikeContentType`
+- `resolveInputUrl`
+- `resolveHref`
+
+## Session and shortcuts
+- `BrowserSession`
+- `resolveShortcutAction`
+
+## Runtime hosts
+- `createNodeHost`
+- `createDenoHost`
+- `createBunHost`
+
+## Exported types
+- `BrowserCommand`
+- `CookieEntry`
+- `LocalFileReader`
+- `FormEntry`
+- `FormField`
+- `FormSubmissionRequest`
+- `PagerState`
+- `PagerViewport`
+- `SearchState`
+- `SecurityPolicyOptions`
+- `BrowserSessionOptions`
+- `PageLoader`
+- `PageStreamLoader`
+- `PageRenderer`
+- `ShortcutAction`
+- `NetworkOutcome`
+- `NetworkOutcomeKind`
+- `RenderedLink`
+- `RenderedPage`
+- `FetchPageResult`
+- `FetchPageStreamResult`
+- `FetchPagePayload`
+- `PageRequestOptions`
+- `PageDiagnostics`
+- `RenderInput`
+- `PageSnapshot`
+- `KeyboardKey`
+- `RuntimeHost`
+- `RuntimeName`

@@ -1,41 +1,44 @@
-# Tutorial: First Session
+# First Session
 
-This tutorial validates the default local workflow from build to interactive use.
+This tutorial runs one deterministic parse/render flow and one command-parse flow.
 
-## 1) Build
+## Step 1: Render HTML to terminal lines
 
-```bash
-npm install
-npm run build
+```ts
+import { parse } from "@ismail-elkorchi/html-parser";
+import { renderDocumentToTerminal } from "@ismail-elkorchi/verge-browser";
+
+const tree = parse("<article><h1>Hello</h1><p>World</p></article>");
+const rendered = renderDocumentToTerminal({
+  tree,
+  requestUrl: "https://example.com",
+  finalUrl: "https://example.com",
+  status: 200,
+  statusText: "OK",
+  fetchedAtIso: "2026-01-01T00:00:00.000Z",
+  width: 80
+});
+
+console.log(rendered.lines.length > 0);
 ```
 
-## 2) Open the built-in help page
+Expected output:
+- `true`.
 
-```bash
-node dist/cli.js about:help
+## Step 2: Parse commands
+
+```ts
+import { parseCommand } from "@ismail-elkorchi/verge-browser";
+
+const command = parseCommand("open https://example.com");
+console.log(command.kind);
 ```
 
-Expected outcome:
-- a rendered help page appears in the terminal
-- the command prompt is available (`:`)
+Expected output:
+- Deterministic command kind for the same input string.
 
-## 3) Try the core commands
-
-Run these commands inside the interactive prompt:
-- `view`
-- `links`
-- `diag`
-- `history`
-- `bookmark add tutorial`
-- `bookmark list`
-- `quit`
-
-## 4) Run scripted examples
+## Step 3: Run examples
 
 ```bash
 npm run examples:run
 ```
-
-Expected outcome:
-- command exits zero
-- terminal prints `examples:run ok`

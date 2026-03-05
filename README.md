@@ -1,18 +1,20 @@
 # @ismail-elkorchi/verge-browser
 
-Deterministic terminal browsing utilities and CLI workflows for turning HTML input into auditable, reproducible terminal output.
+Deterministic terminal browsing utilities and CLI helpers for auditable text-first browsing workflows.
+
+No runtime dependencies are added beyond declared package dependencies.
 
 ## When To Use
 
-- You need deterministic terminal rendering for HTML content.
-- You need scriptable command parsing and URL resolution utilities.
-- You need a CLI-oriented browsing flow with reproducible behavior.
+- You need deterministic terminal rendering from HTML input.
+- You need command parsing, URL resolution, and policy-checked fetch helpers.
+- You need reproducible output for automation and audits.
 
 ## When Not To Use
 
-- You need JavaScript execution or a full browser engine.
-- You need pixel-accurate visual rendering.
-- You need unrestricted network protocols or unbounded content ingestion.
+- You need full browser JavaScript execution.
+- You need pixel-accurate rendering.
+- You need unrestricted network protocol access.
 
 ## Install
 
@@ -24,88 +26,94 @@ npm install @ismail-elkorchi/verge-browser @ismail-elkorchi/html-parser
 deno add jsr:@ismail-elkorchi/verge-browser
 ```
 
-## Quickstart
+## Import
+
+```ts
+import { parseCommand, renderDocumentToTerminal } from "@ismail-elkorchi/verge-browser";
+```
+
+```txt
+import { parseCommand, renderDocumentToTerminal } from "jsr:@ismail-elkorchi/verge-browser";
+```
+
+## Copy/Paste Examples
+
+### Example 1: Parse command input
+
+```ts
+import { parseCommand } from "@ismail-elkorchi/verge-browser";
+
+const command = parseCommand("open https://example.com");
+console.log(command.kind);
+```
+
+### Example 2: Resolve URLs safely
+
+```ts
+import { resolveHref, resolveInputUrl } from "@ismail-elkorchi/verge-browser";
+
+const base = resolveInputUrl("example.com");
+console.log(resolveHref("/docs", base));
+```
+
+### Example 3: Render HTML to terminal output
 
 ```ts
 import { parse } from "@ismail-elkorchi/html-parser";
-import {
-  formatHelpText,
-  parseCommand,
-  renderDocumentToTerminal,
-  resolveInputUrl
-} from "@ismail-elkorchi/verge-browser";
+import { renderDocumentToTerminal } from "@ismail-elkorchi/verge-browser";
 
-const resolved = resolveInputUrl("example.com");
-const command = parseCommand("bookmark add release-notes");
-
-const tree = parse("<article><h1>Docs</h1><p>Deterministic output.</p></article>");
+const tree = parse("<h1>Hello</h1>");
 const rendered = renderDocumentToTerminal({
   tree,
-  requestUrl: resolved,
-  finalUrl: resolved,
+  requestUrl: "https://example.com",
+  finalUrl: "https://example.com",
   status: 200,
   statusText: "OK",
   fetchedAtIso: "2026-01-01T00:00:00.000Z",
   width: 80
 });
 
-console.log(command.kind);
-console.log(rendered.lines.slice(0, 4).join("\n"));
-console.log(formatHelpText().includes("open <url>"));
+console.log(rendered.lines.length > 0);
 ```
 
-Runnable examples:
+### Example 4: Policy-checked fetch
+
+```ts
+import { DEFAULT_SECURITY_POLICY, assertAllowedUrl, fetchPage } from "@ismail-elkorchi/verge-browser";
+
+const url = "https://example.com";
+assertAllowedUrl(url, DEFAULT_SECURITY_POLICY);
+const page = await fetchPage(url);
+console.log(page.status);
+```
+
+Run packaged examples:
 
 ```bash
 npm run examples:run
 ```
 
-## Options and Config Reference
+## Compatibility
 
-- [Options and API reference](https://github.com/Ismail-elkorchi/verge-browser/blob/main/docs/reference/options.md)
-- [API overview](https://github.com/Ismail-elkorchi/verge-browser/blob/main/docs/reference/api-overview.md)
+Runtime compatibility matrix:
 
-## Error Handling and Gotchas
+| Runtime | Status |
+| --- | --- |
+| Node.js | Supported (CLI and library) |
+| Deno | Supported (library primitives) |
+| Bun | Supported (library primitives) |
+| Browser (evergreen) | Supported (library primitives) |
 
-- `NetworkFetchError` includes structured diagnostics; log and expose it as an expected network failure class.
-- URL policy checks (`assertAllowedUrl`) intentionally block unsupported protocols.
-- Rendering is deterministic text output, not a visual browser layout pipeline.
-- CLI helpers assume bounded input; set policies before feeding untrusted content.
+## Security and Safety Notes
 
-## Compatibility Matrix
+- URL and protocol checks are mandatory for network workflows.
+- Parsing/rendering is deterministic but not a sanitizer for downstream HTML execution.
+- Handle `NetworkFetchError` as a first-class expected failure mode.
 
-| Runtime | Status | Notes |
-| --- | --- | --- |
-| Node.js | ✅ | CI + smoke coverage |
-| Deno | ✅ | CI + smoke coverage |
-| Bun | ✅ | CI + smoke coverage |
-| Browser | ⚠️ | Library primitives are reusable; CLI entrypoint is Node-first |
+## Docs Map
 
-## Security Notes
-
-Network access is policy-constrained (protocol allowlist, content checks, bounded fetch behavior). HTML parsing is deterministic but does not sanitize untrusted content for downstream rendering contexts. See [SECURITY.md](https://github.com/Ismail-elkorchi/verge-browser/blob/main/SECURITY.md).
-
-## Design Constraints / Non-goals
-
-- Deterministic terminal output is prioritized over full browser fidelity.
-- The package does not execute page JavaScript.
-- The package does not bypass URL and protocol policy controls.
-
-## Documentation Map
-
+- [Docs index](https://github.com/Ismail-elkorchi/verge-browser/blob/main/docs/index.md)
 - [Tutorial](https://github.com/Ismail-elkorchi/verge-browser/blob/main/docs/tutorial/first-session.md)
 - [How-to guides](https://github.com/Ismail-elkorchi/verge-browser/tree/main/docs/how-to)
 - [Reference](https://github.com/Ismail-elkorchi/verge-browser/tree/main/docs/reference)
 - [Explanation](https://github.com/Ismail-elkorchi/verge-browser/tree/main/docs/explanation)
-
-## Release Validation
-
-```bash
-npm run check:fast
-npm run docs:lint:jsr
-npm run docs:test:jsr
-npm run examples:run
-npm pack --dry-run
-```
-
-Release workflow details: [RELEASING.md](https://github.com/Ismail-elkorchi/verge-browser/blob/main/RELEASING.md)
