@@ -12,20 +12,29 @@ export const DEFAULT_SECURITY_POLICY: Required<SecurityPolicyOptions> = Object.f
   maxContentBytes: 2 * 1024 * 1024,
   maxRequestRetries: 1,
   retryDelayMs: 75
-});
+});/**
+ * Verifies public invariants for `assertAllowedProtocol` deterministically.
+ */
+
 
 export function assertAllowedProtocol(urlValue: URL): void {
   if (ALLOWED_PROTOCOLS.has(urlValue.protocol)) {
     return;
   }
   throw new Error(`Blocked unsupported protocol: ${urlValue.protocol}`);
-}
+}/**
+ * Verifies public invariants for `assertAllowedUrl` deterministically.
+ */
+
 
 export function assertAllowedUrl(rawUrl: string): URL {
   const parsed = new URL(rawUrl);
   assertAllowedProtocol(parsed);
   return parsed;
-}
+}/**
+ * Provides deterministic public behavior for `isHtmlLikeContentType`.
+ */
+
 
 export function isHtmlLikeContentType(contentType: string | null): boolean {
   if (!contentType) return true;

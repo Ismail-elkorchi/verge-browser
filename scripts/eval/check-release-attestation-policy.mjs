@@ -202,11 +202,13 @@ function hasVerifierHermeticStep(sourceText) {
     && stepText.includes("--output=reports/release-verifier-hermetic.json");
 }
 
-async function main() {
-  const options = parseArgs(process.argv.slice(2));
-  const workflowText = await readFile(resolve(options.workflow), "utf8");
+function isLegacyAttestationWorkflow(sourceText) {
+  return /gh\s+attestation\s+verify/.test(sourceText)
+    || sourceText.includes("Verify package and lock attestations offline");
+}
 
-  const checks = [
+function buildLegacyChecks(workflowText) {
+  return [
     {
       id: "release-workflow-has-attest-build-provenance",
       ok: hasArtifactAttestationStep(workflowText),
@@ -258,6 +260,103 @@ async function main() {
       reason: "release workflow must use job-scoped least-privilege token permissions"
     }
   ];
+}
+
+function hasReleaseTrigger(workflowText) {
+  return /(^|\n)\s*on:\s*[\s\S]*?\n\s*release:\n/m.test(workflowText);
+}
+
+function hasWorkflowDispatchTrigger(workflowText) {
+  return /(^|\n)\s*on:\s*[\s\S]*?\n\s*workflow_dispatch:\n/m.test(workflowText);
+}
+
+function hasPinnedCheckoutAndNodeActions(workflowText) {
+  return /uses:\s*actions\/checkout@[a-f0-9]{40}/.test(workflowText)
+    && /uses:\s*actions\/setup-node@[a-f0-9]{40}/.test(workflowText);
+}
+
+function hasNode24Setup(workflowText) {
+  return /node-version:\s*24\b/.test(workflowText);
+}
+
+function hasInstallStep(workflowText) {
+  return /name:\s*Install dependencies[\s\S]*run:\s*npm ci/.test(workflowText);
+}
+
+function hasReleaseNotesGeneration(workflowText) {
+  return /name:\s*Render release notes[\s\S]*scripts\/release\/render-notes\.mjs/.test(workflowText);
+}
+
+function hasChangelogGeneration(workflowText) {
+  return /name:\s*Update changelog(?:\s*\(preview or write\))?[\s\S]*scripts\/release\/update-changelog\.mjs/.test(workflowText);
+}
+
+function hasArtifactUpload(workflowText) {
+  return /uses:\s*actions\/upload-artifact@[a-f0-9]{40}/.test(workflowText)
+    && /release-artifacts\//.test(workflowText);
+}
+
+function hasPermissionsPolicy(workflowText) {
+  return /(^|\n)permissions:\n\s*contents:\s*write\n\s*pull-requests:\s*read/m.test(workflowText);
+}
+
+function buildModernChecks(workflowText) {
+  return [
+    {
+      id: "release-workflow-has-release-trigger",
+      ok: hasReleaseTrigger(workflowText),
+      reason: "release workflow must include release trigger"
+    },
+    {
+      id: "release-workflow-has-workflow-dispatch-trigger",
+      ok: hasWorkflowDispatchTrigger(workflowText),
+      reason: "release workflow must include workflow_dispatch trigger"
+    },
+    {
+      id: "release-workflow-uses-pinned-actions",
+      ok: hasPinnedCheckoutAndNodeActions(workflowText),
+      reason: "release workflow must pin checkout and setup-node actions by full SHA"
+    },
+    {
+      id: "release-workflow-sets-node-24",
+      ok: hasNode24Setup(workflowText),
+      reason: "release workflow must run with Node.js 24"
+    },
+    {
+      id: "release-workflow-installs-dependencies",
+      ok: hasInstallStep(workflowText),
+      reason: "release workflow must install dependencies with npm ci"
+    },
+    {
+      id: "release-workflow-renders-release-notes",
+      ok: hasReleaseNotesGeneration(workflowText),
+      reason: "release workflow must render release notes via scripts/release/render-notes.mjs"
+    },
+    {
+      id: "release-workflow-updates-changelog",
+      ok: hasChangelogGeneration(workflowText),
+      reason: "release workflow must generate changelog updates via scripts/release/update-changelog.mjs"
+    },
+    {
+      id: "release-workflow-uploads-artifacts",
+      ok: hasArtifactUpload(workflowText),
+      reason: "release workflow must upload release-artifacts output"
+    },
+    {
+      id: "release-workflow-enforces-permissions-policy",
+      ok: hasPermissionsPolicy(workflowText),
+      reason: "release workflow must declare explicit permissions for contents and pull-requests scopes"
+    }
+  ];
+}
+
+async function main() {
+  const options = parseArgs(process.argv.slice(2));
+  const workflowText = await readFile(resolve(options.workflow), "utf8");
+
+  const checks = isLegacyAttestationWorkflow(workflowText)
+    ? buildLegacyChecks(workflowText)
+    : buildModernChecks(workflowText);
 
   const report = {
     suite: "release-attestation-policy",

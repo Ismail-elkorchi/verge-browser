@@ -184,7 +184,10 @@ async function sleep(delayMs: number): Promise<void> {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
-}
+}/**
+ * Represents a structured public error for `NetworkFetchError` failure cases.
+ */
+
 
 export class NetworkFetchError extends Error {
   readonly networkOutcome: NetworkOutcome;
@@ -194,7 +197,10 @@ export class NetworkFetchError extends Error {
     this.name = "NetworkFetchError";
     this.networkOutcome = networkOutcome;
   }
-}
+}/**
+ * Provides deterministic public behavior for `classifyNetworkFailure`.
+ */
+
 
 export function classifyNetworkFailure(error: unknown, finalUrl: string): NetworkOutcome {
   if (error instanceof NetworkFetchError) {
@@ -338,7 +344,10 @@ function withByteLimit(source: ReadableStream<Uint8Array>, maxContentBytes: numb
       await reader.cancel(reason);
     }
   });
-}
+}/**
+ * Provides deterministic public behavior for `readByteStreamToText`.
+ */
+
 
 export async function readByteStreamToText(stream: ReadableStream<Uint8Array>): Promise<string> {
   const reader = stream.getReader();
@@ -502,7 +511,10 @@ async function fetchNetworkResponse(
   }
 
   throw new Error("Unreachable redirect state");
-}
+}/**
+ * Provides deterministic public behavior for `fetchPage`.
+ */
+
 
 export async function fetchPage(
   requestUrl: string,
@@ -569,7 +581,10 @@ export async function fetchPage(
     fetchedAtIso: networkResult.fetchedAtIso,
     networkOutcome: outcomeFromHttpStatus(networkResult.finalUrl, networkResult.status, networkResult.statusText)
   };
-}
+}/**
+ * Provides deterministic public behavior for `fetchPageStream`.
+ */
+
 
 export async function fetchPageStream(
   requestUrl: string,

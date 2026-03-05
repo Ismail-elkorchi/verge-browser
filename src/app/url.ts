@@ -1,4 +1,7 @@
-import { assertAllowedProtocol } from "./security.js";
+import { assertAllowedProtocol } from "./security.js";/**
+ * Formats or resolves deterministic public output for `resolveInputUrl`.
+ */
+
 
 export function resolveInputUrl(rawInput: string, currentUrl?: string): string {
   const trimmedInput = rawInput.trim();
@@ -29,7 +32,10 @@ export function resolveInputUrl(rawInput: string, currentUrl?: string): string {
   const fallback = new URL(`https://${trimmedInput}`);
   assertAllowedProtocol(fallback);
   return fallback.toString();
-}
+}/**
+ * Formats or resolves deterministic public output for `resolveHref`.
+ */
+
 
 export function resolveHref(href: string, baseUrl: string): string {
   try {

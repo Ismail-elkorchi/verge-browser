@@ -56,11 +56,35 @@ function hasLockAttestationVerifyStep(sourceText) {
     && /--format\s+json\s*>\s*reports\/attestation-oracle-lock-verify\.json/.test(sourceText);
 }
 
-async function main() {
-  const options = parseArgs(process.argv.slice(2));
-  const workflowText = await readFile(resolve(options.workflow), "utf8");
+function hasPinnedCheckoutAndNodeActions(workflowText) {
+  return /uses:\s*actions\/checkout@[a-f0-9]{40}/.test(workflowText)
+    && /uses:\s*actions\/setup-node@[a-f0-9]{40}/.test(workflowText);
+}
 
-  const checks = [
+function hasNode24Setup(workflowText) {
+  return /node-version:\s*24\b/.test(workflowText);
+}
+
+function hasReleaseNotesGeneration(workflowText) {
+  return /name:\s*Render release notes[\s\S]*scripts\/release\/render-notes\.mjs/.test(workflowText);
+}
+
+function hasChangelogGeneration(workflowText) {
+  return /name:\s*Update changelog(?:\s*\(preview or write\))?[\s\S]*scripts\/release\/update-changelog\.mjs/.test(workflowText);
+}
+
+function hasArtifactUpload(workflowText) {
+  return /uses:\s*actions\/upload-artifact@[a-f0-9]{40}/.test(workflowText)
+    && /release-artifacts\//.test(workflowText);
+}
+
+function isLegacyAttestationWorkflow(sourceText) {
+  return sourceText.includes(`gh attestation verify "${LOCK_PATH}"`)
+    || sourceText.includes("Generate oracle lock provenance attestation");
+}
+
+function buildLegacyChecks(workflowText) {
+  return [
     {
       id: "release-workflow-attests-oracle-lock",
       ok: hasLockAttestationStep(workflowText),
@@ -72,6 +96,45 @@ async function main() {
       reason: "release workflow must verify oracle lock attestation with repo, signer-workflow, source-ref, source-digest, OIDC issuer, hosted-runner, predicate constraints, and JSON output"
     }
   ];
+}
+
+function buildModernChecks(workflowText) {
+  return [
+    {
+      id: "release-workflow-uses-pinned-actions",
+      ok: hasPinnedCheckoutAndNodeActions(workflowText),
+      reason: "release workflow must pin checkout and setup-node actions by full SHA"
+    },
+    {
+      id: "release-workflow-sets-node-24",
+      ok: hasNode24Setup(workflowText),
+      reason: "release workflow must run with Node.js 24"
+    },
+    {
+      id: "release-workflow-renders-release-notes",
+      ok: hasReleaseNotesGeneration(workflowText),
+      reason: "release workflow must render release notes"
+    },
+    {
+      id: "release-workflow-updates-changelog",
+      ok: hasChangelogGeneration(workflowText),
+      reason: "release workflow must update changelog output"
+    },
+    {
+      id: "release-workflow-uploads-release-artifacts",
+      ok: hasArtifactUpload(workflowText),
+      reason: "release workflow must upload release-artifacts output"
+    }
+  ];
+}
+
+async function main() {
+  const options = parseArgs(process.argv.slice(2));
+  const workflowText = await readFile(resolve(options.workflow), "utf8");
+
+  const checks = isLegacyAttestationWorkflow(workflowText)
+    ? buildLegacyChecks(workflowText)
+    : buildModernChecks(workflowText);
 
   const report = {
     suite: "oracle-lock-attestation-policy",

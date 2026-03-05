@@ -161,7 +161,10 @@ function diagnosticsFromTree(
     networkOutcome: safeNetworkOutcome,
     triageIds: buildTriageIds(tree, safeNetworkOutcome)
   };
-}
+}/**
+ * Provides deterministic public behavior for `BrowserSession`.
+ */
+
 
 export class BrowserSession {
   private readonly loader: PageLoader;

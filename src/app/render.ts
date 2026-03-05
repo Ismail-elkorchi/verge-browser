@@ -392,7 +392,10 @@ function formatLinkSection(links: readonly RenderedLink[], width: number): strin
     lines.push(...wrapText(entry, width).map((line) => `  ${line}`));
   }
   return lines;
-}
+}/**
+ * Provides deterministic public behavior for `renderDocumentToTerminal`.
+ */
+
 
 export function renderDocumentToTerminal(input: RenderInput): RenderedPage {
   const links: RenderedLink[] = [];

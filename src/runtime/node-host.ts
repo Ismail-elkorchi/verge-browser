@@ -1,6 +1,9 @@
 import { readFile } from "node:fs/promises";
 
-import type { RuntimeHost } from "./host.js";
+import type { RuntimeHost } from "./host.js";/**
+ * Computes deterministic public output for `createNodeHost`.
+ */
+
 
 export function createNodeHost(): RuntimeHost {
   return {

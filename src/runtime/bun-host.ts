@@ -23,7 +23,10 @@ function resolveBunApi(): BunApi | null {
   return {
     file: file as (path: string) => BunFileApi
   };
-}
+}/**
+ * Computes deterministic public output for `createBunHost`.
+ */
+
 
 export function createBunHost(): RuntimeHost {
   return {

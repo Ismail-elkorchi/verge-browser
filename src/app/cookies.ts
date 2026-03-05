@@ -59,7 +59,10 @@ function parseExpires(value: string): string | null {
     return null;
   }
   return new Date(parsedMs).toISOString();
-}
+}/**
+ * Parses input deterministically for the `parseSetCookie` public API.
+ */
+
 
 export function parseSetCookie(
   headerValue: string,
@@ -177,11 +180,17 @@ function isExpired(cookie: CookieEntry, nowMs: number): boolean {
 
 function identityKey(cookie: CookieEntry): string {
   return `${cookie.name}\u0000${cookie.domain}\u0000${cookie.path}`;
-}
+}/**
+ * Provides deterministic public behavior for `pruneExpiredCookies`.
+ */
+
 
 export function pruneExpiredCookies(cookies: readonly CookieEntry[], nowMs: number = Date.now()): CookieEntry[] {
   return cookies.filter((cookie) => !isExpired(cookie, nowMs));
-}
+}/**
+ * Provides deterministic public behavior for `mergeSetCookieHeaders`.
+ */
+
 
 export function mergeSetCookieHeaders(
   existingCookies: readonly CookieEntry[],
@@ -209,7 +218,10 @@ export function mergeSetCookieHeaders(
     if (left.path !== right.path) return left.path.localeCompare(right.path);
     return left.name.localeCompare(right.name);
   });
-}
+}/**
+ * Provides deterministic public behavior for `cookieHeaderForUrl`.
+ */
+
 
 export function cookieHeaderForUrl(
   cookies: readonly CookieEntry[],

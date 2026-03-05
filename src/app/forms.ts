@@ -65,7 +65,10 @@ function normalizeMethod(value: string | null): string {
   if (!value) return "get";
   const normalized = value.trim().toLowerCase();
   return normalized.length > 0 ? normalized : "get";
-}
+}/**
+ * Extracts deterministic public data for `extractForms`.
+ */
+
 
 export function extractForms(tree: DocumentTree, baseUrl: string): readonly FormEntry[] {
   const forms: FormEntry[] = [];
@@ -123,7 +126,10 @@ export function extractForms(tree: DocumentTree, baseUrl: string): readonly Form
     index += 1;
   }
   return forms;
-}
+}/**
+ * Computes deterministic public output for `buildGetSubmissionUrl`.
+ */
+
 
 export function buildGetSubmissionUrl(form: FormEntry, overrides: Record<string, string> = {}): string {
   if (form.method !== "get") {
@@ -143,7 +149,10 @@ export function buildGetSubmissionUrl(form: FormEntry, overrides: Record<string,
     url.searchParams.set(name, value);
   }
   return url.toString();
-}
+}/**
+ * Computes deterministic public output for `buildFormSubmissionRequest`.
+ */
+
 
 export function buildFormSubmissionRequest(
   form: FormEntry,

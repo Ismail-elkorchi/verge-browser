@@ -65,7 +65,10 @@ function parseOverrides(tokens: readonly string[]): Readonly<Record<string, stri
     overrides[key] = value;
   }
   return overrides;
-}
+}/**
+ * Parses input deterministically for the `parseCommand` public API.
+ */
+
 
 export function parseCommand(rawInput: string): BrowserCommand {
   const trimmedInput = rawInput.trim();
@@ -301,7 +304,10 @@ export function parseCommand(rawInput: string): BrowserCommand {
   }
 
   return { kind: "go", target: trimmedInput };
-}
+}/**
+ * Formats or resolves deterministic public output for `formatHelpText`.
+ */
+
 
 export function formatHelpText(): string {
   return [
