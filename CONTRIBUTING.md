@@ -36,3 +36,7 @@ Use Conventional Commits:
 - `fix(scope): summary`
 - `chore(scope): summary`
 - `docs(scope): summary`
+
+## Maintainer docs
+
+- [Maintainer index](./docs/maintainers/index.md)

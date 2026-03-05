@@ -110,10 +110,8 @@ Runtime compatibility matrix:
 - Parsing/rendering is deterministic but not a sanitizer for downstream HTML execution.
 - Handle `NetworkFetchError` as a first-class expected failure mode.
 
-## Docs Map
+## Documentation
 
-- [Docs index](https://github.com/Ismail-elkorchi/verge-browser/blob/main/docs/index.md)
-- [Tutorial](https://github.com/Ismail-elkorchi/verge-browser/blob/main/docs/tutorial/first-session.md)
-- [How-to guides](https://github.com/Ismail-elkorchi/verge-browser/tree/main/docs/how-to)
-- [Reference](https://github.com/Ismail-elkorchi/verge-browser/tree/main/docs/reference)
-- [Explanation](https://github.com/Ismail-elkorchi/verge-browser/tree/main/docs/explanation)
+- [Docs index](./docs/index.md)
+- [First session tutorial](./docs/tutorial/first-session.md)
+- [Options reference](./docs/reference/options.md)

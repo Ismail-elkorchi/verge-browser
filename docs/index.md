@@ -3,13 +3,13 @@
 `@ismail-elkorchi/verge-browser` provides deterministic terminal browsing primitives and a Node-first CLI runtime.
 
 ## Tutorial
-- [First session](./tutorial/first-session.md)
+- [First session tutorial](./tutorial/first-session.md)
 
 ## How-to
-- [Render HTML to terminal output](./how-to/render-html-to-terminal.md)
-- [Parse and run browser commands](./how-to/parse-browser-commands.md)
-- [Fetch pages with security policy controls](./how-to/fetch-pages-safely.md)
-- [Work with forms and cookies](./how-to/forms-and-cookies.md)
+- [First session](./how-to/first-session.md)
+- [Extract HTML and CSS snapshot](./how-to/extract-html-css-snapshot.md)
+- [Run a minimal audit](./how-to/run-minimal-audit.md)
+- [Fetch pages safely](./how-to/fetch-pages-safely.md)
 
 ## Reference
 - [API overview](./reference/api-overview.md)

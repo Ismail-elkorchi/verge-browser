@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 function parseArgs(argv) {
   const options = {
     config: "scripts/mutation/pilot-config.json",
-    out: "docs/reference/mutation-pilot-report.json",
+    out: "docs/maintainers/mutation-pilot-report.json",
   };
 
   for (let index = 0; index < argv.length; index += 1) {
