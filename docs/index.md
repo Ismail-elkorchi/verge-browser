@@ -1,6 +1,6 @@
 # Verge Browser Docs
 
-`@ismail-elkorchi/verge-browser` provides deterministic terminal browsing primitives and a Node-first CLI runtime.
+`@ismail-elkorchi/verge-browser` provides terminal browsing primitives with safe fetch helpers, HTML snapshots, and auditable text rendering.
 
 ## Tutorial
 - [First session tutorial](./tutorial/first-session.md)

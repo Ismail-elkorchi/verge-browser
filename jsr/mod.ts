@@ -1,5 +1,5 @@
 /**
- * Deno/JSR utility entrypoint for URL safety checks and deterministic URL resolution.
+ * Deno/JSR utility entrypoint for the safe fetch policy and URL-resolution pieces of verge-browser's terminal browsing surface.
  *
  * Quickstart:
  * @example

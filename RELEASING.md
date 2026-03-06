@@ -27,4 +27,4 @@ node scripts/release/render-notes.mjs --dry-run
 node scripts/release/update-changelog.mjs --dry-run
 ```
 
-Reference details: `docs/reference/releasing.md`.
+Reference details: `docs/maintainers/releasing.md`.

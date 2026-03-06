@@ -1,6 +1,6 @@
 # @ismail-elkorchi/verge-browser
 
-Text-first terminal browsing utilities and HTML snapshot/audit helpers for deterministic browsing workflows.
+Terminal browsing primitives with safe fetch helpers, HTML snapshots, and auditable text rendering.
 
 No runtime dependencies are added beyond declared package dependencies.
 
@@ -10,7 +10,7 @@ No runtime dependencies are added beyond declared package dependencies.
 - You need command parsing, URL resolution, and policy-checked fetch helpers.
 - You need reproducible output for automation and audits.
 
-## When Not To Use
+## What This Is Not
 
 - You need full browser JavaScript execution.
 - You need pixel-accurate rendering.
@@ -33,10 +33,12 @@ import { parseCommand, renderDocumentToTerminal } from "@ismail-elkorchi/verge-b
 ```
 
 ```txt
-import { parseCommand, renderDocumentToTerminal } from "jsr:@ismail-elkorchi/verge-browser";
+import { DEFAULT_SECURITY_POLICY, assertAllowedUrl, resolveHref, resolveInputUrl } from "jsr:@ismail-elkorchi/verge-browser";
 ```
 
 Low-level parsing helpers such as `parseHtml()` are exported from `@ismail-elkorchi/verge-browser`, so npm consumers do not need a separate `@ismail-elkorchi/html-parser` install for normal library usage.
+
+The published JSR package currently exposes the safe URL and fetch-policy utility surface. Use the npm package for the full terminal browser and CLI-oriented API.
 
 ## Copy/Paste Examples
 
@@ -115,6 +117,6 @@ The Node.js package surface is verified against Node 20, 22, and 24.
 
 ## Documentation
 
-- [Docs index](./docs/index.md)
-- [First session tutorial](./docs/tutorial/first-session.md)
-- [Options reference](./docs/reference/options.md)
+- [Docs index](https://github.com/Ismail-elkorchi/verge-browser/blob/main/docs/index.md)
+- [First session tutorial](https://github.com/Ismail-elkorchi/verge-browser/blob/main/docs/tutorial/first-session.md)
+- [Options reference](https://github.com/Ismail-elkorchi/verge-browser/blob/main/docs/reference/options.md)

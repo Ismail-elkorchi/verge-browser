@@ -1,7 +1,7 @@
 {
   "name": "@ismail-elkorchi/verge-browser",
   "version": "0.1.1",
-  "description": "Text-first terminal browser and HTML snapshot/audit toolkit for Node, Deno, Bun, and browser-compatible workflows.",
+  "description": "Terminal browsing primitives with safe fetch helpers, HTML snapshots, and auditable text rendering.",
   "license": "MIT",
   "repository": {
     "type": "git",
