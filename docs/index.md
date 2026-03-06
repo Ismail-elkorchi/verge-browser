@@ -10,6 +10,7 @@
 - [Extract HTML and CSS snapshot](./how-to/extract-html-css-snapshot.md)
 - [Run a minimal audit](./how-to/run-minimal-audit.md)
 - [Fetch pages safely](./how-to/fetch-pages-safely.md)
+- [Handle network failures](./how-to/handle-network-failures.md)
 
 ## Reference
 - [API overview](./reference/api-overview.md)

@@ -1,7 +1,13 @@
 # Run A Minimal Audit
 
-Goal: produce a small deterministic audit record from one page snapshot.
+## Goal
+Produce a small deterministic audit record from a single page snapshot.
 
+## Prerequisites
+- `@ismail-elkorchi/verge-browser` installed
+- A loader or saved HTML fixture
+
+## Copy/paste
 ```ts
 import { BrowserSession } from "@ismail-elkorchi/verge-browser";
 
@@ -42,8 +48,21 @@ console.log(audit.linkCount);
 console.log(audit.triageIds.length > 0);
 ```
 
-Expected output:
-- `200`
-- `0`
-- `1`
-- `true`
+## Expected output
+```txt
+200
+0
+1
+true
+```
+
+## Common failure modes
+- The loader returns non-HTML content so the rendered page and diagnostics are
+  not comparable to normal page audits.
+- Audit consumers treat `triageIds` as stable policy verdicts instead of
+  deterministic hints for review.
+- Link counts are read before resolving relative URLs against the final page.
+
+## Related reference
+- [API overview](../reference/api-overview.md)
+- [Error model](../reference/error-model.md)

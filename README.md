@@ -1,6 +1,6 @@
 # @ismail-elkorchi/verge-browser
 
-Deterministic terminal browsing utilities and CLI helpers for auditable text-first browsing workflows.
+Text-first terminal browsing utilities and HTML snapshot/audit helpers for deterministic browsing workflows.
 
 No runtime dependencies are added beyond declared package dependencies.
 
@@ -80,10 +80,10 @@ console.log(rendered.lines.length > 0);
 ### Example 4: Policy-checked fetch
 
 ```ts
-import { DEFAULT_SECURITY_POLICY, assertAllowedUrl, fetchPage } from "@ismail-elkorchi/verge-browser";
+import { assertAllowedUrl, fetchPage } from "@ismail-elkorchi/verge-browser";
 
 const url = "https://example.com";
-assertAllowedUrl(url, DEFAULT_SECURITY_POLICY);
+assertAllowedUrl(url);
 const page = await fetchPage(url);
 console.log(page.status);
 ```
@@ -104,6 +104,8 @@ Runtime compatibility matrix:
 | Deno | Supported (library primitives) |
 | Bun | Supported (library primitives) |
 | Browser (evergreen) | Supported (library primitives) |
+
+The Node.js package surface is verified against Node 20, 22, and 24.
 
 ## Security and Safety Notes
 

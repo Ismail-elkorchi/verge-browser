@@ -1,7 +1,7 @@
 {
   "name": "@ismail-elkorchi/verge-browser",
   "version": "0.1.1",
-  "description": "Deterministic terminal web browser powered by @ismail-elkorchi/html-parser.",
+  "description": "Text-first terminal browser and HTML snapshot/audit toolkit for Node, Deno, Bun, and browser-compatible workflows.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -13,8 +13,8 @@
   "type": "module",
   "packageManager": "npm@11.10.0",
   "engines": {
-    "node": ">=24.0.0",
-    "npm": ">=11.0.0"
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
   },
   "bin": {
     "verge": "./dist/cli.js"
@@ -35,7 +35,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "check": "npm run lint && npm run typecheck && npm test && npm run smoke:cli && npm run eval:ci",
-    "check:fast": "npm run lint && npm run typecheck && npm test && npm run docs:required && npm run examples:run",
+    "check:fast": "npm run lint && npm run typecheck && npm test && npm run docs:required && npm run docs:quality:jsr && npm run examples:run",
     "ci": "npm run check",
     "ci:reliability:claim": "node scripts/ci/sample-node-reliability.mjs --mode=rolling --window-count=3 --events=push,pull_request --event-sample-sizes=push:5,pull_request:9 --confidence=0.95 --require-non-overlap",
     "ci:reliability:sample": "node scripts/ci/sample-node-reliability.mjs --mode=rolling --window-count=3",
@@ -90,10 +90,11 @@
     "smoke:deno": "npm run build && deno run --allow-read --allow-write=reports --allow-env --node-modules-dir=manual scripts/smoke/runtime-smoke.mjs --runtime=deno --report=reports/smoke-deno.json",
     "smoke:node": "npm run build && node scripts/smoke/runtime-smoke.mjs --runtime=node --report=reports/smoke-node.json",
     "start": "npm run build && node dist/cli.js",
-    "test": "npm run build && node --test test/control/**/*.test.js",
+    "test": "npm run build && node scripts/test/run-node-tests.mjs test/control",
     "test:bench": "npm run build && node scripts/bench/run-bench.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.build.json",
     "docs:required": "node scripts/quality/doc-required.mjs",
+    "docs:quality:jsr": "node scripts/quality/doc-jsr-quality.mjs",
     "release:notes:dry-run": "node scripts/release/render-notes.mjs --dry-run",
     "changelog:update:dry-run": "node scripts/release/update-changelog.mjs --dry-run"
   },

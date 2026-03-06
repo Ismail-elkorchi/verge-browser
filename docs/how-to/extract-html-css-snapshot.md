@@ -1,7 +1,14 @@
-# Extract HTML And CSS Snapshot
+# Extract HTML And Inline CSS Snapshot
 
-Goal: capture HTML and inline CSS from a rendered snapshot.
+## Goal
+Capture the fetched HTML snapshot and any inline `<style>` blocks preserved in
+that HTML.
 
+## Prerequisites
+- `@ismail-elkorchi/verge-browser` installed
+- A loader or fixture HTML that includes inline styles
+
+## Copy/paste
 ```ts
 import { BrowserSession } from "@ismail-elkorchi/verge-browser";
 
@@ -36,7 +43,22 @@ console.log(cssBlocks.length);
 console.log(cssBlocks[0]);
 ```
 
-Expected output:
-- `true`
-- `1`
-- `.card{color:#0057b8}`
+## Expected output
+```txt
+true
+1
+.card{color:#0057b8}
+```
+
+## Common failure modes
+- `sourceHtml` is missing because the loader returned a non-HTML content type.
+- External stylesheets are expected even though this recipe only extracts
+  inline `<style>` blocks from `sourceHtml`.
+- Snapshot auditing is performed before confirming the fetch result was `ok`.
+- Style attributes on elements are expected to appear in `cssBlocks`, even
+  though they remain embedded in the HTML snapshot instead.
+
+## Related reference
+- [API overview](../reference/api-overview.md)
+- [Options](../reference/options.md)
+- [Error model](../reference/error-model.md)
