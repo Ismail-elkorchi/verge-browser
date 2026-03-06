@@ -17,7 +17,7 @@ JSR exports:
 
 Node/npm type surface is shipped from `dist/mod.d.ts` (source module: `src/mod.ts`).
 
-Node/npm includes the full browser runtime stack:
+Node/npm includes the full browser runtime stack and the packaged `verge` CLI binary:
 - command parsing and formatting
 - cookie parsing/merging
 - fetch + stream fetch adapters

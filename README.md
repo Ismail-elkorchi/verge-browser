@@ -18,13 +18,52 @@ No runtime dependencies are added beyond declared package dependencies.
 
 ## Install
 
+Node.js global CLI:
+
+```bash
+npm install --global @ismail-elkorchi/verge-browser
+```
+
+Open the built-in help screen or browse a page:
+
+```bash
+verge about:help
+verge https://example.com
+```
+
+Node.js library usage:
+
 ```bash
 npm install @ismail-elkorchi/verge-browser
 ```
 
+JSR/Deno library usage:
+
 ```bash
 deno add jsr:@ismail-elkorchi/verge-browser
 ```
+
+The documented CLI distribution is the npm `verge` binary on Node.js. The JSR/Deno surface and Bun support in this package are library primitives, not a separately published global `verge` command.
+
+## CLI Quickstart
+
+Use the Node.js CLI when you want an interactive terminal session:
+
+```bash
+verge https://example.com
+```
+
+Inside the session:
+
+```txt
+:links
+:diag
+q
+```
+
+`verge` opens the first positional target immediately. If no target is provided, the CLI reopens the latest history URL when one exists, otherwise it falls back to `about:help`.
+
+`verge <url> --once` is an automation flag that loads the initial target and exits without entering the interactive browsing loop. It is not the right mode when you want terminal output to stay on screen for manual browsing.
 
 ## Import
 
@@ -119,4 +158,4 @@ The Node.js package surface is verified against Node 20, 22, and 24.
 
 - [Docs index](https://github.com/Ismail-elkorchi/verge-browser/blob/main/docs/index.md)
 - [First session tutorial](https://github.com/Ismail-elkorchi/verge-browser/blob/main/docs/tutorial/first-session.md)
-- [Options reference](https://github.com/Ismail-elkorchi/verge-browser/blob/main/docs/reference/options.md)
+- [CLI reference](https://github.com/Ismail-elkorchi/verge-browser/blob/main/docs/reference/cli.md)
