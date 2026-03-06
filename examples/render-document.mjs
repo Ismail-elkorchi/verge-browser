@@ -1,12 +1,10 @@
 /**
  * What it does: renders parsed HTML into deterministic terminal lines.
  * Expected output: prints "render-document ok" and asserts heading/body text visibility.
- * Constraints: requires `@ismail-elkorchi/html-parser` plus built verge-browser output.
+ * Constraints: requires built verge-browser output only; no separate html-parser install is needed.
  * Run: npm run build && node examples/render-document.mjs
  */
-import { parse } from "@ismail-elkorchi/html-parser";
-
-import { renderDocumentToTerminal } from "../dist/mod.js";
+import { parseHtml, renderDocumentToTerminal } from "../dist/mod.js";
 
 function assert(condition, message) {
   if (!condition) {
@@ -15,17 +13,16 @@ function assert(condition, message) {
 }
 
 export function runRenderDocument() {
-  const tree = parse("<article><h1>Docs</h1><p>Deterministic output.</p></article>");
+  const tree = parseHtml("<article><h1>Docs</h1><p>Deterministic output.</p></article>");
   const rendered = renderDocumentToTerminal({
     tree,
-    requestUrl: "https://example.com",
-    finalUrl: "https://example.com",
+    requestUrl: "https://example.test",
+    finalUrl: "https://example.test",
     status: 200,
     statusText: "OK",
     fetchedAtIso: "2026-01-01T00:00:00.000Z",
     width: 80
   });
-
   const combined = rendered.lines.join("\n");
   assert(combined.includes("Docs"), "render output should include heading text");
   assert(combined.includes("Deterministic output"), "render output should include paragraph text");

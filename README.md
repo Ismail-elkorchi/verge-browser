@@ -19,7 +19,7 @@ No runtime dependencies are added beyond declared package dependencies.
 ## Install
 
 ```bash
-npm install @ismail-elkorchi/verge-browser @ismail-elkorchi/html-parser
+npm install @ismail-elkorchi/verge-browser
 ```
 
 ```bash
@@ -35,6 +35,8 @@ import { parseCommand, renderDocumentToTerminal } from "@ismail-elkorchi/verge-b
 ```txt
 import { parseCommand, renderDocumentToTerminal } from "jsr:@ismail-elkorchi/verge-browser";
 ```
+
+Low-level parsing helpers such as `parseHtml()` are exported from `@ismail-elkorchi/verge-browser`, so npm consumers do not need a separate `@ismail-elkorchi/html-parser` install for normal library usage.
 
 ## Copy/Paste Examples
 
@@ -59,10 +61,9 @@ console.log(resolveHref("/docs", base));
 ### Example 3: Render HTML to terminal output
 
 ```ts
-import { parse } from "@ismail-elkorchi/html-parser";
-import { renderDocumentToTerminal } from "@ismail-elkorchi/verge-browser";
+import { parseHtml, renderDocumentToTerminal } from "@ismail-elkorchi/verge-browser";
 
-const tree = parse("<h1>Hello</h1>");
+const tree = parseHtml("<h1>Hello</h1>");
 const rendered = renderDocumentToTerminal({
   tree,
   requestUrl: "https://example.com",

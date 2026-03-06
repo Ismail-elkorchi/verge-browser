@@ -3,10 +3,9 @@
 Goal: convert parsed HTML into deterministic terminal lines.
 
 ```ts
-import { parse } from "@ismail-elkorchi/html-parser";
-import { renderDocumentToTerminal } from "@ismail-elkorchi/verge-browser";
+import { parseHtml, renderDocumentToTerminal } from "@ismail-elkorchi/verge-browser";
 
-const tree = parse("<main><h1>Release</h1><p>Stable output.</p></main>");
+const tree = parseHtml("<main><h1>Release</h1><p>Stable output.</p></main>");
 
 const rendered = renderDocumentToTerminal({
   tree,
