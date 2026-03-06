@@ -5,10 +5,9 @@ This tutorial runs one deterministic parse/render flow and one command-parse flo
 ## Step 1: Render HTML to terminal lines
 
 ```ts
-import { parse } from "@ismail-elkorchi/html-parser";
-import { renderDocumentToTerminal } from "@ismail-elkorchi/verge-browser";
+import { parseHtml, renderDocumentToTerminal } from "@ismail-elkorchi/verge-browser";
 
-const tree = parse("<article><h1>Hello</h1><p>World</p></article>");
+const tree = parseHtml("<article><h1>Hello</h1><p>World</p></article>");
 const rendered = renderDocumentToTerminal({
   tree,
   requestUrl: "https://example.com",

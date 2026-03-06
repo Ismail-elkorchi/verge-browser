@@ -3,10 +3,9 @@
 Goal: extract forms and build deterministic cookie headers.
 
 ```ts
-import { cookieHeaderForUrl, extractForms, parseSetCookie } from "@ismail-elkorchi/verge-browser";
-import { parse } from "@ismail-elkorchi/html-parser";
+import { cookieHeaderForUrl, extractForms, parseHtml, parseSetCookie } from "@ismail-elkorchi/verge-browser";
 
-const tree = parse("<form action='/submit'><input name='q'/></form>");
+const tree = parseHtml("<form action='/submit'><input name='q'/></form>");
 const forms = extractForms(tree, "https://example.com");
 
 const cookie = parseSetCookie("sid=abc; Path=/; HttpOnly", "https://example.com");

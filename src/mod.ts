@@ -30,6 +30,7 @@ export {
   type PagerState,
   type PagerViewport
 } from "./app/pager.js";
+export { parseHtml } from "./app/parse-html.js";
 export { renderDocumentToTerminal } from "./app/render.js";
 export { createSearchState, hasSearchMatches, activeSearchLineIndex, moveSearchMatch, type SearchState } from "./app/search.js";
 export { DEFAULT_SECURITY_POLICY, assertAllowedProtocol, assertAllowedUrl, isHtmlLikeContentType, type SecurityPolicyOptions } from "./app/security.js";
