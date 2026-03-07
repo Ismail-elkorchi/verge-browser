@@ -8,12 +8,19 @@
 Run before opening a pull request:
 
 ```bash
-npm run ci
+npm run check:fast
+```
+
+Generate the static JSR docs site locally when you change public docblocks:
+
+```bash
+npm run docs:html:jsr
 ```
 
 For release candidate checks:
 
 ```bash
+npm run ci
 npm run release:check
 ```
 

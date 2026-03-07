@@ -9,7 +9,7 @@ const REQUIRED_SYMBOLS = [
   "resolveHref"
 ];
 
-const docJson = JSON.parse(execFileSync("deno", ["doc", "--json", "--sloppy-imports", ENTRYPOINT], {
+const docJson = JSON.parse(execFileSync("deno", ["doc", "--json", "--no-lock", "--sloppy-imports", ENTRYPOINT], {
   encoding: "utf8",
   maxBuffer: 10 * 1024 * 1024
 }));
