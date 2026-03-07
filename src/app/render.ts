@@ -542,11 +542,39 @@ function sortActionables(actionables: readonly RenderedActionable[]): readonly R
     }
     return left.index - right.index;
   });
-}/**
- * Provides deterministic public behavior for `renderDocumentToTerminal`.
+}
+
+/**
+ * Renders a parsed HTML document into deterministic terminal output.
+ *
+ * For a given parsed tree, terminal width, and fetch metadata, the renderer
+ * produces the same visible text lines and the same ordered link/form actions.
+ * It does not execute page JavaScript and does not attempt pixel-accurate
+ * browser layout.
+ *
+ * @param input Parsed document, fetch metadata, and target terminal width.
+ * @returns Rendered terminal page with visible lines, extracted links, and
+ * direct link/form actions in visual order.
+ *
+ * @example Usage
+ * ```ts
+ * import { parseHtml, renderDocumentToTerminal } from "@ismail-elkorchi/verge-browser";
+ *
+ * const tree = parseHtml("<h1>Hello</h1><a href=\"/docs\">Docs</a>");
+ * const page = renderDocumentToTerminal({
+ *   tree,
+ *   requestUrl: "https://example.com",
+ *   finalUrl: "https://example.com",
+ *   status: 200,
+ *   statusText: "OK",
+ *   fetchedAtIso: "2026-01-01T00:00:00.000Z",
+ *   width: 80
+ * });
+ *
+ * console.log(page.title);
+ * console.log(page.actionables[0]?.kind);
+ * ```
  */
-
-
 export function renderDocumentToTerminal(input: RenderInput): RenderedPage {
   const links: RenderedLink[] = [];
   const context: RenderContext = {

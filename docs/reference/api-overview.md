@@ -1,6 +1,15 @@
 # API Overview
 
-## JSR Surface
+This package publishes two documented entrypoints with different scope.
+
+## Entrypoints
+
+| Entrypoint | Intended use | Notes |
+| --- | --- | --- |
+| `@ismail-elkorchi/verge-browser` | Full npm/Node library and packaged CLI | Includes the interactive `verge` binary and the full browser/session runtime surface |
+| `jsr:@ismail-elkorchi/verge-browser` | Utility-only Deno/JSR imports | Exposes safe URL and fetch-policy helpers, not the interactive CLI |
+
+## JSR surface
 
 JSR exports are defined by [`jsr/mod.ts`](../../jsr/mod.ts).
 
@@ -13,7 +22,7 @@ JSR exports:
 - `resolveHref(href, baseUrl)`
 - `SecurityPolicyOptions` (type)
 
-## Node/npm Surface
+## Node/npm surface
 
 Node/npm type surface is shipped from `dist/mod.d.ts` (source module: `src/mod.ts`).
 
@@ -25,11 +34,15 @@ Node/npm includes the full browser runtime stack and the packaged `verge` CLI bi
 - runtime hosts (Node/Deno/Bun)
 - exported runtime and diagnostics types
 
-## JSR Surface vs Node Surface
+## Behavioral boundary
 
-- JSR intentionally exposes a small URL/security utility surface for permission-light Deno usage.
+- JSR intentionally exposes a small URL/security utility surface for
+  permission-light usage.
 - Node/npm exposes the complete interactive/browser runtime API.
-- Shared concepts (URL resolution and protocol safety) are behaviorally aligned.
+- Shared concepts such as URL resolution and protocol safety are behaviorally
+  aligned across both entrypoints.
+- CLI-specific screens, command help, browser sessions, and terminal adapters
+  are npm/Node concerns, not part of the published JSR API.
 
 ## Related
 - [Options](./options.md)

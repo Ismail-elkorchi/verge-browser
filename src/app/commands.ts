@@ -1,3 +1,10 @@
+/**
+ * Structured command result returned by {@link parseCommand}.
+ *
+ * The union models both recognized commands and user-facing parse failures. The
+ * parser returns `{ kind: "invalid" }` for unsupported or incomplete input
+ * instead of throwing.
+ */
 export type BrowserCommand =
   | { readonly kind: "help" }
   | { readonly kind: "quit" }
@@ -71,11 +78,26 @@ function parseOverrides(tokens: readonly string[]): Readonly<Record<string, stri
     overrides[key] = value;
   }
   return overrides;
-}/**
- * Parses input deterministically for the `parseCommand` public API.
+}
+
+/**
+ * Parses action-palette input into a structured {@link BrowserCommand}.
+ *
+ * The grammar is whitespace-tolerant and stable for the documented verbs. When
+ * input is unsupported or incomplete, the function returns an `invalid`
+ * command with a reason instead of throwing.
+ *
+ * @param rawInput User-entered command text.
+ * @returns Structured command object for the recognized grammar, or an
+ * `invalid` command with a human-readable reason.
+ *
+ * @example Basic commands
+ * ```ts
+ * console.log(parseCommand("bookmark add docs").kind);
+ * console.log(parseCommand("form submit 2 name=alice").kind);
+ * console.log(parseCommand("bookmark open nope").kind);
+ * ```
  */
-
-
 export function parseCommand(rawInput: string): BrowserCommand {
   const trimmedInput = rawInput.trim();
   if (trimmedInput.length === 0) {
@@ -335,11 +357,24 @@ export function parseCommand(rawInput: string): BrowserCommand {
   }
 
   return { kind: "go", target: trimmedInput };
-}/**
- * Formats or resolves deterministic public output for `formatHelpText`.
+}
+
+/**
+ * Returns the built-in help text for the redesigned CLI shell.
+ *
+ * Keep this text aligned with the supported browse keys, action-palette
+ * grammar, and CLI flags. Tests and smoke coverage treat it as user-facing
+ * reference output.
+ *
+ * @returns Multi-line help text covering the first browse loop, browse keys,
+ * action examples, and CLI flags.
+ *
+ * @example Usage
+ * ```ts
+ * const help = formatHelpText();
+ * console.log(help.includes("First browse loop:"));
+ * ```
  */
-
-
 export function formatHelpText(): string {
   return [
     "First browse loop:",

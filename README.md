@@ -2,8 +2,6 @@
 
 Terminal browsing primitives with safe fetch helpers, HTML snapshots, and auditable text rendering.
 
-No runtime dependencies are added beyond declared package dependencies.
-
 ## When To Use
 
 - You need deterministic terminal rendering from HTML input.
@@ -15,6 +13,14 @@ No runtime dependencies are added beyond declared package dependencies.
 - You need full browser JavaScript execution.
 - You need pixel-accurate rendering.
 - You need unrestricted network protocol access.
+
+## Behavioral Boundaries
+
+- The interactive `verge` CLI is supported from the npm package on Node.js.
+- The published JSR package is utility-only. It does not publish a global `verge` command.
+- The renderer produces deterministic text output for the same parsed input and terminal width.
+- Line wrapping and link/control line numbers can change when terminal width changes.
+- Pages that depend on client-side JavaScript or anti-bot challenges can render partially or fail open with explicit diagnostics.
 
 ## Install
 
@@ -43,7 +49,9 @@ JSR/Deno library usage:
 deno add jsr:@ismail-elkorchi/verge-browser
 ```
 
-The documented CLI distribution is the npm `verge` binary on Node.js. The JSR/Deno surface and Bun support in this package are library primitives, not a separately published global `verge` command.
+The documented CLI distribution is the npm `verge` binary on Node.js. The
+JSR/Deno surface and Bun support in this package are library primitives, not a
+separately published global `verge` command.
 
 ## CLI Quickstart
 
@@ -67,7 +75,9 @@ q          quit
 
 `verge` opens the first positional target immediately. If no target is provided, the CLI reopens the latest history URL when one exists, otherwise it falls back to `about:help`.
 
-`verge <url> --once` is an automation flag that loads the initial target and exits without entering the interactive browsing loop. It is not the right mode when you want terminal output to stay on screen for manual browsing.
+`verge <url> --once` is an automation flag that loads the initial target and
+exits without entering the interactive browsing loop. It is not the right mode
+when you want terminal output to stay on screen for manual browsing.
 
 Use `:` when you want the action palette instead of direct browse keys. Actions such as `documents`, `history`, `bookmark add`, `save text <path>`, `save csv <path>`, `download <path>`, and `open-external` all run from that palette.
 
@@ -79,7 +89,7 @@ Use `--screen-reader` when you want the screen-reader-friendly chrome profile.
 import { parseCommand, renderDocumentToTerminal } from "@ismail-elkorchi/verge-browser";
 ```
 
-```txt
+```ts
 import { DEFAULT_SECURITY_POLICY, assertAllowedUrl, resolveHref, resolveInputUrl } from "jsr:@ismail-elkorchi/verge-browser";
 ```
 
@@ -161,6 +171,7 @@ The Node.js package surface is verified against Node 20, 22, and 24.
 - URL and protocol checks are mandatory for network workflows.
 - Parsing/rendering is deterministic but not a sanitizer for downstream HTML execution.
 - Handle `NetworkFetchError` as a first-class expected failure mode.
+- Expect remote output to reflect the package's allow-list, retry policy, and terminal width rather than browser-engine layout.
 
 ## Documentation
 

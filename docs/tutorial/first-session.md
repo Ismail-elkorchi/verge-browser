@@ -34,6 +34,8 @@ Expected output shape:
 - A page title line such as `Example Domain (https://example.com/)`.
 - Deterministic visible-text lines rendered for the current terminal width.
 - A status line confirming the resolved URL and request method.
+- If you resize the terminal, line wrapping can change even though the browsing
+  model stays the same.
 
 ## Step 4: Use the first browse loop that matters
 
@@ -61,3 +63,5 @@ Expected result:
 - The supported global CLI distribution is the npm `verge` binary on Node.js.
 - The published JSR package is a utility surface for URL and fetch-policy helpers, not a global CLI.
 - Bun support in this package is documented for library primitives, not as a separately published `verge` binary.
+- The interactive CLI renders fetched HTML in a terminal view. It does not
+  execute client-side browser JavaScript.

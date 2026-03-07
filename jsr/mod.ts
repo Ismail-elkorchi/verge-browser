@@ -1,21 +1,22 @@
 /**
- * Deno/JSR utility entrypoint for the safe fetch policy and URL-resolution pieces of verge-browser's terminal browsing surface.
+ * Public JSR entrypoint for the URL validation and fetch-policy helpers from
+ * verge-browser.
  *
- * Quickstart:
- * @example
+ * Use this module when you need the package's protocol allow-listing and URL
+ * resolution behavior without installing the full Node.js CLI surface.
+ *
  * ```ts
- * import { assertAllowedUrl, resolveHref } from "./mod.ts";
- * // Published package form:
- * // import { assertAllowedUrl, resolveHref } from "jsr:@ismail-elkorchi/verge-browser";
+ * import { assertAllowedUrl, resolveHref } from "jsr:@ismail-elkorchi/verge-browser";
  *
  * const target = assertAllowedUrl("https://example.com/docs");
  * console.log(target.hostname);
  * console.log(resolveHref("../guide", target.toString()));
  * ```
  *
- * Additional docs:
- * - `./docs/index.md`
- * - `./docs/reference/options.md`
+ * The published JSR surface is intentionally narrower than the npm package. It
+ * does not publish the interactive `verge` CLI.
+ *
+ * @module
  */
 
 /**
@@ -53,7 +54,7 @@ export const DEFAULT_SECURITY_POLICY: Required<SecurityPolicyOptions> = Object.f
  * @returns Nothing when protocol is allowed.
  * @throws {Error} When protocol is not one of `https:`, `http:`, `file:`, or `about:`.
  *
- * @example
+ * @example Usage
  * ```ts
  * const urlValue = new URL("https://example.com/docs");
  * assertAllowedProtocol(urlValue);
@@ -79,9 +80,9 @@ export function assertAllowedProtocol(urlValue: URL): void {
  * Security note:
  * - Call this before any network fetch to reject unsafe schemes early.
  *
- * @example
+ * @example Usage
  * ```ts
- * import { assertAllowedUrl } from "./mod.ts";
+ * import { assertAllowedUrl } from "jsr:@ismail-elkorchi/verge-browser";
  *
  * const parsed = assertAllowedUrl("https://example.com/path");
  * console.log(parsed.protocol);
@@ -99,7 +100,7 @@ export function assertAllowedUrl(rawUrl: string): URL {
  * @param contentType Raw `Content-Type` header value, or `null` when absent.
  * @returns `true` for HTML/XHTML-compatible values, XML-family values, and for missing content-type headers.
  *
- * @example
+ * @example Usage
  * ```ts
  * console.log(isHtmlLikeContentType("text/html; charset=utf-8"));
  * console.log(isHtmlLikeContentType("application/json"));
@@ -128,9 +129,9 @@ export function isHtmlLikeContentType(contentType: string | null): boolean {
  * Security note:
  * - The function enforces protocol allow-listing through `assertAllowedProtocol`.
  *
- * @example
+ * @example Bare hosts and relative paths
  * ```ts
- * import { resolveInputUrl } from "./mod.ts";
+ * import { resolveInputUrl } from "jsr:@ismail-elkorchi/verge-browser";
  *
  * console.log(resolveInputUrl("example.com"));
  * console.log(resolveInputUrl("../help", "https://example.com/docs/start"));
@@ -174,9 +175,9 @@ export function resolveInputUrl(rawInput: string, currentUrl?: string): string {
  * @param baseUrl Absolute base URL for resolution.
  * @returns Resolved absolute URL string when valid, otherwise the original `href`.
  *
- * @example
+ * @example Relative link resolution
  * ```ts
- * import { resolveHref } from "./mod.ts";
+ * import { resolveHref } from "jsr:@ismail-elkorchi/verge-browser";
  *
  * const baseUrl = "https://example.com/docs/start";
  * console.log(resolveHref("../api", baseUrl));
