@@ -18,7 +18,8 @@ export function runCommandHelp() {
   assert(parsed.name === "reference-page", "parseCommand should preserve bookmark name");
 
   const help = formatHelpText();
-  assert(help.includes("open <url>"), "help text should include open command");
+  assert(help.includes("First browse loop"), "help text should explain the first browse loop");
+  assert(help.includes("save text <path>"), "help text should include export actions");
   return parsed;
 }
 

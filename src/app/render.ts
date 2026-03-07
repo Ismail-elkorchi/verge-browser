@@ -6,8 +6,9 @@ import {
   type HtmlNode
 } from "@ismail-elkorchi/html-parser";
 
+import { extractForms } from "./forms.js";
 import { resolveHref } from "./url.js";
-import type { RenderInput, RenderedLink, RenderedPage } from "./types.js";
+import type { RenderInput, RenderedActionable, RenderedFormAction, RenderedLink, RenderedPage } from "./types.js";
 
 const SKIP_TAGS = new Set(["script", "style", "template", "head"]);
 const PRE_BLOCK_PREFIX = "@@PRE@@";
@@ -135,10 +136,12 @@ function renderInlineNode(node: HtmlNode, context: RenderContext): string {
     const resolvedHref = resolveHref(href, context.baseUrl);
 
     context.links.push({
+      kind: "link",
       index: linkIndex,
       label: label.length > 0 ? label : href,
       href,
-      resolvedHref
+      resolvedHref,
+      lineIndex: -1
     });
 
     return label.length > 0 ? `${label} [${String(linkIndex)}]` : `[${String(linkIndex)}]`;
@@ -410,17 +413,112 @@ function wrapBlocks(blocks: readonly string[], width: number): string[] {
   return wrappedLines;
 }
 
-function formatLinkSection(links: readonly RenderedLink[], width: number): string[] {
+function formatLinkSection(
+  links: readonly RenderedLink[],
+  width: number,
+  startLineIndex: number
+): {
+  readonly lines: readonly string[];
+  readonly summaryLineIndices: ReadonlyMap<number, number>;
+} {
   if (links.length === 0) {
-    return [];
+    return {
+      lines: [],
+      summaryLineIndices: new Map()
+    };
   }
 
   const lines = ["", "Links:"];
+  const summaryLineIndices = new Map<number, number>();
+  let currentLineIndex = startLineIndex + lines.length;
+
   for (const link of links) {
     const entry = `[${String(link.index)}] ${link.label} -> ${link.resolvedHref}`;
-    lines.push(...wrapText(entry, width).map((line) => `  ${line}`));
+    const wrappedLines = wrapText(entry, width).map((line) => `  ${line}`);
+    summaryLineIndices.set(link.index, currentLineIndex);
+    lines.push(...wrappedLines);
+    currentLineIndex += wrappedLines.length;
   }
-  return lines;
+
+  return {
+    lines,
+    summaryLineIndices
+  };
+}
+
+function formatFormsSection(
+  forms: ReturnType<typeof extractForms>,
+  width: number,
+  startLineIndex: number
+): {
+  readonly lines: readonly string[];
+  readonly actions: readonly RenderedFormAction[];
+} {
+  if (forms.length === 0) {
+    return {
+      lines: [],
+      actions: []
+    };
+  }
+
+  const lines = ["", "Forms:"];
+  const actions: RenderedFormAction[] = [];
+  let currentLineIndex = startLineIndex + lines.length;
+
+  for (const form of forms) {
+    const fieldNames = form.fields.slice(0, 3).map((field) => field.name);
+    const fieldSuffix = form.fields.length === 0
+      ? "no named fields"
+      : `${String(form.fields.length)} field${form.fields.length === 1 ? "" : "s"}${fieldNames.length > 0 ? `: ${fieldNames.join(", ")}` : ""}`;
+    const entry = `[form ${String(form.index)}] ${form.method.toUpperCase()} ${form.actionUrl} (${fieldSuffix})`;
+    const wrappedLines = wrapText(entry, width).map((line) => `  ${line}`);
+
+    actions.push({
+      kind: "form",
+      index: form.index,
+      label: `Form ${String(form.index)} ${form.method.toUpperCase()} ${form.actionUrl}`,
+      method: form.method,
+      actionUrl: form.actionUrl,
+      fieldCount: form.fields.length,
+      lineIndex: currentLineIndex
+    });
+
+    lines.push(...wrappedLines);
+    currentLineIndex += wrappedLines.length;
+  }
+
+  return {
+    lines,
+    actions
+  };
+}
+
+function firstLineIndexByLinkMarker(lines: readonly string[]): ReadonlyMap<number, number> {
+  const indices = new Map<number, number>();
+
+  for (const [lineIndex, line] of lines.entries()) {
+    for (const match of line.matchAll(/\[(\d+)\]/g)) {
+      const numericIndex = Number.parseInt(match[1] ?? "", 10);
+      if (!Number.isSafeInteger(numericIndex) || numericIndex < 1 || indices.has(numericIndex)) {
+        continue;
+      }
+      indices.set(numericIndex, lineIndex);
+    }
+  }
+
+  return indices;
+}
+
+function sortActionables(actionables: readonly RenderedActionable[]): readonly RenderedActionable[] {
+  return [...actionables].sort((left, right) => {
+    if (left.lineIndex !== right.lineIndex) {
+      return left.lineIndex - right.lineIndex;
+    }
+    if (left.kind !== right.kind) {
+      return left.kind.localeCompare(right.kind);
+    }
+    return left.index - right.index;
+  });
 }/**
  * Provides deterministic public behavior for `renderDocumentToTerminal`.
  */
@@ -437,7 +535,10 @@ export function renderDocumentToTerminal(input: RenderInput): RenderedPage {
   const blocks = renderNodesAsBlocks(bodyChildren(input.tree), context);
   const contentWidth = Math.max(40, input.width - 2);
   const wrappedContent = wrapBlocks(blocks, contentWidth);
-  const lines: string[] = [...wrappedContent, ...formatLinkSection(links, contentWidth)];
+  const forms = extractForms(input.tree, input.finalUrl);
+  const linkSection = formatLinkSection(links, contentWidth, wrappedContent.length);
+  const formsSection = formatFormsSection(forms, contentWidth, wrappedContent.length + linkSection.lines.length);
+  const lines: string[] = [...wrappedContent, ...linkSection.lines, ...formsSection.lines];
   if (lines.length === 0) {
     const normalizedTitle = title.toLowerCase();
     if (input.status === 403 && normalizedTitle.includes("just a moment")) {
@@ -452,12 +553,20 @@ export function renderDocumentToTerminal(input: RenderInput): RenderedPage {
     lines.push("", `Parser reported ${String(input.tree.errors.length)} recoverable issue(s).`);
   }
 
+  const contentLineIndices = firstLineIndexByLinkMarker(wrappedContent);
+  const renderedLinks = links.map((link) => ({
+    ...link,
+    lineIndex: contentLineIndices.get(link.index) ?? linkSection.summaryLineIndices.get(link.index) ?? 0
+  }));
+  const actionables = sortActionables([...renderedLinks, ...formsSection.actions]);
+
   return {
     title,
     displayUrl: input.finalUrl,
     statusLine: `${String(input.status)} ${input.statusText}`,
     lines,
-    links,
+    links: renderedLinks,
+    actionables,
     parseErrorCount: input.tree.errors.length,
     fetchedAtIso: input.fetchedAtIso
   };

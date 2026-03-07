@@ -1,7 +1,13 @@
 import { emitKeypressEvents } from "node:readline";
 import { stdin, stdout } from "node:process";
 
-import type { CursorPosition, TerminalAdapter, TerminalKeyListener, TerminalSize } from "../ui/terminal-adapter.js";
+import type {
+  CursorPosition,
+  TerminalAdapter,
+  TerminalKeyListener,
+  TerminalResizeListener,
+  TerminalSize
+} from "../ui/terminal-adapter.js";
 
 function clampColumns(columns: number | undefined): number {
   if (!columns || !Number.isFinite(columns)) {
@@ -51,6 +57,18 @@ export function createNodeTerminalAdapter(): TerminalAdapter {
       stdin.on("keypress", listener);
       return () => {
         stdin.off("keypress", listener);
+      };
+    },
+    onResize(listener: TerminalResizeListener): () => void {
+      const handleResize = (): void => {
+        listener({
+          columns: clampColumns(stdout.columns),
+          rows: clampRows(stdout.rows)
+        });
+      };
+      process.on("SIGWINCH", handleResize);
+      return () => {
+        process.off("SIGWINCH", handleResize);
       };
     },
     dispose(): void {

@@ -41,7 +41,6 @@ export {
   type PageStreamLoader,
   type PageRenderer
 } from "./app/session.js";
-export { resolveShortcutAction, type ShortcutAction } from "./app/shortcuts.js";
 export { terminalWidth, terminalHeight, clearTerminal, formatRenderedPage, formatLinkTable } from "./app/terminal.js";
 export type {
   NetworkOutcome,

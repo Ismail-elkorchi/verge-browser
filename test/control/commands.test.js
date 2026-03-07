@@ -13,9 +13,13 @@ test("parseCommand handles navigation and control", () => {
   assert.deepEqual(parseCommand("stream example.com"), { kind: "go-stream", target: "example.com" });
   assert.deepEqual(parseCommand("help"), { kind: "help" });
   assert.deepEqual(parseCommand("reader"), { kind: "reader" });
+  assert.deepEqual(parseCommand("documents"), { kind: "documents" });
   assert.deepEqual(parseCommand("back"), { kind: "back" });
   assert.deepEqual(parseCommand("diag"), { kind: "diag" });
   assert.deepEqual(parseCommand("outline"), { kind: "outline" });
+  assert.deepEqual(parseCommand("close"), { kind: "close-document" });
+  assert.deepEqual(parseCommand("reopen"), { kind: "reopen-document" });
+  assert.deepEqual(parseCommand("open-external"), { kind: "open-external" });
 });
 
 test("parseCommand handles bookmark and history commands", () => {
@@ -76,6 +80,14 @@ test("parseCommand handles viewport commands", () => {
   assert.deepEqual(parseCommand("download ./snapshot.html"), {
     kind: "download",
     path: "./snapshot.html"
+  });
+  assert.deepEqual(parseCommand("save text ./view.txt"), {
+    kind: "save-text",
+    path: "./view.txt"
+  });
+  assert.deepEqual(parseCommand("save csv ./view.csv"), {
+    kind: "save-csv",
+    path: "./view.csv"
   });
 });
 

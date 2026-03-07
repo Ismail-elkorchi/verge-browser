@@ -4,6 +4,7 @@ export type BrowserCommand =
   | { readonly kind: "view" }
   | { readonly kind: "reader" }
   | { readonly kind: "links" }
+  | { readonly kind: "documents" }
   | { readonly kind: "diag" }
   | { readonly kind: "outline" }
   | { readonly kind: "page-down" }
@@ -27,7 +28,12 @@ export type BrowserCommand =
   | { readonly kind: "recall-open"; readonly index: number }
   | { readonly kind: "form-list" }
   | { readonly kind: "form-submit"; readonly index: number; readonly overrides: Readonly<Record<string, string>> }
+  | { readonly kind: "close-document" }
+  | { readonly kind: "reopen-document" }
   | { readonly kind: "download"; readonly path: string }
+  | { readonly kind: "save-text"; readonly path: string }
+  | { readonly kind: "save-csv"; readonly path: string }
+  | { readonly kind: "open-external" }
   | { readonly kind: "open-link"; readonly index: number }
   | { readonly kind: "go"; readonly target: string }
   | { readonly kind: "go-stream"; readonly target: string }
@@ -85,6 +91,7 @@ export function parseCommand(rawInput: string): BrowserCommand {
   if (headLower === "view") return { kind: "view" };
   if (headLower === "reader") return { kind: "reader" };
   if (headLower === "links") return { kind: "links" };
+  if (headLower === "documents" || headLower === "docs") return { kind: "documents" };
   if (headLower === "diag" || headLower === "status") return { kind: "diag" };
   if (headLower === "outline") return { kind: "outline" };
   if (headLower === "pagedown" || headLower === "pd") return { kind: "page-down" };
@@ -189,6 +196,30 @@ export function parseCommand(rawInput: string): BrowserCommand {
       return { kind: "invalid", reason: "download requires a target path" };
     }
     return { kind: "download", path: tail };
+  }
+
+  if (headLower === "save") {
+    const saveParts = tail.split(/\s+/).filter((part) => part.length > 0);
+    const saveMode = saveParts[0]?.toLowerCase() ?? "";
+    const savePath = saveParts.slice(1).join(" ").trim();
+    if ((saveMode !== "text" && saveMode !== "csv") || savePath.length === 0) {
+      return { kind: "invalid", reason: "save supports: text <path> | csv <path>" };
+    }
+    return saveMode === "text"
+      ? { kind: "save-text", path: savePath }
+      : { kind: "save-csv", path: savePath };
+  }
+
+  if (headLower === "open-external") {
+    return { kind: "open-external" };
+  }
+
+  if (headLower === "close") {
+    return { kind: "close-document" };
+  }
+
+  if (headLower === "reopen") {
+    return { kind: "reopen-document" };
   }
 
   if (headLower === "open") {
@@ -311,61 +342,45 @@ export function parseCommand(rawInput: string): BrowserCommand {
 
 export function formatHelpText(): string {
   return [
-    "Commands:",
-    "  help                Show command help",
-    "  view                Re-render current page",
-    "  reader              Render reader-text view for current page",
-    "  links               Show link table for current page",
-    "  diag                Show parse/runtime diagnostics for current page",
-    "  outline             Show heading outline entries",
-    "  pagedown            Scroll viewport by one page",
-    "  pageup              Scroll viewport backward by one page",
-    "  top                 Jump viewport to top",
-    "  bottom              Jump viewport to bottom",
-    "  find <query>        Search in current view",
-    "  find next           Jump to next search match",
-    "  find prev           Jump to previous search match",
-    "  open <n>            Open numbered link",
-    "  open <url>          Navigate to URL",
-    "  go <url>            Navigate to URL",
-    "  stream <url>        Navigate with stream parser mode",
-    "  bookmark list       List bookmarks",
-    "  bookmark add [name] Save current page as bookmark",
-    "  bookmark open <n>   Open bookmark by index",
-    "  cookie list         List persisted cookies",
-    "  cookie clear        Clear persisted cookies",
-    "  history             List persisted history",
-    "  history open <n>    Open history entry by index",
-    "  recall <query>      Search local content index",
-    "  recall open <n>     Open indexed result by index",
-    "  form list           List forms on current page",
-    "  form submit <n>     Submit form (GET/POST) by index",
-    "                      Optional overrides: name=value",
-    "  download <path>     Save current HTML snapshot to disk",
-    "  patch remove-node <id>",
-    "  patch replace-text <id> <value>",
-    "  patch set-attr <id> <name> <value>",
-    "  patch remove-attr <id> <name>",
-    "  patch insert-before <id> <html>",
-    "  patch insert-after <id> <html>",
-    "  back                Navigate backward in history",
-    "  forward             Navigate forward in history",
-    "  reload              Reload current page",
-    "  quit                Exit verge-browser",
+    "First browse loop:",
+    "  1. Start with: verge https://example.com",
+    "  2. Press ] or Tab to focus the next link or control",
+    "  3. Press Enter to open the focused target",
+    "  4. Press h to go back",
+    "  5. Press g to enter a new URL",
+    "  6. Press / to search in the current page",
+    "  7. Press q to quit",
     "",
-    "Shortcuts:",
-    "  j/k or Up/Down      Scroll one line",
-    "  Space / b           Scroll one page forward/back",
-    "  g / G               Jump to top/bottom",
-    "  / / n / N           Find prompt / next / previous match",
+    "Browse keys:",
+    "  Up/Down             Scroll the current screen",
+    "  PageUp/PageDown     Move by one page",
+    "  Home/End            Jump to top or bottom",
+    "  [ / ]               Move to previous or next link/control",
+    "  Enter               Open the focused link/control",
     "  h / f / r           Back / forward / reload",
-    "  l / ?               Links view / help view",
-    "  m / H               Add bookmark / show history",
-    "  :                   Command prompt",
-    "  q                   Exit",
+    "  g / :               Location palette / action palette",
+    "  / / n / N           Find / next match / previous match",
+    "  l / D / H / B / F   Links / documents / history / bookmarks / forms",
+    "  o / d               Outline / diagnostics",
+    "  m / t / x / u       Bookmark / new document / close / reopen",
+    "  Esc                 Back out of search, focus, or transient screens",
+    "  q                   Quit",
+    "",
+    "Action palette examples:",
+    "  links               Open the links picker",
+    "  documents           Open the documents picker",
+    "  history             Open persisted history",
+    "  bookmark add [name] Save the current page as a bookmark",
+    "  download <path>     Save the current HTML snapshot",
+    "  save text <path>    Export the current screen as plain text",
+    "  save csv <path>     Export the current picker as CSV",
+    "  open-external       Open the current page or focused link outside verge",
+    "  form submit <n>     Submit form n, optionally with name=value overrides",
+    "  patch ...           Apply a low-level HTML patch to the current page",
     "",
     "CLI flags:",
     "  --record-corpus     Write fetched HTML/CSS payloads to realworld corpus cache",
-    "  --once              Load initial target once, then exit"
+    "  --once              Load the initial target once, then exit",
+    "  --screen-reader     Use the screen-reader-friendly chrome profile"
   ].join("\n");
 }

@@ -11,6 +11,7 @@ export interface CursorPosition {
 }
 
 export type TerminalKeyListener = (character: string, key: KeyboardKey) => void;
+export type TerminalResizeListener = (size: TerminalSize) => void;
 
 /**
  * Thin runtime boundary for interactive terminal I/O.
@@ -27,5 +28,6 @@ export interface TerminalAdapter {
   showCursor(): void;
   setRawMode(enabled: boolean): void;
   onKeypress(listener: TerminalKeyListener): () => void;
+  onResize(listener: TerminalResizeListener): () => void;
   dispose(): void;
 }

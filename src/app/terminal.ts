@@ -25,7 +25,7 @@ export function terminalHeight(): number {
 
 
 export function clearTerminal(): void {
-  process.stdout.write("\x1Bc");
+  process.stdout.write("\u001b[2J\u001b[H");
 }/**
  * Formats or resolves deterministic public output for `formatRenderedPage`.
  */

@@ -29,17 +29,39 @@ export interface NetworkOutcome {
   readonly detailMessage: string;
 }
 
-/** One rendered link entry extracted from terminal output. */
-export interface RenderedLink {
-  /** One-based link index shown to the user. */
+interface RenderedActionableBase {
+  /** One-based actionable index shown to the user. */
   readonly index: number;
-  /** Visible label rendered for the link. */
+  /** Visible label surfaced by the terminal renderer. */
   readonly label: string;
+  /** Zero-based rendered line index used for focus restoration. */
+  readonly lineIndex: number;
+}
+
+/** One rendered link entry extracted from terminal output. */
+export interface RenderedLink extends RenderedActionableBase {
+  /** Stable actionable kind used by the shell. */
+  readonly kind: "link";
   /** Original href value from the source document. */
   readonly href: string;
   /** Absolute resolved href when URL resolution succeeds. */
   readonly resolvedHref: string;
 }
+
+/** One rendered form entry surfaced as a direct page action. */
+export interface RenderedFormAction extends RenderedActionableBase {
+  /** Stable actionable kind used by the shell. */
+  readonly kind: "form";
+  /** Form method normalized to lower case. */
+  readonly method: string;
+  /** Absolute submission target used by form submission helpers. */
+  readonly actionUrl: string;
+  /** Number of named fields available on the form. */
+  readonly fieldCount: number;
+}
+
+/** Union of rendered page actions that can receive direct focus. */
+export type RenderedActionable = RenderedLink | RenderedFormAction;
 
 /** Terminal-rendered page output produced from a parsed HTML document. */
 export interface RenderedPage {
@@ -53,6 +75,8 @@ export interface RenderedPage {
   readonly lines: readonly string[];
   /** Link table extracted during rendering. */
   readonly links: readonly RenderedLink[];
+  /** Directly focusable page actions in visual order. */
+  readonly actionables: readonly RenderedActionable[];
   /** Number of HTML parse errors attached to the source tree. */
   readonly parseErrorCount: number;
   /** ISO timestamp carried from the fetch result. */

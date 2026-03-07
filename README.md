@@ -53,17 +53,25 @@ Use the Node.js CLI when you want an interactive terminal session:
 verge https://example.com
 ```
 
-Inside the session:
+Inside the session, the primary browse loop is page-first:
 
 ```txt
-:links
-:diag
-q
+] or Tab   focus the next link or control
+Enter      open the focused target
+h          go back
+g          open the location palette
+l          open the links overview
+?          open help
+q          quit
 ```
 
 `verge` opens the first positional target immediately. If no target is provided, the CLI reopens the latest history URL when one exists, otherwise it falls back to `about:help`.
 
 `verge <url> --once` is an automation flag that loads the initial target and exits without entering the interactive browsing loop. It is not the right mode when you want terminal output to stay on screen for manual browsing.
+
+Use `:` when you want the action palette instead of direct browse keys. Actions such as `documents`, `history`, `bookmark add`, `save text <path>`, `save csv <path>`, `download <path>`, and `open-external` all run from that palette.
+
+Use `--screen-reader` when you want the screen-reader-friendly chrome profile.
 
 ## Import
 

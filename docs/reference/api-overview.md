@@ -21,7 +21,7 @@ Node/npm includes the full browser runtime stack and the packaged `verge` CLI bi
 - command parsing and formatting
 - cookie parsing/merging
 - fetch + stream fetch adapters
-- session, paging, search, rendering, shortcuts
+- session, paging, search, rendering, terminal helpers
 - runtime hosts (Node/Deno/Bun)
 - exported runtime and diagnostics types
 
