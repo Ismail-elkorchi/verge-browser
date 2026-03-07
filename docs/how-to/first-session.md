@@ -1,7 +1,14 @@
 # First Session
 
-Goal: open a page in a deterministic local session without network access.
+## Goal
+Open a page in a deterministic local session without relying on live network
+conditions.
 
+## Prerequisites
+- `@ismail-elkorchi/verge-browser` installed
+- A local loader function or fixture HTML
+
+## Copy/paste
 ```ts
 import { BrowserSession } from "@ismail-elkorchi/verge-browser";
 
@@ -31,8 +38,24 @@ const session = new BrowserSession({
 const snapshot = await session.open("https://example.test/");
 console.log(snapshot.status);
 console.log(snapshot.rendered.lines.length > 0);
+console.log(snapshot.diagnostics.parseErrorCount);
 ```
 
-Expected output:
-- `200`
-- `true`
+## Expected output
+```txt
+200
+true
+0
+```
+
+## Common failure modes
+- The loader omits required fields such as `networkOutcome`, so the session
+  cannot classify the fetch.
+- Input URLs are not normalized before session use, which produces confusing
+  relative-resolution behavior.
+- Tests depend on live `fetch()` instead of a deterministic loader fixture.
+
+## Related reference
+- [API overview](../reference/api-overview.md)
+- [Options](../reference/options.md)
+- [Error model](../reference/error-model.md)

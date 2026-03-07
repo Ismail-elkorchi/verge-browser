@@ -51,6 +51,8 @@ const ABOUT_HELP_HTML = `<!doctype html>
 </html>`;
 
 const UTF8_ENCODER = new TextEncoder();
+
+/** Local text-file reader used for `file://` snapshots and tests. */
 export type LocalFileReader = (path: string) => Promise<string>;
 
 async function defaultReadLocalFileText(path: string): Promise<string> {
@@ -184,11 +186,13 @@ async function sleep(delayMs: number): Promise<void> {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
-}/**
- * Represents a structured public error for `NetworkFetchError` failure cases.
+}
+
+/**
+ * Error wrapper used when fetch helpers fail before a usable HTML response can be consumed.
+ *
+ * The structured `networkOutcome` property is the stable surface callers should branch on.
  */
-
-
 export class NetworkFetchError extends Error {
   readonly networkOutcome: NetworkOutcome;
 
@@ -197,11 +201,15 @@ export class NetworkFetchError extends Error {
     this.name = "NetworkFetchError";
     this.networkOutcome = networkOutcome;
   }
-}/**
- * Provides deterministic public behavior for `classifyNetworkFailure`.
+}
+
+/**
+ * Maps an arbitrary thrown value into a stable `NetworkOutcome`.
+ *
+ * @param error Unknown thrown value from fetch, redirect, timeout, or size-limit handling.
+ * @param finalUrl Best-known URL associated with the failed request.
+ * @returns Structured outcome with a stable `kind`, `detailCode`, and `detailMessage`.
  */
-
-
 export function classifyNetworkFailure(error: unknown, finalUrl: string): NetworkOutcome {
   if (error instanceof NetworkFetchError) {
     return error.networkOutcome;
@@ -344,11 +352,14 @@ function withByteLimit(source: ReadableStream<Uint8Array>, maxContentBytes: numb
       await reader.cancel(reason);
     }
   });
-}/**
- * Provides deterministic public behavior for `readByteStreamToText`.
+}
+
+/**
+ * Reads a UTF-8 byte stream into a single string.
+ *
+ * @param stream Stream of response bytes.
+ * @returns Fully decoded UTF-8 text.
  */
-
-
 export async function readByteStreamToText(stream: ReadableStream<Uint8Array>): Promise<string> {
   const reader = stream.getReader();
   const textDecoder = new TextDecoder();
@@ -511,11 +522,37 @@ async function fetchNetworkResponse(
   }
 
   throw new Error("Unreachable redirect state");
-}/**
- * Provides deterministic public behavior for `fetchPage`.
+}
+
+/**
+ * Fetches a page and buffers its HTML body.
+ *
+ * Defaults:
+ * - `timeoutMs = 15000`
+ * - `securityPolicy = DEFAULT_SECURITY_POLICY`
+ * - `requestOptions.method = "GET"`
+ *
+ * Special cases:
+ * - `about:help` returns the built-in help page without network access.
+ * - `file://` URLs are read through `readLocalFileText`.
+ *
+ * Error behavior:
+ * - Throws `NetworkFetchError` for pre-response failures and safety-limit failures.
+ * - Returns a normal result for HTTP `4xx` and `5xx` responses, with `networkOutcome.kind = "http_error"`.
+ *
+ * @param requestUrl Absolute URL, `about:help`, or `file://` URL.
+ * @param timeoutMs Request timeout in milliseconds.
+ * @param securityPolicy Partial fetch policy merged with `DEFAULT_SECURITY_POLICY`.
+ * @param requestOptions Optional method, headers, and body text.
+ * @param readLocalFileText Override for `file://` reads.
+ * @returns Buffered HTML result with response metadata and `networkOutcome`.
+ *
+ * @example
+ * ```ts
+ * const page = await fetchPage("about:help");
+ * console.log(page.status, page.networkOutcome.kind);
+ * ```
  */
-
-
 export async function fetchPage(
   requestUrl: string,
   timeoutMs = DEFAULT_TIMEOUT_MS,
@@ -581,11 +618,27 @@ export async function fetchPage(
     fetchedAtIso: networkResult.fetchedAtIso,
     networkOutcome: outcomeFromHttpStatus(networkResult.finalUrl, networkResult.status, networkResult.statusText)
   };
-}/**
- * Provides deterministic public behavior for `fetchPageStream`.
+}
+
+/**
+ * Fetches a page and returns a size-limited HTML byte stream.
+ *
+ * This shares the same timeout, policy, request, and error semantics as `fetchPage()`,
+ * but returns a `ReadableStream<Uint8Array>` instead of buffered HTML text.
+ *
+ * @param requestUrl Absolute URL, `about:help`, or `file://` URL.
+ * @param timeoutMs Request timeout in milliseconds.
+ * @param securityPolicy Partial fetch policy merged with `DEFAULT_SECURITY_POLICY`.
+ * @param requestOptions Optional method, headers, and body text.
+ * @param readLocalFileText Override for `file://` reads.
+ * @returns Streaming HTML result with response metadata and `networkOutcome`.
+ *
+ * @example
+ * ```ts
+ * const page = await fetchPageStream("about:help");
+ * console.log(page.status, page.networkOutcome.kind);
+ * ```
  */
-
-
 export async function fetchPageStream(
   requestUrl: string,
   timeoutMs = DEFAULT_TIMEOUT_MS,

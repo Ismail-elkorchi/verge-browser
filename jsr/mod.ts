@@ -1,5 +1,5 @@
 /**
- * Deno/JSR utility entrypoint for URL safety checks and deterministic URL resolution.
+ * Deno/JSR utility entrypoint for the safe fetch policy and URL-resolution pieces of verge-browser's terminal browsing surface.
  *
  * Quickstart:
  * @example
@@ -19,24 +19,31 @@
  */
 
 /**
- * Protocol policy represented by `DEFAULT_SECURITY_POLICY`.
+ * Fetch policy knobs exposed by the main package surface.
+ *
+ * The JSR utility entrypoint exports the same shape so callers can document or
+ * mirror the package's default fetch policy values even when they only use the
+ * URL helpers from this module.
  */
 export interface SecurityPolicyOptions {
-  /** Whether plain `http:` URLs are allowed. */
-  readonly allowHttp: boolean;
-  /** Whether secure `https:` URLs are allowed. */
-  readonly allowHttps: boolean;
-  /** Whether local `file:` URLs are allowed. */
-  readonly allowFile: boolean;
+  /** Maximum redirect hops a fetch workflow should follow. */
+  readonly maxRedirects?: number;
+  /** Maximum response bytes allowed before fetch helpers abort. */
+  readonly maxContentBytes?: number;
+  /** Maximum retry attempts for transient network failures. */
+  readonly maxRequestRetries?: number;
+  /** Delay in milliseconds between retry attempts. */
+  readonly retryDelayMs?: number;
 }
 
 /**
- * Default protocol policy used by the JSR utility surface.
+ * Default fetch policy values used by the package's network helpers.
  */
-export const DEFAULT_SECURITY_POLICY: Readonly<SecurityPolicyOptions> = Object.freeze({
-  allowHttp: true,
-  allowHttps: true,
-  allowFile: true
+export const DEFAULT_SECURITY_POLICY: Required<SecurityPolicyOptions> = Object.freeze({
+  maxRedirects: 5,
+  maxContentBytes: 2 * 1024 * 1024,
+  maxRequestRetries: 1,
+  retryDelayMs: 75
 });
 
 /**
@@ -44,14 +51,21 @@ export const DEFAULT_SECURITY_POLICY: Readonly<SecurityPolicyOptions> = Object.f
  *
  * @param urlValue Parsed URL instance to validate.
  * @returns Nothing when protocol is allowed.
- * @throws {Error} When protocol is not one of `https:`, `http:`, or `file:`.
+ * @throws {Error} When protocol is not one of `https:`, `http:`, `file:`, or `about:`.
+ *
+ * @example
+ * ```ts
+ * const urlValue = new URL("https://example.com/docs");
+ * assertAllowedProtocol(urlValue);
+ * console.log(urlValue.protocol);
+ * ```
  */
 export function assertAllowedProtocol(urlValue: URL): void {
   const protocol = urlValue.protocol.toLowerCase();
-  if (protocol === "https:" || protocol === "http:" || protocol === "file:") {
+  if (protocol === "https:" || protocol === "http:" || protocol === "file:" || protocol === "about:") {
     return;
   }
-  throw new Error(`Unsupported protocol: ${protocol}`);
+  throw new Error(`Blocked unsupported protocol: ${protocol}`);
 }
 
 /**
@@ -83,13 +97,22 @@ export function assertAllowedUrl(rawUrl: string): URL {
  * Determines whether an HTTP content-type should be treated as HTML-like.
  *
  * @param contentType Raw `Content-Type` header value, or `null` when absent.
- * @returns `true` for HTML/XHTML-compatible values and for missing content-type headers.
+ * @returns `true` for HTML/XHTML-compatible values, XML-family values, and for missing content-type headers.
+ *
+ * @example
+ * ```ts
+ * console.log(isHtmlLikeContentType("text/html; charset=utf-8"));
+ * console.log(isHtmlLikeContentType("application/json"));
+ * ```
  */
 export function isHtmlLikeContentType(contentType: string | null): boolean {
   if (!contentType) {
     return true;
   }
-  return /^(text\/html|application\/xhtml\+xml)\b/i.test(contentType);
+  const normalized = contentType.toLowerCase();
+  return normalized.includes("text/html")
+    || normalized.includes("application/xhtml+xml")
+    || normalized.includes("application/xml");
 }
 
 /**

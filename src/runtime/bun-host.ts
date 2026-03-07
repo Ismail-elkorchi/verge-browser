@@ -23,11 +23,14 @@ function resolveBunApi(): BunApi | null {
   return {
     file: file as (path: string) => BunFileApi
   };
-}/**
- * Computes deterministic public output for `createBunHost`.
+}
+
+/**
+ * Creates a `RuntimeHost` backed by `Bun.file(path).text()`.
+ *
+ * @returns Host adapter with `name = "bun"`.
+ * @throws {Error} When the current runtime does not expose the Bun file API.
  */
-
-
 export function createBunHost(): RuntimeHost {
   return {
     name: "bun",

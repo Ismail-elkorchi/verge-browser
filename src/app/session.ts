@@ -21,8 +21,13 @@ import type {
   RenderedPage
 } from "./types.js";
 
+/** Buffered page loader contract used by `BrowserSession` text-mode navigation. */
 export type PageLoader = (requestUrl: string, requestOptions?: PageRequestOptions) => Promise<FetchPageResult>;
+
+/** Streaming page loader contract used by `BrowserSession` stream-mode navigation. */
 export type PageStreamLoader = (requestUrl: string, requestOptions?: PageRequestOptions) => Promise<FetchPageStreamResult>;
+
+/** Terminal renderer contract used by `BrowserSession` after parsing HTML into a tree. */
 export type PageRenderer = (input: {
   readonly tree: DocumentTree;
   readonly requestUrl: string;
@@ -58,12 +63,19 @@ interface NavigationTimings {
 }
 
 export interface BrowserSessionOptions {
+  /** Override for buffered page loading. Defaults to `fetchPage()`. */
   readonly loader?: PageLoader;
+  /** Override for streaming page loading. Defaults to `fetchPageStream()`. */
   readonly streamLoader?: PageStreamLoader;
+  /** Override for terminal rendering. Defaults to `renderDocumentToTerminal()`. */
   readonly renderer?: PageRenderer;
+  /** Width provider for rendered output. Defaults to `() => 100`. */
   readonly widthProvider?: () => number;
+  /** HTML parser options forwarded to `html-parser`. */
   readonly parseOptions?: ParseOptions;
+  /** Default navigation mode for `open()` and history traversal. Defaults to `"text"`. */
   readonly defaultParseMode?: ParseMode;
+  /** Override for `file://` reads used by local snapshots. */
   readonly localFileReader?: LocalFileReader;
 }
 
@@ -161,11 +173,29 @@ function diagnosticsFromTree(
     networkOutcome: safeNetworkOutcome,
     triageIds: buildTriageIds(tree, safeNetworkOutcome)
   };
-}/**
- * Provides deterministic public behavior for `BrowserSession`.
+}
+
+/**
+ * High-level navigation helper that fetches, parses, renders, and stores page history.
+ *
+ * The default constructor wiring uses:
+ * - `fetchPage()` for buffered navigation,
+ * - `fetchPageStream()` for streaming navigation,
+ * - `renderDocumentToTerminal()` for terminal output,
+ * - the bounded HTML parse profile defined in this module.
+ *
+ * Navigation methods throw `NetworkFetchError` when a loader fails before producing a usable HTML response.
+ * They also throw plain `Error` for session-state misuse such as missing history entries or applying edits without `sourceHtml`.
+ *
+ * @param options Optional loader, renderer, parser, and local file overrides.
+ *
+ * @example
+ * ```ts
+ * const session = new BrowserSession();
+ * const snapshot = await session.open("about:help");
+ * console.log(snapshot.rendered.lines[0]);
+ * ```
  */
-
-
 export class BrowserSession {
   private readonly loader: PageLoader;
   private readonly streamLoader: PageStreamLoader;

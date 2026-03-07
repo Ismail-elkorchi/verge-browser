@@ -1,6 +1,6 @@
 # @ismail-elkorchi/verge-browser
 
-Deterministic terminal browsing utilities and CLI helpers for auditable text-first browsing workflows.
+Terminal browsing primitives with safe fetch helpers, HTML snapshots, and auditable text rendering.
 
 No runtime dependencies are added beyond declared package dependencies.
 
@@ -10,7 +10,7 @@ No runtime dependencies are added beyond declared package dependencies.
 - You need command parsing, URL resolution, and policy-checked fetch helpers.
 - You need reproducible output for automation and audits.
 
-## When Not To Use
+## What This Is Not
 
 - You need full browser JavaScript execution.
 - You need pixel-accurate rendering.
@@ -18,13 +18,52 @@ No runtime dependencies are added beyond declared package dependencies.
 
 ## Install
 
+Node.js global CLI:
+
+```bash
+npm install --global @ismail-elkorchi/verge-browser
+```
+
+Open the built-in help screen or browse a page:
+
+```bash
+verge about:help
+verge https://example.com
+```
+
+Node.js library usage:
+
 ```bash
 npm install @ismail-elkorchi/verge-browser
 ```
 
+JSR/Deno library usage:
+
 ```bash
 deno add jsr:@ismail-elkorchi/verge-browser
 ```
+
+The documented CLI distribution is the npm `verge` binary on Node.js. The JSR/Deno surface and Bun support in this package are library primitives, not a separately published global `verge` command.
+
+## CLI Quickstart
+
+Use the Node.js CLI when you want an interactive terminal session:
+
+```bash
+verge https://example.com
+```
+
+Inside the session:
+
+```txt
+:links
+:diag
+q
+```
+
+`verge` opens the first positional target immediately. If no target is provided, the CLI reopens the latest history URL when one exists, otherwise it falls back to `about:help`.
+
+`verge <url> --once` is an automation flag that loads the initial target and exits without entering the interactive browsing loop. It is not the right mode when you want terminal output to stay on screen for manual browsing.
 
 ## Import
 
@@ -33,10 +72,12 @@ import { parseCommand, renderDocumentToTerminal } from "@ismail-elkorchi/verge-b
 ```
 
 ```txt
-import { parseCommand, renderDocumentToTerminal } from "jsr:@ismail-elkorchi/verge-browser";
+import { DEFAULT_SECURITY_POLICY, assertAllowedUrl, resolveHref, resolveInputUrl } from "jsr:@ismail-elkorchi/verge-browser";
 ```
 
 Low-level parsing helpers such as `parseHtml()` are exported from `@ismail-elkorchi/verge-browser`, so npm consumers do not need a separate `@ismail-elkorchi/html-parser` install for normal library usage.
+
+The published JSR package currently exposes the safe URL and fetch-policy utility surface. Use the npm package for the full terminal browser and CLI-oriented API.
 
 ## Copy/Paste Examples
 
@@ -80,10 +121,10 @@ console.log(rendered.lines.length > 0);
 ### Example 4: Policy-checked fetch
 
 ```ts
-import { DEFAULT_SECURITY_POLICY, assertAllowedUrl, fetchPage } from "@ismail-elkorchi/verge-browser";
+import { assertAllowedUrl, fetchPage } from "@ismail-elkorchi/verge-browser";
 
 const url = "https://example.com";
-assertAllowedUrl(url, DEFAULT_SECURITY_POLICY);
+assertAllowedUrl(url);
 const page = await fetchPage(url);
 console.log(page.status);
 ```
@@ -105,6 +146,8 @@ Runtime compatibility matrix:
 | Bun | Supported (library primitives) |
 | Browser (evergreen) | Supported (library primitives) |
 
+The Node.js package surface is verified against Node 20, 22, and 24.
+
 ## Security and Safety Notes
 
 - URL and protocol checks are mandatory for network workflows.
@@ -113,6 +156,6 @@ Runtime compatibility matrix:
 
 ## Documentation
 
-- [Docs index](./docs/index.md)
-- [First session tutorial](./docs/tutorial/first-session.md)
-- [Options reference](./docs/reference/options.md)
+- [Docs index](https://github.com/Ismail-elkorchi/verge-browser/blob/main/docs/index.md)
+- [First session tutorial](https://github.com/Ismail-elkorchi/verge-browser/blob/main/docs/tutorial/first-session.md)
+- [CLI reference](https://github.com/Ismail-elkorchi/verge-browser/blob/main/docs/reference/cli.md)

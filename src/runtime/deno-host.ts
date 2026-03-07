@@ -19,11 +19,14 @@ function resolveDenoApi(): DenoApi | null {
   return {
     readTextFile: readTextFile as (path: string) => Promise<string>
   };
-}/**
- * Computes deterministic public output for `createDenoHost`.
+}
+
+/**
+ * Creates a `RuntimeHost` backed by `Deno.readTextFile()`.
+ *
+ * @returns Host adapter with `name = "deno"`.
+ * @throws {Error} When the current runtime does not expose the Deno file API.
  */
-
-
 export function createDenoHost(): RuntimeHost {
   return {
     name: "deno",
