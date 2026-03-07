@@ -8,6 +8,7 @@ import test from "node:test";
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..");
 const SCRIPT_PATH = resolve(REPO_ROOT, "scripts/eval/check-release-attestation-policy.mjs");
 const FIXTURE_DIR = resolve(REPO_ROOT, "test/fixtures/release-attestation-policy");
+const RELEASE_WORKFLOW_PATH = resolve(REPO_ROOT, ".github/workflows/release.yml");
 
 function runPolicyScript(workflowPath, outputPath) {
   return spawnSync(
@@ -29,6 +30,21 @@ test("release attestation policy passes for valid workflow fixture", async () =>
   try {
     const outputPath = resolve(tempDir, "release-attestation-policy-ok.json");
     const result = runPolicyScript(resolve(FIXTURE_DIR, "workflow-valid.yml"), outputPath);
+
+    assert.equal(result.status, 0, result.stderr);
+    const report = JSON.parse(await readFile(outputPath, "utf8"));
+    assert.equal(report.ok, true);
+    assert.equal(report.checks.every((check) => check.ok), true);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("release attestation policy passes for the repository release workflow", async () => {
+  const tempDir = await mkdtemp(resolve(tmpdir(), "verge-release-policy-repo-"));
+  try {
+    const outputPath = resolve(tempDir, "release-attestation-policy-repo.json");
+    const result = runPolicyScript(RELEASE_WORKFLOW_PATH, outputPath);
 
     assert.equal(result.status, 0, result.stderr);
     const report = JSON.parse(await readFile(outputPath, "utf8"));

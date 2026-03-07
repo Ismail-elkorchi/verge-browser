@@ -60,6 +60,51 @@ function extractJobBody(sourceText, jobName) {
   return tail.slice(0, endMatch.index);
 }
 
+function extractTopLevelSection(sourceText, sectionName) {
+  const startPattern = new RegExp(`^${escapeRegex(sectionName)}:\\n`, "m");
+  const startMatch = startPattern.exec(sourceText);
+  if (!startMatch || typeof startMatch.index !== "number") {
+    return "";
+  }
+  const startIndex = startMatch.index + startMatch[0].length;
+  const tail = sourceText.slice(startIndex);
+  const endMatch = /^[a-zA-Z0-9_-]+:\n/m.exec(tail);
+  if (!endMatch || typeof endMatch.index !== "number") {
+    return tail;
+  }
+  return tail.slice(0, endMatch.index);
+}
+
+function extractPermissionsBlock(sourceText, indent = "") {
+  const pattern = new RegExp(`^${indent}permissions:\\n((?:${indent}\\s{2}[a-z-]+:\\s+[a-z-]+\\n)+)`, "m");
+  const match = sourceText.match(pattern);
+  return match?.[1] ?? "";
+}
+
+function hasPermissionsAtIndent(sourceText, indent, expectedScopes) {
+  const permissionsBlock = extractPermissionsBlock(sourceText, indent);
+  if (permissionsBlock.length === 0) {
+    return false;
+  }
+
+  return expectedScopes.every(([scope, value]) => (
+    new RegExp(`^${indent}\\s{2}${escapeRegex(scope)}:\\s*${escapeRegex(value)}\\b`, "m").test(permissionsBlock)
+  ));
+}
+
+function hasAnyJobWithPermissions(sourceText, expectedScopes) {
+  const jobsSection = extractTopLevelSection(sourceText, "jobs");
+  if (jobsSection.length === 0) {
+    return false;
+  }
+
+  const jobNames = [...jobsSection.matchAll(/^\s{2}([a-zA-Z0-9_-]+):\n/mg)]
+    .map((match) => match[1])
+    .filter((jobName) => typeof jobName === "string");
+
+  return jobNames.some((jobName) => hasPermissionsAtIndent(extractJobBody(jobsSection, jobName), "    ", expectedScopes));
+}
+
 function hasTopLevelPermissionsBlock(sourceText) {
   return /^permissions:\n/m.test(sourceText);
 }
@@ -297,7 +342,12 @@ function hasArtifactUpload(workflowText) {
 }
 
 function hasPermissionsPolicy(workflowText) {
-  return /(^|\n)permissions:\n\s*contents:\s*write\n\s*pull-requests:\s*read/m.test(workflowText);
+  if (hasPermissionsAtIndent(workflowText, "", [["contents", "write"], ["pull-requests", "read"]])) {
+    return true;
+  }
+
+  return hasPermissionsAtIndent(workflowText, "", [["contents", "read"], ["pull-requests", "read"]])
+    && hasAnyJobWithPermissions(workflowText, [["contents", "write"], ["pull-requests", "read"]]);
 }
 
 function buildModernChecks(workflowText) {

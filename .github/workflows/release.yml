@@ -22,12 +22,15 @@ on:
         type: boolean
 
 permissions:
-  contents: write
+  contents: read
   pull-requests: read
 
 jobs:
   release-notes:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
