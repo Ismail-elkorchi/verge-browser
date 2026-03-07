@@ -104,24 +104,32 @@ jobs:
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
-          set +e
-          jsr_info_output="$(npx -y jsr info "${PACKAGE_NAME}@${VERSION}" 2>&1)"
-          jsr_info_status=$?
-          set -e
+          scope="${PACKAGE_NAME#@}"
+          scope="${scope%%/*}"
+          package="${PACKAGE_NAME##*/}"
+          metadata_url="https://jsr.io/@${scope}/${package}/${VERSION}_meta.json"
+          metadata_output="publish-artifacts/jsr-version-meta.json"
 
-          if [ ${jsr_info_status} -eq 0 ]; then
-            echo "::error::JSR version already exists: ${PACKAGE_NAME}@${VERSION}"
-            echo "${jsr_info_output}"
-            exit 1
-          fi
+          http_status="$(curl -sS -o "${metadata_output}" -w '%{http_code}' -H 'Accept: application/json' "${metadata_url}")"
 
-          if printf '%s' "${jsr_info_output}" | grep -Eqi '404|not found|Received 404'; then
-            echo "JSR version does not exist yet: ${PACKAGE_NAME}@${VERSION}"
-          else
-            echo "::error::Unable to verify JSR version state for ${PACKAGE_NAME}@${VERSION}"
-            echo "${jsr_info_output}"
-            exit 1
-          fi
+          case "${http_status}" in
+            200)
+              echo "::error::JSR version already exists: ${PACKAGE_NAME}@${VERSION}"
+              cat "${metadata_output}"
+              exit 1
+              ;;
+            404)
+              echo "JSR version does not exist yet: ${PACKAGE_NAME}@${VERSION}"
+              rm -f "${metadata_output}"
+              ;;
+            *)
+              echo "::error::Unable to verify JSR version state for ${PACKAGE_NAME}@${VERSION}"
+              echo "metadata_url=${metadata_url}"
+              echo "http_status=${http_status}"
+              cat "${metadata_output}" || true
+              exit 1
+              ;;
+          esac
 
       - name: Generate npm pack manifest
         run: |
