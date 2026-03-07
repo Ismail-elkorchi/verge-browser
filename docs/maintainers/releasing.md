@@ -21,14 +21,14 @@ The workflow performs idempotent guards and aborts if the target version already
 ```bash
 npm ci
 npm run check:fast
-npm run docs:lint:jsr
-npm run docs:test:jsr
-npm run examples:run
+npm run docs:html:jsr
 npm pack --dry-run
 node scripts/quality/doc-required.mjs
 node scripts/release/render-notes.mjs --dry-run
 node scripts/release/update-changelog.mjs --dry-run
 ```
+
+Both publish workflows also upload the generated JSR HTML docs as workflow artifacts so maintainers can inspect the rendered API surface for the exact release candidate that passed the publish gates.
 
 ## Release notes format
 

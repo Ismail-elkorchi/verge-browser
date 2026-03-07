@@ -170,9 +170,7 @@ jobs:
         run: |
           set -euo pipefail
           npm run check:fast
-          npm run docs:lint:jsr
-          npm run docs:test:jsr
-          npm run examples:run
+          npm run docs:html:jsr
 
       - name: Ensure npm version does not already exist
         if: ${{ steps.meta.outputs.publish_npm == 'true' }}
@@ -249,7 +247,9 @@ jobs:
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: publish-${{ steps.meta.outputs.version }}
-          path: publish-artifacts/
+          path: |
+            publish-artifacts/
+            tmp/jsr-docs-html/
 
       - name: Ensure tokenless npm auth for OIDC publish
         if: ${{ steps.meta.outputs.dry_run != 'true' && steps.meta.outputs.publish_npm == 'true' }}
