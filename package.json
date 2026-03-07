@@ -1,6 +1,6 @@
 {
   "name": "@ismail-elkorchi/verge-browser",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Terminal browsing primitives with safe fetch helpers, HTML snapshots, and auditable text rendering.",
   "license": "MIT",
   "repository": {
