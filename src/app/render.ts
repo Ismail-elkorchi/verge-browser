@@ -446,53 +446,6 @@ function formatLinkSection(
   };
 }
 
-function formatFormsSection(
-  forms: ReturnType<typeof extractForms>,
-  width: number,
-  startLineIndex: number
-): {
-  readonly lines: readonly string[];
-  readonly actions: readonly RenderedFormAction[];
-} {
-  if (forms.length === 0) {
-    return {
-      lines: [],
-      actions: []
-    };
-  }
-
-  const lines = ["", "Forms:"];
-  const actions: RenderedFormAction[] = [];
-  let currentLineIndex = startLineIndex + lines.length;
-
-  for (const form of forms) {
-    const fieldNames = form.fields.slice(0, 3).map((field) => field.name);
-    const fieldSuffix = form.fields.length === 0
-      ? "no named fields"
-      : `${String(form.fields.length)} field${form.fields.length === 1 ? "" : "s"}${fieldNames.length > 0 ? `: ${fieldNames.join(", ")}` : ""}`;
-    const entry = `[form ${String(form.index)}] ${form.method.toUpperCase()} ${form.actionUrl} (${fieldSuffix})`;
-    const wrappedLines = wrapText(entry, width).map((line) => `  ${line}`);
-
-    actions.push({
-      kind: "form",
-      index: form.index,
-      label: `Form ${String(form.index)} ${form.method.toUpperCase()} ${form.actionUrl}`,
-      method: form.method,
-      actionUrl: form.actionUrl,
-      fieldCount: form.fields.length,
-      lineIndex: currentLineIndex
-    });
-
-    lines.push(...wrappedLines);
-    currentLineIndex += wrappedLines.length;
-  }
-
-  return {
-    lines,
-    actions
-  };
-}
-
 function firstLineIndexByLinkMarker(lines: readonly string[]): ReadonlyMap<number, number> {
   const indices = new Map<number, number>();
 
@@ -507,6 +460,76 @@ function firstLineIndexByLinkMarker(lines: readonly string[]): ReadonlyMap<numbe
   }
 
   return indices;
+}
+
+function normalizeAnchorLine(line: string): string {
+  return line
+    .replace(/\[\d+\]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function formActionLineIndices(
+  tree: DocumentTree,
+  baseUrl: string,
+  contentLines: readonly string[],
+  width: number
+): readonly number[] {
+  const formNodes = [...findAllByTagName(tree, "form")];
+  if (contentLines.length === 0) {
+    return formNodes.map(() => 0);
+  }
+
+  const normalizedContentLines = contentLines.map((line) => normalizeAnchorLine(line));
+  const indices: number[] = [];
+  let searchStart = 0;
+
+  for (const formNode of formNodes) {
+    const anchorLines = wrapBlocks(
+      renderBlockNode(formNode, {
+        baseUrl,
+        links: []
+      }),
+      width
+    )
+      .map((line) => normalizeAnchorLine(line))
+      .filter((line) => line.length > 0);
+
+    let matchedLineIndex = -1;
+    for (const anchorLine of anchorLines) {
+      matchedLineIndex = normalizedContentLines.findIndex(
+        (line, lineIndex) => lineIndex >= searchStart && line.includes(anchorLine)
+      );
+      if (matchedLineIndex >= 0) {
+        break;
+      }
+    }
+
+    if (matchedLineIndex < 0) {
+      matchedLineIndex = Math.min(searchStart, Math.max(0, contentLines.length - 1));
+    }
+
+    indices.push(matchedLineIndex);
+    searchStart = Math.min(contentLines.length, matchedLineIndex + 1);
+  }
+
+  return indices;
+}
+
+function buildFormActions(
+  forms: ReturnType<typeof extractForms>,
+  lineIndices: readonly number[]
+): readonly RenderedFormAction[] {
+  return forms.map((form, formIndex) => ({
+    kind: "form",
+    index: form.index,
+    label: `Form ${String(form.index)} ${form.method.toUpperCase()} ${form.actionUrl}`,
+    method: form.method,
+    actionUrl: form.actionUrl,
+    fieldCount: form.fields.length,
+    lineIndex: lineIndices[formIndex] ?? 0
+  }));
 }
 
 function sortActionables(actionables: readonly RenderedActionable[]): readonly RenderedActionable[] {
@@ -537,8 +560,7 @@ export function renderDocumentToTerminal(input: RenderInput): RenderedPage {
   const wrappedContent = wrapBlocks(blocks, contentWidth);
   const forms = extractForms(input.tree, input.finalUrl);
   const linkSection = formatLinkSection(links, contentWidth, wrappedContent.length);
-  const formsSection = formatFormsSection(forms, contentWidth, wrappedContent.length + linkSection.lines.length);
-  const lines: string[] = [...wrappedContent, ...linkSection.lines, ...formsSection.lines];
+  const lines: string[] = [...wrappedContent, ...linkSection.lines];
   if (lines.length === 0) {
     const normalizedTitle = title.toLowerCase();
     if (input.status === 403 && normalizedTitle.includes("just a moment")) {
@@ -558,7 +580,11 @@ export function renderDocumentToTerminal(input: RenderInput): RenderedPage {
     ...link,
     lineIndex: contentLineIndices.get(link.index) ?? linkSection.summaryLineIndices.get(link.index) ?? 0
   }));
-  const actionables = sortActionables([...renderedLinks, ...formsSection.actions]);
+  const formActions = buildFormActions(
+    forms,
+    formActionLineIndices(input.tree, input.finalUrl, wrappedContent, contentWidth)
+  );
+  const actionables = sortActionables([...renderedLinks, ...formActions]);
 
   return {
     title,
