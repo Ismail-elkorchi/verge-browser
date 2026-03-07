@@ -190,3 +190,40 @@ test("renderDocumentToTerminal includes noscript fallback content", () => {
   assert.ok(joined.includes("visible text"));
   assert.ok(joined.includes("fallback text for non-script clients"));
 });
+
+test("renderDocumentToTerminal keeps forms as action metadata without changing rendered lines", () => {
+  const tree = parse(`
+    <html>
+      <head><title>Form sample</title></head>
+      <body>
+        <h1>Search</h1>
+        <form action="/search" method="get">
+          <input name="q" value="alpha">
+          <textarea name="notes">hello</textarea>
+        </form>
+      </body>
+    </html>
+  `);
+
+  const renderedPage = renderDocumentToTerminal({
+    tree,
+    requestUrl: "https://example.com/form",
+    finalUrl: "https://example.com/form",
+    status: 200,
+    statusText: "OK",
+    fetchedAtIso: "2026-01-01T00:00:00.000Z",
+    width: 80
+  });
+
+  assert.equal(renderedPage.lines.includes("Forms:"), false);
+  assert.equal(renderedPage.actionables.length, 1);
+  assert.deepEqual(renderedPage.actionables[0], {
+    kind: "form",
+    index: 1,
+    label: "Form 1 GET https://example.com/search",
+    method: "get",
+    actionUrl: "https://example.com/search",
+    fieldCount: 2,
+    lineIndex: 2
+  });
+});

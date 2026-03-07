@@ -4,21 +4,19 @@
 
 ### Node.js global CLI
 
-Install the published CLI command:
-
 ```sh
 npm install --global @ismail-elkorchi/verge-browser
 ```
 
-This installs the `verge` binary from the npm package.
+This installs the supported `verge` binary from npm.
 
-### Node.js local package
-
-Install the package as a project dependency when you want the library exports and the packaged CLI in the same workspace:
+### Node.js project dependency
 
 ```sh
 npm install @ismail-elkorchi/verge-browser
 ```
+
+Use this when you want the library exports and the packaged CLI in the same workspace.
 
 ### Deno, JSR, and Bun
 
@@ -26,70 +24,140 @@ npm install @ismail-elkorchi/verge-browser
 - Bun support in this package is documented for library primitives, not as a separately published global CLI distribution.
 - Use the Node.js npm package when you want the supported interactive CLI.
 
-## Binary name
-
-- `verge`
-
 ## Startup form
 
 ```txt
-verge [initial-target] [--once] [--record-corpus]
+verge [initial-target] [--once] [--record-corpus] [--screen-reader]
 ```
 
 - The first non-flag argument becomes the initial target URL or special page.
 - When no initial target is provided, the CLI reopens the latest history URL if one exists.
 - If there is no stored history entry, the CLI starts at `about:help`.
 
+## Behavioral boundaries
+
+- This reference documents the supported keys, palette grammar, and startup
+  behavior of the redesigned shell.
+- The page view is deterministic for the same fetched HTML and terminal width.
+- Terminal width can change wrapping, visible line numbers, and the line index
+  attached to focused links or forms.
+- The CLI does not execute client-side page JavaScript.
+- Pages guarded by anti-bot or browser-verification flows can fail with partial
+  content or explicit blocked-page diagnostics.
+
 ## Special targets
 
-- `about:help`: open the built-in help screen.
+- `about:help`: open the built-in help page.
 - `https://...` / `http://...`: open a remote page under the package's fetch policy.
 - `file://...`: open a local file through the Node host.
+- Other schemes are rejected by the package's protocol allow-list.
 
-## CLI flags
+## First-use browse loop
 
-### `--once`
+Once the page is open:
 
-- Loads the initial target, then exits before entering the interactive browsing loop.
-- Useful for smoke runs and startup validation.
-- Does not keep the page view rendered on screen for manual browsing.
+- `]` or `Tab`: focus the next link or control from the page view.
+- `[` or `Shift+Tab`: focus the previous link or control.
+- `Enter`: open the focused link or control.
+- `h`, `f`, `r`: back, forward, reload.
+- `g`: open the location palette for URL entry.
+- `/`: open in-page search.
+- `n`, `N`: move to the next or previous search match.
+- `Esc`: back out of search, link/control focus, or transient screens.
+- `q`: quit.
 
-### `--record-corpus`
+The page view is the primary browse surface. Users should not need to type a freeform command just to follow links.
 
-- Records fetched HTML and CSS payloads to the realworld corpus cache while the CLI session runs.
-- Intended for the package's field-evaluation workflow rather than normal browsing.
+## Screens
 
-## In-session commands
+### Browse screen
 
-### Navigation and views
+- shows the rendered page
+- keeps reading focus and link/control focus explicit
+- supports direct page-to-page browsing
 
-- `help`: show the command help screen.
-- `view`: re-render the current page view.
-- `reader`: show reader-text output for the current page.
-- `links`: show the current page's numbered links.
-- `diag`: show parse and network diagnostics.
-- `outline`: show heading outline entries.
-- `open <url>` / `go <url>`: navigate to a URL.
-- `open <n>`: open a numbered link from the links view.
-- `stream <url>`: navigate with stream parser mode.
-- `back`, `forward`, `reload`: navigate through session history.
+### Picker screen
 
-### Search and paging
+Used for:
 
-- `find <query>`: search the current view.
-- `find next`, `find prev`: move between matches.
-- `pagedown`, `pageup`, `top`, `bottom`: move the viewport.
+- links
+- documents
+- history
+- bookmarks
+- forms
+- outline
+- recall results
 
-### State and extraction
+Picker keys:
 
-- `bookmark list`, `bookmark add [name]`, `bookmark open <n>`: manage bookmarks.
-- `cookie list`, `cookie clear`: inspect or clear persisted cookies.
-- `history`, `history open <n>`: inspect or reopen history entries.
-- `recall <query>`, `recall open <n>`: search the local content index.
-- `form list`, `form submit <n>`: inspect and submit forms.
-- `download <path>`: write the current HTML snapshot to disk.
+- `Up` / `Down`: move selection
+- `Home` / `End`: jump to the first or last item
+- `Enter`: activate the selected item
+- digits: fill the visible jump field
+- `/`: focus the filter input
+- `Tab`: move between the filter input and the list
+- `Esc`: clear jump, then clear filter, then leave the picker
 
-### Patch commands
+### Location or action palette
+
+- `g` opens location mode
+- `:` opens action mode
+- `Enter` runs the current input
+- `Up` / `Down` move through visible suggestions
+- `Esc` closes the palette without navigating
+
+### Detail screen
+
+Used for help, diagnostics, reader output, and cookies.
+
+### Editor screen
+
+Used for form editing.
+
+- `Enter` starts editing the selected field
+- `Tab` moves to the next field
+- `s` submits the form
+- `x` opens the external editor for the selected field
+- `Esc` stops editing or starts the explicit discard flow
+
+## Action palette grammar
+
+The action palette uses one documented command grammar.
+
+Common actions:
+
+- `links`
+- `documents`
+- `history`
+- `bookmark add [name]`
+- `bookmarks`
+- `forms`
+- `outline`
+- `diag`
+- `download <path>`
+- `save text <path>`
+- `save csv <path>`
+- `open-external`
+- `close`
+- `reopen`
+
+Navigation and search actions:
+
+- `go <url>`
+- `stream <url>`
+- `find <query>`
+- `find next`
+- `find prev`
+
+Collection and submission actions:
+
+- `bookmark open <n>`
+- `history open <n>`
+- `recall <query>`
+- `recall open <n>`
+- `form submit <n> [name=value ...]`
+
+Low-level patch actions:
 
 - `patch remove-node <id>`
 - `patch replace-text <id> <value>`
@@ -98,21 +166,23 @@ verge [initial-target] [--once] [--record-corpus]
 - `patch insert-before <id> <html>`
 - `patch insert-after <id> <html>`
 
-### Exit
+## Flags
 
-- `quit`
+### `--once`
 
-## Shortcuts
+- Loads the initial target, renders it once, then exits before entering the interactive loop.
+- Useful for smoke runs and startup validation.
+- Not intended for manual browsing sessions that should remain open after the first render.
 
-- `j` / `k` or `Up` / `Down`: scroll one line.
-- `Space` / `b`: scroll one page forward or backward.
-- `g` / `G`: jump to top or bottom.
-- `/`, `n`, `N`: search, next match, previous match.
-- `h` / `f` / `r`: back, forward, reload.
-- `l` / `?`: links view, help view.
-- `m` / `H`: add bookmark, show history.
-- `:`: open the command prompt.
-- `q`: quit.
+### `--record-corpus`
+
+- Records fetched HTML and CSS payloads to the realworld corpus cache while the CLI session runs.
+- Intended for field-evaluation workflows rather than normal browsing.
+
+### `--screen-reader`
+
+- Uses the screen-reader-friendly chrome profile.
+- Keeps the footer and status lines explicit while avoiding decorative separators.
 
 ## Related
 

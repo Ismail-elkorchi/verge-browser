@@ -33,7 +33,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "node scripts/build/clean-dist.mjs && tsc -p tsconfig.build.json",
     "check": "npm run lint && npm run typecheck && npm test && npm run smoke:cli && npm run eval:ci",
     "check:fast": "npm run lint && npm run typecheck && npm test && npm run docs:required && npm run docs:check:jsr && npm run examples:run",
     "ci": "npm run check",

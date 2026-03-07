@@ -18,8 +18,8 @@ test("fetchPage supports about:help without network", async () => {
   assert.equal(page.status, 200);
   assert.equal(page.networkOutcome.kind, "ok");
   assert.ok(page.html.includes("verge-browser"));
-  assert.ok(page.html.includes("stream &lt;url&gt;"));
-  assert.ok(page.html.includes("patch set-attr"));
+  assert.ok(page.html.includes("save text &lt;path&gt;"));
+  assert.ok(page.html.includes("] or Tab"));
 });
 
 test("fetchPage supports file URLs", async () => {

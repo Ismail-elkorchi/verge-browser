@@ -6,8 +6,9 @@ import {
   type HtmlNode
 } from "@ismail-elkorchi/html-parser";
 
+import { extractForms } from "./forms.js";
 import { resolveHref } from "./url.js";
-import type { RenderInput, RenderedLink, RenderedPage } from "./types.js";
+import type { RenderInput, RenderedActionable, RenderedFormAction, RenderedLink, RenderedPage } from "./types.js";
 
 const SKIP_TAGS = new Set(["script", "style", "template", "head"]);
 const PRE_BLOCK_PREFIX = "@@PRE@@";
@@ -135,10 +136,12 @@ function renderInlineNode(node: HtmlNode, context: RenderContext): string {
     const resolvedHref = resolveHref(href, context.baseUrl);
 
     context.links.push({
+      kind: "link",
       index: linkIndex,
       label: label.length > 0 ? label : href,
       href,
-      resolvedHref
+      resolvedHref,
+      lineIndex: -1
     });
 
     return label.length > 0 ? `${label} [${String(linkIndex)}]` : `[${String(linkIndex)}]`;
@@ -410,22 +413,168 @@ function wrapBlocks(blocks: readonly string[], width: number): string[] {
   return wrappedLines;
 }
 
-function formatLinkSection(links: readonly RenderedLink[], width: number): string[] {
+function formatLinkSection(
+  links: readonly RenderedLink[],
+  width: number,
+  startLineIndex: number
+): {
+  readonly lines: readonly string[];
+  readonly summaryLineIndices: ReadonlyMap<number, number>;
+} {
   if (links.length === 0) {
-    return [];
+    return {
+      lines: [],
+      summaryLineIndices: new Map()
+    };
   }
 
   const lines = ["", "Links:"];
+  const summaryLineIndices = new Map<number, number>();
+  let currentLineIndex = startLineIndex + lines.length;
+
   for (const link of links) {
     const entry = `[${String(link.index)}] ${link.label} -> ${link.resolvedHref}`;
-    lines.push(...wrapText(entry, width).map((line) => `  ${line}`));
+    const wrappedLines = wrapText(entry, width).map((line) => `  ${line}`);
+    summaryLineIndices.set(link.index, currentLineIndex);
+    lines.push(...wrappedLines);
+    currentLineIndex += wrappedLines.length;
   }
-  return lines;
-}/**
- * Provides deterministic public behavior for `renderDocumentToTerminal`.
+
+  return {
+    lines,
+    summaryLineIndices
+  };
+}
+
+function firstLineIndexByLinkMarker(lines: readonly string[]): ReadonlyMap<number, number> {
+  const indices = new Map<number, number>();
+
+  for (const [lineIndex, line] of lines.entries()) {
+    for (const match of line.matchAll(/\[(\d+)\]/g)) {
+      const numericIndex = Number.parseInt(match[1] ?? "", 10);
+      if (!Number.isSafeInteger(numericIndex) || numericIndex < 1 || indices.has(numericIndex)) {
+        continue;
+      }
+      indices.set(numericIndex, lineIndex);
+    }
+  }
+
+  return indices;
+}
+
+function normalizeAnchorLine(line: string): string {
+  return line
+    .replace(/\[\d+\]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function formActionLineIndices(
+  tree: DocumentTree,
+  baseUrl: string,
+  contentLines: readonly string[],
+  width: number
+): readonly number[] {
+  const formNodes = [...findAllByTagName(tree, "form")];
+  if (contentLines.length === 0) {
+    return formNodes.map(() => 0);
+  }
+
+  const normalizedContentLines = contentLines.map((line) => normalizeAnchorLine(line));
+  const indices: number[] = [];
+  let searchStart = 0;
+
+  for (const formNode of formNodes) {
+    const anchorLines = wrapBlocks(
+      renderBlockNode(formNode, {
+        baseUrl,
+        links: []
+      }),
+      width
+    )
+      .map((line) => normalizeAnchorLine(line))
+      .filter((line) => line.length > 0);
+
+    let matchedLineIndex = -1;
+    for (const anchorLine of anchorLines) {
+      matchedLineIndex = normalizedContentLines.findIndex(
+        (line, lineIndex) => lineIndex >= searchStart && line.includes(anchorLine)
+      );
+      if (matchedLineIndex >= 0) {
+        break;
+      }
+    }
+
+    if (matchedLineIndex < 0) {
+      matchedLineIndex = Math.min(searchStart, Math.max(0, contentLines.length - 1));
+    }
+
+    indices.push(matchedLineIndex);
+    searchStart = Math.min(contentLines.length, matchedLineIndex + 1);
+  }
+
+  return indices;
+}
+
+function buildFormActions(
+  forms: ReturnType<typeof extractForms>,
+  lineIndices: readonly number[]
+): readonly RenderedFormAction[] {
+  return forms.map((form, formIndex) => ({
+    kind: "form",
+    index: form.index,
+    label: `Form ${String(form.index)} ${form.method.toUpperCase()} ${form.actionUrl}`,
+    method: form.method,
+    actionUrl: form.actionUrl,
+    fieldCount: form.fields.length,
+    lineIndex: lineIndices[formIndex] ?? 0
+  }));
+}
+
+function sortActionables(actionables: readonly RenderedActionable[]): readonly RenderedActionable[] {
+  return [...actionables].sort((left, right) => {
+    if (left.lineIndex !== right.lineIndex) {
+      return left.lineIndex - right.lineIndex;
+    }
+    if (left.kind !== right.kind) {
+      return left.kind.localeCompare(right.kind);
+    }
+    return left.index - right.index;
+  });
+}
+
+/**
+ * Renders a parsed HTML document into deterministic terminal output.
+ *
+ * For a given parsed tree, terminal width, and fetch metadata, the renderer
+ * produces the same visible text lines and the same ordered link/form actions.
+ * It does not execute page JavaScript and does not attempt pixel-accurate
+ * browser layout.
+ *
+ * @param input Parsed document, fetch metadata, and target terminal width.
+ * @returns Rendered terminal page with visible lines, extracted links, and
+ * direct link/form actions in visual order.
+ *
+ * @example Usage
+ * ```ts
+ * import { parseHtml, renderDocumentToTerminal } from "@ismail-elkorchi/verge-browser";
+ *
+ * const tree = parseHtml("<h1>Hello</h1><a href=\"/docs\">Docs</a>");
+ * const page = renderDocumentToTerminal({
+ *   tree,
+ *   requestUrl: "https://example.com",
+ *   finalUrl: "https://example.com",
+ *   status: 200,
+ *   statusText: "OK",
+ *   fetchedAtIso: "2026-01-01T00:00:00.000Z",
+ *   width: 80
+ * });
+ *
+ * console.log(page.title);
+ * console.log(page.actionables[0]?.kind);
+ * ```
  */
-
-
 export function renderDocumentToTerminal(input: RenderInput): RenderedPage {
   const links: RenderedLink[] = [];
   const context: RenderContext = {
@@ -437,7 +586,9 @@ export function renderDocumentToTerminal(input: RenderInput): RenderedPage {
   const blocks = renderNodesAsBlocks(bodyChildren(input.tree), context);
   const contentWidth = Math.max(40, input.width - 2);
   const wrappedContent = wrapBlocks(blocks, contentWidth);
-  const lines: string[] = [...wrappedContent, ...formatLinkSection(links, contentWidth)];
+  const forms = extractForms(input.tree, input.finalUrl);
+  const linkSection = formatLinkSection(links, contentWidth, wrappedContent.length);
+  const lines: string[] = [...wrappedContent, ...linkSection.lines];
   if (lines.length === 0) {
     const normalizedTitle = title.toLowerCase();
     if (input.status === 403 && normalizedTitle.includes("just a moment")) {
@@ -452,12 +603,24 @@ export function renderDocumentToTerminal(input: RenderInput): RenderedPage {
     lines.push("", `Parser reported ${String(input.tree.errors.length)} recoverable issue(s).`);
   }
 
+  const contentLineIndices = firstLineIndexByLinkMarker(wrappedContent);
+  const renderedLinks = links.map((link) => ({
+    ...link,
+    lineIndex: contentLineIndices.get(link.index) ?? linkSection.summaryLineIndices.get(link.index) ?? 0
+  }));
+  const formActions = buildFormActions(
+    forms,
+    formActionLineIndices(input.tree, input.finalUrl, wrappedContent, contentWidth)
+  );
+  const actionables = sortActionables([...renderedLinks, ...formActions]);
+
   return {
     title,
     displayUrl: input.finalUrl,
     statusLine: `${String(input.status)} ${input.statusText}`,
     lines,
-    links,
+    links: renderedLinks,
+    actionables,
     parseErrorCount: input.tree.errors.length,
     fetchedAtIso: input.fetchedAtIso
   };
