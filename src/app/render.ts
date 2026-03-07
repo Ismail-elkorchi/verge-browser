@@ -152,11 +152,40 @@ function renderInlineNodes(nodes: readonly HtmlNode[], context: RenderContext): 
     .map((node) => renderInlineNode(node, context))
     .filter((fragment) => fragment.length > 0);
 
-  return fragments
-    .join(" ")
-    .replace(/[ \t]*\n[ \t]*/g, "\n")
-    .replace(/[ \t]{2,}/g, " ")
-    .trim();
+  return foldInlineWhitespace(fragments.join(" "));
+}
+
+function foldInlineWhitespace(rawText: string): string {
+  let output = "";
+  let pendingSpace = false;
+
+  for (const character of rawText) {
+    if (character === "\r") {
+      continue;
+    }
+
+    if (character === "\n") {
+      if (output.endsWith(" ")) {
+        output = output.slice(0, -1);
+      }
+      output += "\n";
+      pendingSpace = false;
+      continue;
+    }
+
+    if (character === " " || character === "\t") {
+      pendingSpace = true;
+      continue;
+    }
+
+    if (pendingSpace && output.length > 0 && !output.endsWith("\n")) {
+      output += " ";
+    }
+    output += character;
+    pendingSpace = false;
+  }
+
+  return output.trim();
 }
 
 function headingLevel(tagName: string): number {

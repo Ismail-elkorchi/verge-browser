@@ -59,6 +59,30 @@ test("renderDocumentToTerminal preserves preformatted whitespace", () => {
   assert.ok(joined.includes("alpha\n  beta\n\tgamma"));
 });
 
+test("renderDocumentToTerminal collapses inline tabs without regex backtracking", () => {
+  const repeatedTabs = "\t".repeat(20_000);
+  const tree = parse(`
+    <html>
+      <head><title>Inline spacing</title></head>
+      <body>
+        <p>alpha${repeatedTabs}<br>${repeatedTabs}beta</p>
+      </body>
+    </html>
+  `);
+
+  const renderedPage = renderDocumentToTerminal({
+    tree,
+    requestUrl: "https://example.com/inline-spacing",
+    finalUrl: "https://example.com/inline-spacing",
+    status: 200,
+    statusText: "OK",
+    fetchedAtIso: "2026-01-01T00:00:00.000Z",
+    width: 80
+  });
+
+  assert.deepEqual(renderedPage.lines.slice(0, 2), ["alpha", "beta"]);
+});
+
 test("renderDocumentToTerminal renders markdown-like table rows", () => {
   const tree = parse(`
     <html>
