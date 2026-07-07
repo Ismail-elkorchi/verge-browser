@@ -33,7 +33,7 @@ export function sha256HexString(value) {
 }
 
 export async function readNdjson(path) {
-  let sourceText = "";
+  let sourceText;
   try {
     sourceText = await readFile(path, "utf8");
   } catch (error) {

@@ -714,7 +714,7 @@ async function withOracleImageLock(imageRoot, operation) {
     return await operation();
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "EEXIST") {
-      throw new Error(`oracle image lock is already held: ${lockPath}`);
+      throw new Error(`oracle image lock is already held: ${lockPath}`, { cause: error });
     }
     throw error;
   } finally {
