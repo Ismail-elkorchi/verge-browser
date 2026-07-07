@@ -112,11 +112,11 @@ async function main() {
   const fieldSummary = JSON.parse(await readFile(pageSummaryPath, "utf8"));
   const oracleSummary = JSON.parse(await readFile(oracleSummaryPath, "utf8"));
   const cssRecords = await readNdjson(cssManifestPath);
-  let cohortGovernance = null;
+  let cohortGovernance;
   try {
     cohortGovernance = JSON.parse(await readFile(cohortGovernancePath, "utf8"));
   } catch {
-    cohortGovernance = null;
+    // Cohort governance is optional for partial field-report runs.
   }
 
   const cssByKind = cssRecords.reduce((acc, record) => {

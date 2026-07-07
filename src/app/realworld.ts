@@ -531,7 +531,7 @@ export class CorpusRecorder {
               fetchedAtIso: snapshot.fetchedAtIso,
               cssBytes: null,
               skipReason: candidate.skipReason
-            } as LinkedCssFetchResult
+            }
           };
         }
         return {
