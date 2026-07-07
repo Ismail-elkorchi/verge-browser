@@ -4,6 +4,8 @@
  * Constraints: requires built verge-browser output only; no separate html-parser install is needed.
  * Run: npm run build && node examples/render-document.mjs
  */
+import { pathToFileURL } from "node:url";
+
 import { parseHtml, renderDocumentToTerminal } from "../dist/mod.js";
 
 function assert(condition, message) {
@@ -29,7 +31,9 @@ export function runRenderDocument() {
   return rendered;
 }
 
-if (import.meta.main) {
+const isMainModule = process.argv[1] ? import.meta.url === pathToFileURL(process.argv[1]).href : false;
+
+if (isMainModule) {
   runRenderDocument();
   console.log("render-document ok");
 }

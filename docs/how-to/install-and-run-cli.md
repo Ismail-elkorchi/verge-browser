@@ -4,7 +4,7 @@
 Install the packaged `verge` command on Node.js and open a page in the interactive terminal browser.
 
 ## Prerequisites
-- Node.js `>=20`
+- Node.js `>=24`
 - npm `>=10`
 - A terminal session with network access to the page you want to open
 

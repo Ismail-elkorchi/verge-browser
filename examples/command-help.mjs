@@ -4,6 +4,8 @@
  * Constraints: command grammar must stay aligned with `parseCommand` behavior.
  * Run: npm run build && node examples/command-help.mjs
  */
+import { pathToFileURL } from "node:url";
+
 import { formatHelpText, parseCommand } from "../dist/mod.js";
 
 function assert(condition, message) {
@@ -23,7 +25,9 @@ export function runCommandHelp() {
   return parsed;
 }
 
-if (import.meta.main) {
+const isMainModule = process.argv[1] ? import.meta.url === pathToFileURL(process.argv[1]).href : false;
+
+if (isMainModule) {
   runCommandHelp();
   console.log("command-help ok");
 }

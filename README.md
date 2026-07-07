@@ -164,7 +164,7 @@ Runtime compatibility matrix:
 | Bun | Supported (library primitives) |
 | Browser (evergreen) | Supported (library primitives) |
 
-The Node.js package surface is verified against Node 20, 22, and 24.
+The Node.js package surface is verified against Node 24 and 26.
 
 ## Security and Safety Notes
 
