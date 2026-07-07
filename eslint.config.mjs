@@ -1,6 +1,8 @@
 import js from "@eslint/js";
+import nodePlugin from "eslint-plugin-n";
 import tseslint from "typescript-eslint";
 
+const nodeRuntimeFiles = ["**/*.js", "**/*.mjs"];
 const typedFiles = ["src/**/*.ts"];
 
 const recommendedTypeChecked = tseslint.configs.recommendedTypeChecked.map((config) => ({
@@ -18,7 +20,7 @@ export default [
     ignores: ["dist/**", "node_modules/**", "reports/**", "tmp/**"]
   },
   {
-    files: ["**/*.js", "**/*.mjs"],
+    files: nodeRuntimeFiles,
     ...js.configs.recommended,
     languageOptions: {
       ...js.configs.recommended.languageOptions,
@@ -28,6 +30,23 @@ export default [
         setTimeout: "readonly",
         clearTimeout: "readonly"
       }
+    }
+  },
+  {
+    files: nodeRuntimeFiles,
+    plugins: {
+      n: nodePlugin
+    },
+    rules: {
+      "n/no-deprecated-api": "error",
+      "n/no-unsupported-features/es-builtins": "error",
+      "n/no-unsupported-features/es-syntax": [
+        "error",
+        {
+          ignores: ["modules"]
+        }
+      ],
+      "n/no-unsupported-features/node-builtins": "error"
     }
   },
   ...recommendedTypeChecked,

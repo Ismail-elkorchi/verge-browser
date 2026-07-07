@@ -13,7 +13,7 @@
   "type": "module",
   "packageManager": "npm@11.10.0",
   "engines": {
-    "node": ">=20.0.0",
+    "node": ">=24.0.0",
     "npm": ">=10.0.0"
   },
   "bin": {
@@ -107,6 +107,7 @@
     "@eslint/js": "10.0.1",
     "@types/node": "26.1.0",
     "eslint": "10.6.0",
+    "eslint-plugin-n": "18.2.1",
     "typescript": "6.0.3",
     "typescript-eslint": "8.63.0"
   }

@@ -4,6 +4,8 @@
  * Constraints: inputs must stay within supported URL protocol policy semantics.
  * Run: npm run build && node examples/url-policy.mjs
  */
+import { pathToFileURL } from "node:url";
+
 import { assertAllowedUrl, resolveInputUrl } from "../dist/mod.js";
 
 function assert(condition, message) {
@@ -24,7 +26,9 @@ export function runUrlPolicy() {
   return resolved;
 }
 
-if (import.meta.main) {
+const isMainModule = process.argv[1] ? import.meta.url === pathToFileURL(process.argv[1]).href : false;
+
+if (isMainModule) {
   runUrlPolicy();
   console.log("url-policy ok");
 }
