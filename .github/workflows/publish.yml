@@ -169,7 +169,7 @@ jobs:
       - name: Run publish gates
         run: |
           set -euo pipefail
-          npm run check:fast
+          npm run release:check
           npm run docs:html:jsr
 
       - name: Ensure npm version does not already exist

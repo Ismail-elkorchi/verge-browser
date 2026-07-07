@@ -20,10 +20,8 @@ The workflow performs idempotent guards and aborts if the target version already
 
 ```bash
 npm ci
-npm run check:fast
+npm run release:check
 npm run docs:html:jsr
-npm pack --dry-run
-node scripts/quality/doc-required.mjs
 node scripts/release/render-notes.mjs --dry-run
 node scripts/release/update-changelog.mjs --dry-run
 ```

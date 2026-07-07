@@ -12,17 +12,8 @@ Publishing is done by GitHub Actions OIDC workflows:
 
 ```bash
 npm ci
-npm run check:fast
-npm run docs:lint:jsr
-npm run docs:test:jsr
-npm run examples:run
-npm run eval:release
-npm run eval:oracle-runtime:release
-npm run eval:oracle-superiority:release
-npm run eval:oracle-fingerprint:release
-npm run eval:oracle-supply-chain:release
-npm pack --dry-run
-node scripts/quality/doc-required.mjs
+npm run release:check
+npm run docs:html:jsr
 node scripts/release/render-notes.mjs --dry-run
 node scripts/release/update-changelog.mjs --dry-run
 ```
