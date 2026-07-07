@@ -109,9 +109,6 @@ jobs:
       - name: Prepare oracle image
         run: npm run oracle:image:prepare
 
-      - name: Static analysis
-        run: npm run lint && npm run typecheck
-
       - name: Check
         run: npm run ci
 

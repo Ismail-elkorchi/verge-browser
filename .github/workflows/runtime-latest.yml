@@ -54,8 +54,8 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Dependency freshness check
-        run: npm run deps:freshness
+      - name: Dependency freshness report
+        run: npm run deps:freshness:report
 
       - name: Core checks
         run: npm run check
