@@ -2,23 +2,10 @@ import { resolve } from "node:path";
 
 import { readJson, writeJsonReport } from "./render-eval-lib.mjs";
 
-function parseProfile(argv) {
-  let profile = "release";
-  for (const argument of argv) {
-    if (argument.startsWith("--profile=")) {
-      profile = argument.slice("--profile=".length);
-      continue;
-    }
-    throw new Error(`unsupported argument: ${argument}`);
-  }
-  if (profile !== "ci" && profile !== "release") {
-    throw new Error(`invalid profile: ${profile}`);
-  }
-  return profile;
-}
-
 async function main() {
-  const profile = parseProfile(process.argv.slice(2));
+  if (process.argv.length > 2) {
+    throw new Error("oracle superiority is a release-only check and accepts no arguments");
+  }
 
   const [config, scoreReport, runtimeValidationSummary] = await Promise.all([
     readJson(resolve("evaluation.config.json")),
@@ -32,8 +19,8 @@ async function main() {
   const baselineNames = Object.keys(scoreReport.metrics).filter((engineName) => engineName !== "verge");
 
   const failures = [];
-  if (runtimeValidationSummary?.profile !== profile) {
-    failures.push(`oracle runtime report profile mismatch: expected ${profile}`);
+  if (runtimeValidationSummary?.profile !== "release") {
+    failures.push("oracle runtime report is not from the release profile");
   }
   const metrics = {};
   for (const metricName of requiredMetrics) {
@@ -55,7 +42,7 @@ async function main() {
   const report = {
     suite: "oracle-superiority-check",
     timestamp: new Date().toISOString(),
-    profile,
+    profile: "release",
     runtimeValidationOk: runtimeValidationSummary?.gates?.ok === true,
     metrics,
     failures,

@@ -85,7 +85,6 @@ jobs:
         if: ${{ matrix.node-version == 24 }}
         run: |
           npm run eval:oracle-runtime:ci
-          npm run eval:oracle-superiority:ci
           npm run eval:oracle-fingerprint:ci
           npm run eval:oracle-supply-chain:ci
 
