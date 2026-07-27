@@ -1,6 +1,13 @@
-import { findAllByTagName, textContent, type DocumentTree, type ElementNode } from "@ismail-elkorchi/html-parser";
+import {
+  findAllByTagName,
+  getAttributeValue,
+  hasAttribute,
+  type DocumentTree,
+  type ElementNode
+} from "@ismail-elkorchi/html-parser";
 
 import { resolveHref } from "./url.js";
+import { extractCompleteText } from "./text.js";
 import type { PageRequestOptions } from "./types.js";
 
 export interface FormField {
@@ -21,47 +28,49 @@ export interface FormSubmissionRequest {
   readonly requestOptions: PageRequestOptions;
 }
 
-function attrValue(node: ElementNode, name: string): string | null {
-  const target = name.toLowerCase();
-  for (const attribute of node.attributes) {
-    if (attribute.name.toLowerCase() === target) {
-      return attribute.value;
-    }
-  }
-  return null;
-}
-
-function hasAttr(node: ElementNode, name: string): boolean {
-  return attrValue(node, name) !== null;
-}
-
 function collectFormControls(formNode: ElementNode): readonly ElementNode[] {
   const controls: ElementNode[] = [];
-  const walk = (node: ElementNode): void => {
-    for (const child of node.children) {
-      if (child.kind !== "element") continue;
-      const tag = child.tagName.toLowerCase();
-      if (tag === "input" || tag === "textarea" || tag === "select") {
-        controls.push(child);
-      }
-      walk(child);
+  const pending: ElementNode[] = [];
+  for (let index = formNode.children.length - 1; index >= 0; index -= 1) {
+    const child = formNode.children[index];
+    if (child?.kind === "element") pending.push(child);
+  }
+
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (!node) continue;
+    const tag = node.localName.toLowerCase();
+    if (tag === "input" || tag === "textarea" || tag === "select") {
+      controls.push(node);
     }
-  };
-  walk(formNode);
+    for (let index = node.children.length - 1; index >= 0; index -= 1) {
+      const child = node.children[index];
+      if (child?.kind === "element") pending.push(child);
+    }
+  }
+
   return controls;
 }
 
 function selectValue(selectNode: ElementNode): string {
-  const options = selectNode.children.filter(
-    (child): child is ElementNode => child.kind === "element" && child.tagName.toLowerCase() === "option"
-  );
+  const options: ElementNode[] = [];
+  const pending: ElementNode[] = [selectNode];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (!node) continue;
+    if (node !== selectNode && node.localName.toLowerCase() === "option") options.push(node);
+    for (let index = node.children.length - 1; index >= 0; index -= 1) {
+      const child = node.children[index];
+      if (child?.kind === "element") pending.push(child);
+    }
+  }
   if (options.length === 0) return "";
-  const selected = options.find((option) => hasAttr(option, "selected")) ?? options[0];
+  const selected = options.find((option) => hasAttribute(option, "selected")) ?? options[0];
   if (!selected) return "";
-  return attrValue(selected, "value") ?? textContent(selected);
+  return getAttributeValue(selected, "value") ?? extractCompleteText(selected);
 }
 
-function normalizeMethod(value: string | null): string {
+function normalizeMethod(value: string | null | undefined): string {
   if (!value) return "get";
   const normalized = value.trim().toLowerCase();
   return normalized.length > 0 ? normalized : "get";
@@ -74,24 +83,24 @@ export function extractForms(tree: DocumentTree, baseUrl: string): readonly Form
   const forms: FormEntry[] = [];
   let index = 1;
   for (const formNode of findAllByTagName(tree, "form")) {
-    const method = normalizeMethod(attrValue(formNode, "method"));
-    const actionRaw = attrValue(formNode, "action") ?? baseUrl;
+    const method = normalizeMethod(getAttributeValue(formNode, "method"));
+    const actionRaw = getAttributeValue(formNode, "action") ?? baseUrl;
     const actionUrl = resolveHref(actionRaw, baseUrl);
     const controls = collectFormControls(formNode);
     const fields: FormField[] = [];
 
     for (const control of controls) {
-      const name = attrValue(control, "name");
+      const name = getAttributeValue(control, "name");
       if (!name || name.trim().length === 0) {
         continue;
       }
 
-      const tag = control.tagName.toLowerCase();
+      const tag = control.localName.toLowerCase();
       if (tag === "textarea") {
         fields.push({
           name,
           type: "textarea",
-          value: textContent(control)
+          value: extractCompleteText(control)
         });
         continue;
       }
@@ -105,15 +114,15 @@ export function extractForms(tree: DocumentTree, baseUrl: string): readonly Form
         continue;
       }
 
-      const type = (attrValue(control, "type") ?? "text").toLowerCase();
-      if ((type === "checkbox" || type === "radio") && !hasAttr(control, "checked")) {
+      const type = (getAttributeValue(control, "type") ?? "text").toLowerCase();
+      if ((type === "checkbox" || type === "radio") && !hasAttribute(control, "checked")) {
         continue;
       }
 
       fields.push({
         name,
         type,
-        value: attrValue(control, "value") ?? ""
+        value: getAttributeValue(control, "value") ?? ""
       });
     }
 

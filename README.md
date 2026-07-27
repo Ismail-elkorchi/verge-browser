@@ -122,9 +122,9 @@ console.log(resolveHref("/docs", base));
 ```ts
 import { parseHtml, renderDocumentToTerminal } from "@ismail-elkorchi/verge-browser";
 
-const tree = parseHtml("<h1>Hello</h1>");
+const document = parseHtml("<h1>Hello</h1>");
 const rendered = renderDocumentToTerminal({
-  tree,
+  tree: document.tree,
   requestUrl: "https://example.com",
   finalUrl: "https://example.com",
   status: 200,

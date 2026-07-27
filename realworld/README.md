@@ -41,9 +41,14 @@ npm run field:report
 Layout pilot commands (local-only):
 
 ```bash
+npx playwright install chromium firefox webkit
 npm run field:layout:wpt:fetch
 npm run field:layout:wpt:run
 ```
+
+The pilot uses Verge's pinned Playwright development dependency. Set
+`VERGE_PLAYWRIGHT_MODULE_PATH` only when intentionally testing another local
+Playwright installation.
 
 Layout pilot uses a pinned WPT subset manifest:
 

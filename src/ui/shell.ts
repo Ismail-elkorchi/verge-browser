@@ -200,7 +200,7 @@ function formatDiagnosticsLines(snapshot: PageSnapshot | null): readonly string[
     `Used cookies: ${snapshot.diagnostics.usedCookies ? "yes" : "no"}`,
     `Network outcome: ${snapshot.diagnostics.networkOutcome.kind}`,
     `Network detail: ${snapshot.diagnostics.networkOutcome.detailMessage}`,
-    `Source bytes: ${snapshot.diagnostics.sourceBytes === null ? "unavailable" : String(snapshot.diagnostics.sourceBytes)}`,
+    `Source bytes: ${String(snapshot.diagnostics.sourceBytes)}`,
     `Parse errors: ${String(snapshot.diagnostics.parseErrorCount)}`,
     `Triage IDs: ${snapshot.diagnostics.triageIds.length === 0 ? "(none)" : snapshot.diagnostics.triageIds.join(", ")}`,
     `Trace events: ${String(snapshot.diagnostics.traceEventCount)}`,
@@ -748,7 +748,7 @@ export class BrowserShell {
         break;
       case "forms":
         items = snapshot
-          ? extractForms(snapshot.tree, snapshot.finalUrl).map((form, index) => ({
+          ? extractForms(snapshot.document.tree, snapshot.finalUrl).map((form, index) => ({
             index: index + 1,
             label: `${form.method.toUpperCase()} ${form.actionUrl}`,
             detail: form.fields.length === 0 ? "no named fields" : `${String(form.fields.length)} fields`,
@@ -762,10 +762,10 @@ export class BrowserShell {
         break;
       case "outline":
         items = snapshot
-          ? buildOutline(snapshot.tree).entries.map((entry, index) => ({
+          ? buildOutline(snapshot.document.tree).entries.map((entry, index) => ({
             index: index + 1,
             label: entry.text,
-            detail: `<${entry.tagName}> depth ${String(entry.depth)}`,
+            detail: `<${entry.localName}> depth ${String(entry.depth)}`,
             payload: {
               kind: "outline",
               lineIndex: lineIndexForOutlineText(snapshot.rendered, entry.text)
@@ -1063,7 +1063,7 @@ export class BrowserShell {
       return;
     }
 
-    const form = extractForms(snapshot.tree, snapshot.finalUrl)[formIndex - 1];
+    const form = extractForms(snapshot.document.tree, snapshot.finalUrl)[formIndex - 1];
     if (!form) {
       this.setStatus(`No form exists at index ${String(formIndex)}.`, "error");
       return;
@@ -1340,11 +1340,11 @@ export class BrowserShell {
 
   private async downloadSnapshot(path: string): Promise<void> {
     const snapshot = this.activeDocument()?.snapshot;
-    if (!snapshot?.sourceHtml) {
+    if (!snapshot || snapshot.document.sourceText === null) {
       this.setStatus("No HTML snapshot is available to download.", "error");
       return;
     }
-    await this.services.writeTextFile(path, snapshot.sourceHtml);
+    await this.services.writeTextFile(path, snapshot.document.sourceText);
     this.setStatus(`Saved HTML snapshot to ${path}.`, "success");
   }
 
@@ -1537,7 +1537,7 @@ export class BrowserShell {
           this.setStatus("No page is loaded.", "error");
           return;
         }
-        const form = extractForms(snapshot.tree, snapshot.finalUrl)[command.index - 1];
+        const form = extractForms(snapshot.document.tree, snapshot.finalUrl)[command.index - 1];
         if (!form) {
           this.setStatus(`No form exists at index ${String(command.index)}.`, "error");
           return;

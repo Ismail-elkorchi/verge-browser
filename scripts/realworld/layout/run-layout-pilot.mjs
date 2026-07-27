@@ -3,7 +3,9 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { TextEncoder } from "node:util";
 
-import { parseBytes, visibleText } from "@ismail-elkorchi/html-parser";
+import { parseBytes } from "@ismail-elkorchi/html-parser";
+
+import { extractEvaluationText } from "../../support/parser-text.mjs";
 
 import {
   corpusPath,
@@ -17,7 +19,6 @@ import {
 } from "../lib.mjs";
 
 const MANIFEST_PATH = resolve(process.cwd(), "scripts/realworld/layout/wpt-subset.v1.json");
-const DEFAULT_PLAYWRIGHT_MODULE = resolve(process.cwd(), "../html-parser/node_modules/playwright/index.mjs");
 const MIN_ENGINE_COUNT = 2;
 const MIN_ENGINE_AGREEMENT = 0.9;
 const MAX_SNAPSHOT_VERGE_DRIFT = 0.05;
@@ -71,13 +72,17 @@ function flattenCases(manifest) {
 
 async function loadPlaywright() {
   const override = process.env.VERGE_PLAYWRIGHT_MODULE_PATH;
-  const modulePath = override && override.trim().length > 0
-    ? resolve(process.cwd(), override)
-    : DEFAULT_PLAYWRIGHT_MODULE;
-  const moduleUrl = pathToFileURL(modulePath).href;
+  if (!override || override.trim().length === 0) {
+    return {
+      modulePath: "playwright",
+      api: await import("playwright")
+    };
+  }
+
+  const modulePath = resolve(process.cwd(), override);
   return {
     modulePath,
-    api: await import(moduleUrl)
+    api: await import(pathToFileURL(modulePath).href)
   };
 }
 
@@ -97,11 +102,11 @@ async function evaluateInnerText(browserType, html) {
 }
 
 function vergeTokens(html) {
-  const tree = parseBytes(UTF8_ENCODER.encode(html), {
+  const document = parseBytes(UTF8_ENCODER.encode(html), {
     captureSpans: false,
-    trace: false
+    trace: "none"
   });
-  return tokenizeText(visibleText(tree, VISIBLE_TEXT_OPTIONS));
+  return tokenizeText(extractEvaluationText(document.tree, VISIBLE_TEXT_OPTIONS));
 }
 
 async function main() {

@@ -11,12 +11,16 @@ Publishing is done by GitHub Actions OIDC workflows:
 ## Verification commands
 
 ```bash
-npm ci
 npm run release:check
 npm run docs:html:jsr
 node scripts/release/render-notes.mjs --dry-run
 node scripts/release/update-changelog.mjs --dry-run
 ```
+
+`release:check` starts from `npm ci`. It rejects disagreement between the
+manifest, lockfile, and installed HTML parser, requires the parser tarball to
+come from the public npm registry with SHA-512 integrity, and verifies the
+packed Verge package in a clean consumer installation.
 
 ## Release note format
 

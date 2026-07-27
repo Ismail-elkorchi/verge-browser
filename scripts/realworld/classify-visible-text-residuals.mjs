@@ -1,5 +1,8 @@
 import { readFile } from "node:fs/promises";
-import { parseBytes, visibleTextTokensWithProvenance } from "@ismail-elkorchi/html-parser";
+import { TextEncoder } from "node:util";
+import { parseBytes } from "@ismail-elkorchi/html-parser";
+
+import { collectEvaluationTextTokens } from "../support/parser-text.mjs";
 
 import {
   corpusPath,
@@ -67,22 +70,29 @@ function fixed6(value) {
 
 function provenanceWords(tokens) {
   const words = [];
+  const encoder = new TextEncoder();
   for (const token of tokens) {
     if (!token || token.kind !== "text" || typeof token.value !== "string") {
       continue;
     }
-    const normalized = normalizeToken(token.value);
-    if (normalized.length === 0) {
-      continue;
-    }
-    const pieces = normalized.split(" ").filter((entry) => entry.length > 0);
-    for (const piece of pieces) {
-      words.push({
-        word: piece,
-        sourceRole: typeof token.sourceRole === "string" ? token.sourceRole : "unknown",
-        sourceNodeKind: typeof token.sourceNodeKind === "string" ? token.sourceNodeKind : "unknown",
-        sourceNodeId: Number.isInteger(token.sourceNodeId) ? token.sourceNodeId : null
-      });
+    for (const match of token.value.matchAll(/\S+/gu)) {
+      const rawWord = match[0];
+      const normalized = normalizeToken(rawWord);
+      if (normalized.length === 0) continue;
+      const localCodeUnitOffset = match.index ?? 0;
+      const outputByteStart = token.outputByteStart
+        + encoder.encode(token.value.slice(0, localCodeUnitOffset)).byteLength;
+      const source = token.provenance.find(
+        (range) => range.outputByteStart <= outputByteStart && range.outputByteEnd > outputByteStart
+      ) ?? token.provenance[0];
+      for (const piece of normalized.split(" ").filter((entry) => entry.length > 0)) {
+        words.push({
+          word: piece,
+          sourceRole: source?.sourceRole ?? "unknown",
+          sourceNodeKind: source?.sourceNodeKind ?? "unknown",
+          sourceNodeId: Number.isInteger(source?.sourceNodeId) ? source.sourceNodeId : null
+        });
+      }
     }
   }
   return words;
@@ -197,11 +207,11 @@ async function loadExpectedWordsForPage(corpusDir, pageSha256, cache) {
   }
   const htmlPath = corpusPath(corpusDir, `cache/html/${pageSha256}.bin`);
   const htmlBytes = new Uint8Array(await readFile(htmlPath));
-  const tree = parseBytes(htmlBytes, {
+  const document = parseBytes(htmlBytes, {
     captureSpans: false,
-    trace: false
+    trace: "none"
   });
-  const tokens = visibleTextTokensWithProvenance(tree, {});
+  const tokens = collectEvaluationTextTokens(document.tree);
   const words = provenanceWords(tokens);
   cache.set(pageSha256, words);
   return words;

@@ -6,7 +6,7 @@ import { parse } from "@ismail-elkorchi/html-parser";
 import { renderDocumentToTerminal } from "../../dist/app/render.js";
 
 test("renderDocumentToTerminal collects links and renders body text", () => {
-  const tree = parse(`
+  const document = parse(`
     <html>
       <head><title>Sample page</title></head>
       <body>
@@ -17,7 +17,7 @@ test("renderDocumentToTerminal collects links and renders body text", () => {
   `);
 
   const renderedPage = renderDocumentToTerminal({
-    tree,
+    tree: document.tree,
     requestUrl: "https://example.com/",
     finalUrl: "https://example.com/",
     status: 200,
@@ -34,7 +34,7 @@ test("renderDocumentToTerminal collects links and renders body text", () => {
 });
 
 test("renderDocumentToTerminal preserves preformatted whitespace", () => {
-  const tree = parse(`
+  const document = parse(`
     <html>
       <head><title>Pre sample</title></head>
       <body>
@@ -46,7 +46,7 @@ test("renderDocumentToTerminal preserves preformatted whitespace", () => {
   `);
 
   const renderedPage = renderDocumentToTerminal({
-    tree,
+    tree: document.tree,
     requestUrl: "https://example.com/pre",
     finalUrl: "https://example.com/pre",
     status: 200,
@@ -61,7 +61,7 @@ test("renderDocumentToTerminal preserves preformatted whitespace", () => {
 
 test("renderDocumentToTerminal collapses inline tabs without regex backtracking", () => {
   const repeatedTabs = "\t".repeat(20_000);
-  const tree = parse(`
+  const document = parse(`
     <html>
       <head><title>Inline spacing</title></head>
       <body>
@@ -71,7 +71,7 @@ test("renderDocumentToTerminal collapses inline tabs without regex backtracking"
   `);
 
   const renderedPage = renderDocumentToTerminal({
-    tree,
+    tree: document.tree,
     requestUrl: "https://example.com/inline-spacing",
     finalUrl: "https://example.com/inline-spacing",
     status: 200,
@@ -84,7 +84,7 @@ test("renderDocumentToTerminal collapses inline tabs without regex backtracking"
 });
 
 test("renderDocumentToTerminal renders markdown-like table rows", () => {
-  const tree = parse(`
+  const document = parse(`
     <html>
       <head><title>Table sample</title></head>
       <body>
@@ -98,7 +98,7 @@ test("renderDocumentToTerminal renders markdown-like table rows", () => {
   `);
 
   const renderedPage = renderDocumentToTerminal({
-    tree,
+    tree: document.tree,
     requestUrl: "https://example.com/table",
     finalUrl: "https://example.com/table",
     status: 200,
@@ -114,7 +114,7 @@ test("renderDocumentToTerminal renders markdown-like table rows", () => {
 });
 
 test("renderDocumentToTerminal renders nested list indentation", () => {
-  const tree = parse(`
+  const document = parse(`
     <html>
       <head><title>List sample</title></head>
       <body>
@@ -126,7 +126,7 @@ test("renderDocumentToTerminal renders nested list indentation", () => {
   `);
 
   const renderedPage = renderDocumentToTerminal({
-    tree,
+    tree: document.tree,
     requestUrl: "https://example.com/list",
     finalUrl: "https://example.com/list",
     status: 200,
@@ -141,7 +141,7 @@ test("renderDocumentToTerminal renders nested list indentation", () => {
 });
 
 test("renderDocumentToTerminal reports anti-bot challenge pages", () => {
-  const tree = parse(`
+  const document = parse(`
     <html>
       <head><title>Just a moment...</title></head>
       <body>
@@ -151,7 +151,7 @@ test("renderDocumentToTerminal reports anti-bot challenge pages", () => {
   `);
 
   const renderedPage = renderDocumentToTerminal({
-    tree,
+    tree: document.tree,
     requestUrl: "https://blocked.example",
     finalUrl: "https://blocked.example",
     status: 403,
@@ -166,7 +166,7 @@ test("renderDocumentToTerminal reports anti-bot challenge pages", () => {
 });
 
 test("renderDocumentToTerminal includes noscript fallback content", () => {
-  const tree = parse(`
+  const document = parse(`
     <html>
       <head><title>Noscript sample</title></head>
       <body>
@@ -177,7 +177,7 @@ test("renderDocumentToTerminal includes noscript fallback content", () => {
   `);
 
   const renderedPage = renderDocumentToTerminal({
-    tree,
+    tree: document.tree,
     requestUrl: "https://example.com/noscript",
     finalUrl: "https://example.com/noscript",
     status: 200,
@@ -192,7 +192,7 @@ test("renderDocumentToTerminal includes noscript fallback content", () => {
 });
 
 test("renderDocumentToTerminal keeps forms as action metadata without changing rendered lines", () => {
-  const tree = parse(`
+  const document = parse(`
     <html>
       <head><title>Form sample</title></head>
       <body>
@@ -206,7 +206,7 @@ test("renderDocumentToTerminal keeps forms as action metadata without changing r
   `);
 
   const renderedPage = renderDocumentToTerminal({
-    tree,
+    tree: document.tree,
     requestUrl: "https://example.com/form",
     finalUrl: "https://example.com/form",
     status: 200,

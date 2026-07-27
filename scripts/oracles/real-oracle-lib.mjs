@@ -1,7 +1,18 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
-import { copyFile, mkdir, open, readdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
+import {
+  copyFile,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  unlink,
+  writeFile
+} from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { gunzipSync } from "node:zlib";
 
@@ -14,6 +25,15 @@ const DEFAULT_LOCK_MIRRORS = [
   "http://archive.ubuntu.com/ubuntu",
   "http://security.ubuntu.com/ubuntu"
 ];
+const ORACLE_DOWNLOAD_POLICY = Object.freeze({
+  retryCount: 3,
+  retryDelaySeconds: 2,
+  retryMaxSeconds: 1_800,
+  connectTimeoutSeconds: 15,
+  transferTimeoutSeconds: 900,
+  lowSpeedBytesPerSecond: 1_024,
+  lowSpeedSeconds: 60
+});
 const ORACLE_RUNNER_ENVIRONMENT = Object.freeze({
   LANG: "C.UTF-8",
   LC_ALL: "C.UTF-8",
@@ -331,26 +351,39 @@ function ensureRelativePath(pathValue) {
   return pathValue.replace(/^\/+/, "");
 }
 
-async function fetchUrlToFile(url, destinationPath) {
-  await mkdir(dirname(destinationPath), { recursive: true });
-  runCommand("curl", [
+export function oracleDownloadCurlArgs(url, partialPath) {
+  return [
     "-fsSL",
     "--retry-all-errors",
     "--retry-connrefused",
     "--retry",
-    "2",
+    String(ORACLE_DOWNLOAD_POLICY.retryCount),
     "--retry-delay",
-    "2",
+    String(ORACLE_DOWNLOAD_POLICY.retryDelaySeconds),
     "--retry-max-time",
-    "45",
+    String(ORACLE_DOWNLOAD_POLICY.retryMaxSeconds),
     "--max-time",
-    "30",
+    String(ORACLE_DOWNLOAD_POLICY.transferTimeoutSeconds),
     "--connect-timeout",
-    "15",
+    String(ORACLE_DOWNLOAD_POLICY.connectTimeoutSeconds),
+    "--speed-limit",
+    String(ORACLE_DOWNLOAD_POLICY.lowSpeedBytesPerSecond),
+    "--speed-time",
+    String(ORACLE_DOWNLOAD_POLICY.lowSpeedSeconds),
+    "--continue-at",
+    "-",
     "--output",
-    destinationPath,
+    partialPath,
     url
-  ]);
+  ];
+}
+
+async function fetchUrlToFile(url, destinationPath) {
+  await mkdir(dirname(destinationPath), { recursive: true });
+  const partialPath = `${destinationPath}.partial`;
+  await rm(destinationPath, { force: true });
+  runCommand("curl", oracleDownloadCurlArgs(url, partialPath));
+  await rename(partialPath, destinationPath);
 }
 
 async function hashFile(path) {

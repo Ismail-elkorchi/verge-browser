@@ -35,7 +35,7 @@ const session = new BrowserSession({
 });
 
 const snapshot = await session.open("https://example.test/");
-const html = snapshot.sourceHtml ?? "";
+const html = snapshot.document.sourceText ?? "";
 const cssBlocks = [...html.matchAll(/<style[^>]*>([\\s\\S]*?)<\\/style>/gi)].map((match) => match[1].trim());
 
 console.log(html.includes("<main>"));
@@ -51,9 +51,10 @@ true
 ```
 
 ## Common failure modes
-- `sourceHtml` is missing because the loader returned a non-HTML content type.
+- `document.sourceText` is unexpectedly absent because a custom parser path did
+  not retain decoded source.
 - External stylesheets are expected even though this recipe only extracts
-  inline `<style>` blocks from `sourceHtml`.
+  inline `<style>` blocks from `document.sourceText`.
 - Snapshot auditing is performed before confirming the fetch result was `ok`.
 - Style attributes on elements are expected to appear in `cssBlocks`, even
   though they remain embedded in the HTML snapshot instead.

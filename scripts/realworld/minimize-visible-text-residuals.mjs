@@ -1,7 +1,9 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { TextDecoder, TextEncoder } from "node:util";
 
-import { parseBytes, visibleTextTokens } from "@ismail-elkorchi/html-parser";
+import { parseBytes } from "@ismail-elkorchi/html-parser";
+
+import { collectEvaluationTextTokens } from "../support/parser-text.mjs";
 
 import {
   corpusPath,
@@ -68,12 +70,12 @@ function transformHtmlByPolicyId(html, policyId) {
 
 function policyText(html, policyId, optionsByPolicyId) {
   const transformedHtml = transformHtmlByPolicyId(html, policyId);
-  const tree = parseBytes(UTF8_ENCODER.encode(transformedHtml), {
+  const document = parseBytes(UTF8_ENCODER.encode(transformedHtml), {
     captureSpans: false,
-    trace: false
+    trace: "none"
   });
   const options = optionsByPolicyId.get(policyId) ?? {};
-  const mergedText = visibleTextTokens(tree, options)
+  const mergedText = collectEvaluationTextTokens(document.tree, options)
     .map((token) => (token.kind === "text" ? token.value : " "))
     .join(" ")
     .replace(/\s+/g, " ")
@@ -172,12 +174,12 @@ function minimizeHtml(inputHtml, candidatePolicyId, optionsByPolicyId) {
     changed = false;
     passes += 1;
 
-    const tree = parseBytes(UTF8_ENCODER.encode(currentHtml), {
+    const document = parseBytes(UTF8_ENCODER.encode(currentHtml), {
       captureSpans: true,
-      trace: false
+      trace: "none"
     });
     const spanCandidates = [];
-    collectInputElementSpans(tree, spanCandidates);
+    collectInputElementSpans(document.tree, spanCandidates);
     const spans = sortedUniqueSpans(spanCandidates, currentHtml.length);
 
     for (const span of spans) {

@@ -1,5 +1,4 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -87,7 +86,7 @@ async function writeReport(report) {
 }
 
 async function main() {
-  const scratchDir = await mkdtemp(join(tmpdir(), "verge-wpt-delta-"));
+  const scratchDir = await mkdtemp(resolve("scripts/oracles/corpus/.wpt-delta-refresh-"));
   const refreshedPath = join(scratchDir, "wpt-delta-refresh-candidate.json");
 
   try {

@@ -1,4 +1,4 @@
-import type { DocumentTree } from "@ismail-elkorchi/html-parser";
+import type { DocumentTree, ParsedDocument } from "@ismail-elkorchi/html-parser";
 
 /** Classified network outcome kinds surfaced by fetch helpers and page snapshots. */
 export type NetworkOutcomeKind =
@@ -148,8 +148,8 @@ export interface PageRequestOptions {
 export interface PageDiagnostics {
   /** Parse path used to build the snapshot. */
   readonly parseMode: "text" | "stream";
-  /** Source byte length when the HTML is available in memory, otherwise `null`. */
-  readonly sourceBytes: number | null;
+  /** UTF-8 byte length of the decoded HTML source. */
+  readonly sourceBytes: number;
   /** Number of HTML parse errors attached to the tree. */
   readonly parseErrorCount: number;
   /** Number of trace events captured by the parser. */
@@ -210,12 +210,10 @@ export interface PageSnapshot {
   readonly fetchedAtIso: string;
   /** Set-Cookie headers captured from the response. */
   readonly setCookieHeaders: readonly string[];
-  /** Parsed HTML tree. */
-  readonly tree: DocumentTree;
+  /** Parsed HTML document, including its tree, source, and resource metadata. */
+  readonly document: ParsedDocument;
   /** Terminal-rendered representation of the page. */
   readonly rendered: RenderedPage;
-  /** Original buffered HTML when available. */
-  readonly sourceHtml?: string;
   /** Performance and triage metadata for the snapshot. */
   readonly diagnostics: PageDiagnostics;
 }

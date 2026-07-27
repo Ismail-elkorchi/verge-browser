@@ -127,7 +127,7 @@ test("BrowserSession openStream parses from byte stream", async () => {
   assert.ok(snapshot.diagnostics.triageIds.some((entry) => entry.startsWith("NET:OK:HTTP_200")));
   assert.ok(snapshot.diagnostics.triageIds.some((entry) => entry.startsWith("PARSE:")));
   assert.equal(snapshot.rendered.title, "A");
-  assert.ok(snapshot.sourceHtml?.includes("<title>A</title>"));
+  assert.ok(snapshot.document.sourceText?.includes("<title>A</title>"));
 });
 
 test("BrowserSession applyEdits mutates current snapshot deterministically", async () => {
@@ -159,7 +159,7 @@ test("BrowserSession applyEdits mutates current snapshot deterministically", asy
   });
 
   await session.open("https://patch.example/");
-  const currentTree = session.current?.tree;
+  const currentTree = session.current?.document.tree;
   assert.ok(currentTree);
 
   const paragraphNode = currentTree ? [...findAllByTagName(currentTree, "p")][0] : undefined;
@@ -175,7 +175,7 @@ test("BrowserSession applyEdits mutates current snapshot deterministically", asy
     }
   ]);
 
-  assert.ok(patched.sourceHtml?.includes("Updated"));
+  assert.ok(patched.document.sourceText?.includes("Updated"));
   assert.ok(patched.rendered.lines.join("\n").includes("Updated"));
 });
 

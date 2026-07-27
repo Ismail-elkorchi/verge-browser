@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import { parse, visibleText } from "@ismail-elkorchi/html-parser";
+import { parse } from "@ismail-elkorchi/html-parser";
 
 import { renderDocumentToTerminal } from "../../dist/app/render.js";
+import { extractEvaluationText } from "../support/parser-text.mjs";
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -20,13 +21,13 @@ export async function readWptDeltaCorpus(corpusPath = resolve("scripts/oracles/c
 }
 
 export function evaluateWptDeltaCase(caseEntry) {
-  const tree = parse(caseEntry.html, {
-    trace: false,
+  const document = parse(caseEntry.html, {
+    trace: "none",
     captureSpans: false
   });
 
   const render80 = renderDocumentToTerminal({
-    tree,
+    tree: document.tree,
     requestUrl: "https://wpt.example/",
     finalUrl: "https://wpt.example/",
     status: 200,
@@ -36,7 +37,7 @@ export function evaluateWptDeltaCase(caseEntry) {
   });
 
   const render120 = renderDocumentToTerminal({
-    tree,
+    tree: document.tree,
     requestUrl: "https://wpt.example/",
     finalUrl: "https://wpt.example/",
     status: 200,
@@ -45,7 +46,7 @@ export function evaluateWptDeltaCase(caseEntry) {
     width: 120
   });
 
-  const visible = visibleText(tree, {
+  const visible = extractEvaluationText(document.tree, {
     trim: true,
     skipHiddenSubtrees: false,
     includeControlValues: true,
@@ -57,7 +58,7 @@ export function evaluateWptDeltaCase(caseEntry) {
     snapshotId: caseEntry.snapshotId,
     sourcePath: caseEntry.sourcePath,
     sha256: caseEntry.sha256,
-    parseErrorCount: Array.isArray(tree.parseErrors) ? tree.parseErrors.length : 0,
+    parseErrorCount: document.tree.errors.length,
     visibleTextSha256: sha256(visible),
     render80Sha256: sha256(render80.lines.join("\n")),
     render120Sha256: sha256(render120.lines.join("\n")),

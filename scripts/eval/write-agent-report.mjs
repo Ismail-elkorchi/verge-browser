@@ -1,4 +1,17 @@
-import { parse, parseBytes, parseStream, tokenizeStream, outline, chunk, computePatch, applyPatchPlan } from "@ismail-elkorchi/html-parser";
+import {
+  applyPatchPlan,
+  chunk,
+  computePatch,
+  findById,
+  getAttributeValue,
+  isHtmlBudgetExceededError,
+  outline,
+  parse,
+  parseBytes,
+  parseStream,
+  tokenizeByteStreamEager,
+  walk
+} from "@ismail-elkorchi/html-parser";
 import { resolve } from "node:path";
 import { TextEncoder } from "node:util";
 import { ReadableStream } from "node:stream/web";
@@ -37,31 +50,11 @@ function streamFromBytesInChunks(bytes, chunkSize) {
 }
 
 async function collectStreamTokens(bytes, chunkSize) {
-  const stream = streamFromBytesInChunks(bytes, chunkSize);
-  const tokens = [];
-  for await (const token of tokenizeStream(stream, {})) {
-    tokens.push(token);
-  }
-  return tokens;
+  return tokenizeByteStreamEager(streamFromBytesInChunks(bytes, chunkSize));
 }
 
 function sortedKinds(trace) {
-  const kinds = new Set((trace ?? []).map((event) => event.kind));
-  return [...kinds].sort((left, right) => left.localeCompare(right));
-}
-
-function findElementAndTextWithSpans(node, output) {
-  if (node.kind === "element" && node.span && !output.elementNodeId) {
-    output.elementNodeId = node.id;
-  }
-  if (node.kind === "text" && node.span && !output.textNodeId) {
-    output.textNodeId = node.id;
-  }
-  if (node.kind === "element") {
-    for (const child of node.children) {
-      findElementAndTextWithSpans(child, output);
-    }
-  }
+  return trace?.summary.eventKinds ?? [];
 }
 
 function collectSpanTargets(tree) {
@@ -69,42 +62,15 @@ function collectSpanTargets(tree) {
     elementNodeId: null,
     textNodeId: null
   };
-  for (const node of tree.children) {
-    findElementAndTextWithSpans(node, output);
-  }
+  walk(tree, (node) => {
+    if (node.kind === "element" && node.span && output.elementNodeId === null) {
+      output.elementNodeId = node.id;
+    }
+    if (node.kind === "text" && node.span && output.textNodeId === null) {
+      output.textNodeId = node.id;
+    }
+  });
   return output;
-}
-
-function findElementById(node, nodeId) {
-  if (node.kind === "element" && node.id === nodeId) {
-    return node;
-  }
-  if (node.kind !== "element") {
-    return null;
-  }
-  for (const child of node.children) {
-    const result = findElementById(child, nodeId);
-    if (result) {
-      return result;
-    }
-  }
-  return null;
-}
-
-function findTextById(node, nodeId) {
-  if (node.kind === "text" && node.id === nodeId) {
-    return node;
-  }
-  if (node.kind !== "element") {
-    return null;
-  }
-  for (const child of node.children) {
-    const result = findTextById(child, nodeId);
-    if (result) {
-      return result;
-    }
-  }
-  return null;
 }
 
 function stableJson(value) {
@@ -115,7 +81,7 @@ async function main() {
   const bytes = new TextEncoder().encode(SAMPLE_HTML);
   const parsedForTrace = parse(SAMPLE_HTML, {
     captureSpans: true,
-    trace: true,
+    trace: "events",
     budgets: {
       maxInputBytes: 512 * 1024,
       maxTraceEvents: 2_048,
@@ -124,7 +90,7 @@ async function main() {
   });
   const parsedForTraceSecond = parse(SAMPLE_HTML, {
     captureSpans: true,
-    trace: true,
+    trace: "events",
     budgets: {
       maxInputBytes: 512 * 1024,
       maxTraceEvents: 2_048,
@@ -133,7 +99,7 @@ async function main() {
   });
   const malformedTrace = parse(MALFORMED_HTML, {
     captureSpans: true,
-    trace: true,
+    trace: "events",
     budgets: {
       maxInputBytes: 256 * 1024,
       maxTraceEvents: 2_048,
@@ -145,40 +111,40 @@ async function main() {
   try {
     parse(SAMPLE_HTML, {
       captureSpans: true,
-      trace: true,
+      trace: "events",
       budgets: {
         maxTraceEvents: 2,
         maxTraceBytes: 64 * 1024
       }
     });
   } catch (error) {
-    if (error instanceof Error && error.name === "BudgetExceededError") {
+    if (isHtmlBudgetExceededError(error) && error.budget === "maxTraceEvents") {
       traceBudgetFailure = true;
     }
   }
 
-  const traceKinds = sortedKinds(parsedForTrace.trace);
-  const malformedTraceKinds = sortedKinds(malformedTrace.trace);
+  const traceKinds = sortedKinds(parsedForTrace.tree.trace);
+  const malformedTraceKinds = sortedKinds(malformedTrace.tree.trace);
   const traceFeature = {
     ok:
       traceKinds.length >= 3 &&
       malformedTraceKinds.includes("parseError") &&
-      stableJson(parsedForTrace.trace ?? []) === stableJson(parsedForTraceSecond.trace ?? []) &&
+      stableJson(parsedForTrace.tree.trace) === stableJson(parsedForTraceSecond.tree.trace) &&
       traceBudgetFailure,
     details: {
-      eventCount: parsedForTrace.trace?.length ?? 0,
+      eventCount: parsedForTrace.tree.trace?.summary.eventCount ?? 0,
       kinds: traceKinds,
       malformedKinds: malformedTraceKinds,
       budgetFailureObserved: traceBudgetFailure,
-      deterministic: stableJson(parsedForTrace.trace ?? []) === stableJson(parsedForTraceSecond.trace ?? [])
+      deterministic: stableJson(parsedForTrace.tree.trace) === stableJson(parsedForTraceSecond.tree.trace)
     }
   };
 
   const parsedForSpans = parse(SAMPLE_HTML, {
     captureSpans: true,
-    trace: false
+    trace: "none"
   });
-  const spanTargets = collectSpanTargets(parsedForSpans);
+  const spanTargets = collectSpanTargets(parsedForSpans.tree);
   const spanFeature = {
     ok: spanTargets.elementNodeId !== null && spanTargets.textNodeId !== null,
     details: {
@@ -189,9 +155,10 @@ async function main() {
 
   const parsedForPatch = parse(SAMPLE_HTML, {
     captureSpans: true,
-    trace: false
+    sourceRetention: "text",
+    trace: "none"
   });
-  const patchTargets = collectSpanTargets(parsedForPatch);
+  const patchTargets = collectSpanTargets(parsedForPatch.tree);
   const elementTarget = patchTargets.elementNodeId;
   const textTarget = patchTargets.textNodeId;
   let patchFeature = {
@@ -204,7 +171,7 @@ async function main() {
   };
 
   if (elementTarget !== null && textTarget !== null) {
-    const patchPlan = computePatch(SAMPLE_HTML, [
+    const patchPlan = computePatch(parsedForPatch, [
       {
         kind: "replaceText",
         target: textTarget,
@@ -217,22 +184,17 @@ async function main() {
         value: "ok"
       }
     ]);
-    const patchedHtml = applyPatchPlan(SAMPLE_HTML, patchPlan);
-    const patchedTree = parse(patchedHtml, {
+    const patchedHtml = applyPatchPlan(parsedForPatch, patchPlan);
+    const patchedDocument = parse(patchedHtml, {
       captureSpans: true,
-      trace: false
+      trace: "none"
     });
-    const patchedElement = patchedTree.children
-      .map((child) => findElementById(child, elementTarget))
-      .find((child) => child !== null);
-    const patchedText = patchedTree.children
-      .map((child) => findTextById(child, textTarget))
-      .find((child) => child !== null);
+    const patchedElement = findById(patchedDocument.tree, elementTarget);
+    const patchedText = findById(patchedDocument.tree, textTarget);
 
-    const patchedAttrPresent = patchedElement
-      ? patchedElement.attributes.some((attribute) => attribute.name === "data-agent" && attribute.value === "ok")
-      : false;
-    const patchedTextValue = patchedText ? patchedText.value : "";
+    const patchedAttrPresent = patchedElement?.kind === "element" &&
+      getAttributeValue(patchedElement, "data-agent") === "ok";
+    const patchedTextValue = patchedText?.kind === "text" ? patchedText.value : "";
 
     patchFeature = {
       ok: patchedAttrPresent && patchedTextValue.includes("rewritten"),
@@ -244,8 +206,8 @@ async function main() {
     };
   }
 
-  const outlineFirst = outline(parsedForSpans);
-  const outlineSecond = outline(parse(SAMPLE_HTML, { captureSpans: true, trace: false }));
+  const outlineFirst = outline(parsedForSpans.tree);
+  const outlineSecond = outline(parse(SAMPLE_HTML, { captureSpans: true, trace: "none" }).tree);
   const outlineFeature = {
     ok: stableJson(outlineFirst) === stableJson(outlineSecond) && outlineFirst.entries.length > 0,
     details: {
@@ -254,8 +216,8 @@ async function main() {
     }
   };
 
-  const chunksFirst = chunk(parsedForSpans, { maxChars: 80, maxNodes: 5, maxBytes: 256 });
-  const chunksSecond = chunk(parse(SAMPLE_HTML, { captureSpans: true, trace: false }), {
+  const chunksFirst = chunk(parsedForSpans.tree, { maxChars: 80, maxNodes: 5, maxBytes: 256 });
+  const chunksSecond = chunk(parse(SAMPLE_HTML, { captureSpans: true, trace: "none" }).tree, {
     maxChars: 80,
     maxNodes: 5,
     maxBytes: 256
@@ -268,28 +230,28 @@ async function main() {
     }
   };
 
-  const streamTree = await parseStream(streamFromBytesInChunks(bytes, 17), {
+  const streamDocument = await parseStream(streamFromBytesInChunks(bytes, 17), {
     captureSpans: true,
-    trace: true,
+    trace: "events",
     budgets: {
       maxInputBytes: 512 * 1024,
-      maxBufferedBytes: 256 * 1024,
+      maxEncodingPrescanBytes: 256 * 1024,
       maxTraceEvents: 2_048,
       maxTraceBytes: 512 * 1024
     }
   });
   const fromBytes = parseBytes(bytes, {
     captureSpans: true,
-    trace: false
+    trace: "none"
   });
   const streamTokensFirst = await collectStreamTokens(bytes, 13);
   const streamTokensSecond = await collectStreamTokens(bytes, 13);
   const streamFeature = {
     ok:
-      stableJson(streamTree.children) === stableJson(fromBytes.children) &&
+      stableJson(streamDocument.tree.children) === stableJson(fromBytes.tree.children) &&
       stableJson(streamTokensFirst) === stableJson(streamTokensSecond),
     details: {
-      parseParity: stableJson(streamTree.children) === stableJson(fromBytes.children),
+      parseParity: stableJson(streamDocument.tree.children) === stableJson(fromBytes.tree.children),
       tokenDeterministic: stableJson(streamTokensFirst) === stableJson(streamTokensSecond),
       tokenCount: streamTokensFirst.length
     }

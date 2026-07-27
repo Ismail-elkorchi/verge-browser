@@ -1,12 +1,13 @@
 import {
   findAllByTagName,
-  textContent,
+  getAttributeValue,
   type DocumentTree,
   type ElementNode,
   type HtmlNode
 } from "@ismail-elkorchi/html-parser";
 
 import { extractForms } from "./forms.js";
+import { extractCompleteText } from "./text.js";
 import { resolveHref } from "./url.js";
 import type { RenderInput, RenderedActionable, RenderedFormAction, RenderedLink, RenderedPage } from "./types.js";
 
@@ -110,7 +111,7 @@ function renderInlineNode(node: HtmlNode, context: RenderContext): string {
     return "";
   }
 
-  const tagName = node.tagName.toLowerCase();
+  const tagName = node.localName.toLowerCase();
   if (SKIP_TAGS.has(tagName)) {
     return "";
   }
@@ -120,12 +121,12 @@ function renderInlineNode(node: HtmlNode, context: RenderContext): string {
   }
 
   if (tagName === "img") {
-    const altText = node.attributes.find((attribute) => attribute.name.toLowerCase() === "alt")?.value ?? "";
+    const altText = getAttributeValue(node, "alt") ?? "";
     return altText.length > 0 ? `[image: ${normalizeWhitespace(altText)}]` : "[image]";
   }
 
   if (tagName === "a") {
-    const href = node.attributes.find((attribute) => attribute.name.toLowerCase() === "href")?.value;
+    const href = getAttributeValue(node, "href");
     const label = normalizeWhitespace(renderInlineNodes(node.children, context));
 
     if (!href) {
@@ -198,7 +199,8 @@ function headingLevel(tagName: string): number {
 
 function directChildrenByTagName(node: ElementNode, tagName: string): readonly ElementNode[] {
   return node.children.filter(
-    (child): child is ElementNode => child.kind === "element" && child.tagName.toLowerCase() === tagName
+    (child): child is ElementNode =>
+      child.kind === "element" && child.localName.toLowerCase() === tagName
   );
 }
 
@@ -212,7 +214,7 @@ function renderBlockNode(node: HtmlNode, context: RenderContext): string[] {
     return [];
   }
 
-  const tagName = node.tagName.toLowerCase();
+  const tagName = node.localName.toLowerCase();
   if (SKIP_TAGS.has(tagName)) {
     return [];
   }
@@ -224,7 +226,7 @@ function renderBlockNode(node: HtmlNode, context: RenderContext): string[] {
   }
 
   if (tagName === "pre") {
-    const preText = textContent(node).replace(/\r\n/g, "\n").replace(/\r/g, "\n").trimEnd();
+    const preText = extractCompleteText(node).replace(/\r\n/g, "\n").replace(/\r/g, "\n").trimEnd();
     return preText.length > 0 ? [`${PRE_BLOCK_PREFIX}${preText}`] : [];
   }
 
@@ -254,7 +256,7 @@ function renderBlockNode(node: HtmlNode, context: RenderContext): string[] {
           continue;
         }
 
-        const childTagName = child.tagName.toLowerCase();
+        const childTagName = child.localName.toLowerCase();
         if (childTagName === "ul" || childTagName === "ol") {
           nestedBlocks.push(...renderBlockNode(child, context));
           continue;
@@ -280,12 +282,14 @@ function renderBlockNode(node: HtmlNode, context: RenderContext): string[] {
 
   if (tagName === "table") {
     const rowCandidates = node.children.filter(
-      (child): child is ElementNode => child.kind === "element" && ["tr", "thead", "tbody", "tfoot"].includes(child.tagName.toLowerCase())
+      (child): child is ElementNode =>
+        child.kind === "element" &&
+        ["tr", "thead", "tbody", "tfoot"].includes(child.localName.toLowerCase())
     );
 
     const rows: ElementNode[] = [];
     for (const rowCandidate of rowCandidates) {
-      if (rowCandidate.tagName.toLowerCase() === "tr") {
+      if (rowCandidate.localName.toLowerCase() === "tr") {
         rows.push(rowCandidate);
         continue;
       }
@@ -294,7 +298,8 @@ function renderBlockNode(node: HtmlNode, context: RenderContext): string[] {
 
     const tableMatrix = rows.map((row) => {
       const cells = row.children.filter(
-        (child): child is ElementNode => child.kind === "element" && ["td", "th"].includes(child.tagName.toLowerCase())
+        (child): child is ElementNode =>
+          child.kind === "element" && ["td", "th"].includes(child.localName.toLowerCase())
       );
       return cells
         .map((cell) => renderInlineNodes(cell.children, context))
@@ -363,7 +368,7 @@ function renderNodesAsBlocks(nodes: readonly HtmlNode[], context: RenderContext)
 
 function firstTitle(tree: DocumentTree): string {
   for (const titleNode of findAllByTagName(tree, "title")) {
-    const titleText = normalizeWhitespace(textContent(titleNode));
+    const titleText = normalizeWhitespace(extractCompleteText(titleNode));
     if (titleText.length > 0) {
       return titleText;
     }
@@ -560,9 +565,9 @@ function sortActionables(actionables: readonly RenderedActionable[]): readonly R
  * ```ts
  * import { parseHtml, renderDocumentToTerminal } from "@ismail-elkorchi/verge-browser";
  *
- * const tree = parseHtml("<h1>Hello</h1><a href=\"/docs\">Docs</a>");
+ * const document = parseHtml("<h1>Hello</h1><a href=\"/docs\">Docs</a>");
  * const page = renderDocumentToTerminal({
- *   tree,
+ *   tree: document.tree,
  *   requestUrl: "https://example.com",
  *   finalUrl: "https://example.com",
  *   status: 200,

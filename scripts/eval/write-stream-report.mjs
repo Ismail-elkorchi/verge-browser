@@ -1,4 +1,10 @@
-import { parseBytes, parseStream, serialize, tokenizeStream } from "@ismail-elkorchi/html-parser";
+import {
+  isHtmlBudgetExceededError,
+  parseBytes,
+  parseStream,
+  serialize,
+  tokenizeByteStreamEager
+} from "@ismail-elkorchi/html-parser";
 import { resolve } from "node:path";
 import { TextEncoder } from "node:util";
 import { ReadableStream } from "node:stream/web";
@@ -22,54 +28,39 @@ function streamFromChunks(bytes, chunkSize) {
 }
 
 async function tokensFromStream(bytes, chunkSize) {
-  const stream = streamFromChunks(bytes, chunkSize);
-  const tokens = [];
-  for await (const token of tokenizeStream(stream, {})) {
-    tokens.push(token);
-  }
-  return tokens;
+  return tokenizeByteStreamEager(streamFromChunks(bytes, chunkSize));
 }
 
 function budgetErrorMatches(error, budgetName) {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-  if (error.name !== "BudgetExceededError") {
-    return false;
-  }
-  const payload = error.payload;
-  if (!payload || typeof payload !== "object") {
-    return false;
-  }
-  return payload.budget === budgetName;
+  return isHtmlBudgetExceededError(error) && error.budget === budgetName;
 }
 
 async function main() {
   const html = "<!doctype html><html><head><title>stream</title></head><body><p>alpha beta gamma</p><p>delta</p></body></html>";
   const bytes = new TextEncoder().encode(html);
 
-  const parseBytesTree = parseBytes(bytes, {
+  const bytesDocument = parseBytes(bytes, {
     captureSpans: true,
-    trace: false
+    trace: "none"
   });
-  const parseStreamTree = await parseStream(streamFromChunks(bytes, 9), {
+  const streamDocument = await parseStream(streamFromChunks(bytes, 9), {
     captureSpans: true,
-    trace: true,
+    trace: "events",
     budgets: {
       maxInputBytes: 256 * 1024,
-      maxBufferedBytes: 64 * 1024,
+      maxEncodingPrescanBytes: 64 * 1024,
       maxTraceEvents: 2_048,
       maxTraceBytes: 512 * 1024
     }
   });
-  const serializeParity = serialize(parseBytesTree) === serialize(parseStreamTree);
+  const serializeParity = serialize(bytesDocument.tree) === serialize(streamDocument.tree);
 
   const checks = [];
   checks.push({
     id: "stream-serialize-parity",
     ok: serializeParity,
-    observed: serialize(parseStreamTree),
-    expected: serialize(parseBytesTree)
+    observed: serialize(streamDocument.tree),
+    expected: serialize(bytesDocument.tree)
   });
 
   let maxInputBudgetRaised = false;
@@ -77,7 +68,7 @@ async function main() {
     await parseStream(streamFromChunks(bytes, bytes.length), {
       budgets: {
         maxInputBytes: Math.max(1, bytes.length - 5),
-        maxBufferedBytes: 64 * 1024
+        maxEncodingPrescanBytes: 64 * 1024
       }
     });
   } catch (error) {
@@ -90,22 +81,22 @@ async function main() {
     expected: "budget-exceeded(maxInputBytes)"
   });
 
-  let maxBufferedBudgetRaised = false;
+  let maxDecodedBudgetRaised = false;
   try {
     await parseStream(streamFromChunks(bytes, bytes.length), {
       budgets: {
         maxInputBytes: 256 * 1024,
-        maxBufferedBytes: 8
+        maxDecodedUtf8Bytes: 8
       }
     });
   } catch (error) {
-    maxBufferedBudgetRaised = budgetErrorMatches(error, "maxBufferedBytes");
+    maxDecodedBudgetRaised = budgetErrorMatches(error, "maxDecodedUtf8Bytes");
   }
   checks.push({
-    id: "stream-max-buffered-budget",
-    ok: maxBufferedBudgetRaised,
-    observed: maxBufferedBudgetRaised ? "budget-exceeded" : "no-error",
-    expected: "budget-exceeded(maxBufferedBytes)"
+    id: "stream-max-decoded-budget",
+    ok: maxDecodedBudgetRaised,
+    observed: maxDecodedBudgetRaised ? "budget-exceeded" : "no-error",
+    expected: "budget-exceeded(maxDecodedUtf8Bytes)"
   });
 
   const tokensFirst = await tokensFromStream(bytes, 7);

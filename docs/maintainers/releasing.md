@@ -19,14 +19,20 @@ The workflow performs idempotent guards and aborts if the target version already
 ## Local verification commands
 
 ```bash
-npm ci
 npm run release:check
 npm run docs:html:jsr
 node scripts/release/render-notes.mjs --dry-run
 node scripts/release/update-changelog.mjs --dry-run
 ```
 
-Both publish workflows also upload the generated JSR HTML docs as workflow artifacts so maintainers can inspect the rendered API surface for the exact release candidate that passed the publish gates.
+`release:check` begins with `npm ci`, verifies that the installed
+`@ismail-elkorchi/html-parser` is the exact public-registry artifact pinned by
+the manifest and lockfile, and finishes by installing the packed Verge tarball
+in a clean consumer and exercising its public parser/rendering API.
+
+Both publish workflows also upload the generated JSR HTML docs as workflow
+artifacts so maintainers can inspect the rendered API surface for the exact
+release candidate that passed the publish gates.
 
 ## Release notes format
 

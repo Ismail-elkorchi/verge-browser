@@ -4,9 +4,9 @@ import test from "node:test";
 import { parseHtml, renderDocumentToTerminal } from "../../dist/mod.js";
 
 test("parseHtml supports low-level rendering from the verge-browser entrypoint", () => {
-  const tree = parseHtml("<main><h1>Docs</h1><p>Deterministic output.</p></main>");
+  const document = parseHtml("<main><h1>Docs</h1><p>Deterministic output.</p></main>");
   const rendered = renderDocumentToTerminal({
-    tree,
+    tree: document.tree,
     requestUrl: "https://example.test",
     finalUrl: "https://example.test",
     status: 200,

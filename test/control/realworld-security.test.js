@@ -9,6 +9,7 @@ import { parse } from "@ismail-elkorchi/html-parser";
 import { CorpusRecorder } from "../../dist/app/realworld.js";
 
 function buildSnapshot(html, finalUrl = "https://example.com/page") {
+  const document = parse(html, { sourceRetention: "text" });
   return {
     requestUrl: finalUrl,
     finalUrl,
@@ -18,7 +19,7 @@ function buildSnapshot(html, finalUrl = "https://example.com/page") {
     responseHeaders: {},
     fetchedAtIso: "2026-01-01T00:00:00.000Z",
     setCookieHeaders: [],
-    tree: parse(html),
+    document,
     rendered: {
       title: "sample",
       displayUrl: finalUrl,
@@ -28,7 +29,6 @@ function buildSnapshot(html, finalUrl = "https://example.com/page") {
       parseErrorCount: 0,
       fetchedAtIso: "2026-01-01T00:00:00.000Z"
     },
-    sourceHtml: html,
     diagnostics: {
       parseMode: "text",
       sourceBytes: html.length,

@@ -6,7 +6,7 @@ import { parse } from "@ismail-elkorchi/html-parser";
 import { buildFormSubmissionRequest, buildGetSubmissionUrl, extractForms } from "../../dist/app/forms.js";
 
 test("extractForms lists forms and fields", () => {
-  const tree = parse(`
+  const document = parse(`
     <html>
       <body>
         <form method="get" action="/search">
@@ -18,7 +18,7 @@ test("extractForms lists forms and fields", () => {
     </html>
   `);
 
-  const forms = extractForms(tree, "https://example.com/base");
+  const forms = extractForms(document.tree, "https://example.com/base");
   assert.equal(forms.length, 1);
   assert.equal(forms[0]?.method, "get");
   assert.equal(forms[0]?.actionUrl, "https://example.com/search");
