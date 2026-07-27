@@ -1,5 +1,3 @@
 name: verge-browser-codeql
 paths-ignore:
-  - src/app/realworld.ts
-  - scripts/realworld/layout/fetch-wpt-subset.mjs
   - scripts/oracles/corpus/refresh-wpt-delta-corpus.mjs

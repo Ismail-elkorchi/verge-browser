@@ -132,6 +132,5 @@ export interface ShellState {
   readonly editor: EditorState | null;
   readonly detail: DetailState | null;
   readonly status: StatusMessage | null;
-  readonly screenReaderMode: boolean;
   readonly shouldExit: boolean;
 }

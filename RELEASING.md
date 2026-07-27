@@ -1,30 +1,25 @@
 # Releasing
 
-## Publish model
+Verge Browser publishes to npm and JSR from one GitHub Actions workflow using
+trusted publishing. The version in `package.json` and `jsr.json` must match.
 
-Publishing is performed via GitHub Actions OIDC (tokenless):
-- npm Trusted Publishing
-- JSR OIDC publishing
+1. Update the version and `CHANGELOG.md` in a pull request.
+2. Run `npm run release:check` and merge only after hosted checks pass.
+3. Create and publish the `vX.Y.Z` GitHub release from the current `main`
+   commit.
+4. Confirm the Publish workflow qualified and published that exact tag to both
+   registries.
 
-Use `.github/workflows/publish.yml` for release-driven publish and `.github/workflows/publish-manual.yml` for manual dry-runs or controlled publish runs.
+The Publish workflow can be dispatched manually for a dry run. A real manual
+run is reserved for registry-specific recovery and must check out the exact
+version tag; it cannot publish an arbitrary branch or commit.
 
-## Required checks before publish
-
-```bash
-npm ci
-npm run check:fast
-npm run docs:lint:jsr
-npm run docs:test:jsr
-npm run examples:run
-npm pack --dry-run
-node scripts/quality/doc-required.mjs
-```
-
-## Release notes and changelog
+Useful local checks:
 
 ```bash
-node scripts/release/render-notes.mjs --dry-run
-node scripts/release/update-changelog.mjs --dry-run
+npm run release:check
+npm run docs:html:jsr
+npm run release:notes:dry-run
 ```
 
-Reference details: `docs/maintainers/releasing.md`.
+Publishing is never performed from a developer workstation.

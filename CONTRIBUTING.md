@@ -1,49 +1,27 @@
 # Contributing
 
-## Workflow
-- Use feature branches and reviewable pull requests.
-- Keep changes scoped and test-backed.
-
-## Local checks
-Run before opening a pull request:
+Create a focused branch, install the locked dependencies, and keep behavior
+changes covered by tests.
 
 ```bash
-npm run check:fast
+npm ci
+npm run check
 ```
 
-Generate the static JSR docs site locally when you change public docblocks:
+When public APIs or documentation change, also run:
 
 ```bash
-npm run docs:html:jsr
+npm run docs:required
+npm run docs:check:jsr
+npm run examples:run
 ```
 
-For release candidate checks:
+`npm run release:check` is the complete clean-install, cross-runtime,
+evaluation, oracle, documentation, and packed-consumer qualification. Run it
+before a release. The benchmark and oracle-lock refresh commands are available
+for work that intentionally changes their respective baselines:
 
 ```bash
-npm run ci
-npm run release:check
-```
-
-Standalone evaluation commands:
-
-```bash
-npm run eval:ci
-npm run eval:release
-npm run eval:oracle-runtime:release
-npm run oracle:lock:refresh
-npm run eval:oracle-superiority:release
-npm run eval:oracle-fingerprint:release
-npm run eval:oracle-supply-chain:release
 npm run test:bench
+npm run oracle:lock:refresh
 ```
-
-## Commit style
-Use Conventional Commits:
-- `feat(scope): summary`
-- `fix(scope): summary`
-- `chore(scope): summary`
-- `docs(scope): summary`
-
-## Maintainer docs
-
-- [Maintainer index](./docs/maintainers/index.md)

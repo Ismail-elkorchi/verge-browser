@@ -27,7 +27,7 @@ Use this when you want the library exports and the packaged CLI in the same work
 ## Startup form
 
 ```txt
-verge [initial-target] [--once] [--record-corpus] [--screen-reader]
+verge [initial-target] [--once]
 ```
 
 - The first non-flag argument becomes the initial target URL or special page.
@@ -174,19 +174,8 @@ Low-level patch actions:
 - Useful for smoke runs and startup validation.
 - Not intended for manual browsing sessions that should remain open after the first render.
 
-### `--record-corpus`
-
-- Records fetched HTML and CSS payloads to the realworld corpus cache while the CLI session runs.
-- Intended for field-evaluation workflows rather than normal browsing.
-
-### `--screen-reader`
-
-- Uses the screen-reader-friendly chrome profile.
-- Keeps the footer and status lines explicit while avoiding decorative separators.
-
 ## Related
 
 - [First session tutorial](../tutorial/first-session.md)
-- [Install and run the CLI](../how-to/install-and-run-cli.md)
 - [API overview](./api-overview.md)
 - [Error model](./error-model.md)

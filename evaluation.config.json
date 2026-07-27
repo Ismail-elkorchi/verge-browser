@@ -1,8 +1,4 @@
 {
-  "runtime": {
-    "targets": ["node", "deno", "bun"],
-    "browserTarget": false
-  },
   "render": {
     "suiteName": "render-v3",
     "widths": [60, 80, 100, 120],
@@ -12,7 +8,6 @@
         "includeHoldout": true,
         "minExecutedFraction": 0.9,
         "minCases": 250,
-        "requireRuntimeMatrix": true,
         "requireFuzzGuided": false,
         "requireOracleLockRefreshDiff": false
       },
@@ -20,7 +15,6 @@
         "includeHoldout": true,
         "minExecutedFraction": 1,
         "minCases": 1000,
-        "requireRuntimeMatrix": true,
         "requireFuzzGuided": true,
         "requireOracleLockRefreshDiff": true
       }
@@ -67,10 +61,6 @@
       "requireIndexSha256": true,
       "requireHttpsPackageDownloadUrls": true
     }
-  },
-  "benchmarks": {
-    "required": ["render-width-80", "render-width-120"],
-    "minSampleCases": 300
   },
   "fuzz": {
     "profiles": {

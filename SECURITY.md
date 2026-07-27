@@ -20,14 +20,7 @@ Include:
 
 Do not disclose unpatched vulnerabilities in public issues.
 
-## Response targets
-
-- Initial triage response: 3 business days.
-- Reproduction and severity classification: 7 business days.
-- Fix or mitigation plan for high/critical issues: 14 business days.
-
 ## Scope notes
 
 - Network-boundary bypasses and unsafe write-path bugs are in scope.
 - Determinism and policy gate bypasses are in scope.
-- False positives in non-runtime test fixtures are triaged separately.

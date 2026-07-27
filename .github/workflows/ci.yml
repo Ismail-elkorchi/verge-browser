@@ -20,7 +20,6 @@ jobs:
     name: docs
     runs-on: ubuntu-latest
     timeout-minutes: 20
-
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -39,22 +38,8 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Docs gates
-        run: |
-          set -euo pipefail
-          npm run docs:required
-          npm run docs:check:jsr
-
-      - name: Render JSR HTML docs
-        run: npm run docs:html:jsr
-
-      - name: Upload JSR HTML docs
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: jsr-html-docs
-          path: tmp/jsr-docs-html/
-          if-no-files-found: error
-          retention-days: 7
+      - name: Check documentation
+        run: npm run docs:required && npm run docs:check:jsr
 
   node:
     name: node-${{ matrix.node-version }}
@@ -64,7 +49,6 @@ jobs:
       fail-fast: false
       matrix:
         node-version: [24, 26]
-
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -75,43 +59,40 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
 
-      - name: Setup Deno
-        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
-        with:
-          deno-version: v2.x
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-
       - name: Install
         run: npm ci
 
       - name: Restore oracle image cache
+        if: ${{ matrix.node-version == 24 }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: tmp/oracle-image
           key: ${{ runner.os }}-oracle-image-${{ hashFiles('scripts/oracles/oracle-image.lock.json') }}
 
       - name: Prepare oracle image
+        if: ${{ matrix.node-version == 24 }}
         run: npm run oracle:image:prepare
 
-      - name: Check
-        run: npm run ci
+      - name: Check current runtime
+        if: ${{ matrix.node-version == 24 }}
+        run: npm run check
 
-      - name: Real oracle validation
-        run: npm run eval:oracle-runtime:ci
+      - name: Check next runtime
+        if: ${{ matrix.node-version == 26 }}
+        run: npm run check:core && npm run smoke:node
 
-      - name: Oracle fingerprint drift validation
-        run: npm run eval:oracle-fingerprint:ci
+      - name: Validate reference browsers
+        if: ${{ matrix.node-version == 24 }}
+        run: |
+          npm run eval:oracle-runtime:ci
+          npm run eval:oracle-superiority:ci
+          npm run eval:oracle-fingerprint:ci
+          npm run eval:oracle-supply-chain:ci
 
-      - name: Oracle supply-chain validation
-        run: npm run eval:oracle-supply-chain:ci
-
-  deno:
-    name: deno
+  runtime-parity:
+    name: runtime-parity
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -119,7 +100,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: '24'
+          node-version: "24"
           cache: npm
 
       - name: Setup Deno
@@ -127,32 +108,11 @@ jobs:
         with:
           deno-version: v2.x
 
-      - name: Install
-        run: npm ci
-
-      - name: Runtime smoke (deno)
-        run: npm run smoke:deno
-
-  bun:
-    name: bun
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Setup Node
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
-        with:
-          node-version: '24'
-          cache: npm
-
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
       - name: Install
         run: npm ci
 
-      - name: Runtime smoke (bun)
-        run: npm run smoke:bun
+      - name: Compare runtime behavior
+        run: npm run smoke:all

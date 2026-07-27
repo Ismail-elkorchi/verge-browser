@@ -41,11 +41,16 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    env:
+      DENO_PUBLISH_VERSION: "2.9.3"
+      PUBLISH_ARTIFACTS_DIR: ${{ runner.temp }}/verge-browser-publish
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.ref || github.ref }}
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Setup Node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -56,10 +61,10 @@ jobs:
       - name: Setup Deno
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
-          deno-version: v2.x
+          deno-version: v${{ env.DENO_PUBLISH_VERSION }}
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
       - name: Resolve publish metadata
         id: meta
@@ -68,6 +73,7 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           DRY_RUN_INPUT: ${{ inputs.dry_run }}
           PUBLISH_TARGET_INPUT: ${{ inputs.publish_target }}
+          REF_INPUT: ${{ inputs.ref }}
         run: |
           set -euo pipefail
 
@@ -105,9 +111,35 @@ jobs:
             exit 1
           fi
 
+          expected_tag="v${package_version}"
+          checkout_commit="$(git rev-parse HEAD)"
+          if [ "${GITHUB_EVENT_NAME}" = "release" ]; then
+            if [ "${RELEASE_TAG}" != "${expected_tag}" ]; then
+              echo "::error::Release tag must be ${expected_tag}, got ${RELEASE_TAG}"
+              exit 1
+            fi
+            tag_commit="$(git rev-parse "${RELEASE_TAG}^{commit}")"
+            if [ "${checkout_commit}" != "${tag_commit}" ] || [ "${checkout_commit}" != "${GITHUB_SHA}" ]; then
+              echo "::error::Checkout, release tag, and event SHA do not identify the same commit"
+              exit 1
+            fi
+          fi
+
           dry_run="false"
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${DRY_RUN_INPUT}" = "true" ]; then
             dry_run="true"
+          fi
+
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${dry_run}" != "true" ]; then
+            if [ "${REF_INPUT}" != "${expected_tag}" ]; then
+              echo "::error::A real manual publish must check out the exact ${expected_tag} tag"
+              exit 1
+            fi
+            tag_commit="$(git rev-parse "${expected_tag}^{commit}")"
+            if [ "${checkout_commit}" != "${tag_commit}" ]; then
+              echo "::error::Manual publish checkout does not match ${expected_tag}"
+              exit 1
+            fi
           fi
 
           publish_target="all"
@@ -134,22 +166,23 @@ jobs:
               ;;
           esac
 
-          mkdir -p publish-artifacts
+          mkdir -p "${PUBLISH_ARTIFACTS_DIR}"
           {
             echo "package_name=${package_name}"
             echo "version=${package_version}"
-            echo "commit_sha=${GITHUB_SHA}"
+            echo "commit_sha=${checkout_commit}"
             echo "ref=${GITHUB_REF}"
             echo "event=${GITHUB_EVENT_NAME}"
             echo "dry_run=${dry_run}"
             echo "publish_target=${publish_target}"
             echo "publish_npm=${publish_npm}"
             echo "publish_jsr=${publish_jsr}"
-          } | tee publish-artifacts/publish-summary.txt
+          } | tee "${PUBLISH_ARTIFACTS_DIR}/publish-summary.txt"
 
           {
             echo "package_name=${package_name}"
             echo "version=${package_version}"
+            echo "commit_sha=${checkout_commit}"
             echo "dry_run=${dry_run}"
             echo "publish_target=${publish_target}"
             echo "publish_npm=${publish_npm}"
@@ -160,7 +193,7 @@ jobs:
         run: |
           echo "package=${{ steps.meta.outputs.package_name }}"
           echo "version=${{ steps.meta.outputs.version }}"
-          echo "commit=${GITHUB_SHA}"
+          echo "commit=${{ steps.meta.outputs.commit_sha }}"
           echo "dry_run=${{ steps.meta.outputs.dry_run }}"
           echo "publish_target=${{ steps.meta.outputs.publish_target }}"
           echo "publish_npm=${{ steps.meta.outputs.publish_npm }}"
@@ -171,6 +204,15 @@ jobs:
           set -euo pipefail
           npm run release:check
           npm run docs:html:jsr
+
+      - name: Verify qualified revision
+        env:
+          QUALIFIED_COMMIT: ${{ steps.meta.outputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${QUALIFIED_COMMIT}"
+          git diff --exit-code
+          git diff --cached --exit-code
 
       - name: Ensure npm version does not already exist
         if: ${{ steps.meta.outputs.publish_npm == 'true' }}
@@ -209,7 +251,7 @@ jobs:
           scope="${scope%%/*}"
           package="${PACKAGE_NAME##*/}"
           metadata_url="https://jsr.io/@${scope}/${package}/${VERSION}_meta.json"
-          metadata_output="publish-artifacts/jsr-version-meta.json"
+          metadata_output="${PUBLISH_ARTIFACTS_DIR}/jsr-version-meta.json"
 
           http_status="$(curl -sS -o "${metadata_output}" -w '%{http_code}' -H 'Accept: application/json' "${metadata_url}")"
 
@@ -236,16 +278,17 @@ jobs:
         run: |
           set -euo pipefail
           pack_json="$(npm pack --json)"
-          printf '%s\n' "${pack_json}" > publish-artifacts/npm-pack.json
+          printf '%s\n' "${pack_json}" > "${PUBLISH_ARTIFACTS_DIR}/npm-pack.json"
           tarball="$(printf '%s\n' "${pack_json}" | node -e 'const fs=require("node:fs");const data=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(data[0].filename);')"
-          tar -tzf "${tarball}" | sort > publish-artifacts/npm-pack-file-list.txt
+          tar -tzf "${tarball}" | sort > "${PUBLISH_ARTIFACTS_DIR}/npm-pack-file-list.txt"
           rm -f "${tarball}"
 
       - name: Run JSR publish dry-run
         if: ${{ steps.meta.outputs.publish_jsr == 'true' }}
         run: |
           set -euo pipefail
-          npx -y jsr publish --dry-run --allow-dirty 2>&1 | tee publish-artifacts/jsr-publish-dry-run.txt
+          test "$(deno --version | head -1 | awk '{print $2}')" = "${DENO_PUBLISH_VERSION}"
+          deno publish --dry-run 2>&1 | tee "${PUBLISH_ARTIFACTS_DIR}/jsr-publish-dry-run.txt"
 
       - name: Run npm publish dry-run
         if: ${{ steps.meta.outputs.dry_run == 'true' && steps.meta.outputs.publish_npm == 'true' }}
@@ -256,7 +299,7 @@ jobs:
         with:
           name: publish-${{ steps.meta.outputs.version }}
           path: |
-            publish-artifacts/
+            ${{ env.PUBLISH_ARTIFACTS_DIR }}/
             tmp/jsr-docs-html/
 
       - name: Ensure tokenless npm auth for OIDC publish
@@ -275,4 +318,4 @@ jobs:
 
       - name: Publish JSR
         if: ${{ steps.meta.outputs.dry_run != 'true' && steps.meta.outputs.publish_jsr == 'true' }}
-        run: npx -y jsr publish --allow-dirty
+        run: deno publish

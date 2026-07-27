@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 const timeoutMs = 8_000;
 
@@ -112,6 +112,12 @@ async function runSmokeCheck() {
 
 try {
   await runSmokeCheck();
+  const invalidOption = spawnSync(process.execPath, ["dist/cli.js", "--unknown-option"], {
+    encoding: "utf8"
+  });
+  if (invalidOption.status !== 1 || !invalidOption.stderr.includes("Unknown option: --unknown-option")) {
+    throw new Error("CLI did not reject an unknown option");
+  }
   process.stdout.write("cli-smoke ok\n");
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);

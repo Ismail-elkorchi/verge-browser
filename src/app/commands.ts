@@ -414,8 +414,6 @@ export function formatHelpText(): string {
     "  patch ...           Apply a low-level HTML patch to the current page",
     "",
     "CLI flags:",
-    "  --record-corpus     Write fetched HTML/CSS payloads to realworld corpus cache",
-    "  --once              Load the initial target once, then exit",
-    "  --screen-reader     Use the screen-reader-friendly chrome profile"
+    "  --once              Load the initial target once, then exit"
   ].join("\n");
 }

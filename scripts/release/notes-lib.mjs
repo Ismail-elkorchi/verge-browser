@@ -142,6 +142,14 @@ export function parseReleaseCliArgs(argv) {
     dryRun: false
   };
 
+  const readValue = (index, option) => {
+    const value = argv[index + 1];
+    if (typeof value !== "string" || value.length === 0 || value.startsWith("--")) {
+      throw new Error(`${option} requires a value`);
+    }
+    return value;
+  };
+
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
 
@@ -150,23 +158,19 @@ export function parseReleaseCliArgs(argv) {
       continue;
     }
 
-    if (argument === "--from-tag" || argument === "--from_tag") {
-      options.fromTag = argv[index + 1];
+    if (argument === "--from-tag") {
+      options.fromTag = readValue(index, argument);
       index += 1;
       continue;
     }
 
-    if (argument === "--to-ref" || argument === "--to_ref") {
-      options.toRef = argv[index + 1];
+    if (argument === "--to-ref") {
+      options.toRef = readValue(index, argument);
       index += 1;
       continue;
     }
 
-    if (argument === "--changelog" || argument === "--changelog-file") {
-      options.changelogPath = argv[index + 1];
-      index += 1;
-      continue;
-    }
+    throw new Error(`unsupported argument: ${argument}`);
   }
 
   return options;

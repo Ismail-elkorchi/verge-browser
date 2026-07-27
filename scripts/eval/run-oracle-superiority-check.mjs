@@ -1,40 +1,24 @@
-import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 
 import { readJson, writeJsonReport } from "./render-eval-lib.mjs";
 
-function parseArgs(argv) {
-  const forwarded = [];
+function parseProfile(argv) {
+  let profile = "release";
   for (const argument of argv) {
-    if (argument.startsWith("--profile=") || argument.startsWith("--sample-cases=") || argument.startsWith("--widths=") || argument === "--rebuild-lock") {
-      forwarded.push(argument);
+    if (argument.startsWith("--profile=")) {
+      profile = argument.slice("--profile=".length);
       continue;
     }
     throw new Error(`unsupported argument: ${argument}`);
   }
-  return forwarded;
-}
-
-function runOracleRuntimeValidation(forwardedArgs) {
-  const result = spawnSync(
-    process.execPath,
-    ["scripts/eval/run-oracle-runtime-validation.mjs", ...forwardedArgs],
-    {
-      encoding: "utf8",
-      stdio: "inherit"
-    }
-  );
-  if (result.error) {
-    throw result.error;
+  if (profile !== "ci" && profile !== "release") {
+    throw new Error(`invalid profile: ${profile}`);
   }
-  if (result.status !== 0) {
-    throw new Error(`oracle runtime precheck failed with status ${String(result.status)}`);
-  }
+  return profile;
 }
 
 async function main() {
-  const forwardedArgs = parseArgs(process.argv.slice(2));
-  runOracleRuntimeValidation(forwardedArgs);
+  const profile = parseProfile(process.argv.slice(2));
 
   const [config, scoreReport, runtimeValidationSummary] = await Promise.all([
     readJson(resolve("evaluation.config.json")),
@@ -48,6 +32,9 @@ async function main() {
   const baselineNames = Object.keys(scoreReport.metrics).filter((engineName) => engineName !== "verge");
 
   const failures = [];
+  if (runtimeValidationSummary?.profile !== profile) {
+    failures.push(`oracle runtime report profile mismatch: expected ${profile}`);
+  }
   const metrics = {};
   for (const metricName of requiredMetrics) {
     const bestBaseline = Math.max(...baselineNames.map((engineName) => scoreReport.metrics[engineName][metricName]));
@@ -68,7 +55,7 @@ async function main() {
   const report = {
     suite: "oracle-superiority-check",
     timestamp: new Date().toISOString(),
-    profile: runtimeValidationSummary?.profile ?? "release",
+    profile,
     runtimeValidationOk: runtimeValidationSummary?.gates?.ok === true,
     metrics,
     failures,
