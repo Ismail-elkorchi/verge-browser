@@ -86,6 +86,16 @@ async function fetchBytes(url) {
   return new Uint8Array(await response.arrayBuffer());
 }
 
+function decodeHtmlBytes(bytes) {
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return new TextDecoder("utf-16le").decode(bytes);
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    return new TextDecoder("utf-16be").decode(bytes);
+  }
+  return new TextDecoder("utf-8").decode(bytes);
+}
+
 function caseId(category, path) {
   const digest = sha256HexText(path).slice(0, 12);
   const slug = path
@@ -213,7 +223,7 @@ async function main() {
       );
     }
     const bytes = await fetchBytes(rawUrl(commit, policyCase.sourcePath));
-    const html = new TextDecoder("utf-8").decode(bytes);
+    const html = decodeHtmlBytes(bytes);
     selected.push({
       id: policyCase.id,
       category: policyCase.category,

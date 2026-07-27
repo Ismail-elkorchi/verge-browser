@@ -6,10 +6,10 @@ import {
   type DocumentTree,
   type Edit,
   type ParseOptions,
-  type TraceEvent
+  type ParsedDocument
 } from "@ismail-elkorchi/html-parser";
 
-import { fetchPage, fetchPageStream, readByteStreamToText, type LocalFileReader } from "./fetch-page.js";
+import { fetchPage, fetchPageStream, type LocalFileReader } from "./fetch-page.js";
 import { renderDocumentToTerminal } from "./render.js";
 import type {
   FetchPagePayload,
@@ -38,17 +38,14 @@ export type PageRenderer = (input: {
   readonly width: number;
 }) => RenderedPage;
 
-const TEXT_ENCODER = new TextEncoder();
 const DEFAULT_PARSE_OPTIONS: ParseOptions = Object.freeze({
   captureSpans: true,
-  trace: true,
+  sourceRetention: "text",
+  trace: "summary",
   budgets: {
     maxInputBytes: 2 * 1024 * 1024,
-    maxBufferedBytes: 512 * 1024,
     maxNodes: 250_000,
     maxDepth: 2_048,
-    maxTraceEvents: 8_192,
-    maxTraceBytes: 2 * 1024 * 1024,
     maxTimeMs: 20_000
   }
 });
@@ -77,17 +74,6 @@ export interface BrowserSessionOptions {
   readonly defaultParseMode?: ParseMode;
   /** Override for `file://` reads used by local snapshots. */
   readonly localFileReader?: LocalFileReader;
-}
-
-function uniqueTraceKinds(trace: readonly TraceEvent[] | undefined): readonly string[] {
-  if (!trace || trace.length === 0) {
-    return [];
-  }
-  const seenKinds = new Set<string>();
-  for (const event of trace) {
-    seenKinds.add(event.kind);
-  }
-  return [...seenKinds].sort((left, right) => left.localeCompare(right));
 }
 
 function hasCookieHeader(headers: Readonly<Record<string, string>> | undefined): boolean {
@@ -140,15 +126,15 @@ function buildTriageIds(tree: DocumentTree, networkOutcome: PageDiagnostics["net
   return [...triage].sort((left, right) => left.localeCompare(right));
 }
 
-function diagnosticsFromTree(
-  tree: DocumentTree,
+function diagnosticsFromDocument(
+  document: ParsedDocument,
   parseMode: ParseMode,
-  sourceHtml: string | undefined,
   requestMethod: "GET" | "POST",
   timings: NavigationTimings,
   usedCookies: boolean,
   networkOutcome: PageDiagnostics["networkOutcome"] | undefined
 ): PageDiagnostics {
+  const tree = document.tree;
   const safeNetworkOutcome = networkOutcome ?? {
     kind: "unknown",
     finalUrl: "about:blank",
@@ -160,10 +146,10 @@ function diagnosticsFromTree(
 
   return {
     parseMode,
-    sourceBytes: sourceHtml === undefined ? null : TEXT_ENCODER.encode(sourceHtml).byteLength,
+    sourceBytes: document.metadata.resourceUsage.decodedUtf8Bytes,
     parseErrorCount: tree.errors.length,
-    traceEventCount: tree.trace?.length ?? 0,
-    traceKinds: uniqueTraceKinds(tree.trace),
+    traceEventCount: tree.trace?.summary.eventCount ?? 0,
+    traceKinds: tree.trace?.summary.eventKinds ?? [],
     requestMethod,
     fetchDurationMs: timings.fetchDurationMs,
     parseDurationMs: timings.parseDurationMs,
@@ -185,7 +171,7 @@ function diagnosticsFromTree(
  * - the bounded HTML parse profile defined in this module.
  *
  * Navigation methods throw `NetworkFetchError` when a loader fails before producing a usable HTML response.
- * They also throw plain `Error` for session-state misuse such as missing history entries or applying edits without `sourceHtml`.
+ * They also throw plain `Error` for session-state misuse such as missing history entries or applying edits without retained source.
  *
  * @param options Optional loader, renderer, parser, and local file overrides.
  *
@@ -219,7 +205,16 @@ export class BrowserSession {
         fetchPageStream(requestUrl, undefined, undefined, requestOptions, this.localFileReader));
     this.renderer = options.renderer ?? renderDocumentToTerminal;
     this.widthProvider = options.widthProvider ?? (() => 100);
-    this.parseOptions = options.parseOptions ?? DEFAULT_PARSE_OPTIONS;
+    this.parseOptions = {
+      ...DEFAULT_PARSE_OPTIONS,
+      ...options.parseOptions,
+      captureSpans: true,
+      sourceRetention: "text",
+      budgets: {
+        ...DEFAULT_PARSE_OPTIONS.budgets,
+        ...options.parseOptions?.budgets
+      }
+    };
     this.defaultParseMode = options.defaultParseMode ?? "text";
   }
 
@@ -306,21 +301,21 @@ export class BrowserSession {
     if (!currentPage) {
       throw new Error("No page is loaded");
     }
-    if (!currentPage.sourceHtml) {
+    if (currentPage.document.sourceText === null) {
       throw new Error("Cannot apply patch: source HTML is unavailable for this snapshot");
     }
 
-    const patchPlan = computePatch(currentPage.sourceHtml, edits);
-    const patchedHtml = applyPatchPlan(currentPage.sourceHtml, patchPlan);
+    const patchPlan = computePatch(currentPage.document, edits);
+    const patchedHtml = applyPatchPlan(currentPage.document, patchPlan);
     const startedAtMs = Date.now();
     const parseStartMs = Date.now();
-    const tree = parse(patchedHtml, this.parseOptions);
+    const document = parse(patchedHtml, this.parseOptions);
     const parseDurationMs = Date.now() - parseStartMs;
 
     const width = Math.max(40, this.widthProvider());
     const renderStartMs = Date.now();
     const rendered = this.renderer({
-      tree,
+      tree: document.tree,
       requestUrl: currentPage.requestUrl,
       finalUrl: currentPage.finalUrl,
       status: currentPage.status,
@@ -340,13 +335,11 @@ export class BrowserSession {
       responseHeaders: currentPage.responseHeaders,
       fetchedAtIso: currentPage.fetchedAtIso,
       setCookieHeaders: [],
-      tree,
+      document,
       rendered,
-      sourceHtml: patchedHtml,
-      diagnostics: diagnosticsFromTree(
-        tree,
+      diagnostics: diagnosticsFromDocument(
+        document,
         currentPage.diagnostics.parseMode,
-        patchedHtml,
         currentPage.diagnostics.requestMethod,
         {
           fetchDurationMs: 0,
@@ -388,36 +381,19 @@ export class BrowserSession {
   private async parseFetchedPayload(
     parseMode: ParseMode,
     fetchedPage: FetchPagePayload
-  ): Promise<{ readonly tree: DocumentTree; readonly sourceHtml: string | undefined }> {
+  ): Promise<ParsedDocument> {
     if (parseMode === "text") {
       if (!("html" in fetchedPage)) {
         throw new Error("Text parse mode requires an HTML payload");
       }
-      const tree = parse(fetchedPage.html, this.parseOptions);
-      return {
-        tree,
-        sourceHtml: fetchedPage.html
-      };
+      return parse(fetchedPage.html, this.parseOptions);
     }
 
     if ("html" in fetchedPage) {
-      const tree = parse(fetchedPage.html, this.parseOptions);
-      return {
-        tree,
-        sourceHtml: fetchedPage.html
-      };
+      return parse(fetchedPage.html, this.parseOptions);
     }
 
-    const [parseStreamInput, sourceStreamInput] = fetchedPage.stream.tee();
-    const [tree, sourceHtml] = await Promise.all([
-      parseStream(parseStreamInput, this.parseOptions),
-      readByteStreamToText(sourceStreamInput)
-    ]);
-
-    return {
-      tree,
-      sourceHtml
-    };
+    return parseStream(fetchedPage.stream, this.parseOptions);
   }
 
   private async navigate(
@@ -435,13 +411,13 @@ export class BrowserSession {
     const fetchDurationMs = Date.now() - fetchStartMs;
 
     const parseStartMs = Date.now();
-    const parsedPayload = await this.parseFetchedPayload(parseMode, fetchedPage);
+    const document = await this.parseFetchedPayload(parseMode, fetchedPage);
     const parseDurationMs = Date.now() - parseStartMs;
 
     const width = Math.max(40, this.widthProvider());
     const renderStartMs = Date.now();
     const rendered = this.renderer({
-      tree: parsedPayload.tree,
+      tree: document.tree,
       requestUrl: fetchedPage.requestUrl,
       finalUrl: fetchedPage.finalUrl,
       status: fetchedPage.status,
@@ -464,13 +440,11 @@ export class BrowserSession {
       responseHeaders: fetchedPage.responseHeaders,
       fetchedAtIso: fetchedPage.fetchedAtIso,
       setCookieHeaders: fetchedPage.setCookieHeaders,
-      tree: parsedPayload.tree,
+      document,
       rendered,
-      ...(parsedPayload.sourceHtml !== undefined ? { sourceHtml: parsedPayload.sourceHtml } : {}),
-      diagnostics: diagnosticsFromTree(
-        parsedPayload.tree,
+      diagnostics: diagnosticsFromDocument(
+        document,
         parseMode,
-        parsedPayload.sourceHtml,
         requestMethod,
         {
           fetchDurationMs,

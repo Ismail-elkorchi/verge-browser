@@ -1,6 +1,6 @@
 {
   "name": "@ismail-elkorchi/verge-browser",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Terminal browsing primitives with safe fetch helpers, HTML snapshots, and auditable text rendering.",
   "license": "MIT",
   "repository": {
@@ -85,7 +85,9 @@
     "docs:test:jsr": "deno test --doc --no-check --no-lock --sloppy-imports jsr/mod.ts",
     "docs:check:jsr": "npm run docs:lint:jsr && npm run docs:test:jsr && npm run docs:quality:jsr",
     "docs:html:jsr": "node scripts/quality/render-jsr-docs-html.mjs",
-    "release:check": "npm run check && npm run docs:required && npm run docs:check:jsr && npm run examples:run && npm run eval:release && npm run eval:oracle-runtime:release && npm run eval:oracle-superiority:release && npm run eval:oracle-fingerprint:release && npm run eval:oracle-supply-chain:release && npm pack --dry-run",
+    "release:clean-install": "npm ci && node scripts/release/verify-clean-install.mjs",
+    "release:package": "node scripts/release/verify-packed-consumer.mjs",
+    "release:check": "npm run release:clean-install && npm run check && npm run docs:required && npm run docs:check:jsr && npm run examples:run && npm run eval:release && npm run eval:oracle-runtime:release && npm run eval:oracle-superiority:release && npm run eval:oracle-fingerprint:release && npm run eval:oracle-supply-chain:release && npm run release:package",
     "smoke:all": "npm run smoke:node && npm run smoke:deno && npm run smoke:bun",
     "smoke:bun": "npm run build && bun scripts/smoke/runtime-smoke.mjs --runtime=bun --report=reports/smoke-bun.json",
     "smoke:cli": "npm run build && node scripts/automation/smoke-cli.mjs",
@@ -101,13 +103,14 @@
     "changelog:update:dry-run": "node scripts/release/update-changelog.mjs --dry-run"
   },
   "dependencies": {
-    "@ismail-elkorchi/html-parser": "^0.1.0"
+    "@ismail-elkorchi/html-parser": "0.2.1"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@types/node": "26.1.0",
     "eslint": "10.6.0",
     "eslint-plugin-n": "18.2.1",
+    "playwright": "1.62.0",
     "typescript": "6.0.3",
     "typescript-eslint": "8.63.0"
   }

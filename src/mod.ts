@@ -9,9 +9,9 @@
  * import { parseCommand, parseHtml, renderDocumentToTerminal } from "@ismail-elkorchi/verge-browser";
  *
  * const command = parseCommand("open https://example.com");
- * const tree = parseHtml("<h1>Hello</h1><a href=\"/docs\">Docs</a>");
+ * const document = parseHtml("<h1>Hello</h1><a href=\"/docs\">Docs</a>");
  * const page = renderDocumentToTerminal({
- *   tree,
+ *   tree: document.tree,
  *   requestUrl: "https://example.com",
  *   finalUrl: "https://example.com",
  *   status: 200,

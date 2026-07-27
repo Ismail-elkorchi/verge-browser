@@ -3,9 +3,19 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { URL } from "node:url";
 
-import { findAllByTagName, parse, textContent, visibleText as extractVisibleText, visibleTextTokens } from "@ismail-elkorchi/html-parser";
+import {
+  findAllByTagName,
+  getAttributeValue,
+  HTML_NAMESPACE_URI,
+  parse
+} from "@ismail-elkorchi/html-parser";
 
 import { renderDocumentToTerminal } from "../../dist/app/render.js";
+import {
+  collectEvaluationTextTokens,
+  extractEvaluationText,
+  extractEvaluationTextContent
+} from "../support/parser-text.mjs";
 
 
 export function hashSha256(value) {
@@ -103,25 +113,10 @@ function f1FromTokenArrays(expectedTokens, actualTokens) {
   return (2 * precision * recall) / (precision + recall);
 }
 
-function getElementTagName(node) {
+function getHtmlElementLocalName(node) {
   if (!node || typeof node !== "object" || node.kind !== "element") return null;
-  if (typeof node.tagName !== "string") return null;
-  return node.tagName.toLowerCase();
-}
-
-function getElementAttr(node, attrName) {
-  if (!node || typeof node !== "object" || node.kind !== "element" || !Array.isArray(node.attributes)) {
-    return null;
-  }
-  const target = attrName.toLowerCase();
-  for (const attribute of node.attributes) {
-    if (!attribute || typeof attribute !== "object") continue;
-    if (typeof attribute.name !== "string") continue;
-    if (attribute.name.toLowerCase() !== target) continue;
-    if (typeof attribute.value !== "string") continue;
-    return attribute.value;
-  }
-  return null;
+  if (node.namespaceUri !== HTML_NAMESPACE_URI || typeof node.localName !== "string") return null;
+  return node.localName.toLowerCase();
 }
 
 function walkNodes(nodes, visit) {
@@ -140,7 +135,7 @@ function extractTableCells(tableNode) {
   const rowCandidates = Array.isArray(tableNode.children) ? tableNode.children : [];
   const collectRows = (parentNode) => {
     if (!parentNode || typeof parentNode !== "object") return;
-    const tagName = getElementTagName(parentNode);
+    const tagName = getHtmlElementLocalName(parentNode);
     if (!tagName) return;
 
     if (tagName === "tr") {
@@ -151,7 +146,7 @@ function extractTableCells(tableNode) {
     if (!["thead", "tbody", "tfoot"].includes(tagName)) return;
     if (!Array.isArray(parentNode.children)) return;
     for (const childNode of parentNode.children) {
-      if (getElementTagName(childNode) === "tr") {
+      if (getHtmlElementLocalName(childNode) === "tr") {
         rows.push(childNode);
       }
     }
@@ -165,9 +160,9 @@ function extractTableCells(tableNode) {
   for (const row of rows) {
     if (!Array.isArray(row.children)) continue;
     for (const childNode of row.children) {
-      const tagName = getElementTagName(childNode);
+      const tagName = getHtmlElementLocalName(childNode);
       if (!tagName || !["td", "th"].includes(tagName)) continue;
-      const cellText = normalizeWhitespace(textContent(childNode));
+      const cellText = normalizeWhitespace(extractEvaluationTextContent(childNode));
       if (cellText.length > 0) {
         tableCells.push(cellText);
       }
@@ -178,12 +173,13 @@ function extractTableCells(tableNode) {
 }
 
 function extractReferenceModel(caseId, html, finalUrl) {
-  const tree = parse(html, {
+  const document = parse(html, {
     captureSpans: false,
-    trace: false
+    trace: "none"
   });
+  const tree = document.tree;
 
-  const body = findAllByTagName(tree, "body")[0];
+  const body = [...findAllByTagName(tree, "body")][0];
   const rootNodes = body && Array.isArray(body.children) ? body.children : (Array.isArray(tree.children) ? tree.children : []);
 
   const headings = [];
@@ -192,11 +188,11 @@ function extractReferenceModel(caseId, html, finalUrl) {
   const tableCells = [];
 
   walkNodes(rootNodes, (node) => {
-    const tagName = getElementTagName(node);
+    const tagName = getHtmlElementLocalName(node);
     if (!tagName) return;
 
     if (/^h[1-6]$/.test(tagName)) {
-      const headingText = normalizeWhitespace(textContent(node));
+      const headingText = normalizeWhitespace(extractEvaluationTextContent(node));
       if (headingText.length > 0) {
         const level = Number.parseInt(tagName.slice(1), 10);
         headings.push(`h${String(level)}:${normalizeComparisonText(headingText)}`);
@@ -205,9 +201,9 @@ function extractReferenceModel(caseId, html, finalUrl) {
     }
 
     if (tagName === "a") {
-      const href = getElementAttr(node, "href");
+      const href = getAttributeValue(node, "href");
       if (!href) return;
-      const label = normalizeWhitespace(textContent(node));
+      const label = normalizeWhitespace(extractEvaluationTextContent(node));
       if (label.length === 0) return;
       links.push({
         href,
@@ -218,7 +214,7 @@ function extractReferenceModel(caseId, html, finalUrl) {
     }
 
     if (tagName === "pre") {
-      const preText = textContent(node).replace(/\r\n/g, "\n");
+      const preText = extractEvaluationTextContent(node).replace(/\r\n/g, "\n");
       preBlocks.push(preText);
       return;
     }
@@ -228,10 +224,10 @@ function extractReferenceModel(caseId, html, finalUrl) {
     }
   });
 
-  const titleNode = findAllByTagName(tree, "title")[0];
-  const title = titleNode ? normalizeWhitespace(textContent(titleNode)) : `Untitled ${caseId}`;
-  const visibleText = extractVisibleText(tree);
-  const visibleTextTokenArray = visibleTextTokens(tree);
+  const titleNode = [...findAllByTagName(tree, "title")][0];
+  const title = titleNode ? normalizeWhitespace(extractEvaluationTextContent(titleNode)) : `Untitled ${caseId}`;
+  const visibleText = extractEvaluationText(tree);
+  const visibleTextTokenArray = collectEvaluationTextTokens(tree);
   const visibleTextTokenSource = visibleTextTokenArray
     .map((token) => (token.kind === "text" ? token.value : " "))
     .join(" ");

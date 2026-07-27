@@ -83,12 +83,12 @@ async function runSmoke(expectedRuntime) {
   const html = "<html><head><title>Runtime</title></head><body><h1>Smoke</h1><p>alpha beta</p></body></html>";
   const bytes = new globalThis.TextEncoder().encode(html);
 
-  const treeFromText = parse(html, { captureSpans: true, trace: true });
-  const treeFromBytes = parseBytes(bytes, { captureSpans: true, trace: true });
-  const treeFromStream = await parseStream(createHtmlStream(html), { captureSpans: true, trace: true });
+  const documentFromText = parse(html, { captureSpans: true, trace: "summary" });
+  const documentFromBytes = parseBytes(bytes, { captureSpans: true, trace: "summary" });
+  const documentFromStream = await parseStream(createHtmlStream(html), { captureSpans: true, trace: "summary" });
 
   const rendered = renderDocumentToTerminal({
-    tree: treeFromText,
+    tree: documentFromText.tree,
     requestUrl: "https://runtime.example/",
     finalUrl: "https://runtime.example/",
     status: 200,
@@ -97,18 +97,18 @@ async function runSmoke(expectedRuntime) {
     width: 80
   });
 
-  const serialized = serialize(treeFromText);
-  const serializedBytes = serialize(treeFromBytes);
-  const serializedStream = serialize(treeFromStream);
+  const serialized = serialize(documentFromText.tree);
+  const serializedBytes = serialize(documentFromBytes.tree);
+  const serializedStream = serialize(documentFromStream.tree);
 
-  const errorIdsFromText = treeFromText.errors.map((entry) => entry.parseErrorId ?? "unknown");
-  const errorIdsFromBytes = treeFromBytes.errors.map((entry) => entry.parseErrorId ?? "unknown");
-  const errorIdsFromStream = treeFromStream.errors.map((entry) => entry.parseErrorId ?? "unknown");
+  const errorIdsFromText = documentFromText.tree.errors.map((entry) => entry.parseErrorId);
+  const errorIdsFromBytes = documentFromBytes.tree.errors.map((entry) => entry.parseErrorId);
+  const errorIdsFromStream = documentFromStream.tree.errors.map((entry) => entry.parseErrorId);
 
   const checks = {
-    parse: treeFromText.root !== null,
-    parseBytes: treeFromBytes.root !== null,
-    parseStream: treeFromStream.root !== null,
+    parse: documentFromText.tree.kind === "document",
+    parseBytes: documentFromBytes.tree.kind === "document",
+    parseStream: documentFromStream.tree.kind === "document",
     determinism:
       serialized === serializedBytes &&
       serialized === serializedStream &&

@@ -5,7 +5,9 @@ import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { TextDecoder } from "node:util";
 
-import { parseBytes, visibleTextTokens } from "@ismail-elkorchi/html-parser";
+import { parseBytes } from "@ismail-elkorchi/html-parser";
+
+import { collectEvaluationTextTokens } from "../support/parser-text.mjs";
 import { collectEngineFingerprints, ensureOracleImage, runEngineDump } from "../oracles/real-oracle-lib.mjs";
 
 import {
@@ -230,11 +232,11 @@ async function binarySha256(path) {
 }
 
 function computeExpectedTokens(htmlBytes) {
-  const tree = parseBytes(htmlBytes, {
+  const document = parseBytes(htmlBytes, {
     captureSpans: false,
-    trace: false
+    trace: "none"
   });
-  const tokens = visibleTextTokens(tree)
+  const tokens = collectEvaluationTextTokens(document.tree)
     .map((token) => (token.kind === "text" ? token.value : " "))
     .join(" ");
   return tokenizeText(tokens);

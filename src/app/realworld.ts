@@ -2,8 +2,13 @@ import { createHash } from "node:crypto";
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 
-import { findAllByAttr, findAllByTagName, textContent, type ElementNode } from "@ismail-elkorchi/html-parser";
+import {
+  findAllByAttr,
+  findAllByTagName,
+  getAttributeValue
+} from "@ismail-elkorchi/html-parser";
 
+import { extractCompleteText } from "./text.js";
 import type { PageSnapshot } from "./types.js";
 
 const UTF8_ENCODER = new TextEncoder();
@@ -173,15 +178,6 @@ function canonicalizeHeaders(headers: Readonly<Record<string, string>> | undefin
   return entries;
 }
 
-function getAttrValue(node: ElementNode, attrName: string): string | null {
-  for (const attribute of node.attributes) {
-    if (attribute.name.toLowerCase() === attrName.toLowerCase()) {
-      return attribute.value;
-    }
-  }
-  return null;
-}
-
 function parseExtraAllowedCssHosts(rawValue: string | undefined): readonly string[] {
   if (!rawValue) {
     return [];
@@ -199,12 +195,12 @@ function linkedStylesheetCandidates(
   allowedHosts: ReadonlySet<string>
 ): readonly LinkedCssCandidate[] {
   const candidates: LinkedCssCandidate[] = [];
-  for (const node of findAllByTagName(snapshot.tree, "link")) {
+  for (const node of findAllByTagName(snapshot.document.tree, "link")) {
     if (candidates.length >= maxLinkedSheetsPerPage) {
       break;
     }
-    const rel = getAttrValue(node, "rel");
-    const href = getAttrValue(node, "href");
+    const rel = getAttributeValue(node, "rel");
+    const href = getAttributeValue(node, "href");
     if (!rel || !href) {
       continue;
     }
@@ -406,7 +402,7 @@ export class CorpusRecorder {
     const normalizedRequestUrl = stripUrlFragment(snapshot.requestUrl);
     const normalizedFinalUrl = stripUrlFragment(snapshot.finalUrl);
 
-    if (!snapshot.sourceHtml) {
+    if (snapshot.document.sourceText === null) {
       const skippedRecord: PageManifestRecord = {
         url: normalizedRequestUrl,
         urlSha256: hashSha256String(normalizedRequestUrl),
@@ -426,7 +422,7 @@ export class CorpusRecorder {
       return;
     }
 
-    const htmlBytes = UTF8_ENCODER.encode(snapshot.sourceHtml);
+    const htmlBytes = UTF8_ENCODER.encode(snapshot.document.sourceText);
     const pageSha256 = hashSha256Bytes(htmlBytes);
     const htmlPath = resolve(this.layout.htmlCacheDir, `${pageSha256}.bin`);
     assertPathWithinRoot(this.layout.baseDir, htmlPath, "html-cache");
@@ -495,12 +491,17 @@ export class CorpusRecorder {
       });
     };
 
-    for (const styleNode of findAllByTagName(snapshot.tree, "style")) {
-      await appendInlineCssRecord("inline-style", textContent(styleNode), snapshot.fetchedAtIso, normalizedFinalUrl);
+    for (const styleNode of findAllByTagName(snapshot.document.tree, "style")) {
+      await appendInlineCssRecord(
+        "inline-style",
+        extractCompleteText(styleNode),
+        snapshot.fetchedAtIso,
+        normalizedFinalUrl
+      );
     }
 
-    for (const node of findAllByAttr(snapshot.tree, "style")) {
-      const value = getAttrValue(node, "style");
+    for (const node of findAllByAttr(snapshot.document.tree, "style")) {
+      const value = getAttributeValue(node, "style");
       if (!value) {
         continue;
       }

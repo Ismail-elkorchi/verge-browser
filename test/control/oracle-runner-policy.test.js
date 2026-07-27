@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { oracleDumpArgs, oracleRunnerPolicy } from "../../scripts/oracles/real-oracle-lib.mjs";
+import {
+  oracleDownloadCurlArgs,
+  oracleDumpArgs,
+  oracleRunnerPolicy
+} from "../../scripts/oracles/real-oracle-lib.mjs";
 
 test("oracle runner policy pins deterministic environment", () => {
   const policy = oracleRunnerPolicy();
@@ -50,4 +54,18 @@ test("oracle dump args use deterministic encoding and width placeholders", () =>
     "100",
     "file:///tmp/case.html"
   ]);
+});
+
+test("oracle downloads resume atomically with bounded stalls instead of short total deadlines", () => {
+  const args = oracleDownloadCurlArgs("https://example.test/archive", "/tmp/archive.partial");
+  const optionValue = (option) => args[args.indexOf(option) + 1];
+
+  assert.equal(optionValue("--continue-at"), "-");
+  assert.equal(optionValue("--output"), "/tmp/archive.partial");
+  assert.equal(optionValue("--connect-timeout"), "15");
+  assert.equal(optionValue("--speed-limit"), "1024");
+  assert.equal(optionValue("--speed-time"), "60");
+  assert.equal(optionValue("--max-time"), "900");
+  assert.equal(optionValue("--retry-max-time"), "1800");
+  assert.equal(args.at(-1), "https://example.test/archive");
 });

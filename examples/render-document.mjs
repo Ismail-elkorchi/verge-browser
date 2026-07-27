@@ -15,9 +15,9 @@ function assert(condition, message) {
 }
 
 export function runRenderDocument() {
-  const tree = parseHtml("<article><h1>Docs</h1><p>Deterministic output.</p></article>");
+  const document = parseHtml("<article><h1>Docs</h1><p>Deterministic output.</p></article>");
   const rendered = renderDocumentToTerminal({
-    tree,
+    tree: document.tree,
     requestUrl: "https://example.test",
     finalUrl: "https://example.test",
     status: 200,

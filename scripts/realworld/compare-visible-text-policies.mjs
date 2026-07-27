@@ -3,7 +3,17 @@ import { resolve } from "node:path";
 import { TextDecoder, TextEncoder } from "node:util";
 import { pathToFileURL } from "node:url";
 
-import { findAllByAttr, findAllByTagName, parseBytes, textContent, visibleTextTokens, visibleTextTokensWithProvenance } from "@ismail-elkorchi/html-parser";
+import {
+  findAllByAttr,
+  findAllByTagName,
+  getAttributeValue,
+  parseBytes
+} from "@ismail-elkorchi/html-parser";
+
+import {
+  collectEvaluationTextTokens,
+  extractEvaluationTextContent
+} from "../support/parser-text.mjs";
 
 import {
   corpusPath,
@@ -209,7 +219,7 @@ function collectRenderedStyleHiddenNodeIds(tree, cssParser) {
   let truncated = false;
 
   for (const element of findAllByAttr(tree, "style")) {
-    const styleValue = element.attributes.find((attribute) => attribute.name.toLowerCase() === "style")?.value ?? "";
+    const styleValue = getAttributeValue(element, "style") ?? "";
     if (styleValue.trim().length === 0) {
       continue;
     }
@@ -221,7 +231,7 @@ function collectRenderedStyleHiddenNodeIds(tree, cssParser) {
 
   const styleBlocks = [];
   for (const styleNode of findAllByTagName(tree, "style")) {
-    const cssText = textContent(styleNode).trim();
+    const cssText = extractEvaluationTextContent(styleNode).trim();
     if (cssText.length > 0) {
       styleBlocks.push(cssText);
     }
@@ -299,16 +309,19 @@ function collectHiddenSubtreeNodeIds(tree, hiddenRootNodeIds) {
 
 function policyTokensFromHtml(htmlText, policy, cssParser) {
   const transformedHtml = policy.transform(htmlText);
-  const tree = parseBytes(UTF8_ENCODER.encode(transformedHtml), {
+  const document = parseBytes(UTF8_ENCODER.encode(transformedHtml), {
     captureSpans: false,
-    trace: false
+    trace: "none"
   });
+  const tree = document.tree;
 
   if (policy.mode === "rendered-style-v1") {
     const hidden = collectRenderedStyleHiddenNodeIds(tree, cssParser);
     const hiddenSubtreeNodeIds = collectHiddenSubtreeNodeIds(tree, hidden.hiddenNodeIds);
-    const mergedText = visibleTextTokensWithProvenance(tree, policy.options)
-      .filter((token) => token.sourceNodeId === null || !hiddenSubtreeNodeIds.has(token.sourceNodeId))
+    const mergedText = collectEvaluationTextTokens(tree, policy.options)
+      .filter((token) => token.provenance.every(
+        (range) => range.sourceNodeId === null || !hiddenSubtreeNodeIds.has(range.sourceNodeId)
+      ))
       .map((token) => (token.kind === "text" ? token.value : " "))
       .join(" ");
     return {
@@ -323,7 +336,7 @@ function policyTokensFromHtml(htmlText, policy, cssParser) {
     };
   }
 
-  const mergedText = visibleTextTokens(tree, policy.options)
+  const mergedText = collectEvaluationTextTokens(tree, policy.options)
     .map((token) => (token.kind === "text" ? token.value : " "))
     .join(" ");
   return {

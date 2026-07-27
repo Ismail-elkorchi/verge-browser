@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 
-import { parse, visibleText } from "@ismail-elkorchi/html-parser";
+import { parse } from "@ismail-elkorchi/html-parser";
 
 import { renderDocumentToTerminal } from "../../dist/app/render.js";
+import { extractEvaluationText } from "../support/parser-text.mjs";
 
 const TAGS = [
   "div",
@@ -141,15 +142,15 @@ export function generateFuzzHtml(seed, options = {}) {
 }
 
 export function evaluateFuzzCase(caseEntry) {
-  const tree = parse(caseEntry.html, {
-    trace: false,
+  const document = parse(caseEntry.html, {
+    trace: "none",
     captureSpans: false
   });
-  const parseErrors = Array.isArray(tree.parseErrors) ? tree.parseErrors : [];
+  const parseErrors = document.tree.errors;
   const parseErrorIds = [...new Set(parseErrors.map((entry) => entry?.parseErrorId ?? "unknown"))].sort();
 
   const rendered = renderDocumentToTerminal({
-    tree,
+    tree: document.tree,
     requestUrl: "https://fuzz.example/",
     finalUrl: "https://fuzz.example/",
     status: 200,
@@ -158,7 +159,7 @@ export function evaluateFuzzCase(caseEntry) {
     width: 80
   });
 
-  const visible = visibleText(tree, {
+  const visible = extractEvaluationText(document.tree, {
     trim: true,
     skipHiddenSubtrees: false,
     includeControlValues: true,

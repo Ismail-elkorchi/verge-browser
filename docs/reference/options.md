@@ -55,9 +55,14 @@
 - `bodyText`: UTF-8 request body for `POST`.
 
 ### `PageSnapshot`
-- `sourceHtml` is present for HTML snapshots opened from buffered HTML input.
+- `document` is the parser's identity-bearing result and contains `tree`,
+  `metadata`, and the retained decoded HTML in `sourceText`.
+- Browser sessions retain source for both buffered and streamed HTML. Raw
+  `parseHtml()` calls retain it only when requested with
+  `sourceRetention: "text"`.
 - The package does not expose a full external CSS snapshot field.
-- If you need CSS alongside the HTML snapshot, extract inline `<style>` blocks from `sourceHtml` and fetch linked stylesheets separately.
+- If you need CSS alongside the HTML snapshot, extract inline `<style>` blocks
+  from `document.sourceText` and fetch linked stylesheets separately.
 
 ## Related
 - [API overview](./api-overview.md)

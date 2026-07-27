@@ -51,12 +51,12 @@ async function main() {
 
     for (const caseItem of selectedCases) {
       const caseStart = nowNs();
-      const tree = parse(caseItem.html, {
+      const document = parse(caseItem.html, {
         captureSpans: false,
-        trace: false
+        trace: "none"
       });
       renderDocumentToTerminal({
-        tree,
+        tree: document.tree,
         requestUrl: `https://bench.example/${caseItem.id}`,
         finalUrl: `https://bench.example/${caseItem.id}`,
         status: 200,

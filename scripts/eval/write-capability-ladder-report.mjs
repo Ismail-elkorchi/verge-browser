@@ -181,13 +181,13 @@ async function main() {
     }
   };
 
-  const formTree = parse(`
+  const formDocument = parse(`
     <html><body>
       <form method="get" action="/search"><input name="q" value="alpha" /></form>
       <form method="post" action="/login"><input name="user" value="ismail" /></form>
     </body></html>
   `);
-  const forms = extractForms(formTree, "https://example.com/base");
+  const forms = extractForms(formDocument.tree, "https://example.com/base");
   const getSubmission = buildFormSubmissionRequest(forms[0], { q: "beta" });
   const postSubmission = buildFormSubmissionRequest(forms[1], { user: "agent" });
   const capability14 = {

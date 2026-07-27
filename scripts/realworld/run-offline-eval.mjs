@@ -3,9 +3,13 @@ import { performance } from "node:perf_hooks";
 import { ReadableStream } from "node:stream/web";
 import { TextEncoder } from "node:util";
 
-import { parseBytes, parseStream, visibleText, visibleTextTokens } from "@ismail-elkorchi/html-parser";
+import { parseBytes, parseStream, serialize, walk } from "@ismail-elkorchi/html-parser";
 
 import { renderDocumentToTerminal } from "../../dist/app/render.js";
+import {
+  collectEvaluationTextTokens,
+  extractEvaluationText
+} from "../support/parser-text.mjs";
 import {
   corpusPath,
   decodeUtf8,
@@ -22,45 +26,9 @@ import {
 const WIDTHS = Object.freeze([80, 120]);
 const CHUNK_PATTERN = Object.freeze([13, 5, 29, 7, 17, 11, 19]);
 
-function stableNodeShape(node) {
-  if (!node || typeof node !== "object") {
-    return null;
-  }
-  if (node.kind === "element") {
-    return {
-      id: node.id,
-      kind: node.kind,
-      tagName: node.tagName,
-      attributes: node.attributes.map((attribute) => ({
-        name: attribute.name,
-        value: attribute.value
-      })),
-      children: node.children.map(stableNodeShape)
-    };
-  }
-  if (node.kind === "text" || node.kind === "comment") {
-    return {
-      id: node.id,
-      kind: node.kind,
-      value: node.value
-    };
-  }
-  if (node.kind === "doctype") {
-    return {
-      id: node.id,
-      kind: node.kind,
-      name: node.name,
-      publicId: node.publicId ?? null,
-      systemId: node.systemId ?? null
-    };
-  }
-  return null;
-}
-
 function stableTreeFingerprint(tree) {
   return JSON.stringify({
-    kind: tree.kind,
-    children: tree.children.map(stableNodeShape),
+    serialized: serialize(tree),
     errors: tree.errors.map((error) => ({
       code: error.code,
       parseErrorId: error.parseErrorId,
@@ -72,17 +40,9 @@ function stableTreeFingerprint(tree) {
 
 function nodeCount(tree) {
   let total = 0;
-  function walk(node) {
+  walk(tree, () => {
     total += 1;
-    if (node.kind === "element") {
-      for (const childNode of node.children) {
-        walk(childNode);
-      }
-    }
-  }
-  for (const childNode of tree.children) {
-    walk(childNode);
-  }
+  });
   return total;
 }
 
@@ -179,27 +139,27 @@ async function main() {
     const pageBytes = new Uint8Array(await readFile(pagePath));
 
     const parseStartedAt = performance.now();
-    const treeFromBytes = parseBytes(pageBytes, {
+    const documentFromBytes = parseBytes(pageBytes, {
       captureSpans: true,
-      trace: false
+      trace: "none"
     });
     const parseElapsedMs = performance.now() - parseStartedAt;
 
     const streamStartedAt = performance.now();
-    const treeFromStream = await parseStream(streamFromChunkPattern(pageBytes), {
+    const documentFromStream = await parseStream(streamFromChunkPattern(pageBytes), {
       captureSpans: true,
-      trace: false
+      trace: "none"
     });
     const streamElapsedMs = performance.now() - streamStartedAt;
 
     const bytesHtml = decodeUtf8(pageBytes);
-    const bytesFingerprint = stableTreeFingerprint(treeFromBytes);
-    const streamFingerprint = stableTreeFingerprint(treeFromStream);
+    const bytesFingerprint = stableTreeFingerprint(documentFromBytes.tree);
+    const streamFingerprint = stableTreeFingerprint(documentFromStream.tree);
     const streamParityOk = bytesFingerprint === streamFingerprint;
 
     const renderStartedAt = performance.now();
     const renderedByWidth = WIDTHS.map((width) => renderDocumentToTerminal({
-      tree: treeFromBytes,
+      tree: documentFromBytes.tree,
       requestUrl: page.url,
       finalUrl: page.finalUrl,
       status: page.status ?? 200,
@@ -209,8 +169,8 @@ async function main() {
     }));
     const renderElapsedMs = performance.now() - renderStartedAt;
 
-    const visibleTextValue = visibleText(treeFromBytes);
-    const visibleTextTokenList = visibleTextTokens(treeFromBytes);
+    const visibleTextValue = extractEvaluationText(documentFromBytes.tree);
+    const visibleTextTokenList = collectEvaluationTextTokens(documentFromBytes.tree);
 
     const measuredPageResult = {
       runId,
@@ -223,9 +183,11 @@ async function main() {
       parseTimeMs: toFixedMillis(parseElapsedMs),
       parseStreamTimeMs: toFixedMillis(streamElapsedMs),
       renderTimeMs: toFixedMillis(renderElapsedMs),
-      nodeCount: nodeCount(treeFromBytes),
-      parseErrorCount: treeFromBytes.errors.length,
-      parseErrorIds: treeFromBytes.errors.map((error) => error.parseErrorId).sort((left, right) => left.localeCompare(right)),
+      nodeCount: nodeCount(documentFromBytes.tree),
+      parseErrorCount: documentFromBytes.tree.errors.length,
+      parseErrorIds: documentFromBytes.tree.errors
+        .map((error) => error.parseErrorId)
+        .sort((left, right) => left.localeCompare(right)),
       visibleTextBytes: new TextEncoder().encode(visibleTextValue).byteLength,
       tokenCount: visibleTextTokenList.length,
       streamParityOk,
