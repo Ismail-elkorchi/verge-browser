@@ -43,7 +43,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DENO_PUBLISH_VERSION: "2.9.3"
-      PUBLISH_ARTIFACTS_DIR: ${{ runner.temp }}/verge-browser-publish
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -65,6 +64,9 @@ jobs:
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Initialize publish paths
+        run: echo "PUBLISH_ARTIFACTS_DIR=${RUNNER_TEMP}/verge-browser-publish" >> "${GITHUB_ENV}"
 
       - name: Resolve publish metadata
         id: meta
