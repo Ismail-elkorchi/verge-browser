@@ -1,25 +1,23 @@
-# Verge Browser Docs
+# Verge Browser documentation
 
-`@ismail-elkorchi/verge-browser` provides terminal browsing primitives with safe fetch helpers, HTML snapshots, and auditable text rendering.
+Start with the [first-session tutorial](./tutorial/first-session.md) to install the
+Node.js CLI and browse a page. The [README](../README.md) gives the shortest
+library examples and defines the package's runtime boundaries.
 
-## Tutorial
-- [First session tutorial](./tutorial/first-session.md)
+## Guides
 
-## How-to
-- [Install and run the CLI](./how-to/install-and-run-cli.md)
-- [First session](./how-to/first-session.md)
-- [Extract HTML and CSS snapshot](./how-to/extract-html-css-snapshot.md)
-- [Run a minimal audit](./how-to/run-minimal-audit.md)
+- [Use `BrowserSession` with a local loader](./how-to/use-browser-session.md)
 - [Fetch pages safely](./how-to/fetch-pages-safely.md)
 - [Handle network failures](./how-to/handle-network-failures.md)
+- [Work with forms and cookies](./how-to/forms-and-cookies.md)
+- [Render HTML to terminal text](./how-to/render-html-to-terminal.md)
+- [Extract an HTML and CSS snapshot](./how-to/extract-html-css-snapshot.md)
+- [Parse browser commands](./how-to/parse-browser-commands.md)
+- [Run a minimal audit](./how-to/run-minimal-audit.md)
 
 ## Reference
-- [CLI reference](./reference/cli.md)
+
+- [CLI](./reference/cli.md)
 - [API overview](./reference/api-overview.md)
 - [Options](./reference/options.md)
 - [Error model](./reference/error-model.md)
-
-## Explanation
-- [Design constraints](./explanation/design-constraints.md)
-- [Security posture](./explanation/security-posture.md)
-- [Performance characteristics](./explanation/performance-characteristics.md)

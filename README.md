@@ -81,8 +81,6 @@ when you want terminal output to stay on screen for manual browsing.
 
 Use `:` when you want the action palette instead of direct browse keys. Actions such as `documents`, `history`, `bookmark add`, `save text <path>`, `save csv <path>`, `download <path>`, and `open-external` all run from that palette.
 
-Use `--screen-reader` when you want the screen-reader-friendly chrome profile.
-
 ## Import
 
 ```ts

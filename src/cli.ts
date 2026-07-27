@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { CorpusRecorder } from "./app/realworld.js";
 import { BrowserSession } from "./app/session.js";
 import { BrowserStore } from "./app/storage.js";
 import { createNodeHost } from "./runtime/node-host.js";
@@ -9,32 +8,20 @@ import { BrowserShell } from "./ui/shell.js";
 
 interface CliFlags {
   readonly initialTarget: string | null;
-  readonly recordCorpus: boolean;
   readonly runOnce: boolean;
-  readonly screenReaderMode: boolean;
 }
 
 function parseCliFlags(argv: readonly string[]): CliFlags {
   let initialTarget: string | null = null;
-  let recordCorpus = false;
   let runOnce = false;
-  let screenReaderMode = false;
 
   for (const token of argv) {
-    if (token === "--record-corpus") {
-      recordCorpus = true;
-      continue;
-    }
     if (token === "--once") {
       runOnce = true;
       continue;
     }
-    if (token === "--screen-reader") {
-      screenReaderMode = true;
-      continue;
-    }
     if (token.startsWith("--")) {
-      continue;
+      throw new Error(`Unknown option: ${token}`);
     }
     if (initialTarget === null) {
       initialTarget = token;
@@ -43,9 +30,7 @@ function parseCliFlags(argv: readonly string[]): CliFlags {
 
   return {
     initialTarget,
-    recordCorpus,
-    runOnce,
-    screenReaderMode
+    runOnce
   };
 }
 
@@ -55,7 +40,6 @@ async function main(): Promise<void> {
   const runtimeHost = createNodeHost();
   const services = createNodeShellServices();
   const store = await BrowserStore.open();
-  const corpusRecorder = cliFlags.recordCorpus ? new CorpusRecorder() : null;
 
   const shell = new BrowserShell({
     adapter,
@@ -64,9 +48,7 @@ async function main(): Promise<void> {
     createSession: () => new BrowserSession({
       widthProvider: () => adapter.getSize().columns,
       localFileReader: (path) => runtimeHost.readFileText(path)
-    }),
-    ...(corpusRecorder ? { onSnapshot: (snapshot) => corpusRecorder.recordNavigation(snapshot) } : {}),
-    screenReaderMode: cliFlags.screenReaderMode
+    })
   });
 
   const initialTarget = cliFlags.initialTarget ?? store.latestHistoryUrl() ?? "about:help";

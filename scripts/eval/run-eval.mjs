@@ -36,11 +36,7 @@ async function main() {
 
   const config = await readJson(configPath);
   const profilePolicy = config?.render?.profiles?.[profile] ?? {};
-  const evaluation = await runRenderEvaluation({
-    configPath,
-    corpusPath,
-    profile
-  });
+  const evaluation = await runRenderEvaluation({ configPath, corpusPath, profile });
 
   const baselineReportPath = resolve(reportsDir, "render-baselines.json");
   const vergeReportPath = resolve(reportsDir, "render-verge.json");
@@ -50,48 +46,32 @@ async function main() {
   await writeJsonReport(vergeReportPath, evaluation.vergeReport);
   await writeJsonReport(scoreReportPath, evaluation.scoreReport);
 
-  runNodeScript("scripts/eval/write-agent-report.mjs");
-  runNodeScript("scripts/eval/write-stream-report.mjs");
-  runNodeScript("scripts/eval/check-runtime-matrix.mjs", [`--profile=${profile}`]);
-  runNodeScript("scripts/eval/check-release-attestation-policy.mjs");
-  runNodeScript("scripts/eval/check-oracle-lock-attestation-policy.mjs");
-  runNodeScript("scripts/eval/write-network-outcomes-report.mjs");
-  runNodeScript("scripts/bench/run-bench.mjs");
-  runNodeScript("scripts/eval/check-bench-governance.mjs");
-  runNodeScript("scripts/eval/check-oracle-workflow-policy.mjs");
   runNodeScript("scripts/eval/check-wpt-delta.mjs");
   runNodeScript("scripts/eval/run-fuzz-check.mjs", [`--profile=${profile}`]);
-  runNodeScript("scripts/eval/run-fuzz-guided-check.mjs", [`--profile=${profile}`]);
+  if (profilePolicy.requireFuzzGuided === true) {
+    runNodeScript("scripts/eval/run-fuzz-guided-check.mjs", [`--profile=${profile}`]);
+  }
   if (profilePolicy.requireOracleLockRefreshDiff === true) {
     runNodeScript("scripts/eval/check-oracle-lock-refresh-diff.mjs", [`--profile=${profile}`]);
   }
-  runNodeScript("scripts/eval/check-eval-coherence.mjs", [`--profile=${profile}`]);
   if (profile === "release") {
     runNodeScript("scripts/eval/check-release-integrity.mjs");
   }
-  runNodeScript("scripts/eval/write-capability-ladder-report.mjs", [`--profile=${profile}`]);
 
-  const [agentReport, streamReport, runtimeMatrixReport, evalCoherenceReport, releaseAttestationPolicyReport, oracleLockAttestationPolicyReport, networkOutcomesReport, benchGovernanceReport, oracleWorkflowPolicyReport, wptDeltaReport, fuzzReport, fuzzGuidedReport, oracleLockRefreshDiffReport, releaseIntegrityReport, capabilityLadderReport] = await Promise.all([
-    readJson(resolve(reportsDir, "agent.json")),
-    readJson(resolve(reportsDir, "stream.json")),
-    readJson(resolve(reportsDir, "runtime-matrix.json")),
-    readJson(resolve(reportsDir, "eval-coherence.json")),
-    readJson(resolve(reportsDir, "release-attestation-policy.json")),
-    readJson(resolve(reportsDir, "oracle-lock-attestation-policy.json")),
-    readJson(resolve(reportsDir, "network-outcomes.json")),
-    readJson(resolve(reportsDir, "bench-governance.json")),
-    readJson(resolve(reportsDir, "oracle-workflow-policy.json")),
-    readJson(resolve(reportsDir, "wpt-delta.json")),
-    readJson(resolve(reportsDir, "fuzz.json")),
-    readJson(resolve(reportsDir, "fuzz-guided.json")),
-    profilePolicy.requireOracleLockRefreshDiff === true
-      ? readJson(resolve(reportsDir, "oracle-lock-refresh-diff.json"))
-      : Promise.resolve(null),
-    profile === "release"
-      ? readJson(resolve(reportsDir, "release-integrity.json"))
-      : Promise.resolve(null),
-    readJson(resolve(reportsDir, "capability-ladder.json"))
-  ]);
+  const [wptDeltaReport, fuzzReport, fuzzGuidedReport, oracleLockRefreshDiffReport, releaseIntegrityReport] =
+    await Promise.all([
+      readJson(resolve(reportsDir, "wpt-delta.json")),
+      readJson(resolve(reportsDir, "fuzz.json")),
+      profilePolicy.requireFuzzGuided === true
+        ? readJson(resolve(reportsDir, "fuzz-guided.json"))
+        : Promise.resolve(null),
+      profilePolicy.requireOracleLockRefreshDiff === true
+        ? readJson(resolve(reportsDir, "oracle-lock-refresh-diff.json"))
+        : Promise.resolve(null),
+      profile === "release"
+        ? readJson(resolve(reportsDir, "release-integrity.json"))
+        : Promise.resolve(null)
+    ]);
 
   const gateResult = evaluateRenderGates({
     config,
@@ -101,41 +81,14 @@ async function main() {
   });
 
   const extraFailures = [];
-  if (agentReport?.overall?.ok !== true) {
-    extraFailures.push("agent report failed");
-  }
-  if (streamReport?.overall?.ok !== true) {
-    extraFailures.push("stream report failed");
-  }
-  if (runtimeMatrixReport?.overall?.ok !== true) {
-    extraFailures.push("runtime matrix report failed");
-  }
-  if (evalCoherenceReport?.overall?.ok !== true) {
-    extraFailures.push("evaluation coherence report failed");
-  }
-  if (releaseAttestationPolicyReport?.ok !== true) {
-    extraFailures.push("release attestation policy report failed");
-  }
-  if (oracleLockAttestationPolicyReport?.ok !== true) {
-    extraFailures.push("oracle lock attestation policy report failed");
-  }
-  if (networkOutcomesReport?.overall?.ok !== true) {
-    extraFailures.push("network outcomes report failed");
-  }
-  if (benchGovernanceReport?.ok !== true) {
-    extraFailures.push("bench governance report failed");
-  }
-  if (oracleWorkflowPolicyReport?.ok !== true) {
-    extraFailures.push("oracle workflow policy report failed");
-  }
   if (wptDeltaReport?.ok !== true) {
-    extraFailures.push("wpt delta report failed");
+    extraFailures.push("WPT delta report failed");
   }
   if (fuzzReport?.ok !== true) {
     extraFailures.push("fuzz report failed");
   }
   if (profilePolicy.requireFuzzGuided === true && fuzzGuidedReport?.ok !== true) {
-    extraFailures.push("fuzz-guided report failed");
+    extraFailures.push("guided fuzz report failed");
   }
   if (profilePolicy.requireOracleLockRefreshDiff === true && oracleLockRefreshDiffReport?.ok !== true) {
     extraFailures.push("oracle lock refresh diff report failed");
@@ -143,50 +96,39 @@ async function main() {
   if (profile === "release" && releaseIntegrityReport?.ok !== true) {
     extraFailures.push("release integrity report failed");
   }
-  if (capabilityLadderReport?.overall?.ok !== true) {
-    extraFailures.push("capability ladder report failed");
-  }
 
-  const combinedGateResult = {
+  const gates = {
     ok: gateResult.ok && extraFailures.length === 0,
     failures: [...gateResult.failures, ...extraFailures]
   };
+  const reports = {
+    baselines: baselineReportPath,
+    verge: vergeReportPath,
+    score: scoreReportPath,
+    wptDelta: resolve(reportsDir, "wpt-delta.json"),
+    fuzz: resolve(reportsDir, "fuzz.json"),
+    ...(profilePolicy.requireFuzzGuided === true
+      ? { fuzzGuided: resolve(reportsDir, "fuzz-guided.json") }
+      : {}),
+    ...(profilePolicy.requireOracleLockRefreshDiff === true
+      ? { oracleLockRefreshDiff: resolve(reportsDir, "oracle-lock-refresh-diff.json") }
+      : {}),
+    ...(profile === "release"
+      ? { releaseIntegrity: resolve(reportsDir, "release-integrity.json") }
+      : {})
+  };
+  const summaryPath = resolve(reportsDir, "eval-summary.json");
 
-  const summary = {
+  await writeJsonReport(summaryPath, {
     suite: "eval",
     profile,
     timestamp: new Date().toISOString(),
-    reports: {
-      baselines: baselineReportPath,
-      verge: vergeReportPath,
-      score: scoreReportPath,
-      agent: resolve(reportsDir, "agent.json"),
-      stream: resolve(reportsDir, "stream.json"),
-      runtimeMatrix: resolve(reportsDir, "runtime-matrix.json"),
-      evalCoherence: resolve(reportsDir, "eval-coherence.json"),
-      releaseAttestationPolicy: resolve(reportsDir, "release-attestation-policy.json"),
-      oracleLockAttestationPolicy: resolve(reportsDir, "oracle-lock-attestation-policy.json"),
-      networkOutcomes: resolve(reportsDir, "network-outcomes.json"),
-      bench: resolve(reportsDir, "bench.json"),
-      benchGovernance: resolve(reportsDir, "bench-governance.json"),
-      oracleWorkflowPolicy: resolve(reportsDir, "oracle-workflow-policy.json"),
-      wptDelta: resolve(reportsDir, "wpt-delta.json"),
-      fuzz: resolve(reportsDir, "fuzz.json"),
-      fuzzGuided: resolve(reportsDir, "fuzz-guided.json"),
-      capabilityLadder: resolve(reportsDir, "capability-ladder.json"),
-      ...(profilePolicy.requireOracleLockRefreshDiff === true
-        ? { oracleLockRefreshDiff: resolve(reportsDir, "oracle-lock-refresh-diff.json") }
-        : {}),
-      ...(profile === "release" ? { releaseIntegrity: resolve(reportsDir, "release-integrity.json") } : {})
-    },
-    gates: combinedGateResult
-  };
+    reports,
+    gates
+  });
 
-  const summaryPath = resolve(reportsDir, "eval-summary.json");
-  await writeJsonReport(summaryPath, summary);
-
-  if (!combinedGateResult.ok) {
-    for (const failure of combinedGateResult.failures) {
+  if (!gates.ok) {
+    for (const failure of gates.failures) {
       process.stderr.write(`gate-failure: ${failure}\n`);
     }
     throw new Error("evaluation failed");

@@ -252,8 +252,6 @@ export interface BrowserShellOptions {
   readonly store: BrowserStore;
   readonly services: ShellServices;
   readonly createSession: () => BrowserSession;
-  readonly onSnapshot?: (snapshot: PageSnapshot) => Promise<void>;
-  readonly screenReaderMode?: boolean;
 }
 
 export class BrowserShell {
@@ -261,7 +259,6 @@ export class BrowserShell {
   private readonly store: BrowserStore;
   private readonly services: ShellServices;
   private readonly createSession: () => BrowserSession;
-  private readonly onSnapshot: ((snapshot: PageSnapshot) => Promise<void>) | undefined;
   private readonly exitPromise: Promise<void>;
   private inputQueue: Promise<void> = Promise.resolve();
   private resolveExit: (() => void) | null = null;
@@ -275,7 +272,6 @@ export class BrowserShell {
     this.store = options.store;
     this.services = options.services;
     this.createSession = options.createSession;
-    this.onSnapshot = options.onSnapshot;
     this.state = {
       screen: "browse",
       documents: [],
@@ -286,7 +282,6 @@ export class BrowserShell {
       editor: null,
       detail: null,
       status: null,
-      screenReaderMode: options.screenReaderMode === true,
       shouldExit: false
     };
     this.exitPromise = new Promise((resolve) => {
@@ -531,9 +526,6 @@ export class BrowserShell {
     const excerpt = composeExcerpt(snapshot.rendered.lines);
     await this.store.recordHistory(snapshot.finalUrl, snapshot.rendered.title, excerpt);
     await this.store.recordIndexDocument(snapshot.finalUrl, snapshot.rendered.title, snapshot.rendered.lines.join("\n"));
-    if (this.onSnapshot) {
-      await this.onSnapshot(snapshot);
-    }
   }
 
   private async navigateDocument(

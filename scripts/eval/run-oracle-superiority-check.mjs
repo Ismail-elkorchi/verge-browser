@@ -1,40 +1,11 @@
-import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 
 import { readJson, writeJsonReport } from "./render-eval-lib.mjs";
 
-function parseArgs(argv) {
-  const forwarded = [];
-  for (const argument of argv) {
-    if (argument.startsWith("--profile=") || argument.startsWith("--sample-cases=") || argument.startsWith("--widths=") || argument === "--rebuild-lock") {
-      forwarded.push(argument);
-      continue;
-    }
-    throw new Error(`unsupported argument: ${argument}`);
-  }
-  return forwarded;
-}
-
-function runOracleRuntimeValidation(forwardedArgs) {
-  const result = spawnSync(
-    process.execPath,
-    ["scripts/eval/run-oracle-runtime-validation.mjs", ...forwardedArgs],
-    {
-      encoding: "utf8",
-      stdio: "inherit"
-    }
-  );
-  if (result.error) {
-    throw result.error;
-  }
-  if (result.status !== 0) {
-    throw new Error(`oracle runtime precheck failed with status ${String(result.status)}`);
-  }
-}
-
 async function main() {
-  const forwardedArgs = parseArgs(process.argv.slice(2));
-  runOracleRuntimeValidation(forwardedArgs);
+  if (process.argv.length > 2) {
+    throw new Error("oracle superiority is a release-only check and accepts no arguments");
+  }
 
   const [config, scoreReport, runtimeValidationSummary] = await Promise.all([
     readJson(resolve("evaluation.config.json")),
@@ -48,6 +19,9 @@ async function main() {
   const baselineNames = Object.keys(scoreReport.metrics).filter((engineName) => engineName !== "verge");
 
   const failures = [];
+  if (runtimeValidationSummary?.profile !== "release") {
+    failures.push("oracle runtime report is not from the release profile");
+  }
   const metrics = {};
   for (const metricName of requiredMetrics) {
     const bestBaseline = Math.max(...baselineNames.map((engineName) => scoreReport.metrics[engineName][metricName]));
@@ -68,7 +42,7 @@ async function main() {
   const report = {
     suite: "oracle-superiority-check",
     timestamp: new Date().toISOString(),
-    profile: runtimeValidationSummary?.profile ?? "release",
+    profile: "release",
     runtimeValidationOk: runtimeValidationSummary?.gates?.ok === true,
     metrics,
     failures,

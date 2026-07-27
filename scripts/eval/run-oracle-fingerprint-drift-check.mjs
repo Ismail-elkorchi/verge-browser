@@ -1,49 +1,29 @@
-import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 
 import { readJson, writeJsonReport } from "./render-eval-lib.mjs";
 import { computeOracleLockFingerprint, validateOracleLockFingerprintInputs } from "../oracles/real-oracle-lib.mjs";
 
-function parseArgs(argv) {
-  const forwardedArgs = [];
+function parseProfile(argv) {
+  let profile = "release";
   for (const argument of argv) {
-    if (
-      argument.startsWith("--profile=") ||
-      argument.startsWith("--sample-cases=") ||
-      argument.startsWith("--widths=") ||
-      argument === "--rebuild-lock"
-    ) {
-      forwardedArgs.push(argument);
+    if (argument.startsWith("--profile=")) {
+      profile = argument.slice("--profile=".length);
       continue;
     }
     throw new Error(`unsupported argument: ${argument}`);
   }
-  return forwardedArgs;
-}
-
-function runOracleRuntimeValidation(forwardedArgs) {
-  const result = spawnSync(
-    process.execPath,
-    ["scripts/eval/run-oracle-runtime-validation.mjs", ...forwardedArgs],
-    {
-      encoding: "utf8",
-      stdio: "inherit"
-    }
-  );
-  if (result.error) {
-    throw result.error;
+  if (profile !== "ci" && profile !== "release") {
+    throw new Error(`invalid profile: ${profile}`);
   }
-  if (result.status !== 0) {
-    throw new Error(`oracle runtime precheck failed with status ${String(result.status)}`);
-  }
+  return profile;
 }
 
 async function main() {
-  const forwardedArgs = parseArgs(process.argv.slice(2));
-  runOracleRuntimeValidation(forwardedArgs);
+  const profile = parseProfile(process.argv.slice(2));
 
-  const [runtimeReport, lockFile] = await Promise.all([
+  const [runtimeReport, runtimeSummary, lockFile] = await Promise.all([
     readJson(resolve("reports/oracle-runtime.json")),
+    readJson(resolve("reports/eval-oracle-runtime-summary.json")),
     readJson(resolve("scripts/oracles/oracle-image.lock.json"))
   ]);
 
@@ -79,6 +59,7 @@ async function main() {
   const report = {
     suite: "oracle-fingerprint-drift-check",
     timestamp: new Date().toISOString(),
+    profile,
     fingerprint: {
       runtime: runtimeFingerprint,
       expected: expectedFingerprint,
@@ -98,7 +79,12 @@ async function main() {
       missing: missingEngines,
       weakFingerprints
     },
-    ok: lockFingerprintOk && missingEngines.length === 0 && weakFingerprints.length === 0
+    ok:
+      runtimeSummary?.gates?.ok === true &&
+      runtimeSummary?.profile === profile &&
+      lockFingerprintOk &&
+      missingEngines.length === 0 &&
+      weakFingerprints.length === 0
   };
 
   const reportPath = resolve("reports/eval-oracle-fingerprint-summary.json");

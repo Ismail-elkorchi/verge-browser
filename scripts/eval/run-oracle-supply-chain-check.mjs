@@ -3,21 +3,19 @@ import { resolve } from "node:path";
 
 import { readJson, writeJsonReport } from "./render-eval-lib.mjs";
 
-function parseArgs(argv) {
-  const forwardedArgs = [];
+function parseProfile(argv) {
+  let profile = "release";
   for (const argument of argv) {
-    if (
-      argument.startsWith("--profile=") ||
-      argument.startsWith("--sample-cases=") ||
-      argument.startsWith("--widths=") ||
-      argument === "--rebuild-lock"
-    ) {
-      forwardedArgs.push(argument);
+    if (argument.startsWith("--profile=")) {
+      profile = argument.slice("--profile=".length);
       continue;
     }
     throw new Error(`unsupported argument: ${argument}`);
   }
-  return forwardedArgs;
+  if (profile !== "ci" && profile !== "release") {
+    throw new Error(`invalid profile: ${profile}`);
+  }
+  return profile;
 }
 
 function runNodeScript(scriptPath, args = []) {
@@ -34,8 +32,7 @@ function runNodeScript(scriptPath, args = []) {
 }
 
 async function main() {
-  const forwardedArgs = parseArgs(process.argv.slice(2));
-  runNodeScript("scripts/eval/run-oracle-runtime-validation.mjs", forwardedArgs);
+  const profile = parseProfile(process.argv.slice(2));
   runNodeScript("scripts/oracles/analyze-supply-chain.mjs");
 
   const [runtimeValidationSummary, supplyChainReport] = await Promise.all([
@@ -46,6 +43,7 @@ async function main() {
   const report = {
     suite: "oracle-supply-chain-check",
     timestamp: new Date().toISOString(),
+    profile,
     runtimeValidation: {
       ok: runtimeValidationSummary?.gates?.ok === true
     },
@@ -57,7 +55,10 @@ async function main() {
       provenanceOk: supplyChainReport?.provenance?.ok === true,
       provenanceFailures: supplyChainReport?.provenance?.failures ?? []
     },
-    ok: runtimeValidationSummary?.gates?.ok === true && supplyChainReport?.ok === true
+    ok:
+      runtimeValidationSummary?.gates?.ok === true &&
+      runtimeValidationSummary?.profile === profile &&
+      supplyChainReport?.ok === true
   };
 
   const reportPath = resolve("reports/eval-oracle-supply-chain-summary.json");

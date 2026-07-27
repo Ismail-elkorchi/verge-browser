@@ -1,4 +1,4 @@
-# First Session
+# Use a BrowserSession with a local loader
 
 ## Goal
 Open a page in a deterministic local session without relying on live network
@@ -8,7 +8,7 @@ conditions.
 - `@ismail-elkorchi/verge-browser` installed
 - A local loader function or fixture HTML
 
-## Copy/paste
+## Example
 ```ts
 import { BrowserSession } from "@ismail-elkorchi/verge-browser";
 
