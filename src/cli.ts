@@ -2,9 +2,8 @@
 import { BrowserSession } from "./app/session.js";
 import { BrowserStore } from "./app/storage.js";
 import { createNodeHost } from "./runtime/node-host.js";
-import { createNodeShellServices } from "./runtime/node-shell-services.js";
-import { createNodeTerminalAdapter } from "./runtime/node-terminal-adapter.js";
-import { BrowserShell } from "./ui/shell.js";
+import { createNodeBrowserServices } from "./runtime/node-browser-services.js";
+import { renderBrowserOnce, runBrowserTui } from "./ui/run.js";
 
 interface CliFlags {
   readonly initialTarget: string | null;
@@ -36,35 +35,29 @@ function parseCliFlags(argv: readonly string[]): CliFlags {
 
 async function main(): Promise<void> {
   const cliFlags = parseCliFlags(process.argv.slice(2));
-  const adapter = createNodeTerminalAdapter();
   const runtimeHost = createNodeHost();
-  const services = createNodeShellServices();
+  const services = createNodeBrowserServices();
   const store = await BrowserStore.open();
-
-  const shell = new BrowserShell({
-    adapter,
+  const browserOptions = {
     store,
     services,
     createSession: () => new BrowserSession({
-      widthProvider: () => adapter.getSize().columns,
       localFileReader: (path) => runtimeHost.readFileText(path)
     })
-  });
+  };
 
   const initialTarget = cliFlags.initialTarget ?? store.latestHistoryUrl() ?? "about:help";
 
   if (cliFlags.runOnce) {
-    await shell.runOnce(initialTarget);
-    const state = shell.getState();
-    const activeDocument = state.documents[state.activeDocumentIndex];
-    if (!activeDocument?.snapshot && state.status?.tone === "error") {
-      throw new Error(state.status.text);
-    }
-    adapter.dispose();
+    const output = await renderBrowserOnce(initialTarget, browserOptions, {
+      columns: process.stdout.columns || 100,
+      rows: process.stdout.rows || 24
+    });
+    process.stdout.write(`${output}\n`);
     return;
   }
 
-  await shell.run(initialTarget);
+  await runBrowserTui(initialTarget, browserOptions);
 }
 
 main().catch((error: unknown) => {

@@ -360,7 +360,7 @@ export function parseCommand(rawInput: string): BrowserCommand {
 }
 
 /**
- * Returns the built-in help text for the redesigned CLI shell.
+ * Returns the built-in help text for the terminal UI.
  *
  * Keep this text aligned with the supported browse keys, action-palette
  * grammar, and CLI flags. Tests and smoke coverage treat it as user-facing

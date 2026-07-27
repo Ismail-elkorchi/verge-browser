@@ -30,6 +30,10 @@ export interface NetworkOutcome {
 }
 
 interface RenderedActionableBase {
+  /** Stable action identity derived from the source document. */
+  readonly id: string;
+  /** Stable block identity containing the action. */
+  readonly blockId: string;
   /** One-based actionable index shown to the user. */
   readonly index: number;
   /** Visible label surfaced by the terminal renderer. */
@@ -40,7 +44,7 @@ interface RenderedActionableBase {
 
 /** One rendered link entry extracted from terminal output. */
 export interface RenderedLink extends RenderedActionableBase {
-  /** Stable actionable kind used by the shell. */
+  /** Stable actionable kind used by the browser UI. */
   readonly kind: "link";
   /** Original href value from the source document. */
   readonly href: string;
@@ -50,7 +54,7 @@ export interface RenderedLink extends RenderedActionableBase {
 
 /** One rendered form entry surfaced as a direct page action. */
 export interface RenderedFormAction extends RenderedActionableBase {
-  /** Stable actionable kind used by the shell. */
+  /** Stable actionable kind used by the browser UI. */
   readonly kind: "form";
   /** Form method normalized to lower case. */
   readonly method: string;
@@ -62,6 +66,85 @@ export interface RenderedFormAction extends RenderedActionableBase {
 
 /** Union of rendered page actions that can receive direct focus. */
 export type RenderedActionable = RenderedLink | RenderedFormAction;
+
+/** Semantic block kinds retained independently from terminal width. */
+export type PageBlockKind =
+  | "heading"
+  | "paragraph"
+  | "preformatted"
+  | "listItem"
+  | "tableRow"
+  | "quote"
+  | "form"
+  | "notice";
+
+/** One semantic document block before terminal layout. */
+export interface PageBlock {
+  readonly id: string;
+  readonly kind: PageBlockKind;
+  readonly text: string;
+  readonly level?: number;
+  readonly depth?: number;
+}
+
+interface PageActionBase {
+  readonly id: string;
+  readonly blockId: string;
+  readonly index: number;
+  readonly label: string;
+  readonly textOffset: number;
+}
+
+/** Stable link action retained in semantic page content. */
+export interface PageLinkAction extends PageActionBase {
+  readonly kind: "link";
+  readonly href: string;
+  readonly resolvedHref: string;
+}
+
+/** Stable form action retained in semantic page content. */
+export interface PageFormAction extends PageActionBase {
+  readonly kind: "form";
+  readonly method: string;
+  readonly actionUrl: string;
+  readonly fieldCount: number;
+}
+
+export type PageAction = PageLinkAction | PageFormAction;
+
+/** Parsed page meaning that does not depend on terminal dimensions. */
+export interface PageContent {
+  readonly title: string;
+  readonly displayUrl: string;
+  readonly statusLine: string;
+  readonly blocks: readonly PageBlock[];
+  readonly links: readonly PageLinkAction[];
+  readonly actions: readonly PageAction[];
+  readonly parseErrorCount: number;
+  readonly fetchedAtIso: string;
+}
+
+/** One terminal row derived from a semantic block. */
+export interface PageLayoutRow {
+  readonly blockId: string;
+  readonly text: string;
+  readonly actionIds: readonly string[];
+}
+
+/** Terminal geometry for one stable page action. */
+export interface PageActionPlacement {
+  readonly actionId: string;
+  readonly rowIndex: number;
+  readonly columnIndex: number;
+  readonly width: number;
+}
+
+/** Width-specific layout derived from `PageContent`. */
+export interface PageLayout {
+  readonly columns: number;
+  readonly rows: readonly PageLayoutRow[];
+  readonly actionPlacements: readonly PageActionPlacement[];
+}
 
 /** Terminal-rendered page output produced from a parsed HTML document. */
 export interface RenderedPage {
@@ -142,6 +225,8 @@ export interface PageRequestOptions {
   readonly headers?: Readonly<Record<string, string>>;
   /** UTF-8 request body used for `POST` requests. */
   readonly bodyText?: string;
+  /** Cancels fetch, retry waits, and parsing work owned by this navigation. */
+  readonly signal?: AbortSignal;
 }
 
 /** Performance and triage metadata attached to a page snapshot. */
@@ -162,9 +247,9 @@ export interface PageDiagnostics {
   readonly fetchDurationMs: number;
   /** Time spent parsing the HTML in milliseconds. */
   readonly parseDurationMs: number;
-  /** Time spent rendering the terminal output in milliseconds. */
-  readonly renderDurationMs: number;
-  /** End-to-end time for fetch, parse, and render in milliseconds. */
+  /** Time spent building semantic page content in milliseconds. */
+  readonly contentDurationMs: number;
+  /** End-to-end time for fetch, parse, and semantic content construction in milliseconds. */
   readonly totalDurationMs: number;
   /** Whether request headers included a Cookie header. */
   readonly usedCookies: boolean;
@@ -192,6 +277,9 @@ export interface RenderInput {
   readonly width: number;
 }
 
+/** Input accepted by semantic page-content construction. */
+export type PageContentInput = Omit<RenderInput, "width">;
+
 /** Rich page snapshot returned by `BrowserSession` navigation helpers. */
 export interface PageSnapshot {
   /** Original request URL supplied by the caller. */
@@ -212,8 +300,8 @@ export interface PageSnapshot {
   readonly setCookieHeaders: readonly string[];
   /** Parsed HTML document, including its tree, source, and resource metadata. */
   readonly document: ParsedDocument;
-  /** Terminal-rendered representation of the page. */
-  readonly rendered: RenderedPage;
+  /** Semantic page content retained independently from terminal size. */
+  readonly content: PageContent;
   /** Performance and triage metadata for the snapshot. */
   readonly diagnostics: PageDiagnostics;
 }

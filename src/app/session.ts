@@ -10,33 +10,58 @@ import {
 } from "@ismail-elkorchi/html-parser";
 
 import { fetchPage, fetchPageStream, type LocalFileReader } from "./fetch-page.js";
-import { renderDocumentToTerminal } from "./render.js";
+import { buildPageContent } from "./render.js";
 import type {
   FetchPagePayload,
   FetchPageResult,
   FetchPageStreamResult,
+  PageContent,
   PageDiagnostics,
   PageRequestOptions,
-  PageSnapshot,
-  RenderedPage
+  PageSnapshot
 } from "./types.js";
 
-/** Buffered page loader contract used by `BrowserSession` text-mode navigation. */
-export type PageLoader = (requestUrl: string, requestOptions?: PageRequestOptions) => Promise<FetchPageResult>;
+export type PageLoader = (
+  requestUrl: string,
+  requestOptions?: PageRequestOptions
+) => Promise<FetchPageResult>;
 
-/** Streaming page loader contract used by `BrowserSession` stream-mode navigation. */
-export type PageStreamLoader = (requestUrl: string, requestOptions?: PageRequestOptions) => Promise<FetchPageStreamResult>;
+export type PageStreamLoader = (
+  requestUrl: string,
+  requestOptions?: PageRequestOptions
+) => Promise<FetchPageStreamResult>;
 
-/** Terminal renderer contract used by `BrowserSession` after parsing HTML into a tree. */
-export type PageRenderer = (input: {
+export type PageContentBuilder = (input: {
   readonly tree: DocumentTree;
   readonly requestUrl: string;
   readonly finalUrl: string;
   readonly status: number;
   readonly statusText: string;
   readonly fetchedAtIso: string;
-  readonly width: number;
-}) => RenderedPage;
+}) => PageContent;
+
+type ParseMode = "text" | "stream";
+
+interface NavigationTimings {
+  readonly fetchDurationMs: number;
+  readonly parseDurationMs: number;
+  readonly contentDurationMs: number;
+  readonly totalDurationMs: number;
+}
+
+interface HistoryEntry {
+  readonly snapshot: PageSnapshot;
+  readonly parseMode: ParseMode;
+}
+
+export interface BrowserSessionOptions {
+  readonly loader?: PageLoader;
+  readonly streamLoader?: PageStreamLoader;
+  readonly contentBuilder?: PageContentBuilder;
+  readonly parseOptions?: ParseOptions;
+  readonly defaultParseMode?: ParseMode;
+  readonly localFileReader?: LocalFileReader;
+}
 
 const DEFAULT_PARSE_OPTIONS: ParseOptions = Object.freeze({
   captureSpans: true,
@@ -50,55 +75,40 @@ const DEFAULT_PARSE_OPTIONS: ParseOptions = Object.freeze({
   }
 });
 
-type ParseMode = "text" | "stream";
-
-interface NavigationTimings {
-  readonly fetchDurationMs: number;
-  readonly parseDurationMs: number;
-  readonly renderDurationMs: number;
-  readonly totalDurationMs: number;
-}
-
-export interface BrowserSessionOptions {
-  /** Override for buffered page loading. Defaults to `fetchPage()`. */
-  readonly loader?: PageLoader;
-  /** Override for streaming page loading. Defaults to `fetchPageStream()`. */
-  readonly streamLoader?: PageStreamLoader;
-  /** Override for terminal rendering. Defaults to `renderDocumentToTerminal()`. */
-  readonly renderer?: PageRenderer;
-  /** Width provider for rendered output. Defaults to `() => 100`. */
-  readonly widthProvider?: () => number;
-  /** HTML parser options forwarded to `html-parser`. */
-  readonly parseOptions?: ParseOptions;
-  /** Default navigation mode for `open()` and history traversal. Defaults to `"text"`. */
-  readonly defaultParseMode?: ParseMode;
-  /** Override for `file://` reads used by local snapshots. */
-  readonly localFileReader?: LocalFileReader;
-}
-
 function hasCookieHeader(headers: Readonly<Record<string, string>> | undefined): boolean {
-  if (!headers) {
-    return false;
-  }
-  for (const [name, value] of Object.entries(headers)) {
-    if (name.toLowerCase() === "cookie" && value.trim().length > 0) {
-      return true;
-    }
-  }
-  return false;
+  return Object.entries(headers ?? {}).some(
+    ([name, value]) => name.toLowerCase() === "cookie" && value.trim().length > 0
+  );
 }
 
 function normalizeTriageToken(value: string | null | undefined): string {
-  if (!value || value.trim().length === 0) {
-    return "NONE";
-  }
-  return value
-    .trim()
-    .replaceAll(/[^A-Za-z0-9_.:-]+/g, "_");
+  if (!value || value.trim().length === 0) return "NONE";
+  return value.trim().replaceAll(/[^A-Za-z0-9_.:-]+/gu, "_");
 }
 
-function buildTriageIds(tree: DocumentTree, networkOutcome: PageDiagnostics["networkOutcome"] | undefined): readonly string[] {
-  const safeNetworkOutcome = networkOutcome ?? {
+function buildTriageIds(
+  tree: DocumentTree,
+  networkOutcome: PageDiagnostics["networkOutcome"]
+): readonly string[] {
+  const triage = new Set<string>([
+    `NET:${normalizeTriageToken(networkOutcome.kind.toUpperCase())}:${normalizeTriageToken(networkOutcome.detailCode)}`
+  ]);
+  const parseErrorIds = tree.errors.flatMap((entry) =>
+    typeof entry.parseErrorId === "string" && entry.parseErrorId.length > 0
+      ? [entry.parseErrorId]
+      : []
+  );
+  if (parseErrorIds.length === 0) triage.add("PARSE:NONE");
+  else {
+    for (const id of [...new Set(parseErrorIds)].sort()) {
+      triage.add(`PARSE:${normalizeTriageToken(id)}`);
+    }
+  }
+  return [...triage].sort();
+}
+
+function unknownNetworkOutcome(): PageDiagnostics["networkOutcome"] {
+  return {
     kind: "unknown",
     finalUrl: "about:blank",
     status: null,
@@ -106,24 +116,6 @@ function buildTriageIds(tree: DocumentTree, networkOutcome: PageDiagnostics["net
     detailCode: "MISSING_NETWORK_OUTCOME",
     detailMessage: "Network outcome unavailable"
   };
-  const triage = new Set<string>();
-  triage.add(
-    `NET:${normalizeTriageToken(safeNetworkOutcome.kind.toUpperCase())}:${normalizeTriageToken(safeNetworkOutcome.detailCode)}`
-  );
-
-  const parseErrorIds = tree.errors
-    .map((entry) => (typeof entry.parseErrorId === "string" && entry.parseErrorId.length > 0 ? entry.parseErrorId : null))
-    .filter((entry) => entry !== null);
-
-  if (parseErrorIds.length === 0) {
-    triage.add("PARSE:NONE");
-  } else {
-    for (const parseErrorId of [...new Set(parseErrorIds)].sort((left, right) => left.localeCompare(right))) {
-      triage.add(`PARSE:${normalizeTriageToken(parseErrorId)}`);
-    }
-  }
-
-  return [...triage].sort((left, right) => left.localeCompare(right));
 }
 
 function diagnosticsFromDocument(
@@ -134,78 +126,44 @@ function diagnosticsFromDocument(
   usedCookies: boolean,
   networkOutcome: PageDiagnostics["networkOutcome"] | undefined
 ): PageDiagnostics {
-  const tree = document.tree;
-  const safeNetworkOutcome = networkOutcome ?? {
-    kind: "unknown",
-    finalUrl: "about:blank",
-    status: null,
-    statusText: null,
-    detailCode: "MISSING_NETWORK_OUTCOME",
-    detailMessage: "Network outcome unavailable"
-  };
-
+  const outcome = networkOutcome ?? unknownNetworkOutcome();
   return {
     parseMode,
     sourceBytes: document.metadata.resourceUsage.decodedUtf8Bytes,
-    parseErrorCount: tree.errors.length,
-    traceEventCount: tree.trace?.summary.eventCount ?? 0,
-    traceKinds: tree.trace?.summary.eventKinds ?? [],
+    parseErrorCount: document.tree.errors.length,
+    traceEventCount: document.tree.trace?.summary.eventCount ?? 0,
+    traceKinds: document.tree.trace?.summary.eventKinds ?? [],
     requestMethod,
     fetchDurationMs: timings.fetchDurationMs,
     parseDurationMs: timings.parseDurationMs,
-    renderDurationMs: timings.renderDurationMs,
+    contentDurationMs: timings.contentDurationMs,
     totalDurationMs: timings.totalDurationMs,
     usedCookies,
-    networkOutcome: safeNetworkOutcome,
-    triageIds: buildTriageIds(tree, safeNetworkOutcome)
+    networkOutcome: outcome,
+    triageIds: buildTriageIds(document.tree, outcome)
   };
 }
 
-/**
- * High-level navigation helper that fetches, parses, renders, and stores page history.
- *
- * The default constructor wiring uses:
- * - `fetchPage()` for buffered navigation,
- * - `fetchPageStream()` for streaming navigation,
- * - `renderDocumentToTerminal()` for terminal output,
- * - the bounded HTML parse profile defined in this module.
- *
- * Navigation methods throw `NetworkFetchError` when a loader fails before producing a usable HTML response.
- * They also throw plain `Error` for session-state misuse such as missing history entries or applying edits without retained source.
- *
- * @param options Optional loader, renderer, parser, and local file overrides.
- *
- * @example
- * ```ts
- * const session = new BrowserSession();
- * const snapshot = await session.open("about:help");
- * console.log(snapshot.rendered.lines[0]);
- * ```
- */
 export class BrowserSession {
-  private readonly loader: PageLoader;
-  private readonly streamLoader: PageStreamLoader;
-  private readonly renderer: PageRenderer;
-  private readonly widthProvider: () => number;
-  private readonly parseOptions: ParseOptions;
-  private readonly defaultParseMode: ParseMode;
-  private readonly localFileReader: LocalFileReader | undefined;
-  private readonly historyUrls: string[] = [];
-  private readonly historyModes: ParseMode[] = [];
-  private historyIndex = -1;
-  private currentSnapshot: PageSnapshot | null = null;
+  readonly #loader: PageLoader;
+  readonly #streamLoader: PageStreamLoader;
+  readonly #contentBuilder: PageContentBuilder;
+  readonly #parseOptions: ParseOptions;
+  readonly #defaultParseMode: ParseMode;
+  readonly #history: HistoryEntry[] = [];
+  #historyIndex = -1;
+  #current: PageSnapshot | null = null;
 
   public constructor(options: BrowserSessionOptions = {}) {
-    this.localFileReader = options.localFileReader;
-    this.loader = options.loader
+    const localFileReader = options.localFileReader;
+    this.#loader = options.loader
       ?? ((requestUrl, requestOptions) =>
-        fetchPage(requestUrl, undefined, undefined, requestOptions, this.localFileReader));
-    this.streamLoader = options.streamLoader
+        fetchPage(requestUrl, undefined, undefined, requestOptions, localFileReader));
+    this.#streamLoader = options.streamLoader
       ?? ((requestUrl, requestOptions) =>
-        fetchPageStream(requestUrl, undefined, undefined, requestOptions, this.localFileReader));
-    this.renderer = options.renderer ?? renderDocumentToTerminal;
-    this.widthProvider = options.widthProvider ?? (() => 100);
-    this.parseOptions = {
+        fetchPageStream(requestUrl, undefined, undefined, requestOptions, localFileReader));
+    this.#contentBuilder = options.contentBuilder ?? buildPageContent;
+    this.#parseOptions = {
       ...DEFAULT_PARSE_OPTIONS,
       ...options.parseOptions,
       captureSpans: true,
@@ -215,222 +173,187 @@ export class BrowserSession {
         ...options.parseOptions?.budgets
       }
     };
-    this.defaultParseMode = options.defaultParseMode ?? "text";
+    this.#defaultParseMode = options.defaultParseMode ?? "text";
   }
 
   public get current(): PageSnapshot | null {
-    return this.currentSnapshot;
+    return this.#current;
   }
 
   public canBack(): boolean {
-    return this.historyIndex > 0;
+    return this.#historyIndex > 0;
   }
 
   public canForward(): boolean {
-    return this.historyIndex >= 0 && this.historyIndex < this.historyUrls.length - 1;
+    return this.#historyIndex >= 0 && this.#historyIndex < this.#history.length - 1;
   }
 
-  public async open(requestUrl: string): Promise<PageSnapshot> {
-    return this.navigate(requestUrl, "push", this.defaultParseMode, {});
+  public open(requestUrl: string, signal?: AbortSignal): Promise<PageSnapshot> {
+    return this.#navigate(requestUrl, "push", this.#defaultParseMode, {
+      ...(signal === undefined ? {} : { signal })
+    });
   }
 
-  public async openStream(requestUrl: string): Promise<PageSnapshot> {
-    return this.navigate(requestUrl, "push", "stream", {});
+  public openStream(requestUrl: string, signal?: AbortSignal): Promise<PageSnapshot> {
+    return this.#navigate(requestUrl, "push", "stream", {
+      ...(signal === undefined ? {} : { signal })
+    });
   }
 
-  public async openWithRequest(
+  public openWithRequest(
     requestUrl: string,
     requestOptions: PageRequestOptions,
-    parseMode: ParseMode = this.defaultParseMode
+    parseMode: ParseMode = this.#defaultParseMode
   ): Promise<PageSnapshot> {
-    return this.navigate(requestUrl, "push", parseMode, requestOptions);
+    return this.#navigate(requestUrl, "push", parseMode, requestOptions);
   }
 
-  public async reload(): Promise<PageSnapshot> {
-    const currentUrl = this.historyUrls[this.historyIndex];
-    const currentMode = this.historyModes[this.historyIndex];
-    if (!currentUrl) {
-      throw new Error("No page is loaded");
-    }
-    return this.navigate(currentUrl, "replace", currentMode ?? this.defaultParseMode, {});
+  public reload(signal?: AbortSignal): Promise<PageSnapshot> {
+    const current = this.#history[this.#historyIndex];
+    if (!current) return Promise.reject(new Error("No page is loaded"));
+    return this.#navigate(current.snapshot.finalUrl, "replace", current.parseMode, {
+      ...(signal === undefined ? {} : { signal })
+    });
   }
 
-  public async back(): Promise<PageSnapshot> {
-    if (!this.canBack()) {
-      throw new Error("No backward history entry");
-    }
-    this.historyIndex -= 1;
-    const targetUrl = this.historyUrls[this.historyIndex];
-    const targetMode = this.historyModes[this.historyIndex];
-    if (!targetUrl) {
-      throw new Error("History entry is missing");
-    }
-    return this.navigate(targetUrl, "replace", targetMode ?? this.defaultParseMode, {});
+  public back(signal?: AbortSignal): Promise<PageSnapshot> {
+    signal?.throwIfAborted();
+    if (!this.canBack()) return Promise.reject(new Error("No backward history entry"));
+    this.#historyIndex -= 1;
+    const entry = this.#history[this.#historyIndex];
+    if (!entry) return Promise.reject(new Error("History entry is missing"));
+    this.#current = entry.snapshot;
+    return Promise.resolve(entry.snapshot);
   }
 
-  public async forward(): Promise<PageSnapshot> {
-    if (!this.canForward()) {
-      throw new Error("No forward history entry");
-    }
-    this.historyIndex += 1;
-    const targetUrl = this.historyUrls[this.historyIndex];
-    const targetMode = this.historyModes[this.historyIndex];
-    if (!targetUrl) {
-      throw new Error("History entry is missing");
-    }
-    return this.navigate(targetUrl, "replace", targetMode ?? this.defaultParseMode, {});
+  public forward(signal?: AbortSignal): Promise<PageSnapshot> {
+    signal?.throwIfAborted();
+    if (!this.canForward()) return Promise.reject(new Error("No forward history entry"));
+    this.#historyIndex += 1;
+    const entry = this.#history[this.#historyIndex];
+    if (!entry) return Promise.reject(new Error("History entry is missing"));
+    this.#current = entry.snapshot;
+    return Promise.resolve(entry.snapshot);
   }
 
-  public async openLink(linkIndex: number): Promise<PageSnapshot> {
-    const currentPage = this.currentSnapshot;
-    if (!currentPage) {
-      throw new Error("No page is loaded");
-    }
-
-    const targetLink = currentPage.rendered.links.find((link) => link.index === linkIndex);
-    if (!targetLink) {
-      throw new Error(`No link exists at index ${String(linkIndex)}`);
-    }
-
-    const linkParseMode = currentPage.diagnostics.parseMode;
-    return this.navigate(targetLink.resolvedHref, "push", linkParseMode, {});
+  public openLink(linkIndex: number, signal?: AbortSignal): Promise<PageSnapshot> {
+    const current = this.#current;
+    if (!current) return Promise.reject(new Error("No page is loaded"));
+    const link = current.content.links.find((candidate) => candidate.index === linkIndex);
+    if (!link) return Promise.reject(new Error(`No link exists at index ${String(linkIndex)}`));
+    return this.#navigate(link.resolvedHref, "push", current.diagnostics.parseMode, {
+      ...(signal === undefined ? {} : { signal })
+    });
   }
 
   public applyEdits(edits: readonly Edit[]): PageSnapshot {
-    const currentPage = this.currentSnapshot;
-    if (!currentPage) {
-      throw new Error("No page is loaded");
-    }
-    if (currentPage.document.sourceText === null) {
+    const current = this.#current;
+    if (!current) throw new Error("No page is loaded");
+    if (current.document.sourceText === null) {
       throw new Error("Cannot apply patch: source HTML is unavailable for this snapshot");
     }
-
-    const patchPlan = computePatch(currentPage.document, edits);
-    const patchedHtml = applyPatchPlan(currentPage.document, patchPlan);
     const startedAtMs = Date.now();
-    const parseStartMs = Date.now();
-    const document = parse(patchedHtml, this.parseOptions);
-    const parseDurationMs = Date.now() - parseStartMs;
-
-    const width = Math.max(40, this.widthProvider());
-    const renderStartMs = Date.now();
-    const rendered = this.renderer({
+    const patchedHtml = applyPatchPlan(current.document, computePatch(current.document, edits));
+    const parseStartedAtMs = Date.now();
+    const document = parse(patchedHtml, this.#parseOptions);
+    const parseDurationMs = Date.now() - parseStartedAtMs;
+    const contentStartedAtMs = Date.now();
+    const content = this.#contentBuilder({
       tree: document.tree,
-      requestUrl: currentPage.requestUrl,
-      finalUrl: currentPage.finalUrl,
-      status: currentPage.status,
-      statusText: currentPage.statusText,
-      fetchedAtIso: currentPage.fetchedAtIso,
-      width
+      requestUrl: current.requestUrl,
+      finalUrl: current.finalUrl,
+      status: current.status,
+      statusText: current.statusText,
+      fetchedAtIso: current.fetchedAtIso
     });
-    const renderDurationMs = Date.now() - renderStartMs;
-    const totalDurationMs = Date.now() - startedAtMs;
-
+    const contentDurationMs = Date.now() - contentStartedAtMs;
     const snapshot: PageSnapshot = {
-      requestUrl: currentPage.requestUrl,
-      finalUrl: currentPage.finalUrl,
-      status: currentPage.status,
-      statusText: currentPage.statusText,
-      contentType: currentPage.contentType,
-      responseHeaders: currentPage.responseHeaders,
-      fetchedAtIso: currentPage.fetchedAtIso,
+      ...current,
       setCookieHeaders: [],
       document,
-      rendered,
+      content,
       diagnostics: diagnosticsFromDocument(
         document,
-        currentPage.diagnostics.parseMode,
-        currentPage.diagnostics.requestMethod,
+        current.diagnostics.parseMode,
+        current.diagnostics.requestMethod,
         {
           fetchDurationMs: 0,
           parseDurationMs,
-          renderDurationMs,
-          totalDurationMs
+          contentDurationMs,
+          totalDurationMs: Date.now() - startedAtMs
         },
-        currentPage.diagnostics.usedCookies,
-        currentPage.diagnostics.networkOutcome
+        current.diagnostics.usedCookies,
+        current.diagnostics.networkOutcome
       )
     };
-
-    this.currentSnapshot = snapshot;
+    this.#current = snapshot;
+    if (this.#historyIndex >= 0) {
+      this.#history[this.#historyIndex] = {
+        snapshot,
+        parseMode: current.diagnostics.parseMode
+      };
+    }
     return snapshot;
   }
 
-  private commitHistory(url: string, mode: "push" | "replace", parseMode: ParseMode): void {
+  async #parseFetchedPayload(
+    parseMode: ParseMode,
+    fetchedPage: FetchPagePayload,
+    signal?: AbortSignal
+  ): Promise<ParsedDocument> {
+    const parseOptions = {
+      ...this.#parseOptions,
+      ...(signal === undefined ? {} : { signal })
+    };
+    if ("html" in fetchedPage) return parse(fetchedPage.html, parseOptions);
+    if (parseMode === "text") throw new Error("Text parse mode requires an HTML payload");
+    return parseStream(fetchedPage.stream, parseOptions);
+  }
+
+  #commitHistory(snapshot: PageSnapshot, mode: "push" | "replace", parseMode: ParseMode): void {
+    const entry = { snapshot, parseMode };
     if (mode === "replace") {
-      if (this.historyIndex < 0) {
-        this.historyUrls.push(url);
-        this.historyModes.push(parseMode);
-        this.historyIndex = 0;
-        return;
+      if (this.#historyIndex < 0) {
+        this.#history.push(entry);
+        this.#historyIndex = 0;
+      } else {
+        this.#history[this.#historyIndex] = entry;
       }
-      this.historyUrls[this.historyIndex] = url;
-      this.historyModes[this.historyIndex] = parseMode;
       return;
     }
-
-    const truncatedHistory = this.historyUrls.slice(0, this.historyIndex + 1);
-    const truncatedModes = this.historyModes.slice(0, this.historyIndex + 1);
-    truncatedHistory.push(url);
-    truncatedModes.push(parseMode);
-    this.historyUrls.splice(0, this.historyUrls.length, ...truncatedHistory);
-    this.historyModes.splice(0, this.historyModes.length, ...truncatedModes);
-    this.historyIndex = this.historyUrls.length - 1;
+    this.#history.splice(this.#historyIndex + 1);
+    this.#history.push(entry);
+    this.#historyIndex = this.#history.length - 1;
   }
 
-  private async parseFetchedPayload(
-    parseMode: ParseMode,
-    fetchedPage: FetchPagePayload
-  ): Promise<ParsedDocument> {
-    if (parseMode === "text") {
-      if (!("html" in fetchedPage)) {
-        throw new Error("Text parse mode requires an HTML payload");
-      }
-      return parse(fetchedPage.html, this.parseOptions);
-    }
-
-    if ("html" in fetchedPage) {
-      return parse(fetchedPage.html, this.parseOptions);
-    }
-
-    return parseStream(fetchedPage.stream, this.parseOptions);
-  }
-
-  private async navigate(
+  async #navigate(
     requestUrl: string,
     mode: "push" | "replace",
     parseMode: ParseMode,
     requestOptions: PageRequestOptions
   ): Promise<PageSnapshot> {
     const startedAtMs = Date.now();
-
-    const fetchStartMs = Date.now();
+    requestOptions.signal?.throwIfAborted();
+    const fetchStartedAtMs = Date.now();
     const fetchedPage = parseMode === "stream"
-      ? await this.streamLoader(requestUrl, requestOptions)
-      : await this.loader(requestUrl, requestOptions);
-    const fetchDurationMs = Date.now() - fetchStartMs;
-
-    const parseStartMs = Date.now();
-    const document = await this.parseFetchedPayload(parseMode, fetchedPage);
-    const parseDurationMs = Date.now() - parseStartMs;
-
-    const width = Math.max(40, this.widthProvider());
-    const renderStartMs = Date.now();
-    const rendered = this.renderer({
+      ? await this.#streamLoader(requestUrl, requestOptions)
+      : await this.#loader(requestUrl, requestOptions);
+    const fetchDurationMs = Date.now() - fetchStartedAtMs;
+    requestOptions.signal?.throwIfAborted();
+    const parseStartedAtMs = Date.now();
+    const document = await this.#parseFetchedPayload(parseMode, fetchedPage, requestOptions.signal);
+    const parseDurationMs = Date.now() - parseStartedAtMs;
+    requestOptions.signal?.throwIfAborted();
+    const contentStartedAtMs = Date.now();
+    const content = this.#contentBuilder({
       tree: document.tree,
       requestUrl: fetchedPage.requestUrl,
       finalUrl: fetchedPage.finalUrl,
       status: fetchedPage.status,
       statusText: fetchedPage.statusText,
-      fetchedAtIso: fetchedPage.fetchedAtIso,
-      width
+      fetchedAtIso: fetchedPage.fetchedAtIso
     });
-    const renderDurationMs = Date.now() - renderStartMs;
-    const totalDurationMs = Date.now() - startedAtMs;
-    const requestMethod = requestOptions.method ?? "GET";
-    const usedCookies = hasCookieHeader(requestOptions.headers);
-    const networkOutcome = fetchedPage.networkOutcome;
-
+    const contentDurationMs = Date.now() - contentStartedAtMs;
     const snapshot: PageSnapshot = {
       requestUrl: fetchedPage.requestUrl,
       finalUrl: fetchedPage.finalUrl,
@@ -441,25 +364,23 @@ export class BrowserSession {
       fetchedAtIso: fetchedPage.fetchedAtIso,
       setCookieHeaders: fetchedPage.setCookieHeaders,
       document,
-      rendered,
+      content,
       diagnostics: diagnosticsFromDocument(
         document,
         parseMode,
-        requestMethod,
+        requestOptions.method ?? "GET",
         {
           fetchDurationMs,
           parseDurationMs,
-          renderDurationMs,
-          totalDurationMs
+          contentDurationMs,
+          totalDurationMs: Date.now() - startedAtMs
         },
-        usedCookies,
-        networkOutcome
+        hasCookieHeader(requestOptions.headers),
+        fetchedPage.networkOutcome
       )
     };
-
-    this.currentSnapshot = snapshot;
-    this.commitHistory(snapshot.finalUrl, mode, parseMode);
-
+    this.#current = snapshot;
+    this.#commitHistory(snapshot, mode, parseMode);
     return snapshot;
   }
 }

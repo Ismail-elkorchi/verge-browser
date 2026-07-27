@@ -38,7 +38,7 @@ const snapshot = await session.open("https://example.test/");
 const audit = {
   status: snapshot.status,
   parseErrorCount: snapshot.diagnostics.parseErrorCount,
-  linkCount: snapshot.rendered.links.length,
+  linkCount: snapshot.content.links.length,
   triageIds: snapshot.diagnostics.triageIds
 };
 
@@ -57,7 +57,7 @@ true
 ```
 
 ## Common failure modes
-- The loader returns non-HTML content so the rendered page and diagnostics are
+- The loader returns non-HTML content so the page content and diagnostics are
   not comparable to normal page audits.
 - Audit consumers treat `triageIds` as stable policy verdicts instead of
   deterministic hints for review.

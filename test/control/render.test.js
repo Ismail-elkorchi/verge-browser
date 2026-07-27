@@ -3,7 +3,11 @@ import test from "node:test";
 
 import { parse } from "@ismail-elkorchi/html-parser";
 
-import { renderDocumentToTerminal } from "../../dist/app/render.js";
+import {
+  buildPageContent,
+  layoutPageContent,
+  renderDocumentToTerminal
+} from "../../dist/app/render.js";
 
 test("renderDocumentToTerminal collects links and renders body text", () => {
   const document = parse(`
@@ -31,6 +35,60 @@ test("renderDocumentToTerminal collects links and renders body text", () => {
   assert.equal(renderedPage.links[0].resolvedHref, "https://example.com/docs");
   assert.ok(renderedPage.lines.some((line) => line.includes("Welcome")));
   assert.ok(renderedPage.lines.some((line) => line.includes("[1]")));
+});
+
+test("semantic content keeps stable actions while terminal layout responds to width", () => {
+  const document = parse(`
+    <html><head><title>Responsive</title></head><body>
+      <h1>Responsive page</h1>
+      <p>A long paragraph before <a href="/target">the stable link target</a> and after it.</p>
+    </body></html>
+  `);
+  const content = buildPageContent({
+    tree: document.tree,
+    requestUrl: "https://example.com/",
+    finalUrl: "https://example.com/",
+    status: 200,
+    statusText: "OK",
+    fetchedAtIso: "2026-01-01T00:00:00.000Z"
+  });
+  const narrow = layoutPageContent(content, 24);
+  const wide = layoutPageContent(content, 80);
+
+  assert.equal(content.actions.length, 1);
+  assert.equal(narrow.actionPlacements[0].actionId, content.actions[0].id);
+  assert.equal(wide.actionPlacements[0].actionId, content.actions[0].id);
+  assert.ok(narrow.rows.length > wide.rows.length);
+});
+
+test("semantic layout keeps link geometry with line breaks and table cells", () => {
+  const document = parse(`
+    <html><body>
+      <p>first line<br><a href="/after-break">after break</a></p>
+      <table><tr><td>Label</td><td><a href="/table-link">table link</a></td></tr></table>
+    </body></html>
+  `);
+  const content = buildPageContent({
+    tree: document.tree,
+    requestUrl: "https://example.com/",
+    finalUrl: "https://example.com/",
+    status: 200,
+    statusText: "OK",
+    fetchedAtIso: "2026-01-01T00:00:00.000Z"
+  });
+  const layout = layoutPageContent(content, 80);
+  const afterBreak = content.links.find((link) => link.resolvedHref.endsWith("/after-break"));
+  const tableLink = content.links.find((link) => link.resolvedHref.endsWith("/table-link"));
+
+  assert.equal(content.links.length, 2);
+  assert.equal(
+    layout.actionPlacements.find((placement) => placement.actionId === afterBreak.id).rowIndex,
+    1
+  );
+  assert.equal(
+    layout.rows[layout.actionPlacements.find((placement) => placement.actionId === tableLink.id).rowIndex].text,
+    "| Label | table link [2] |"
+  );
 });
 
 test("renderDocumentToTerminal preserves preformatted whitespace", () => {
@@ -191,7 +249,7 @@ test("renderDocumentToTerminal includes noscript fallback content", () => {
   assert.ok(joined.includes("fallback text for non-script clients"));
 });
 
-test("renderDocumentToTerminal keeps forms as action metadata without changing rendered lines", () => {
+test("renderDocumentToTerminal exposes forms as stable visible actions", () => {
   const document = parse(`
     <html>
       <head><title>Form sample</title></head>
@@ -215,15 +273,18 @@ test("renderDocumentToTerminal keeps forms as action metadata without changing r
     width: 80
   });
 
-  assert.equal(renderedPage.lines.includes("Forms:"), false);
+  assert.ok(renderedPage.lines.some((line) => line.includes("[Form 1")));
   assert.equal(renderedPage.actionables.length, 1);
   assert.deepEqual(renderedPage.actionables[0], {
     kind: "form",
+    id: renderedPage.actionables[0].id,
+    blockId: renderedPage.actionables[0].blockId,
     index: 1,
     label: "Form 1 GET https://example.com/search",
     method: "get",
     actionUrl: "https://example.com/search",
     fieldCount: 2,
+    textOffset: 0,
     lineIndex: 2
   });
 });

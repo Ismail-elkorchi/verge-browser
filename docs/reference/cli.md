@@ -37,10 +37,10 @@ verge [initial-target] [--once]
 ## Behavioral boundaries
 
 - This reference documents the supported keys, palette grammar, and startup
-  behavior of the redesigned shell.
+  behavior of the terminal UI.
 - The page view is deterministic for the same fetched HTML and terminal width.
-- Terminal width can change wrapping, visible line numbers, and the line index
-  attached to focused links or forms.
+- Terminal width can change wrapping and visible row geometry without changing
+  the stable identity of a focused link or form.
 - The CLI does not execute client-side page JavaScript.
 - Pages guarded by anti-bot or browser-verification flows can fail with partial
   content or explicit blocked-page diagnostics.
@@ -170,7 +170,9 @@ Low-level patch actions:
 
 ### `--once`
 
-- Loads the initial target, renders it once, then exits before entering the interactive loop.
+- Loads the initial target, renders the same element tree as plain text, then
+  exits before entering the interactive loop.
+- It does not require a TTY and does not emit terminal control sequences.
 - Useful for smoke runs and startup validation.
 - Not intended for manual browsing sessions that should remain open after the first render.
 

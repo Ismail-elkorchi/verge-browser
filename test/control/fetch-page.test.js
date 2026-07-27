@@ -145,6 +145,33 @@ test("fetchPage classifies timeout deterministically", async () => {
   }
 });
 
+test("fetchPage stops a pending request when the caller aborts", async () => {
+  const server = createServer((_, response) => {
+    setTimeout(() => {
+      response.statusCode = 200;
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      response.end("<html><body>late</body></html>");
+    }, 200);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("server address unavailable");
+  const controller = new globalThis.AbortController();
+  const reason = new Error("navigation replaced");
+  const pending = fetchPage(
+    `http://127.0.0.1:${String(address.port)}/`,
+    15_000,
+    undefined,
+    { signal: controller.signal }
+  );
+  controller.abort(reason);
+  try {
+    await assert.rejects(pending, (error) => error === reason);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test("fetchPage marks HTTP failures as http_error while returning body", async () => {
   const server = createServer((_, response) => {
     response.statusCode = 403;

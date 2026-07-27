@@ -18,8 +18,9 @@ Terminal browsing primitives with safe fetch helpers, HTML snapshots, and audita
 
 - The interactive `verge` CLI is supported from the npm package on Node.js.
 - The published JSR package is utility-only. It does not publish a global `verge` command.
-- The renderer produces deterministic text output for the same parsed input and terminal width.
-- Line wrapping and link/control line numbers can change when terminal width changes.
+- Navigation retains semantic document blocks and stable link/form identities.
+- Terminal layout is derived from that content at the current width, so wrapping
+  can change without changing action identity or refetching the page.
 - Pages that depend on client-side JavaScript or anti-bot challenges can render partially or fail open with explicit diagnostics.
 
 ## Install
@@ -76,8 +77,9 @@ q          quit
 `verge` opens the first positional target immediately. If no target is provided, the CLI reopens the latest history URL when one exists, otherwise it falls back to `about:help`.
 
 `verge <url> --once` is an automation flag that loads the initial target and
-exits without entering the interactive browsing loop. It is not the right mode
-when you want terminal output to stay on screen for manual browsing.
+prints the same element tree as plain text, and exits without entering the
+interactive browsing loop. It does not require a TTY or emit terminal control
+sequences.
 
 Use `:` when you want the action palette instead of direct browse keys. Actions such as `documents`, `history`, `bookmark add`, `save text <path>`, `save csv <path>`, `download <path>`, and `open-external` all run from that palette.
 

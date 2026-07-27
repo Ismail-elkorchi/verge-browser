@@ -17,6 +17,7 @@ export interface FormField {
 }
 
 export interface FormEntry {
+  readonly id: string;
   readonly index: number;
   readonly method: string;
   readonly actionUrl: string;
@@ -127,6 +128,7 @@ export function extractForms(tree: DocumentTree, baseUrl: string): readonly Form
     }
 
     forms.push({
+      id: `form:${String(formNode.id)}`,
       index,
       method,
       actionUrl,

@@ -63,7 +63,7 @@ export {
   type PagerViewport
 } from "./app/pager.js";
 export { parseHtml } from "./app/parse-html.js";
-export { renderDocumentToTerminal } from "./app/render.js";
+export { buildPageContent, layoutPageContent, renderDocumentToTerminal } from "./app/render.js";
 export { createSearchState, hasSearchMatches, activeSearchLineIndex, moveSearchMatch, type SearchState } from "./app/search.js";
 export { DEFAULT_SECURITY_POLICY, assertAllowedProtocol, assertAllowedUrl, isHtmlLikeContentType, type SecurityPolicyOptions } from "./app/security.js";
 export {
@@ -71,12 +71,22 @@ export {
   type BrowserSessionOptions,
   type PageLoader,
   type PageStreamLoader,
-  type PageRenderer
+  type PageContentBuilder
 } from "./app/session.js";
 export { terminalWidth, terminalHeight, clearTerminal, formatRenderedPage, formatLinkTable } from "./app/terminal.js";
 export type {
   NetworkOutcome,
   NetworkOutcomeKind,
+  PageAction,
+  PageActionPlacement,
+  PageBlock,
+  PageBlockKind,
+  PageContent,
+  PageContentInput,
+  PageFormAction,
+  PageLayout,
+  PageLayoutRow,
+  PageLinkAction,
   RenderedLink,
   RenderedPage,
   FetchPageResult,

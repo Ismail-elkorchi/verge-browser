@@ -13,7 +13,6 @@ conditions.
 import { BrowserSession } from "@ismail-elkorchi/verge-browser";
 
 const session = new BrowserSession({
-  widthProvider: () => 72,
   loader: async (requestUrl) => ({
     requestUrl,
     finalUrl: requestUrl,
@@ -37,7 +36,7 @@ const session = new BrowserSession({
 
 const snapshot = await session.open("https://example.test/");
 console.log(snapshot.status);
-console.log(snapshot.rendered.lines.length > 0);
+console.log(snapshot.content.blocks.length > 0);
 console.log(snapshot.diagnostics.parseErrorCount);
 ```
 

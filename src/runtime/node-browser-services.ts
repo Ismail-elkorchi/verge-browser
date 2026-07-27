@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import type { ShellServices } from "../ui/services.js";
+import type { BrowserServices } from "../ui/services.js";
 
 function csvCell(value: string): string {
   if (!/[",\n]/.test(value)) {
@@ -62,7 +62,7 @@ function externalOpenCommand(target: string): { readonly command: string; readon
   };
 }
 
-export function createNodeShellServices(): ShellServices {
+export function createNodeBrowserServices(): BrowserServices {
   return {
     async writeTextFile(path: string, content: string): Promise<void> {
       await writeTextFile(path, content);

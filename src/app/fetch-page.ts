@@ -180,8 +180,20 @@ function shouldRetryNetworkError(error: unknown, method: string, attemptIndex: n
   return false;
 }
 
-async function sleep(delayMs: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, delayMs));
+async function sleep(delayMs: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timeout);
+      const reason: unknown = signal?.reason;
+      reject(reason instanceof Error ? reason : new Error(String(reason)));
+    };
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function isAbortError(error: unknown): boolean {
@@ -450,16 +462,17 @@ async function fetchNetworkResponse(
     };
 
     for (let attemptIndex = 0; attemptIndex <= securityPolicy.maxRequestRetries; attemptIndex += 1) {
-      const abortController = new AbortController();
-      const timeoutHandle = setTimeout(() => {
-        abortController.abort("fetch timeout");
-      }, timeoutMs);
+      requestOptions.signal?.throwIfAborted();
+      const timeoutSignal = AbortSignal.timeout(timeoutMs);
+      const signal = requestOptions.signal === undefined
+        ? timeoutSignal
+        : AbortSignal.any([requestOptions.signal, timeoutSignal]);
 
       try {
         const response = await fetch(currentUrl, {
           method,
           redirect: "manual",
-          signal: abortController.signal,
+          signal,
           headers: requestHeaders,
           ...(method === "POST" ? { body: requestOptions.bodyText ?? "" } : {})
         });
@@ -495,11 +508,14 @@ async function fetchNetworkResponse(
           fetchedAtIso: nowIso()
         };
       } catch (error) {
-        if (error instanceof Error && error.name === "AbortError") {
+        if (requestOptions.signal?.aborted === true) {
+          throw requestOptions.signal.reason;
+        }
+        if (timeoutSignal.aborted) {
           throw new Error(`Network request timed out after ${String(timeoutMs)}ms`, { cause: error });
         }
         if (shouldRetryNetworkError(error, method, attemptIndex, securityPolicy.maxRequestRetries)) {
-          await sleep(securityPolicy.retryDelayMs);
+          await sleep(securityPolicy.retryDelayMs, requestOptions.signal);
           continue;
         }
         if (error instanceof Error) {
@@ -515,8 +531,6 @@ async function fetchNetworkResponse(
           throw new Error(`Network request failed for ${currentUrl}: ${detail}`, { cause: error });
         }
         throw new Error(`Network request failed for ${currentUrl}: ${String(error)}`);
-      } finally {
-        clearTimeout(timeoutHandle);
       }
     }
   }
@@ -560,6 +574,7 @@ export async function fetchPage(
   requestOptions: PageRequestOptions = {},
   readLocalFileText: LocalFileReader = defaultReadLocalFileText
 ): Promise<FetchPageResult> {
+  requestOptions.signal?.throwIfAborted();
   const policy = {
     ...DEFAULT_SECURITY_POLICY,
     ...securityPolicy
@@ -589,13 +604,16 @@ export async function fetchPage(
   }
 
   if (requestUrl.startsWith("file://")) {
-    return fetchFileUrl(requestUrl, readLocalFileText);
+    const page = await fetchFileUrl(requestUrl, readLocalFileText);
+    requestOptions.signal?.throwIfAborted();
+    return page;
   }
 
   let networkResult: NetworkFetchResult;
   try {
     networkResult = await fetchNetworkResponse(requestUrl, timeoutMs, policy, requestOptions);
   } catch (error) {
+    if (requestOptions.signal?.aborted === true) throw requestOptions.signal.reason;
     throw new NetworkFetchError(classifyNetworkFailure(error, requestUrl));
   }
 
@@ -603,6 +621,7 @@ export async function fetchPage(
   try {
     html = await readResponseBodyWithLimit(networkResult.body, policy.maxContentBytes);
   } catch (error) {
+    if (requestOptions.signal?.aborted === true) throw requestOptions.signal.reason;
     throw new NetworkFetchError(classifyNetworkFailure(error, networkResult.finalUrl));
   }
 
@@ -646,6 +665,7 @@ export async function fetchPageStream(
   requestOptions: PageRequestOptions = {},
   readLocalFileText: LocalFileReader = defaultReadLocalFileText
 ): Promise<FetchPageStreamResult> {
+  requestOptions.signal?.throwIfAborted();
   const policy = {
     ...DEFAULT_SECURITY_POLICY,
     ...securityPolicy
@@ -686,6 +706,7 @@ export async function fetchPageStream(
 
   if (requestUrl.startsWith("file://")) {
     const filePage = await fetchFileUrl(requestUrl, readLocalFileText);
+    requestOptions.signal?.throwIfAborted();
     const fileBytes = utf8ByteLength(filePage.html);
     if (fileBytes > policy.maxContentBytes) {
       throw new NetworkFetchError(
@@ -714,6 +735,7 @@ export async function fetchPageStream(
   try {
     networkResult = await fetchNetworkResponse(requestUrl, timeoutMs, policy, requestOptions);
   } catch (error) {
+    if (requestOptions.signal?.aborted === true) throw requestOptions.signal.reason;
     throw new NetworkFetchError(classifyNetworkFailure(error, requestUrl));
   }
   const stream = networkResult.body ?? streamFromUtf8("");

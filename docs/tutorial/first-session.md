@@ -32,7 +32,7 @@ verge https://example.com
 
 Expected output shape:
 - A page title line such as `Example Domain (https://example.com/)`.
-- Deterministic visible-text lines rendered for the current terminal width.
+- Stable document content laid out for the current terminal width.
 - A status line confirming the resolved URL and request method.
 - If you resize the terminal, line wrapping can change even though the browsing
   model stays the same.

@@ -41,7 +41,7 @@ Node/npm includes the full browser runtime stack and the packaged `verge` CLI bi
 - Node/npm exposes the complete interactive/browser runtime API.
 - Shared concepts such as URL resolution and protocol safety are behaviorally
   aligned across both entrypoints.
-- CLI-specific screens, command help, browser sessions, and terminal adapters
+- CLI-specific views, command help, browser sessions, and Node platform services
   are npm/Node concerns, not part of the published JSR API.
 
 ## Related

@@ -55,7 +55,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.build.json"
   },
   "dependencies": {
-    "@ismail-elkorchi/html-parser": "0.2.1"
+    "@ismail-elkorchi/html-parser": "0.2.1",
+    "@ismail-elkorchi/terminal-ui": "git+https://github.com/Ismail-elkorchi/terminal-ui.git#4c80bb3db2aa17bad8302a43b43b199837aa014c"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

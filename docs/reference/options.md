@@ -43,8 +43,7 @@
 
 ### `BrowserSessionOptions`
 - `loader` and `streamLoader` replace the built-in page fetchers.
-- `renderer` replaces the terminal renderer.
-- `widthProvider` defaults to `() => 100`.
+- `contentBuilder` replaces semantic page-content construction.
 - `parseOptions` defaults to the package's bounded HTML parse profile.
 - `defaultParseMode` defaults to `"text"` and may be set to `"stream"`.
 - `localFileReader` overrides `file://` reads for tests or custom hosts.
@@ -53,6 +52,7 @@
 - `method`: `"GET"` or `"POST"`.
 - `headers`: request headers merged into the deterministic defaults.
 - `bodyText`: UTF-8 request body for `POST`.
+- `signal`: aborts the request, retry wait, and session navigation.
 
 ### `PageSnapshot`
 - `document` is the parser's identity-bearing result and contains `tree`,
@@ -60,6 +60,9 @@
 - Browser sessions retain source for both buffered and streamed HTML. Raw
   `parseHtml()` calls retain it only when requested with
   `sourceRetention: "text"`.
+- `content` contains terminal-independent blocks, links, forms, and stable
+  action identities. Use `layoutPageContent(content, columns)` when terminal
+  rows and action geometry are needed.
 - The package does not expose a full external CSS snapshot field.
 - If you need CSS alongside the HTML snapshot, extract inline `<style>` blocks
   from `document.sourceText` and fetch linked stylesheets separately.
