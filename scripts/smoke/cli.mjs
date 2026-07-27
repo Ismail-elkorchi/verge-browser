@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
-const timeoutMs = 8_000;
+const TIMEOUT_MS = 8_000;
 
 async function createFixture() {
   const fixtureDirectory = await mkdtemp(join(tmpdir(), "verge-browser-smoke-"));
@@ -28,10 +28,6 @@ async function createFixture() {
   return fixtureDirectory;
 }
 
-function wait(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 async function runSmokeCheck() {
   const fixtureDirectory = await createFixture();
   const target = `file://${fixtureDirectory}/index.html`;
@@ -44,15 +40,49 @@ async function runSmokeCheck() {
 
       let stdoutBuffer = "";
       let stderrBuffer = "";
+      let step = "initial-page";
+      let settled = false;
 
       const timeoutHandle = setTimeout(() => {
+        settled = true;
         child.kill("SIGKILL");
-        reject(new Error(`CLI smoke timed out after ${String(timeoutMs)}ms`));
-      }, timeoutMs);
+        reject(
+          new Error(
+            `CLI smoke timed out at ${step} after ${String(TIMEOUT_MS)}ms\n${stderrBuffer}`
+          )
+        );
+      }, TIMEOUT_MS);
+
+      const fail = (error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeoutHandle);
+        child.kill("SIGKILL");
+        reject(error);
+      };
 
       child.stdout.setEncoding("utf8");
       child.stdout.on("data", (chunk) => {
         stdoutBuffer += chunk;
+
+        if (step === "initial-page" && stdoutBuffer.includes("Index")) {
+          step = "linked-page";
+          child.stdin.write("]\r");
+          return;
+        }
+
+        if (step === "linked-page" && stdoutBuffer.includes("Second page")) {
+          step = "back-navigation";
+          child.stdin.write("h");
+          return;
+        }
+
+        if (step === "back-navigation" && stdoutBuffer.includes("Back ->")) {
+          step = "exit";
+          child.stdin.end("q");
+        }
       });
 
       child.stderr.setEncoding("utf8");
@@ -61,11 +91,14 @@ async function runSmokeCheck() {
       });
 
       child.on("error", (error) => {
-        clearTimeout(timeoutHandle);
-        reject(error);
+        fail(error);
       });
 
       child.on("exit", (code, signal) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
         clearTimeout(timeoutHandle);
         if (signal !== null) {
           reject(new Error(`CLI smoke terminated by signal ${signal}`));
@@ -75,34 +108,11 @@ async function runSmokeCheck() {
           reject(new Error(`CLI smoke failed with exit code ${String(code)}\n${stderrBuffer}`));
           return;
         }
-        if (!stdoutBuffer.includes("Index")) {
-          reject(new Error("CLI smoke did not render the initial page"));
-          return;
-        }
-        if (!stdoutBuffer.includes("Next")) {
-          reject(new Error("CLI smoke did not navigate to the linked page"));
-          return;
-        }
-        if (!stdoutBuffer.includes("Back ->")) {
-          reject(new Error("CLI smoke did not navigate back"));
+        if (step !== "exit") {
+          reject(new Error(`CLI smoke exited before completing ${step}`));
           return;
         }
         resolve(undefined);
-      });
-
-      (async () => {
-        await wait(150);
-        child.stdin.write("]");
-        await wait(150);
-        child.stdin.write("\r");
-        await wait(150);
-        child.stdin.write("h");
-        await wait(150);
-        child.stdin.write("q");
-        child.stdin.end();
-      })().catch((error) => {
-        clearTimeout(timeoutHandle);
-        reject(error);
       });
     });
   } finally {
@@ -118,7 +128,7 @@ try {
   if (invalidOption.status !== 1 || !invalidOption.stderr.includes("Unknown option: --unknown-option")) {
     throw new Error("CLI did not reject an unknown option");
   }
-  process.stdout.write("cli-smoke ok\n");
+  process.stdout.write("cli smoke ok\n");
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   process.stderr.write(`cli-smoke failed: ${message}\n`);

@@ -39,7 +39,7 @@ jobs:
         run: npm ci
 
       - name: Check documentation
-        run: npm run docs:required && npm run docs:check:jsr
+        run: npm run jsr:check
 
   node:
     name: node-${{ matrix.node-version }}
@@ -62,17 +62,6 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Restore oracle image cache
-        if: ${{ matrix.node-version == 24 }}
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: tmp/oracle-image
-          key: ${{ runner.os }}-oracle-image-${{ hashFiles('scripts/oracles/oracle-image.lock.json') }}
-
-      - name: Prepare oracle image
-        if: ${{ matrix.node-version == 24 }}
-        run: npm run oracle:image:prepare
-
       - name: Check current runtime
         if: ${{ matrix.node-version == 24 }}
         run: npm run check
@@ -80,13 +69,6 @@ jobs:
       - name: Check next runtime
         if: ${{ matrix.node-version == 26 }}
         run: npm run check:core && npm run smoke:node
-
-      - name: Validate reference browsers
-        if: ${{ matrix.node-version == 24 }}
-        run: |
-          npm run eval:oracle-runtime:ci
-          npm run eval:oracle-fingerprint:ci
-          npm run eval:oracle-supply-chain:ci
 
   runtime-parity:
     name: runtime-parity

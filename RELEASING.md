@@ -14,12 +14,10 @@ The Publish workflow can be dispatched manually for a dry run. A real manual
 run is reserved for registry-specific recovery and must check out the exact
 version tag; it cannot publish an arbitrary branch or commit.
 
-Useful local checks:
+The same release qualification can be run locally:
 
 ```bash
 npm run release:check
-npm run docs:html:jsr
-npm run release:notes:dry-run
 ```
 
 Publishing is never performed from a developer workstation.

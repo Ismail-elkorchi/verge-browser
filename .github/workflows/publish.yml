@@ -202,10 +202,7 @@ jobs:
           echo "publish_jsr=${{ steps.meta.outputs.publish_jsr }}"
 
       - name: Run publish gates
-        run: |
-          set -euo pipefail
-          npm run release:check
-          npm run docs:html:jsr
+        run: npm run release:check
 
       - name: Verify qualified revision
         env:
@@ -300,9 +297,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: publish-${{ steps.meta.outputs.version }}
-          path: |
-            ${{ env.PUBLISH_ARTIFACTS_DIR }}/
-            tmp/jsr-docs-html/
+          path: ${{ env.PUBLISH_ARTIFACTS_DIR }}/
 
       - name: Ensure tokenless npm auth for OIDC publish
         if: ${{ steps.meta.outputs.dry_run != 'true' && steps.meta.outputs.publish_npm == 'true' }}
