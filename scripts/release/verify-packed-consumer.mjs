@@ -31,6 +31,38 @@ async function readJson(path) {
   return JSON.parse(await readFile(path, "utf8"));
 }
 
+function verifyPackedFiles(packEntry) {
+  const paths = Array.isArray(packEntry.files)
+    ? packEntry.files
+      .map((file) => file?.path)
+      .filter((path) => typeof path === "string")
+    : [];
+  const requiredPaths = [
+    "LICENSE",
+    "README.md",
+    "dist/cli.js",
+    "dist/mod.d.ts",
+    "dist/mod.js",
+    "package.json"
+  ];
+  const missingPaths = requiredPaths.filter((path) => !paths.includes(path));
+  const unexpectedPaths = paths.filter(
+    (path) =>
+      path !== "LICENSE"
+      && path !== "README.md"
+      && path !== "package.json"
+      && !path.startsWith("dist/")
+  );
+
+  if (missingPaths.length > 0 || unexpectedPaths.length > 0) {
+    throw new Error(
+      `invalid packed file set: missing=${missingPaths.join(",") || "none"} unexpected=${unexpectedPaths.join(",") || "none"}`
+    );
+  }
+
+  return paths.length;
+}
+
 const root = process.cwd();
 const temporaryRoot = await mkdtemp(join(tmpdir(), "verge-packed-consumer-"));
 
@@ -46,6 +78,7 @@ try {
   if (packed === undefined || typeof packed.filename !== "string") {
     throw new Error("npm pack did not report the packed Verge artifact");
   }
+  const packedFileCount = verifyPackedFiles(packed);
 
   const tarballPath = join(temporaryRoot, basename(packed.filename));
   const consumerRoot = join(temporaryRoot, "consumer");
@@ -135,7 +168,7 @@ if (!rendered.lines.join("\\n").includes("Packed consumer")) {
 
   run(process.execPath, ["smoke.mjs"], { cwd: consumerRoot });
   process.stdout.write(
-    `packed consumer verified: ${workspaceManifest.name}@${workspaceManifest.version} -> ` +
+    `packed consumer verified: ${workspaceManifest.name}@${workspaceManifest.version} (${String(packedFileCount)} files) -> ` +
       `${parserEvidence.name}@${parserEvidence.version} ${parserEvidence.integrity}\n`
   );
 } finally {

@@ -1,22 +1,45 @@
+import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { parse } from "@ismail-elkorchi/html-parser";
 
 import { renderDocumentToTerminal } from "../../dist/app/render.js";
-import { hashInt, readJson, writeJsonReport } from "../eval/render-eval-lib.mjs";
 
 const WIDTHS = [80, 120];
 const SAMPLE_CASES = 300;
 
-function pickCases(cases, count) {
-  return [...cases]
-    .sort((left, right) => {
-      const leftHash = hashInt(left.id);
-      const rightHash = hashInt(right.id);
-      if (leftHash !== rightHash) return leftHash - rightHash;
-      return left.id.localeCompare(right.id);
-    })
-    .slice(0, Math.min(count, cases.length));
+function createBenchmarkHtml(index) {
+  const listItems = Array.from(
+    { length: 4 + (index % 5) },
+    (_, itemIndex) =>
+      `<li>Item ${String(itemIndex + 1)} for case ${String(index)} <a href="/items/${String(index)}/${String(itemIndex)}">open</a></li>`
+  ).join("");
+  const tableRows = Array.from(
+    { length: 3 + (index % 4) },
+    (_, rowIndex) =>
+      `<tr><td>${String(rowIndex + 1)}</td><td>value-${String(index)}-${String(rowIndex)}</td></tr>`
+  ).join("");
+  const malformedFormatting =
+    index % 3 === 0
+      ? "<p><b><i>misnested formatting</b> remains readable</i></p>"
+      : "";
+
+  return `<!doctype html>
+<html>
+  <head><title>Benchmark ${String(index)}</title></head>
+  <body>
+    <main>
+      <h1>Case ${String(index)}</h1>
+      <p>Deterministic terminal rendering benchmark with links, lists, tables, and text wrapping.</p>
+      <ul>${listItems}</ul>
+      <table><thead><tr><th>Row</th><th>Value</th></tr></thead><tbody>${tableRows}</tbody></table>
+      <pre>line one
+  line two
+\tline three</pre>
+      ${malformedFormatting}
+    </main>
+  </body>
+</html>`;
 }
 
 function nowNs() {
@@ -37,12 +60,13 @@ function percentile(values, ratio) {
 }
 
 async function main() {
-  const corpus = await readJson(resolve("scripts/oracles/corpus/render-v3.json"));
-  if (!Array.isArray(corpus?.cases) || corpus.cases.length === 0) {
-    throw new Error("render-v3 corpus is missing or empty");
-  }
-
-  const selectedCases = pickCases(corpus.cases, SAMPLE_CASES);
+  const selectedCases = Array.from(
+    { length: SAMPLE_CASES },
+    (_, index) => ({
+      id: `benchmark-${String(index + 1)}`,
+      html: createBenchmarkHtml(index + 1)
+    })
+  );
   const benchmarks = [];
 
   for (const width of WIDTHS) {
@@ -89,7 +113,8 @@ async function main() {
   };
 
   const reportPath = resolve("reports/bench.json");
-  await writeJsonReport(reportPath, report);
+  await mkdir(resolve("reports"), { recursive: true });
+  await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   process.stdout.write(`bench report written: ${reportPath}\n`);
 }
 

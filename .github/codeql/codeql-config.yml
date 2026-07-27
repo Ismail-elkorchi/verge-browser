@@ -1,3 +1,0 @@
-name: verge-browser-codeql
-paths-ignore:
-  - scripts/oracles/corpus/refresh-wpt-delta-corpus.mjs

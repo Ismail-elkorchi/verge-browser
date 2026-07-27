@@ -15,6 +15,14 @@ function parseArgs(argv) {
       reportPath = arg.slice("--report=".length);
       continue;
     }
+    throw new Error(`unsupported argument: ${arg}`);
+  }
+
+  if (!["node", "deno", "bun"].includes(runtime)) {
+    throw new Error(`unsupported runtime: ${runtime}`);
+  }
+  if (reportPath.length === 0) {
+    throw new Error("report path must not be empty");
   }
 
   return { runtime, reportPath };
@@ -151,7 +159,6 @@ async function main() {
     const report = {
       suite: "runtime-smoke",
       timestamp,
-      runtime,
       ...result
     };
     await writeReport(reportPath, `${JSON.stringify(report, null, 2)}\n`);
