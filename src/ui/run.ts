@@ -1,6 +1,7 @@
 import { createTerminalHost } from "@ismail-elkorchi/terminal-ui/host";
 import { renderElementFrame, renderFramePlain } from "@ismail-elkorchi/terminal-ui/renderer";
 import { runTui } from "@ismail-elkorchi/terminal-ui/tui";
+import type { DiagnosticOccurrence, TerminalDiagnosticValue } from "@ismail-elkorchi/terminal-ui";
 
 import type { BrowserSession } from "../app/session.js";
 import type { BrowserStore } from "../app/storage.js";
@@ -57,8 +58,37 @@ export async function runBrowserTui(initialTarget: string, options: BrowserTuiOp
     }
   );
   if (exit.status === "error") {
-    throw new Error("The terminal UI stopped because of a runtime error.");
+    throw new Error(browserTuiFailureMessage(exit.diagnostics));
   }
+}
+
+export function browserTuiFailureMessage(diagnostics: readonly DiagnosticOccurrence[]): string {
+  let failure: DiagnosticOccurrence | undefined;
+  for (let index = diagnostics.length - 1; index >= 0; index -= 1) {
+    const item = diagnostics[index];
+    if (item?.severity === "fatal" || item?.severity === "error") {
+      failure = item;
+      break;
+    }
+  }
+  if (failure === undefined) return "The terminal UI stopped because of a runtime error.";
+  const cause = diagnosticCauseMessage(failure.cause);
+  return [failure.message, cause, failure.hint]
+    .filter((part, index, parts): part is string =>
+      part !== undefined
+      && part.length > 0
+      && parts.indexOf(part) === index
+    )
+    .join(" ");
+}
+
+function diagnosticCauseMessage(cause: TerminalDiagnosticValue | undefined): string | undefined {
+  if (typeof cause === "string") return cause;
+  if (cause === null || cause === undefined || Array.isArray(cause) || typeof cause !== "object") {
+    return undefined;
+  }
+  const message = (cause as Readonly<Record<string, TerminalDiagnosticValue>>)["message"];
+  return typeof message === "string" ? message : undefined;
 }
 
 export async function renderBrowserOnce(

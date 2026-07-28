@@ -13,7 +13,7 @@ import { createTuiRuntime, runTui } from "@ismail-elkorchi/terminal-ui/tui";
 import { BrowserSession } from "../../dist/app/session.js";
 import { NetworkFetchError } from "../../dist/app/fetch-page.js";
 import { BrowserStore } from "../../dist/app/storage.js";
-import { prepareBrowserTui } from "../../dist/ui/run.js";
+import { browserTuiFailureMessage, prepareBrowserTui } from "../../dist/ui/run.js";
 
 function createLoader(htmlMap) {
   return async (requestUrl, requestOptions = {}) => {
@@ -149,6 +149,20 @@ function wheelEvent(row, column, deltaRows) {
   };
 }
 
+function pointerEvent(action, row, column) {
+  return {
+    kind: "mouse",
+    sequence: "",
+    encoding: "sgr",
+    action,
+    button: "left",
+    row,
+    column,
+    rawCode: action === "drag" ? 32 : 0,
+    modifiers: { shift: false, alt: false, ctrl: false }
+  };
+}
+
 function findRole(node, role) {
   if (node.role === role) return node;
   for (const child of node.children ?? []) {
@@ -196,6 +210,28 @@ test("Verge renders a browser shell and preserves navigation, focus, scrolling, 
   await runtime.handleInput(wheelEvent(scrollTarget.bounds.row, scrollTarget.bounds.column, 1));
   await runtime.flushInput();
   assert.notEqual(runtime.state().documents[0].scrollAnchor.blockId, initialBlockId);
+  const anchorAfterWheel = runtime.state().documents[0].scrollAnchor;
+  const thumb = runtime.frame().hitTargets?.find((target) =>
+    target.id.startsWith("browser-viewport-") && target.id.endsWith(":scrollbar:vertical:thumb")
+  );
+  const track = runtime.frame().hitTargets?.find((target) =>
+    target.id.startsWith("browser-viewport-") && target.id.endsWith(":scrollbar:vertical:track")
+  );
+  assert.ok(thumb);
+  assert.ok(track);
+  await runtime.handleInput(pointerEvent("press", thumb.bounds.row, thumb.bounds.column));
+  await runtime.handleInput(pointerEvent(
+    "drag",
+    track.bounds.row + track.bounds.height - 1,
+    track.bounds.column
+  ));
+  await runtime.handleInput(pointerEvent(
+    "release",
+    track.bounds.row + track.bounds.height - 1,
+    track.bounds.column
+  ));
+  assert.notDeepEqual(runtime.state().documents[0].scrollAnchor, anchorAfterWheel);
+  assert.equal(runtime.diagnostics().some((item) => item.severity === "error" || item.severity === "fatal"), false);
 
   await runtime.handleInput(textEvent("q"));
   assert.equal(runtime.exit().status, "completed");
@@ -245,6 +281,51 @@ test("browser chrome and document geometry remain readable from narrow to wide t
     .filter((cell) => ["browser-back", "browser-forward", "browser-reload", "browser-new-tab", "browser-bookmark", "browser-library", "browser-menu"].includes(cell.source.elementId))
     .map((cell) => cell.row));
   assert.equal(toolbarRows.size, 1);
+  assert.ok(wideFrame.cells.some((cell) =>
+    cell.source?.elementId === "browser-tabs"
+    && cell.source.partName === "header.background"
+    && cell.style?.bg?.token === "surface.background"
+  ));
+  assert.ok(wideFrame.cells.some((cell) =>
+    cell.source?.elementId === "browser-tabs"
+    && cell.source.itemId === runtime.state().documents[0].id
+    && cell.style?.bg?.token === "surface.raised.background"
+  ));
+  assert.ok(wideFrame.cells.some((cell) =>
+    cell.source?.elementId === "browser-toolbar-surface"
+    && cell.style?.bg?.token === "surface.bar.background"
+  ));
+  assert.ok(wideFrame.cells.some((cell) =>
+    cell.source?.elementId === "browser-omnibox"
+    && cell.style?.bg?.token === "control.background"
+  ));
+  assert.ok(wideFrame.cells.some((cell) =>
+    cell.source?.elementId?.startsWith("browser-page-surface-")
+    && cell.style?.bg?.token === "surface.background"
+  ));
+  assert.ok(wideFrame.cells.some((cell) =>
+    cell.source?.elementId === "browser-status"
+    && cell.style?.bg?.token === "surface.bar.background"
+  ));
+
+  await runtime.dispatch({ kind: "toggleSidePanel", panel: "history" });
+  const panelFrame = runtime.frame();
+  assert.ok(panelFrame.cells.some((cell) =>
+    cell.source?.elementId === "browser-content-with-panel"
+    && cell.source.partName === "divider"
+  ));
+  assert.ok(panelFrame.cells.some((cell) =>
+    cell.source?.elementId === "browser-side-panel"
+    && cell.style?.bg?.token === "surface.inset.background"
+  ));
+  assert.ok(panelFrame.cells.some((cell) =>
+    cell.source?.elementId === "panel-history"
+    && cell.style?.bg?.token === "control.primary.background"
+  ));
+  assert.ok(panelFrame.cells.some((cell) =>
+    cell.source?.elementId === "browser-library"
+    && cell.style?.bg?.token === "control.primary.background"
+  ));
 
   for (const columns of [40, 80, 120, 240]) {
     await runtime.resize({ columns, rows: 40 });
@@ -256,6 +337,23 @@ test("browser chrome and document geometry remain readable from narrow to wide t
       assert.equal(frame.cells.some((cell) => cell.source?.elementId === "browser-library"), false);
     }
   }
+});
+
+test("browser runtime errors retain the terminal diagnostic cause", () => {
+  const message = browserTuiFailureMessage([{
+    severity: "error",
+    message: "TUI run failed before completion.",
+    cause: {
+      name: "RangeError",
+      message: "Custom composite child 0 returned bounds outside its parent."
+    },
+    hint: "Inspect the renderer extension bounds."
+  }]);
+
+  assert.equal(
+    message,
+    "TUI run failed before completion. Custom composite child 0 returned bounds outside its parent. Inspect the renderer extension bounds."
+  );
 });
 
 test("new-tab content stays compact and centered on a large terminal", async () => {

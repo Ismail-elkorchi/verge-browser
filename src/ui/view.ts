@@ -35,7 +35,7 @@ import {
   type CustomCompositeRenderer,
   type Element
 } from "@ismail-elkorchi/terminal-ui/component";
-import { column, overlay, row, surface, viewport } from "@ismail-elkorchi/terminal-ui/layout";
+import { column, overlay, row, splitPane, surface, viewport } from "@ismail-elkorchi/terminal-ui/layout";
 import type { RoutedPointerEvent } from "@ismail-elkorchi/terminal-ui/input";
 import type { RenderSpan, TerminalStyle } from "@ismail-elkorchi/terminal-ui/renderer";
 import type { TuiContext } from "@ismail-elkorchi/terminal-ui/tui";
@@ -610,7 +610,7 @@ function browserDocument(
     state: document,
     children
   });
-  return viewport(content, {
+  return surface(viewport(content, {
     id: `browser-viewport-${document.id}`,
     scrollRow,
     scrollColumn: 0,
@@ -622,6 +622,9 @@ function browserDocument(
       kind: "scrollTo",
       row: scrollReducer(event.scroll, event.action).offsetRow
     })
+  }), {
+    id: `browser-page-surface-${document.id}`,
+    appearance: "neutral"
   });
 }
 
@@ -726,9 +729,24 @@ function sidePanel(state: BrowserTuiState): Element<BrowserTuiMessage> {
     });
   }
   const header = row([
-      button({ id: "panel-history", label: "History", onPress: (): BrowserTuiMessage => ({ kind: "toggleSidePanel", panel: "history" }) }),
-      button({ id: "panel-bookmarks", label: "Bookmarks", onPress: (): BrowserTuiMessage => ({ kind: "toggleSidePanel", panel: "bookmarks" }) }),
-      button({ id: "panel-downloads", label: "Downloads", onPress: (): BrowserTuiMessage => ({ kind: "toggleSidePanel", panel: "downloads" }) })
+      button({
+        id: "panel-history",
+        label: "History",
+        tone: panel === "history" ? "primary" : "default",
+        onPress: (): BrowserTuiMessage => ({ kind: "toggleSidePanel", panel: "history" })
+      }),
+      button({
+        id: "panel-bookmarks",
+        label: "Bookmarks",
+        tone: panel === "bookmarks" ? "primary" : "default",
+        onPress: (): BrowserTuiMessage => ({ kind: "toggleSidePanel", panel: "bookmarks" })
+      }),
+      button({
+        id: "panel-downloads",
+        label: "Downloads",
+        tone: panel === "downloads" ? "primary" : "default",
+        onPress: (): BrowserTuiMessage => ({ kind: "toggleSidePanel", panel: "downloads" })
+      })
     ], { gap: 1 });
   const panelContent = content.length === 0 ? [text(`No ${panel}.`)] : content;
   return surface(column([
@@ -787,7 +805,13 @@ function toolbar(
     omnibox,
     button({ id: "browser-bookmark", label: bookmarked ? "★" : "☆", density: "compact", onPress: (): BrowserTuiMessage => ({ kind: "toggleBookmark" }) }),
     ...(showLibrary
-      ? [button({ id: "browser-library", label: "Library", density: "compact", onPress: (): BrowserTuiMessage => ({ kind: "toggleSidePanel", panel: "history" }) })]
+      ? [button({
+          id: "browser-library",
+          label: "Library",
+          density: "compact",
+          tone: state.sidePanel === null ? "default" : "primary",
+          onPress: (): BrowserTuiMessage => ({ kind: "toggleSidePanel", panel: "history" })
+        })]
       : []),
     button({ id: "browser-menu", label: "☰", density: "compact", onPress: (): BrowserTuiMessage => ({ kind: "openBrowserMenu" }) })
   ], {
@@ -846,14 +870,16 @@ function findBar(state: BrowserTuiState): Element<BrowserTuiMessage> | null {
 function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMessage> {
   const selected = state.documents[state.activeDocumentIndex] ?? state.documents[0];
   if (!selected) throw new Error("The browser view requires an open document.");
-  const pageColumns = state.sidePanel !== null && columns >= 100 ? columns - 40 : columns;
+  const pageColumns = state.sidePanel !== null && columns >= 100 ? columns - 41 : columns;
   const pagePanel = selected.snapshot.finalUrl === "about:newtab"
     ? newTabDashboard(state)
     : browserDocument(selected, pageColumns);
   const body = state.sidePanel !== null
     ? columns >= 100
-      ? row([pagePanel, sidePanel(state)], {
+      ? splitPane([pagePanel, sidePanel(state)], {
         id: "browser-content-with-panel",
+        direction: "horizontal",
+        gap: 1,
         sizes: [{ kind: "fill" }, { kind: "fixed", cells: 40 }]
       })
       : sidePanel(state)
