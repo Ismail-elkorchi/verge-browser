@@ -71,6 +71,8 @@ export type RenderedActionable = RenderedLink | RenderedFormAction;
 export type PageBlockKind =
   | "heading"
   | "paragraph"
+  | "definitionTerm"
+  | "definitionDescription"
   | "image"
   | "preformatted"
   | "listItem"

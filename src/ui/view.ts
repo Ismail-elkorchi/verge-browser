@@ -78,11 +78,11 @@ function accessibleBlock(block: PageBlock) {
 }
 
 function blockStyle(block: PageBlock): TerminalStyle {
-  if (block.kind === "heading") {
+  if (block.kind === "heading" || block.kind === "definitionTerm") {
     return {
       fg: {
         kind: "theme",
-        token: block.level === 1 ? "accent.primary" : "text.strong"
+        token: block.kind === "heading" && block.level === 1 ? "accent.primary" : "text.strong"
       },
       bold: true
     };
@@ -661,12 +661,26 @@ function panelEntryButton(id: string, label: string, target: string): Element<Br
   });
 }
 
+function compactLocation(value: string): string {
+  try {
+    const url = new URL(value);
+    const path = url.pathname === "/" ? "" : url.pathname;
+    return `${url.hostname}${path}${url.search}${url.hash}`;
+  } catch {
+    return value;
+  }
+}
+
 function sidePanel(state: BrowserTuiState): Element<BrowserTuiMessage> {
   const panel = state.sidePanel ?? "history";
   let content: readonly Element<BrowserTuiMessage>[];
   if (panel === "history") {
     content = state.history.slice(0, 30).map((entry, index) =>
-      panelEntryButton(`history-${String(index)}`, entry.title, entry.url)
+      panelEntryButton(
+        `history-${String(index)}`,
+        `${entry.title} · ${compactLocation(entry.url)}`,
+        entry.url
+      )
     );
   } else if (panel === "bookmarks") {
     content = state.bookmarks.slice(0, 30).map((entry, index) =>
@@ -766,6 +780,7 @@ function sidePanel(state: BrowserTuiState): Element<BrowserTuiMessage> {
     id: "browser-side-panel",
     padding: 1,
     appearance: "inset",
+    border: { kind: "none" },
     meta: { accessibility: { role: "complementary", label: panel } }
   });
 }
@@ -954,7 +969,7 @@ function actionPaletteView(palette: ActionPaletteOverlay): Element<BrowserTuiMes
     modal: true,
     focusPolicy: { initialFocus: { kind: "element", elementId: "browser-action-input" }, returnFocus: "restore" },
     width: 72,
-    height: 12
+    maxHeight: 12
   });
 }
 
@@ -980,7 +995,7 @@ function pickerView(picker: PickerOverlay): Element<BrowserTuiMessage> {
     modal: true,
     focusPolicy: { initialFocus: { kind: "element", elementId: "browser-picker-list" }, returnFocus: "restore" },
     width: 76,
-    height: 18
+    maxHeight: 18
   });
 }
 
@@ -994,7 +1009,7 @@ function detailView(detail: DetailOverlay): Element<BrowserTuiMessage> {
     focusPolicy: { returnFocus: "restore" },
     keys: { escape: (): BrowserTuiMessage => ({ kind: "dismiss" }) },
     width: 82,
-    height: 22
+    maxHeight: 22
   });
 }
 
@@ -1029,7 +1044,7 @@ function linkMenuView(state: BrowserTuiState, menu: LinkMenuOverlay): Element<Br
     focusPolicy: { returnFocus: "restore" },
     keys: { escape: (): BrowserTuiMessage => ({ kind: "dismiss" }) },
     width: 52,
-    height: 12
+    maxHeight: 12
   });
 }
 
@@ -1053,7 +1068,7 @@ function browserMenuView(): Element<BrowserTuiMessage> {
     focusPolicy: { returnFocus: "restore" },
     keys: { escape: (): BrowserTuiMessage => ({ kind: "dismiss" }) },
     width: 52,
-    height: 16
+    maxHeight: 16
   });
 }
 
@@ -1079,7 +1094,7 @@ function downloadPromptView(prompt: DownloadPromptOverlay): Element<BrowserTuiMe
     },
     keys: { escape: (): BrowserTuiMessage => ({ kind: "dismiss" }) },
     width: 64,
-    height: 9
+    maxHeight: 9
   });
 }
 

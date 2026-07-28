@@ -253,7 +253,7 @@ test("browser chrome and document geometry remain readable from narrow to wide t
   assert.doesNotMatch(wideText, /Ctrl\+L/u);
   assert.doesNotMatch(wideText, /^#+\s+Index$/mu);
   assert.ok(linkCells.length > 0);
-  assert.ok(linkCells.every((cell) => cell.column >= 60 && cell.column <= 179));
+  assert.ok(linkCells.every((cell) => cell.column >= 72 && cell.column <= 167));
   assert.ok(linkCells.every((cell) =>
     cell.style?.underline === true
     && cell.style.fg?.kind === "theme"
@@ -326,6 +326,27 @@ test("browser chrome and document geometry remain readable from narrow to wide t
     cell.source?.elementId === "browser-library"
     && cell.style?.bg?.token === "control.primary.background"
   ));
+  assert.match(renderFramePlain(panelFrame), /Index · example\.test/u);
+  const panelBackground = panelFrame.cells.filter((cell) =>
+    cell.source?.elementId === "browser-side-panel"
+    && cell.source.partName === "background"
+  );
+  assert.ok(panelBackground.length > 0);
+  const panelRows = panelBackground.map((cell) => cell.row);
+  const panelColumns = panelBackground.map((cell) => cell.column);
+  const panelBounds = {
+    top: Math.min(...panelRows),
+    bottom: Math.max(...panelRows),
+    left: Math.min(...panelColumns),
+    right: Math.max(...panelColumns)
+  };
+  assert.equal(panelFrame.cells.some((cell) =>
+    cell.source?.cellRole === "border"
+    && cell.row >= panelBounds.top
+    && cell.row <= panelBounds.bottom
+    && cell.column >= panelBounds.left
+    && cell.column <= panelBounds.right
+  ), false);
 
   for (const columns of [40, 80, 120, 240]) {
     await runtime.resize({ columns, rows: 40 });
@@ -554,6 +575,10 @@ test("non-HTML navigation offers a download instead of replacing the page", asyn
   await waitUntil(runtime, () => runtime.state().overlay?.kind === "downloadPrompt");
   assert.equal(runtime.state().documents[0].snapshot.content.title, "Index");
   assert.match(renderFramePlain(runtime.frame()), /Download resource\?/u);
+  const dialogRows = new Set(runtime.frame().cells
+    .filter((cell) => cell.source?.elementId === "download-prompt")
+    .map((cell) => cell.row));
+  assert.ok(dialogRows.size > 0 && dialogRows.size < 9);
 
   await runtime.dispatch({ kind: "download", target: archiveUrl });
   await waitUntil(runtime, () => runtime.state().downloads[0]?.status === "completed");

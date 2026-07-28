@@ -6,6 +6,7 @@ import { measureTextCells } from "@ismail-elkorchi/terminal-ui/text";
 
 import {
   buildPageContent,
+  documentContentColumns,
   layoutPageContent,
   renderDocumentToTerminal
 } from "../../dist/app/render.js";
@@ -230,6 +231,53 @@ test("renderDocumentToTerminal renders nested list indentation", () => {
   const joined = renderedPage.lines.join("\n");
   assert.ok(joined.includes("- alpha"));
   assert.ok(joined.includes("  - beta"));
+});
+
+test("semantic content preserves definition terms and descriptions", () => {
+  const document = parse(`
+    <!doctype html><html><body>
+      <dl>
+        <dt>Terminal cell</dt>
+        <dd>A character-sized drawing position.</dd>
+        <dt>Viewport</dt>
+        <dd>A clipped scrolling region with a visible window.</dd>
+      </dl>
+    </body></html>
+  `);
+  const content = buildPageContent({
+    tree: document.tree,
+    requestUrl: "https://example.com/glossary",
+    finalUrl: "https://example.com/glossary",
+    status: 200,
+    statusText: "OK",
+    fetchedAtIso: "2026-01-01T00:00:00.000Z"
+  });
+  const layout = layoutPageContent(content, 80);
+
+  assert.deepEqual(
+    content.blocks.map(({ kind, text }) => ({ kind, text })),
+    [
+      { kind: "definitionTerm", text: "Terminal cell" },
+      { kind: "definitionDescription", text: "A character-sized drawing position." },
+      { kind: "definitionTerm", text: "Viewport" },
+      { kind: "definitionDescription", text: "A clipped scrolling region with a visible window." }
+    ]
+  );
+  assert.deepEqual(
+    layout.rows.map((row) => row.text),
+    [
+      "Terminal cell",
+      "  A character-sized drawing position.",
+      "Viewport",
+      "  A clipped scrolling region with a visible window."
+    ]
+  );
+});
+
+test("document prose stays within a readable measure on wide terminals", () => {
+  assert.equal(documentContentColumns(39), 39);
+  assert.equal(documentContentColumns(80), 76);
+  assert.equal(documentContentColumns(240), 96);
 });
 
 test("renderDocumentToTerminal reports anti-bot challenge pages", () => {

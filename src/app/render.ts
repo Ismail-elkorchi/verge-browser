@@ -35,7 +35,6 @@ const CONTAINER_TAGS = new Set([
   "aside",
   "body",
   "div",
-  "dl",
   "fieldset",
   "figcaption",
   "figure",
@@ -291,6 +290,41 @@ function collectList(
   }
 }
 
+function definitionItems(node: ElementNode): readonly ElementNode[] {
+  return node.children.flatMap((child) => {
+    if (child.kind !== "element") return [];
+    const tag = child.localName.toLowerCase();
+    if (tag === "dt" || tag === "dd") return [child];
+    return tag === "div"
+      ? child.children.filter(
+          (nested): nested is ElementNode =>
+            nested.kind === "element"
+            && ["dt", "dd"].includes(nested.localName.toLowerCase())
+        )
+      : [];
+  });
+}
+
+function collectDefinitionList(
+  node: ElementNode,
+  collector: ContentCollector,
+  region: PageRegion | undefined
+): void {
+  for (const item of definitionItems(node)) {
+    const inline = inlineContent(item.children, collector);
+    addBlock(
+      collector,
+      item,
+      item.localName.toLowerCase() === "dt" ? "definitionTerm" : "definitionDescription",
+      inline.text,
+      {
+        ...(region === undefined ? {} : { region }),
+        links: inline.links
+      }
+    );
+  }
+}
+
 function tableRows(node: ElementNode): readonly ElementNode[] {
   const rows: ElementNode[] = [];
   for (const child of node.children) {
@@ -474,6 +508,10 @@ function collectNode(
     collectList(node, collector, 0, region);
     return;
   }
+  if (tag === "dl") {
+    collectDefinitionList(node, collector, region);
+    return;
+  }
   if (tag === "table") {
     collectTable(node, collector, region);
     return;
@@ -559,6 +597,7 @@ export function buildPageContent(input: PageContentInput): PageContent {
 function prefixForBlock(block: PageBlock): string {
   if (block.kind === "quote") return "│ ".repeat(Math.max(1, block.depth ?? 1));
   if (block.kind === "listItem") return "  ".repeat(block.depth ?? 0);
+  if (block.kind === "definitionDescription") return "  ";
   return "";
 }
 
@@ -634,7 +673,7 @@ function wrapBlock(block: PageBlock, columns: number): readonly WrappedRow[] {
 /** Returns a readable document width with gutters on ordinary terminals. */
 export function documentContentColumns(availableColumns: number): number {
   const columns = Math.max(1, Math.floor(availableColumns));
-  return columns < 40 ? columns : Math.min(120, columns - 4);
+  return columns < 40 ? columns : Math.min(96, columns - 4);
 }
 
 function blockGapRows(previous: PageBlock | undefined, current: PageBlock): number {
@@ -643,6 +682,7 @@ function blockGapRows(previous: PageBlock | undefined, current: PageBlock): numb
     previous.kind === "heading"
     || previous.kind === "listItem" && current.kind === "listItem"
     || previous.kind === "tableRow" && current.kind === "tableRow"
+    || previous.kind.startsWith("definition") && current.kind.startsWith("definition")
     || previous.region === "navigation" && current.region === "navigation"
   ) {
     return 0;
