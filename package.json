@@ -56,7 +56,7 @@
   },
   "dependencies": {
     "@ismail-elkorchi/html-parser": "0.2.1",
-    "@ismail-elkorchi/terminal-ui": "git+https://github.com/Ismail-elkorchi/terminal-ui.git#8e0f3e643ee54d87c9e179c01336939438d9b7bf"
+    "@ismail-elkorchi/terminal-ui": "git+https://github.com/Ismail-elkorchi/terminal-ui.git#2eeb11bb29c9b088cf4d5cdaadeb795f8a5a8bf2"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
