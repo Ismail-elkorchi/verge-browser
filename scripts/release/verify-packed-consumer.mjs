@@ -127,7 +127,6 @@ if (!rendered.lines.join("\\n").includes("Packed consumer")) {
     "npm",
     [
       "install",
-      "--ignore-scripts",
       "--no-audit",
       "--no-fund",
       "--registry=https://registry.npmjs.org"

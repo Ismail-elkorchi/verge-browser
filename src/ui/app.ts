@@ -24,7 +24,6 @@ import {
 import { formatHelpText, parseCommand, type BrowserCommand } from "../app/commands.js";
 import { NetworkFetchError } from "../app/fetch-page.js";
 import type { FormControl, FormControlValue } from "../app/forms.js";
-import { layoutPageContent } from "../app/render.js";
 import type { DownloadRecord } from "../app/storage.js";
 import type { PageRequestOptions, PageSnapshot } from "../app/types.js";
 import type { BrowserController } from "./browser-controller.js";
@@ -146,7 +145,7 @@ function persistEffect(
 
 function contentColumns(state: BrowserTuiState, terminalColumns: number): number {
   return state.sidePanel !== null && terminalColumns >= 100
-    ? Math.max(1, terminalColumns - 41)
+    ? Math.max(1, terminalColumns - 40)
     : Math.max(1, terminalColumns);
 }
 
@@ -181,7 +180,7 @@ function pageFromSnapshot(
 }
 
 function pageText(document: BrowserDocumentState, columns: number): string {
-  return layoutPageContent(document.snapshot.content, columns).rows.map((row) => row.text).join("\n");
+  return documentLayout(document, columns).rows.map((row) => row.text).join("\n");
 }
 
 function navigationMessage(
@@ -567,7 +566,7 @@ export function updateBrowser(
 ): TuiUpdateResult<BrowserTuiState, BrowserTuiMessage> {
   const document = activeDocument(state);
   const columns = contentColumns(state, context.terminalSize.columns);
-  const viewportRows = Math.max(1, context.terminalSize.rows - (state.findBar === null ? 4 : 5));
+  const viewportRows = Math.max(1, context.terminalSize.rows - (state.findBar === null ? 5 : 6));
   const layout = documentLayout(document, columns);
   switch (message.kind) {
     case "quit":

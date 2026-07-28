@@ -41,7 +41,10 @@ async function runSmokeCheck() {
     if (!once.stdout.includes("Index") || !once.stdout.includes("Next page")) {
       throw new Error("CLI --once did not render the initial document.");
     }
-    if (!once.stdout.includes(target) || once.stdout.indexOf(target) > once.stdout.indexOf("# Index")) {
+    const outputLines = once.stdout.split("\n");
+    const addressRow = outputLines.findIndex((line) => line.includes("⌕ "));
+    const documentHeadingRow = outputLines.findIndex((line, index) => index > 0 && line.trim() === "Index");
+    if (addressRow < 0 || documentHeadingRow < 0 || addressRow > documentHeadingRow) {
       throw new Error("CLI --once did not render browser chrome before the document.");
     }
     if (once.stdout.includes("\u001b")) {

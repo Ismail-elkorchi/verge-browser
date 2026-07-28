@@ -7,6 +7,7 @@ import test from "node:test";
 import { validateAccessibleSnapshot } from "@ismail-elkorchi/terminal-ui/accessibility";
 import { renderFramePlain } from "@ismail-elkorchi/terminal-ui/renderer";
 import { createTerminalHarness } from "@ismail-elkorchi/terminal-ui/testing";
+import { measureTextCells } from "@ismail-elkorchi/terminal-ui/text";
 import { createTuiRuntime, runTui } from "@ismail-elkorchi/terminal-ui/tui";
 
 import { BrowserSession } from "../../dist/app/session.js";
@@ -68,7 +69,7 @@ async function fixture(options = {}) {
     ]
   ]);
   const writes = [];
-  const prepared = await prepareBrowserTui("https://example.test/", {
+  const prepared = await prepareBrowserTui(options.initialUrl ?? "https://example.test/", {
     store,
     services: {
       async writeTextFile(path, content) {
@@ -97,7 +98,9 @@ async function fixture(options = {}) {
     downloadDirectory: stateDirectory,
     restoreWorkspace: options.restoreWorkspace === true
   });
-  const harness = createTerminalHarness({ terminalSize: { columns: 120, rows: 30 } });
+  const harness = createTerminalHarness({
+    terminalSize: options.terminalSize ?? { columns: 120, rows: 30 }
+  });
   const runtime = createTuiRuntime({ app: prepared.app, host: harness.host });
   await runtime.start();
   return { runtime, harness, writes, prepared };
@@ -194,6 +197,63 @@ test("Verge renders a browser shell and preserves navigation, focus, scrolling, 
 
   await runtime.handleInput(textEvent("q"));
   assert.equal(runtime.exit().status, "completed");
+});
+
+test("browser chrome and document geometry remain readable from narrow to wide terminals", async () => {
+  const { runtime } = await fixture({ terminalSize: { columns: 240, rows: 40 } });
+  const wideFrame = runtime.frame();
+  const wideText = renderFramePlain(wideFrame);
+  const backText = wideFrame.cells
+    .filter((cell) => cell.source?.elementId === "browser-back")
+    .toSorted((left, right) => left.row - right.row || left.column - right.column)
+    .map((cell) => cell.text)
+    .join("");
+  const linkCells = wideFrame.cells.filter((cell) => cell.link?.href === "https://example.test/next");
+
+  assert.match(backText, /^\[.*←.*\]$/u);
+  assert.ok(wideFrame.cells.some((cell) => cell.source?.elementId === "browser-omnibox-surface"));
+  assert.doesNotMatch(wideText, /Ctrl\+L/u);
+  assert.doesNotMatch(wideText, /^#+\s+Index$/mu);
+  assert.ok(linkCells.length > 0);
+  assert.ok(linkCells.every((cell) => cell.column >= 71 && cell.column <= 170));
+  assert.ok(linkCells.every((cell) =>
+    cell.style?.underline === true
+    && cell.style.fg?.kind === "theme"
+    && cell.style.fg.token === "link.foreground"
+  ));
+  assert.ok(wideFrame.cells.some((cell) =>
+    cell.text === "I"
+    && cell.style?.bold === true
+    && cell.style.fg?.kind === "theme"
+    && cell.style.fg.token === "accent.primary"
+  ));
+
+  for (const columns of [40, 80, 120, 240]) {
+    await runtime.resize({ columns, rows: 40 });
+    const frame = runtime.frame();
+    assert.equal(validateAccessibleSnapshot(frame.accessibility).ok, true);
+    assert.ok(frame.cells.every((cell) => cell.column + cell.width - 1 <= columns));
+    assert.ok(renderFramePlain(frame).split("\n").every((line) => measureTextCells(line).cells <= columns));
+    if (columns < 64) {
+      assert.equal(frame.cells.some((cell) => cell.source?.elementId === "browser-library"), false);
+    }
+  }
+});
+
+test("new-tab content stays compact and centered on a large terminal", async () => {
+  const { runtime } = await fixture({
+    initialUrl: "about:newtab",
+    terminalSize: { columns: 240, rows: 60 }
+  });
+  const frame = runtime.frame();
+  const title = frame.cells.find((cell) => cell.source?.elementId === "new-tab-title");
+  const hint = frame.cells.find((cell) => cell.source?.elementId === "new-tab-hint");
+
+  assert.ok(title);
+  assert.ok(hint);
+  assert.ok(hint.row - title.row <= 2);
+  assert.ok(title.column > 70 && title.column < 170);
+  assert.equal(frame.cells.some((cell) => cell.source?.elementId === "browser-help"), false);
 });
 
 test("Verge cancels superseded omnibox navigation and keeps the latest page", async () => {

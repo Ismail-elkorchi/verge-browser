@@ -1,9 +1,21 @@
-import { layoutPageContent } from "../app/render.js";
+import type { Rect } from "@ismail-elkorchi/terminal-ui/renderer";
+
+import { documentContentColumns, layoutPageContent } from "../app/render.js";
 import type { PageAction, PageLayout } from "../app/types.js";
 import type { BrowserDocumentState } from "./model.js";
 
 export function documentLayout(document: BrowserDocumentState, columns: number): PageLayout {
-  return layoutPageContent(document.snapshot.content, columns);
+  return layoutPageContent(document.snapshot.content, documentContentColumns(columns));
+}
+
+export function documentContentBounds(bounds: Rect): Rect {
+  const width = documentContentColumns(bounds.width);
+  return {
+    row: bounds.row,
+    column: bounds.column + Math.floor((bounds.width - width) / 2),
+    width,
+    height: bounds.height
+  };
 }
 
 export function documentScrollRow(document: BrowserDocumentState, layout: PageLayout): number {

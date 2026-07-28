@@ -15,7 +15,6 @@ import {
   dialog,
   field,
   form,
-  helpBar,
   numberInput,
   passwordInput,
   progressBar,
@@ -37,12 +36,14 @@ import {
 } from "@ismail-elkorchi/terminal-ui/component";
 import { column, overlay, row, surface, viewport } from "@ismail-elkorchi/terminal-ui/layout";
 import type { RoutedPointerEvent } from "@ismail-elkorchi/terminal-ui/input";
+import type { RenderSpan, TerminalStyle } from "@ismail-elkorchi/terminal-ui/renderer";
 import type { TuiContext } from "@ismail-elkorchi/terminal-ui/tui";
 
 import { extractForms, type FormControl, type FormEntry } from "../app/forms.js";
-import type { PageAction, PageBlock } from "../app/types.js";
+import type { PageAction, PageBlock, PageLayoutRow } from "../app/types.js";
 import {
   activeSearchMatch,
+  documentContentBounds,
   documentLayout,
   documentScrollRow
 } from "./document-layout.js";
@@ -75,34 +76,107 @@ function accessibleBlock(block: PageBlock) {
   return { id: block.id, role: "text" as const, label: block.text };
 }
 
+function blockStyle(block: PageBlock): TerminalStyle {
+  if (block.kind === "heading") {
+    return {
+      fg: {
+        kind: "theme",
+        token: block.level === 1 ? "accent.primary" : "text.strong"
+      },
+      bold: true
+    };
+  }
+  if (block.kind === "quote") {
+    return { fg: { kind: "theme", token: "text.muted" }, italic: true };
+  }
+  if (block.kind === "notice") {
+    return { fg: { kind: "theme", token: "status.warning" } };
+  }
+  return { fg: { kind: "theme", token: "text.default" } };
+}
+
 function rowSegments(
   document: BrowserDocumentState,
-  rowText: string,
+  block: PageBlock,
+  layoutRow: PageLayoutRow,
   rowIndex: number,
-  focused: boolean
-) {
-  if (focused) return [{ text: rowText, style: { bold: true, underline: true } }];
+  focusedActionId: string | undefined
+): readonly RenderSpan[] {
+  const rowText = layoutRow.text;
+  const visibleBlockText = block.text.slice(
+    layoutRow.blockTextStartCodeUnitIndex,
+    layoutRow.blockTextEndCodeUnitIndexExclusive
+  );
+  const contentStart = Math.max(0, rowText.length - visibleBlockText.length);
+  const links = document.snapshot.content.links.flatMap((link) => {
+    if (link.blockId !== block.id) return [];
+    const start = Math.max(link.textOffset, layoutRow.blockTextStartCodeUnitIndex);
+    const end = Math.min(
+      link.textOffset + link.label.length,
+      layoutRow.blockTextEndCodeUnitIndexExclusive
+    );
+    return start >= end
+      ? []
+      : [{
+        link,
+        start: contentStart + start - layoutRow.blockTextStartCodeUnitIndex,
+        end: contentStart + end - layoutRow.blockTextStartCodeUnitIndex
+      }];
+  });
   const query = document.search?.query ?? "";
-  if (query.length === 0) return [{ text: rowText }];
   const active = activeSearchMatch(document);
-  const normalizedRow = rowText.toLocaleLowerCase();
-  const normalizedQuery = query.toLocaleLowerCase();
-  const segments = [];
-  let start = 0;
-  while (start < rowText.length) {
-    const match = normalizedRow.indexOf(normalizedQuery, start);
-    if (match < 0) {
-      segments.push({ text: rowText.slice(start) });
-      break;
+  const searchRanges: { readonly start: number; readonly end: number; readonly active: boolean }[] = [];
+  if (query.length > 0) {
+    const normalizedRow = rowText.toLocaleLowerCase();
+    const normalizedQuery = query.toLocaleLowerCase();
+    let start = 0;
+    while (start < rowText.length) {
+      const match = normalizedRow.indexOf(normalizedQuery, start);
+      if (match < 0) break;
+      searchRanges.push({
+        start: match,
+        end: match + query.length,
+        active: active?.rowIndex === rowIndex
+          && active.startCodeUnitIndex === layoutRow.blockTextStartCodeUnitIndex + match - contentStart
+      });
+      start = match + Math.max(1, query.length);
     }
-    if (match > start) segments.push({ text: rowText.slice(start, match) });
-    segments.push({
-      text: rowText.slice(match, match + query.length),
-      style: active?.rowIndex === rowIndex ? { inverse: true, bold: true } : { underline: true }
-    });
-    start = match + Math.max(1, query.length);
   }
-  return segments.length === 0 ? [{ text: rowText }] : segments;
+  const boundaries = new Set([0, rowText.length]);
+  for (const range of [...links, ...searchRanges]) {
+    boundaries.add(range.start);
+    boundaries.add(range.end);
+  }
+  const positions = [...boundaries].sort((left, right) => left - right);
+  const spans: RenderSpan[] = [];
+  for (let index = 0; index < positions.length - 1; index += 1) {
+    const start = positions[index] ?? 0;
+    const end = positions[index + 1] ?? rowText.length;
+    if (start >= end) continue;
+    const link = links.find((range) => range.start <= start && range.end >= end)?.link;
+    const search = searchRanges.find((range) => range.start <= start && range.end >= end);
+    const style: TerminalStyle = {
+      ...blockStyle(block),
+      ...(link === undefined
+        ? {}
+        : {
+          fg: { kind: "theme" as const, token: "link.foreground" as const },
+          underline: true
+        }),
+      ...(link?.id === focusedActionId ? { inverse: true, bold: true } : {}),
+      ...(search === undefined
+        ? {}
+        : search.active
+          ? { inverse: true, bold: true }
+          : { underline: true })
+    };
+    spans.push({
+      text: rowText.slice(start, end),
+      style,
+      ...(link === undefined ? {} : { link: { href: link.resolvedHref, id: link.id } })
+    });
+  }
+  return spans;
 }
 
 function forms(document: BrowserDocumentState): readonly FormEntry[] {
@@ -362,22 +436,23 @@ const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, Bro
   layout({ state, bounds, childCount, measureChild }) {
     const layout = documentLayout(state, bounds.width);
     const scrollRow = documentScrollRow(state, layout);
+    const contentBounds = documentContentBounds(bounds);
     const entries = forms(state);
     return Array.from({ length: childCount }, (_, index) => {
       const entry = entries[index];
-      if (!entry) return { row: bounds.row, column: bounds.column, width: 0, height: 0 };
+      if (!entry) return { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 };
       const first = layout.rows.findIndex((candidate) => candidate.blockId === entry.id);
       const count = layout.rows.filter((candidate) => candidate.blockId === entry.id).length;
       const localRow = first - scrollRow;
-      if (first < 0 || localRow < 0 || localRow >= bounds.height) {
-        return { row: bounds.row, column: bounds.column, width: 0, height: 0 };
+      if (first < 0 || localRow < 0 || localRow >= contentBounds.height) {
+        return { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 };
       }
       const childHeight = Math.max(count, measureChild(index).preferredHeight);
       return {
-        row: bounds.row + localRow,
-        column: bounds.column,
-        width: bounds.width,
-        height: Math.max(0, Math.min(childHeight, bounds.height - localRow))
+        row: contentBounds.row + localRow,
+        column: contentBounds.column,
+        width: contentBounds.width,
+        height: Math.max(0, Math.min(childHeight, contentBounds.height - localRow))
       };
     });
   },
@@ -386,16 +461,19 @@ const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, Bro
     const layout = documentLayout(state, bounds.width);
     const scrollRow = documentScrollRow(state, layout);
     const focusedAction = actionForId(state, focusedTargetId);
-    const focusedPlacement = layout.actionPlacements.find((placement) => placement.actionId === focusedAction?.id);
+    const contentBounds = documentContentBounds(bounds);
+    const blocksById = new Map(state.snapshot.content.blocks.map((block) => [block.id, block]));
     const formIds = new Set(forms(state).map((entry) => entry.id));
-    for (let localRow = 0; localRow < bounds.height; localRow += 1) {
+    for (let localRow = 0; localRow < contentBounds.height; localRow += 1) {
       const rowIndex = scrollRow + localRow;
       const layoutRow = layout.rows[rowIndex];
       if (!layoutRow || formIds.has(layoutRow.blockId)) continue;
+      const block = blocksById.get(layoutRow.blockId);
+      if (!block) continue;
       target.write(
-        bounds.row + localRow,
-        bounds.column,
-        rowSegments(state, layoutRow.text, rowIndex, focusedPlacement?.rowIndex === rowIndex)
+        contentBounds.row + localRow,
+        contentBounds.column,
+        rowSegments(state, block, layoutRow, rowIndex, focusedAction?.id)
       );
     }
   },
@@ -446,57 +524,68 @@ const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, Bro
     if (bounds.width <= 0 || bounds.height <= 0) return [];
     const layout = documentLayout(state, bounds.width);
     const scrollRow = documentScrollRow(state, layout);
+    const contentBounds = documentContentBounds(bounds);
+    const seen = new Set<string>();
     return layout.actionPlacements
-      .filter((placement) => {
+      .flatMap((placement) => {
         const action = actionForId(state, placement.actionId);
-        return action?.kind === "link"
-          && placement.rowIndex >= scrollRow
-          && placement.rowIndex < scrollRow + bounds.height;
-      })
-      .map((placement) => ({
-        id: placement.actionId,
-        bounds: {
-          row: bounds.row + placement.rowIndex - scrollRow,
-          column: bounds.column + Math.min(bounds.width - 1, placement.columnIndex),
-          width: Math.max(1, Math.min(placement.width, bounds.width - Math.min(bounds.width - 1, placement.columnIndex))),
-          height: 1
+        if (action?.kind !== "link"
+          || seen.has(placement.actionId)
+          || placement.rowIndex < scrollRow
+          || placement.rowIndex >= scrollRow + contentBounds.height) {
+          return [];
         }
-      }));
+        seen.add(placement.actionId);
+        const columnIndex = Math.min(contentBounds.width - 1, placement.columnIndex);
+        return [{
+          id: placement.actionId,
+          bounds: {
+            row: contentBounds.row + placement.rowIndex - scrollRow,
+            column: contentBounds.column + columnIndex,
+            width: Math.max(1, Math.min(placement.width, contentBounds.width - columnIndex)),
+            height: 1
+          }
+        }];
+      });
   },
   hitTargets({ state, bounds }) {
     if (bounds.width <= 0 || bounds.height <= 0) return [];
     const layout = documentLayout(state, bounds.width);
     const scrollRow = documentScrollRow(state, layout);
+    const contentBounds = documentContentBounds(bounds);
     const linkTargets = layout.actionPlacements
       .filter((placement) => {
         const action = actionForId(state, placement.actionId);
         return action?.kind === "link"
           && placement.rowIndex >= scrollRow
-          && placement.rowIndex < scrollRow + bounds.height;
+          && placement.rowIndex < scrollRow + contentBounds.height;
       })
-      .map((placement) => ({
-        id: `activate:${placement.actionId}`,
-        bounds: {
-          row: bounds.row + placement.rowIndex - scrollRow,
-          column: bounds.column + Math.min(bounds.width - 1, placement.columnIndex),
-          width: Math.max(1, Math.min(placement.width, bounds.width - Math.min(bounds.width - 1, placement.columnIndex))),
-          height: 1
-        },
-        accepts: ["click" as const, "contextMenu" as const],
-        cursor: "pointer" as const,
-        focus: { kind: "target" as const, targetId: placement.actionId },
-        message: (event: RoutedPointerEvent): BrowserTuiMessage => ({
-          kind: "activateActionAt",
-          actionId: placement.actionId,
-          disposition: event.kind === "contextMenu" || event.button === "right"
-            ? "context"
-            : event.button === "middle"
-              ? "newBackground"
-              : event.modifiers.ctrl
-                ? "newForeground"
-                : "current"
-        })
-      }));
+      .map((placement) => {
+        const columnIndex = Math.min(contentBounds.width - 1, placement.columnIndex);
+        return {
+          id: `activate:${placement.actionId}:${String(placement.rowIndex)}:${String(placement.columnIndex)}`,
+          bounds: {
+            row: contentBounds.row + placement.rowIndex - scrollRow,
+            column: contentBounds.column + columnIndex,
+            width: Math.max(1, Math.min(placement.width, contentBounds.width - columnIndex)),
+            height: 1
+          },
+          accepts: ["click" as const, "contextMenu" as const],
+          cursor: "pointer" as const,
+          focus: { kind: "target" as const, targetId: placement.actionId },
+          message: (event: RoutedPointerEvent): BrowserTuiMessage => ({
+            kind: "activateActionAt",
+            actionId: placement.actionId,
+            disposition: event.kind === "contextMenu" || event.button === "right"
+              ? "context"
+              : event.button === "middle"
+                ? "newBackground"
+                : event.modifiers.ctrl
+                  ? "newForeground"
+                  : "current"
+          })
+        };
+      });
     return [{
       id: `scroll:${state.id}`,
       bounds,
@@ -538,6 +627,8 @@ function newTabDashboard(state: BrowserTuiState): Element<BrowserTuiMessage> {
   ], { gap: 1 }), {
     id: "new-tab-dashboard",
     padding: 1,
+    maxWidth: 80,
+    align: "center",
     meta: { accessibility: { role: "document", label: "New Tab" } }
   });
 }
@@ -644,9 +735,29 @@ function sidePanel(state: BrowserTuiState): Element<BrowserTuiMessage> {
   });
 }
 
-function toolbar(state: BrowserTuiState, document: BrowserDocumentState): Element<BrowserTuiMessage> {
+function toolbar(
+  state: BrowserTuiState,
+  document: BrowserDocumentState,
+  columns: number
+): Element<BrowserTuiMessage> {
   const bookmarked = state.bookmarks.some((entry) => entry.url === document.snapshot.finalUrl);
-  return row([
+  const omnibox = surface(commandInput({
+    id: "browser-omnibox",
+    prompt: document.loading ? "… " : "⌕ ",
+    placeholder: "Search or enter address",
+    presentation: commandInputPresentation(state.omnibox),
+    display: "popup",
+    placement: "below",
+    maxVisibleSuggestions: 8,
+    onAction: (action): BrowserTuiMessage => ({ kind: "omniboxAction", action }),
+    onSubmit: (value): BrowserTuiMessage => ({ kind: "omniboxSubmit", value }),
+    keys: { escape: (): BrowserTuiMessage => ({ kind: "cancelOmnibox" }) }
+  }), {
+    id: "browser-omnibox-surface",
+    appearance: "inset"
+  });
+  const showLibrary = columns >= 64;
+  return surface(row([
     button({ id: "browser-back", label: "←", disabled: !document.canGoBack, onPress: (): BrowserTuiMessage => ({ kind: "navigate", operation: "back" }) }),
     button({ id: "browser-forward", label: "→", disabled: !document.canGoForward, onPress: (): BrowserTuiMessage => ({ kind: "navigate", operation: "forward" }) }),
     button({
@@ -655,35 +766,30 @@ function toolbar(state: BrowserTuiState, document: BrowserDocumentState): Elemen
       onPress: (): BrowserTuiMessage => ({ kind: "navigate", operation: document.loading ? "stop" : "reload" })
     }),
     button({ id: "browser-new-tab", label: "+", onPress: (): BrowserTuiMessage => ({ kind: "newDocument" }) }),
-    commandInput({
-      id: "browser-omnibox",
-      prompt: document.loading ? "… " : "⌕ ",
-      placeholder: "Search or enter address",
-      presentation: commandInputPresentation(state.omnibox),
-      display: "popup",
-      placement: "below",
-      maxVisibleSuggestions: 8,
-      onAction: (action): BrowserTuiMessage => ({ kind: "omniboxAction", action }),
-      onSubmit: (value): BrowserTuiMessage => ({ kind: "omniboxSubmit", value }),
-      keys: { escape: (): BrowserTuiMessage => ({ kind: "cancelOmnibox" }) }
-    }),
+    omnibox,
     button({ id: "browser-bookmark", label: bookmarked ? "★" : "☆", onPress: (): BrowserTuiMessage => ({ kind: "toggleBookmark" }) }),
-    button({ id: "browser-library", label: "Library", onPress: (): BrowserTuiMessage => ({ kind: "toggleSidePanel", panel: "history" }) }),
+    ...(showLibrary
+      ? [button({ id: "browser-library", label: "Library", onPress: (): BrowserTuiMessage => ({ kind: "toggleSidePanel", panel: "history" }) })]
+      : []),
     button({ id: "browser-menu", label: "☰", onPress: (): BrowserTuiMessage => ({ kind: "openBrowserMenu" }) })
   ], {
     id: "browser-toolbar",
     gap: 1,
+    align: "center",
     sizes: [
-      { kind: "fixed", cells: 3 },
-      { kind: "fixed", cells: 3 },
-      { kind: "fixed", cells: 3 },
-      { kind: "fixed", cells: 3 },
+      { kind: "content" },
+      { kind: "content" },
+      { kind: "content" },
+      { kind: "content" },
       { kind: "fill" },
-      { kind: "fixed", cells: 3 },
-      { kind: "fixed", cells: 9 },
-      { kind: "fixed", cells: 3 }
+      { kind: "content" },
+      ...(showLibrary ? [{ kind: "content" as const }] : []),
+      { kind: "content" }
     ],
     meta: { accessibility: { role: "toolbar", label: "Browser navigation" } }
+  }), {
+    id: "browser-toolbar-surface",
+    appearance: "bar"
   });
 }
 
@@ -710,10 +816,10 @@ function findBar(state: BrowserTuiState): Element<BrowserTuiMessage> | null {
     gap: 1,
     sizes: [
       { kind: "fill" },
-      { kind: "fixed", cells: 7 },
-      { kind: "fixed", cells: 3 },
-      { kind: "fixed", cells: 3 },
-      { kind: "fixed", cells: 3 }
+      { kind: "content" },
+      { kind: "content" },
+      { kind: "content" },
+      { kind: "content" }
     ],
     meta: { accessibility: { role: "search", label: "Find in page" } }
   });
@@ -733,16 +839,16 @@ function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMe
       })
       : sidePanel(state)
     : pagePanel;
-  const layout = documentLayout(selected, state.sidePanel !== null && columns >= 100 ? columns - 41 : columns);
+  const layout = documentLayout(selected, state.sidePanel !== null && columns >= 100 ? columns - 40 : columns);
   const find = findBar(state);
   const selectedPanel = column([
-    toolbar(state, selected),
+    toolbar(state, selected, columns),
     ...(find === null ? [] : [find]),
     body
   ], {
     id: "browser-selected-tab",
     sizes: [
-      { kind: "fixed", cells: 1 },
+      { kind: "fixed", cells: 3 },
       ...(find === null ? [] : [{ kind: "fixed" as const, cells: 1 }]),
       { kind: "fill" }
     ]
@@ -776,25 +882,11 @@ function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMe
         kind: "text",
         text: `${String(documentScrollRow(selected, layout) + 1)}/${String(Math.max(1, layout.rows.length))}`
       }]
-    }),
-    helpBar({
-      id: "browser-help",
-      groups: [{
-        id: "browse",
-        bindings: [
-          { key: "Ctrl+L", label: "address/search" },
-          { key: "Ctrl+T/W", label: "new/close tab" },
-          { key: "Ctrl+F", label: "find" },
-          { key: ":", label: "actions" },
-          { key: "?", label: "help" }
-        ]
-      }]
     })
   ], {
     id: "browser-root",
     sizes: [
       { kind: "fill" },
-      { kind: "fixed", cells: 1 },
       { kind: "fixed", cells: 1 }
     ]
   });

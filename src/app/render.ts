@@ -5,6 +5,7 @@ import {
   type ElementNode,
   type HtmlNode
 } from "@ismail-elkorchi/html-parser";
+import { measureTextCells, segmentGraphemes } from "@ismail-elkorchi/terminal-ui/text";
 
 import { extractForms, type FormEntry } from "./forms.js";
 import { extractCompleteText } from "./text.js";
@@ -126,7 +127,7 @@ function inlineContent(nodes: readonly HtmlNode[], collector: ContentCollector):
       const textOffset = text.length;
       const index = collector.nextLinkNumber;
       collector.nextLinkNumber += 1;
-      text += `${label} [${String(index)}]`;
+      text += label;
       links.push({
         id: `link:${String(node.id)}`,
         kind: "link",
@@ -399,34 +400,56 @@ export function buildPageContent(input: PageContentInput): PageContent {
 }
 
 function prefixForBlock(block: PageBlock): string {
-  if (block.kind === "heading") return `${"#".repeat(block.level ?? 1)} `;
-  if (block.kind === "quote") return "> ".repeat(Math.max(1, block.depth ?? 1));
+  if (block.kind === "quote") return "│ ".repeat(Math.max(1, block.depth ?? 1));
   if (block.kind === "listItem") return "  ".repeat(block.depth ?? 0);
   return "";
 }
 
 function wrapLine(value: string, width: number): readonly WrappedRow[] {
   if (value.length === 0) return [{ text: "", startOffset: 0, endOffsetExclusive: 0 }];
+  const graphemes = segmentGraphemes(value);
   const rows: WrappedRow[] = [];
-  let start = 0;
-  while (start < value.length) {
-    const availableEnd = Math.min(value.length, start + width);
-    let end = availableEnd;
-    if (availableEnd < value.length) {
-      const breakAt = value.lastIndexOf(" ", availableEnd);
-      if (breakAt > start) end = breakAt;
+  let startIndex = 0;
+  while (startIndex < graphemes.length) {
+    let cells = 0;
+    let endIndex = startIndex;
+    let whitespaceIndex = -1;
+    while (endIndex < graphemes.length) {
+      const segment = graphemes[endIndex];
+      if (!segment) break;
+      if (endIndex > startIndex && cells + segment.cells > width) break;
+      cells += segment.cells;
+      if (/^\s+$/u.test(segment.text)) whitespaceIndex = endIndex;
+      endIndex += 1;
+      if (cells >= width) break;
     }
-    const text = value.slice(start, end).trimEnd();
-    rows.push({ text, startOffset: start, endOffsetExclusive: end });
-    start = end;
-    while (value[start] === " ") start += 1;
+    if (endIndex === startIndex) endIndex += 1;
+    let contentEndIndex = endIndex;
+    let nextStartIndex = endIndex;
+    if (endIndex < graphemes.length && whitespaceIndex >= startIndex) {
+      contentEndIndex = whitespaceIndex;
+      nextStartIndex = whitespaceIndex + 1;
+      while (nextStartIndex < graphemes.length && /^\s+$/u.test(graphemes[nextStartIndex]?.text ?? "")) {
+        nextStartIndex += 1;
+      }
+    }
+    const startOffset = graphemes[startIndex]?.startOffset ?? value.length;
+    const endOffsetExclusive = contentEndIndex >= graphemes.length
+      ? value.length
+      : graphemes[contentEndIndex]?.startOffset ?? value.length;
+    rows.push({
+      text: value.slice(startOffset, endOffsetExclusive),
+      startOffset,
+      endOffsetExclusive
+    });
+    startIndex = Math.max(startIndex + 1, nextStartIndex);
   }
   return rows;
 }
 
 function wrapBlock(block: PageBlock, columns: number): readonly WrappedRow[] {
   const prefix = prefixForBlock(block);
-  const width = Math.max(1, columns - prefix.length);
+  const width = Math.max(1, columns - measureTextCells(prefix).cells);
   if (block.kind === "preformatted") {
     let offset = 0;
     return block.text.split("\n").map((line) => {
@@ -451,6 +474,12 @@ function wrapBlock(block: PageBlock, columns: number): readonly WrappedRow[] {
   }));
 }
 
+/** Returns a readable document width with gutters on ordinary terminals. */
+export function documentContentColumns(availableColumns: number): number {
+  const columns = Math.max(1, Math.floor(availableColumns));
+  return columns < 40 ? columns : Math.min(100, columns - 4);
+}
+
 /** Derives terminal rows and action geometry from semantic page content. */
 export function layoutPageContent(content: PageContent, columns: number): PageLayout {
   const normalizedColumns = Math.max(1, Math.floor(columns));
@@ -468,12 +497,7 @@ export function layoutPageContent(content: PageContent, columns: number): PageLa
     const blockActions = actionsByBlock.get(block.id) ?? [];
     const firstRowIndex = rows.length;
     for (const [localIndex, row] of blockRows.entries()) {
-      const actionIds = blockActions
-        .filter((action) =>
-          action.textOffset >= row.startOffset
-          && (action.textOffset < row.endOffsetExclusive || row.endOffsetExclusive === block.text.length)
-        )
-        .map((action) => action.id);
+      const actionIds: string[] = [];
       rows.push({
         blockId: block.id,
         text: row.text,
@@ -482,13 +506,23 @@ export function layoutPageContent(content: PageContent, columns: number): PageLa
         blockTextEndCodeUnitIndexExclusive: row.endOffsetExclusive
       });
       for (const action of blockActions) {
-        if (!actionIds.includes(action.id)) continue;
-        const prefixWidth = prefixForBlock(block).length;
+        const actionStart = action.textOffset;
+        const actionEnd = action.textOffset + action.label.length;
+        const overlapStart = Math.max(actionStart, row.startOffset);
+        const overlapEnd = Math.min(actionEnd, row.endOffsetExclusive);
+        if (overlapStart >= overlapEnd) continue;
+        actionIds.push(action.id);
+        const prefixWidth = measureTextCells(prefixForBlock(block)).cells;
         actionPlacements.push({
           actionId: action.id,
           rowIndex: firstRowIndex + localIndex,
-          columnIndex: Math.max(0, action.textOffset - row.startOffset + prefixWidth),
-          width: Math.max(1, Math.min(action.label.length, normalizedColumns))
+          columnIndex: prefixWidth + measureTextCells(
+            block.text.slice(row.startOffset, overlapStart)
+          ).cells,
+          width: Math.max(1, Math.min(
+            measureTextCells(block.text.slice(overlapStart, overlapEnd)).cells,
+            normalizedColumns
+          ))
         });
       }
     }
@@ -507,7 +541,7 @@ export function layoutPageContent(content: PageContent, columns: number): PageLa
 /** Renders semantic page content through the same responsive layout used by the TUI. */
 export function renderDocumentToTerminal(input: RenderInput): RenderedPage {
   const content = buildPageContent(input);
-  const contentWidth = Math.max(40, input.width - 2);
+  const contentWidth = documentContentColumns(input.width);
   const layout = layoutPageContent(content, contentWidth);
   const lineByActionId = new Map(layout.actionPlacements.map((placement) => [placement.actionId, placement.rowIndex]));
   const links: RenderedLink[] = content.links.map((link) => ({
@@ -524,7 +558,7 @@ export function renderDocumentToTerminal(input: RenderInput): RenderedPage {
     for (const link of links) {
       lines.push(...wrapLine(
         `[${String(link.index)}] ${link.label} -> ${link.resolvedHref}`,
-        contentWidth
+        Math.max(1, contentWidth - 2)
       ).map((row) => `  ${row.text}`));
     }
   }

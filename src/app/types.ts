@@ -133,7 +133,7 @@ export interface PageLayoutRow {
   readonly blockTextEndCodeUnitIndexExclusive: number;
 }
 
-/** Terminal geometry for one stable page action. */
+/** Terminal geometry for one rendered segment of a stable page action. */
 export interface PageActionPlacement {
   readonly actionId: string;
   readonly rowIndex: number;

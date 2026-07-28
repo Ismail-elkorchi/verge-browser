@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { parse } from "@ismail-elkorchi/html-parser";
+import { measureTextCells } from "@ismail-elkorchi/terminal-ui/text";
 
 import {
   buildPageContent,
@@ -35,6 +36,10 @@ test("renderDocumentToTerminal collects links and renders body text", () => {
   assert.equal(renderedPage.links[0].resolvedHref, "https://example.com/docs");
   assert.ok(renderedPage.lines.some((line) => line.includes("Welcome")));
   assert.ok(renderedPage.lines.some((line) => line.includes("[1]")));
+  assert.equal(
+    renderedPage.lines.find((line) => line.includes("Open the")),
+    "Open the documentation for details."
+  );
 });
 
 test("semantic content keeps stable actions while terminal layout responds to width", () => {
@@ -87,8 +92,37 @@ test("semantic layout keeps link geometry with line breaks and table cells", () 
   );
   assert.equal(
     layout.rows[layout.actionPlacements.find((placement) => placement.actionId === tableLink.id).rowIndex].text,
-    "| Label | table link [2] |"
+    "| Label | table link |"
   );
+});
+
+test("semantic layout wraps Unicode and long links by terminal cells", () => {
+  const document = parse(`
+    <html><body>
+      <h1>Unicode page</h1>
+      <p>漢字🙂 e\u0301 <a href="/long">abcdefghijklmnopqrstuvwx</a></p>
+    </body></html>
+  `);
+  const content = buildPageContent({
+    tree: document.tree,
+    requestUrl: "https://example.com/",
+    finalUrl: "https://example.com/",
+    status: 200,
+    statusText: "OK",
+    fetchedAtIso: "2026-01-01T00:00:00.000Z"
+  });
+  const layout = layoutPageContent(content, 10);
+  const placements = layout.actionPlacements.filter(
+    (placement) => placement.actionId === content.links[0].id
+  );
+
+  assert.ok(layout.rows.every((row) => measureTextCells(row.text).cells <= 10));
+  assert.ok(placements.length >= 3);
+  assert.ok(placements.every((placement) =>
+    placement.columnIndex >= 0
+    && placement.width > 0
+    && placement.columnIndex + placement.width <= layout.columns
+  ));
 });
 
 test("renderDocumentToTerminal preserves preformatted whitespace", () => {
