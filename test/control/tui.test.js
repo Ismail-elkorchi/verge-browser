@@ -3,7 +3,6 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { setImmediate as defer } from "node:timers/promises";
 
 import { validateAccessibleSnapshot } from "@ismail-elkorchi/terminal-ui/accessibility";
 import { renderFramePlain } from "@ismail-elkorchi/terminal-ui/renderer";
@@ -104,12 +103,16 @@ async function fixture(options = {}) {
   return { runtime, harness, writes, prepared };
 }
 
-async function waitUntil(predicate) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (predicate()) return;
-    await defer();
+async function waitUntil(runtime, predicate) {
+  const signal = globalThis.AbortSignal.timeout(5_000);
+  while (!predicate()) {
+    try {
+      await runtime.nextChange(signal);
+    } catch (error) {
+      if (signal.aborted) assert.fail("Timed out waiting for the TUI state.");
+      throw error;
+    }
   }
-  assert.fail("Timed out waiting for the TUI state.");
 }
 
 function textEvent(text) {
@@ -177,10 +180,10 @@ test("Verge renders a browser shell and preserves navigation, focus, scrolling, 
   await runtime.resize({ columns: 72, rows: 24 });
   assert.equal(runtime.frame().focusPath?.includes(focusedActionId), true);
   await runtime.handleInput(keyEvent("enter"));
-  await waitUntil(() => runtime.state().documents[0].snapshot.finalUrl === "https://example.test/next");
+  await waitUntil(runtime, () => runtime.state().documents[0].snapshot.finalUrl === "https://example.test/next");
 
   await runtime.dispatch({ kind: "navigate", operation: "back" });
-  await waitUntil(() => runtime.state().documents[0].snapshot.finalUrl === "https://example.test/");
+  await waitUntil(runtime, () => runtime.state().documents[0].snapshot.finalUrl === "https://example.test/");
   assert.equal(runtime.state().documents[0].canGoForward, true);
   const initialBlockId = runtime.state().documents[0].scrollAnchor.blockId;
   const scrollTarget = runtime.frame().hitTargets?.find((target) => target.id.startsWith("scroll:"));
@@ -211,9 +214,9 @@ test("Verge cancels superseded omnibox navigation and keeps the latest page", as
   });
 
   await runtime.dispatch({ kind: "omniboxSubmit", value: "https://example.test/slow" });
-  await waitUntil(() => runtime.state().documents[0].loading);
+  await waitUntil(runtime, () => runtime.state().documents[0].loading);
   await runtime.dispatch({ kind: "omniboxSubmit", value: "https://example.test/next" });
-  await waitUntil(() => runtime.state().documents[0].snapshot.finalUrl === "https://example.test/next");
+  await waitUntil(runtime, () => runtime.state().documents[0].snapshot.finalUrl === "https://example.test/next");
 
   assert.equal(slowNavigationAborted, true);
   assert.equal(runtime.state().status.tone, "success");
@@ -290,7 +293,7 @@ test("Verge supports exact find, adaptive library panels, and inline semantic fo
   assert.ok(findRoleWithLabel(runtime.frame().accessibility.root, "combobox", "Language *"));
   assert.ok(findRoleWithLabel(runtime.frame().accessibility.root, "spinbutton", count.id));
   await runtime.dispatch({ kind: "submitForm", formId: form.id, submitterId: form.controls.find((control) => control.kind === "submit").id });
-  await waitUntil(() => runtime.state().documents[0].snapshot.finalUrl.includes("/search?"));
+  await waitUntil(runtime, () => runtime.state().documents[0].snapshot.finalUrl.includes("/search?"));
   assert.equal(runtime.state().documents[0].snapshot.content.title, "Results");
 });
 
@@ -298,10 +301,10 @@ test("Verge supports new tabs, restored tabs, bookmarks, downloads, exports, and
   const { runtime, writes } = await fixture();
 
   await runtime.dispatch({ kind: "toggleBookmark" });
-  await waitUntil(() => runtime.state().bookmarks.length === 1);
+  await waitUntil(runtime, () => runtime.state().bookmarks.length === 1);
 
   await runtime.dispatch({ kind: "newDocument", target: "https://example.test/next" });
-  await waitUntil(() => runtime.state().documents.length === 2);
+  await waitUntil(runtime, () => runtime.state().documents.length === 2);
   assert.equal(runtime.state().documents[1].snapshot.finalUrl, "https://example.test/next");
   await runtime.dispatch({ kind: "closeDocument" });
   assert.equal(runtime.state().documents.length, 1);
@@ -309,15 +312,15 @@ test("Verge supports new tabs, restored tabs, bookmarks, downloads, exports, and
   assert.equal(runtime.state().documents.length, 2);
 
   await runtime.dispatch({ kind: "download", target: "https://example.test/archive.bin" });
-  await waitUntil(() => runtime.state().downloads[0]?.status === "completed");
+  await waitUntil(runtime, () => runtime.state().downloads[0]?.status === "completed");
   assert.ok(writes.some((entry) => entry.kind === "download"));
 
   await runtime.dispatch({ kind: "openActionPalette" });
   await runtime.dispatch({ kind: "actionPaletteSubmit", value: "save text page.txt" });
-  await waitUntil(() => writes.some((entry) => entry.kind === "text"));
+  await waitUntil(runtime, () => writes.some((entry) => entry.kind === "text"));
   await runtime.dispatch({ kind: "openActionPalette" });
   await runtime.dispatch({ kind: "actionPaletteSubmit", value: "open-external" });
-  await waitUntil(() => writes.some((entry) => entry.kind === "openExternal"));
+  await waitUntil(runtime, () => writes.some((entry) => entry.kind === "openExternal"));
 
   await runtime.dispatch({ kind: "quit" });
   assert.equal(runtime.exit().status, "completed");
@@ -347,7 +350,7 @@ test("Verge restores persisted tabs, selection, and library panel", async () => 
 test("closing the final tab replaces it with the new-tab dashboard", async () => {
   const { runtime } = await fixture();
   await runtime.dispatch({ kind: "closeDocument" });
-  await waitUntil(() => runtime.state().documents[0]?.snapshot.finalUrl === "about:newtab");
+  await waitUntil(runtime, () => runtime.state().documents[0]?.snapshot.finalUrl === "about:newtab");
   assert.equal(runtime.state().documents.length, 1);
   assert.match(renderFramePlain(runtime.frame()), /New Tab/u);
 });
@@ -372,12 +375,12 @@ test("non-HTML navigation offers a download instead of replacing the page", asyn
   });
 
   await runtime.dispatch({ kind: "omniboxSubmit", value: archiveUrl });
-  await waitUntil(() => runtime.state().overlay?.kind === "downloadPrompt");
+  await waitUntil(runtime, () => runtime.state().overlay?.kind === "downloadPrompt");
   assert.equal(runtime.state().documents[0].snapshot.content.title, "Index");
   assert.match(renderFramePlain(runtime.frame()), /Download resource\?/u);
 
   await runtime.dispatch({ kind: "download", target: archiveUrl });
-  await waitUntil(() => runtime.state().downloads[0]?.status === "completed");
+  await waitUntil(runtime, () => runtime.state().downloads[0]?.status === "completed");
   assert.ok(writes.some((entry) => entry.kind === "download" && entry.url === archiveUrl));
 });
 
@@ -387,11 +390,11 @@ test("runTui owns the terminal lifecycle and exits through the app binding", asy
   await runtime.dispose();
   const harness = createTerminalHarness({ terminalSize: { columns: 100, rows: 24 } });
   const running = runTui(app, harness.host);
-  await waitUntil(() => harness.frames().length > 0);
   await harness.input("q");
   const exit = await running;
 
   assert.equal(exit.status, "completed");
   assert.equal(exit.reason, "quit");
+  assert.ok(harness.frames().length > 0);
   assert.equal(harness.restores().length, 1);
 });
