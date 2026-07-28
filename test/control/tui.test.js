@@ -283,12 +283,6 @@ test("browser chrome and document geometry remain readable from narrow to wide t
   const tabRows = new Set(wideFrame.cells
     .filter((cell) => cell.source?.elementId === "browser-tabs")
     .map((cell) => cell.row));
-  const tabLabelRows = new Set(wideFrame.cells
-    .filter((cell) =>
-      cell.source?.elementId === "browser-tabs"
-      && cell.source.partName === "label"
-    )
-    .map((cell) => cell.row));
   const toolbarSurfaceRows = new Set(wideFrame.cells
     .filter((cell) =>
       cell.source?.elementId === "browser-toolbar-surface"
@@ -300,13 +294,17 @@ test("browser chrome and document geometry remain readable from narrow to wide t
     .toSorted((left, right) => left.row - right.row || left.column - right.column)
     .map((cell) => cell.text)
     .join("");
+  const omniboxRows = new Set(wideFrame.cells
+    .filter((cell) => cell.source?.elementId === "browser-omnibox")
+    .map((cell) => cell.row));
 
   assert.equal(toolbarRows.size, 1);
-  assert.equal(tabRows.size, 2);
-  assert.deepEqual([...tabLabelRows], [Math.max(...tabRows)]);
-  assert.equal(toolbarSurfaceRows.size, 2);
+  assert.equal(tabRows.size, 1);
+  assert.equal(toolbarSurfaceRows.size, 1);
+  assert.equal(omniboxRows.size, 1);
   assert.equal(Math.min(...toolbarSurfaceRows), Math.max(...tabRows) + 1);
-  assert.equal([...toolbarRows][0], Math.min(...toolbarSurfaceRows));
+  assert.equal([...toolbarRows][0], [...omniboxRows][0]);
+  assert.equal([...omniboxRows][0], [...toolbarSurfaceRows][0]);
   assert.doesNotMatch(omniboxText, /›/u);
   assert.ok(wideFrame.cells.some((cell) =>
     cell.source?.elementId === "browser-tabs"

@@ -870,7 +870,7 @@ function toolbar(
   }), {
     id: "browser-toolbar-surface",
     appearance: "bar",
-    padding: { right: 1, bottom: 1, left: 1 }
+    padding: { right: 1, left: 1 }
   });
 }
 
@@ -932,7 +932,7 @@ function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMe
   ], {
     id: "browser-selected-tab",
     sizes: [
-      { kind: "fixed", cells: 2 },
+      { kind: "fixed", cells: 1 },
       ...(find === null ? [] : [{ kind: "fixed" as const, cells: 1 }]),
       { kind: "fill" }
     ]
@@ -942,7 +942,6 @@ function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMe
       id: "browser-tabs",
       selected: selected.id,
       maxTabWidth: 36,
-      tabBarRows: 2,
       tabs: state.documents.map((document) => ({
         id: document.id,
         label: `${document.loading ? "◌ " : ""}${document.snapshot.content.title}`,
