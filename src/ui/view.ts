@@ -4,6 +4,7 @@ import {
   createScrollState,
   createTextAreaState,
   numberInputPresentation,
+  scrollReducer,
   selectedSearchPickerEntry,
   textInputPresentation
 } from "@ismail-elkorchi/terminal-ui/behavior";
@@ -163,7 +164,7 @@ function rowSegments(
           fg: { kind: "theme" as const, token: "link.foreground" as const },
           underline: true
         }),
-      ...(link?.id === focusedActionId ? { inverse: true, bold: true } : {}),
+      ...(link !== undefined && link.id === focusedActionId ? { inverse: true, bold: true } : {}),
       ...(search === undefined
         ? {}
         : search.active
@@ -427,7 +428,7 @@ function inlineForm(document: BrowserDocumentState, entry: FormEntry): Element<B
   }
   return form(controls, {
     id: entry.id,
-    title: `${entry.method.toUpperCase()} ${entry.actionUrl}`,
+    title: entry.label,
     gap: 0
   });
 }
@@ -435,7 +436,6 @@ function inlineForm(document: BrowserDocumentState, entry: FormEntry): Element<B
 const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, BrowserTuiMessage> = {
   layout({ state, bounds, childCount, measureChild }) {
     const layout = documentLayout(state, bounds.width);
-    const scrollRow = documentScrollRow(state, layout);
     const contentBounds = documentContentBounds(bounds);
     const entries = forms(state);
     return Array.from({ length: childCount }, (_, index) => {
@@ -443,44 +443,53 @@ const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, Bro
       if (!entry) return { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 };
       const first = layout.rows.findIndex((candidate) => candidate.blockId === entry.id);
       const count = layout.rows.filter((candidate) => candidate.blockId === entry.id).length;
-      const localRow = first - scrollRow;
-      if (first < 0 || localRow < 0 || localRow >= contentBounds.height) {
+      if (first < 0) {
         return { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 };
       }
       const childHeight = Math.max(count, measureChild(index).preferredHeight);
       return {
-        row: contentBounds.row + localRow,
+        row: contentBounds.row + first,
         column: contentBounds.column,
         width: contentBounds.width,
-        height: Math.max(0, Math.min(childHeight, contentBounds.height - localRow))
+        height: childHeight
       };
     });
   },
-  render({ state, bounds, target, focusedTargetId }) {
+  render({ state, bounds, viewport: visibleBounds, target, focusedTargetId }) {
     if (bounds.width <= 0 || bounds.height <= 0) return;
     const layout = documentLayout(state, bounds.width);
-    const scrollRow = documentScrollRow(state, layout);
     const focusedAction = actionForId(state, focusedTargetId);
     const contentBounds = documentContentBounds(bounds);
     const blocksById = new Map(state.snapshot.content.blocks.map((block) => [block.id, block]));
     const formIds = new Set(forms(state).map((entry) => entry.id));
-    for (let localRow = 0; localRow < contentBounds.height; localRow += 1) {
-      const rowIndex = scrollRow + localRow;
+    const startIndex = Math.max(0, visibleBounds.row - contentBounds.row);
+    const endIndexExclusive = Math.min(
+      layout.rows.length,
+      visibleBounds.row + visibleBounds.height - contentBounds.row
+    );
+    for (let rowIndex = startIndex; rowIndex < endIndexExclusive; rowIndex += 1) {
       const layoutRow = layout.rows[rowIndex];
       if (!layoutRow || formIds.has(layoutRow.blockId)) continue;
       const block = blocksById.get(layoutRow.blockId);
       if (!block) continue;
       target.write(
-        contentBounds.row + localRow,
+        contentBounds.row + rowIndex,
         contentBounds.column,
         rowSegments(state, block, layoutRow, rowIndex, focusedAction?.id)
       );
     }
   },
-  accessibility({ id, state, bounds, focusedTargetId, children }) {
+  accessibility({ id, state, bounds, viewport: visibleBounds, focusedTargetId, children }) {
     const layout = documentLayout(state, bounds.width);
-    const startIndex = Math.min(documentScrollRow(state, layout), layout.rows.length);
-    const endIndexExclusive = Math.min(startIndex + bounds.height, layout.rows.length);
+    const contentBounds = documentContentBounds(bounds);
+    const startIndex = Math.min(
+      Math.max(0, visibleBounds.row - contentBounds.row),
+      layout.rows.length
+    );
+    const endIndexExclusive = Math.min(
+      Math.max(startIndex, visibleBounds.row + visibleBounds.height - contentBounds.row),
+      layout.rows.length
+    );
     const visibleBlockIds = new Set(layout.rows.slice(startIndex, endIndexExclusive).map((row) => row.blockId));
     const focusedAction = actionForId(state, focusedTargetId);
     const visibleActions = state.snapshot.content.actions.filter((action) =>
@@ -520,10 +529,9 @@ const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, Bro
       ]
     };
   },
-  focusTargets({ state, bounds }) {
+  focusTargets({ state, bounds, viewport: visibleBounds }) {
     if (bounds.width <= 0 || bounds.height <= 0) return [];
     const layout = documentLayout(state, bounds.width);
-    const scrollRow = documentScrollRow(state, layout);
     const contentBounds = documentContentBounds(bounds);
     const seen = new Set<string>();
     return layout.actionPlacements
@@ -531,8 +539,8 @@ const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, Bro
         const action = actionForId(state, placement.actionId);
         if (action?.kind !== "link"
           || seen.has(placement.actionId)
-          || placement.rowIndex < scrollRow
-          || placement.rowIndex >= scrollRow + contentBounds.height) {
+          || contentBounds.row + placement.rowIndex < visibleBounds.row
+          || contentBounds.row + placement.rowIndex >= visibleBounds.row + visibleBounds.height) {
           return [];
         }
         seen.add(placement.actionId);
@@ -540,7 +548,7 @@ const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, Bro
         return [{
           id: placement.actionId,
           bounds: {
-            row: contentBounds.row + placement.rowIndex - scrollRow,
+            row: contentBounds.row + placement.rowIndex,
             column: contentBounds.column + columnIndex,
             width: Math.max(1, Math.min(placement.width, contentBounds.width - columnIndex)),
             height: 1
@@ -548,24 +556,23 @@ const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, Bro
         }];
       });
   },
-  hitTargets({ state, bounds }) {
+  hitTargets({ state, bounds, viewport: visibleBounds }) {
     if (bounds.width <= 0 || bounds.height <= 0) return [];
     const layout = documentLayout(state, bounds.width);
-    const scrollRow = documentScrollRow(state, layout);
     const contentBounds = documentContentBounds(bounds);
-    const linkTargets = layout.actionPlacements
+    return layout.actionPlacements
       .filter((placement) => {
         const action = actionForId(state, placement.actionId);
         return action?.kind === "link"
-          && placement.rowIndex >= scrollRow
-          && placement.rowIndex < scrollRow + contentBounds.height;
+          && contentBounds.row + placement.rowIndex >= visibleBounds.row
+          && contentBounds.row + placement.rowIndex < visibleBounds.row + visibleBounds.height;
       })
       .map((placement) => {
         const columnIndex = Math.min(contentBounds.width - 1, placement.columnIndex);
         return {
           id: `activate:${placement.actionId}:${String(placement.rowIndex)}:${String(placement.columnIndex)}`,
           bounds: {
-            row: contentBounds.row + placement.rowIndex - scrollRow,
+            row: contentBounds.row + placement.rowIndex,
             column: contentBounds.column + columnIndex,
             width: Math.max(1, Math.min(placement.width, contentBounds.width - columnIndex)),
             height: 1
@@ -586,25 +593,35 @@ const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, Bro
           })
         };
       });
-    return [{
-      id: `scroll:${state.id}`,
-      bounds,
-      accepts: ["scroll" as const],
-      message: (event): BrowserTuiMessage => ({
-        kind: "scroll",
-        rows: event.deltaRows * 3
-      })
-    }, ...linkTargets];
   }
 };
 
-function browserDocument(document: BrowserDocumentState): Element<BrowserTuiMessage> {
+function browserDocument(
+  document: BrowserDocumentState,
+  availableColumns: number
+): Element<BrowserTuiMessage> {
+  const contentColumns = Math.max(1, Math.floor(availableColumns) - 1);
+  const layout = documentLayout(document, contentColumns);
+  const scrollRow = documentScrollRow(document, layout);
   const children = forms(document).map((entry) => inlineForm(document, entry));
-  return customComposite({
+  const content = customComposite({
     id: `browser-${document.id}`,
     renderer: browserDocumentRenderer,
     state: document,
     children
+  });
+  return viewport(content, {
+    id: `browser-viewport-${document.id}`,
+    scrollRow,
+    scrollColumn: 0,
+    contentRows: layout.rows.length,
+    contentColumns,
+    scrollbar: { axis: "vertical", visible: "auto" },
+    scrollPolicy: { wheel: { unit: "line", rows: 3 } },
+    onScroll: (event): BrowserTuiMessage => ({
+      kind: "scrollTo",
+      row: scrollReducer(event.scroll, event.action).offsetRow
+    })
   });
 }
 
@@ -756,22 +773,23 @@ function toolbar(
     id: "browser-omnibox-surface",
     appearance: "inset"
   });
-  const showLibrary = columns >= 64;
+  const showLibrary = columns >= 96;
   return surface(row([
-    button({ id: "browser-back", label: "←", disabled: !document.canGoBack, onPress: (): BrowserTuiMessage => ({ kind: "navigate", operation: "back" }) }),
-    button({ id: "browser-forward", label: "→", disabled: !document.canGoForward, onPress: (): BrowserTuiMessage => ({ kind: "navigate", operation: "forward" }) }),
+    button({ id: "browser-back", label: "←", density: "compact", disabled: !document.canGoBack, onPress: (): BrowserTuiMessage => ({ kind: "navigate", operation: "back" }) }),
+    button({ id: "browser-forward", label: "→", density: "compact", disabled: !document.canGoForward, onPress: (): BrowserTuiMessage => ({ kind: "navigate", operation: "forward" }) }),
     button({
       id: "browser-reload",
       label: document.loading ? "■" : "↻",
+      density: "compact",
       onPress: (): BrowserTuiMessage => ({ kind: "navigate", operation: document.loading ? "stop" : "reload" })
     }),
-    button({ id: "browser-new-tab", label: "+", onPress: (): BrowserTuiMessage => ({ kind: "newDocument" }) }),
+    button({ id: "browser-new-tab", label: "+", density: "compact", onPress: (): BrowserTuiMessage => ({ kind: "newDocument" }) }),
     omnibox,
-    button({ id: "browser-bookmark", label: bookmarked ? "★" : "☆", onPress: (): BrowserTuiMessage => ({ kind: "toggleBookmark" }) }),
+    button({ id: "browser-bookmark", label: bookmarked ? "★" : "☆", density: "compact", onPress: (): BrowserTuiMessage => ({ kind: "toggleBookmark" }) }),
     ...(showLibrary
-      ? [button({ id: "browser-library", label: "Library", onPress: (): BrowserTuiMessage => ({ kind: "toggleSidePanel", panel: "history" }) })]
+      ? [button({ id: "browser-library", label: "Library", density: "compact", onPress: (): BrowserTuiMessage => ({ kind: "toggleSidePanel", panel: "history" }) })]
       : []),
-    button({ id: "browser-menu", label: "☰", onPress: (): BrowserTuiMessage => ({ kind: "openBrowserMenu" }) })
+    button({ id: "browser-menu", label: "☰", density: "compact", onPress: (): BrowserTuiMessage => ({ kind: "openBrowserMenu" }) })
   ], {
     id: "browser-toolbar",
     gap: 1,
@@ -828,9 +846,10 @@ function findBar(state: BrowserTuiState): Element<BrowserTuiMessage> | null {
 function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMessage> {
   const selected = state.documents[state.activeDocumentIndex] ?? state.documents[0];
   if (!selected) throw new Error("The browser view requires an open document.");
+  const pageColumns = state.sidePanel !== null && columns >= 100 ? columns - 40 : columns;
   const pagePanel = selected.snapshot.finalUrl === "about:newtab"
     ? newTabDashboard(state)
-    : browserDocument(selected);
+    : browserDocument(selected, pageColumns);
   const body = state.sidePanel !== null
     ? columns >= 100
       ? row([pagePanel, sidePanel(state)], {
@@ -839,7 +858,7 @@ function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMe
       })
       : sidePanel(state)
     : pagePanel;
-  const layout = documentLayout(selected, state.sidePanel !== null && columns >= 100 ? columns - 40 : columns);
+  const layout = documentLayout(selected, Math.max(1, pageColumns - 1));
   const find = findBar(state);
   const selectedPanel = column([
     toolbar(state, selected, columns),
@@ -848,7 +867,7 @@ function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMe
   ], {
     id: "browser-selected-tab",
     sizes: [
-      { kind: "fixed", cells: 3 },
+      { kind: "fixed", cells: 1 },
       ...(find === null ? [] : [{ kind: "fixed" as const, cells: 1 }]),
       { kind: "fill" }
     ]

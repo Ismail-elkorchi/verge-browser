@@ -189,7 +189,9 @@ test("Verge renders a browser shell and preserves navigation, focus, scrolling, 
   await waitUntil(runtime, () => runtime.state().documents[0].snapshot.finalUrl === "https://example.test/");
   assert.equal(runtime.state().documents[0].canGoForward, true);
   const initialBlockId = runtime.state().documents[0].scrollAnchor.blockId;
-  const scrollTarget = runtime.frame().hitTargets?.find((target) => target.id.startsWith("scroll:"));
+  const scrollTarget = runtime.frame().hitTargets?.find((target) =>
+    target.id.startsWith("browser-viewport-") && target.id.endsWith(":scroll:content")
+  );
   assert.ok(scrollTarget);
   await runtime.handleInput(wheelEvent(scrollTarget.bounds.row, scrollTarget.bounds.column, 1));
   await runtime.flushInput();
@@ -210,12 +212,12 @@ test("browser chrome and document geometry remain readable from narrow to wide t
     .join("");
   const linkCells = wideFrame.cells.filter((cell) => cell.link?.href === "https://example.test/next");
 
-  assert.match(backText, /^\[.*←.*\]$/u);
-  assert.ok(wideFrame.cells.some((cell) => cell.source?.elementId === "browser-omnibox-surface"));
+  assert.match(backText, /^\s*←\s*$/u);
+  assert.ok(wideFrame.cells.some((cell) => cell.source?.elementId === "browser-omnibox"));
   assert.doesNotMatch(wideText, /Ctrl\+L/u);
   assert.doesNotMatch(wideText, /^#+\s+Index$/mu);
   assert.ok(linkCells.length > 0);
-  assert.ok(linkCells.every((cell) => cell.column >= 71 && cell.column <= 170));
+  assert.ok(linkCells.every((cell) => cell.column >= 60 && cell.column <= 179));
   assert.ok(linkCells.every((cell) =>
     cell.style?.underline === true
     && cell.style.fg?.kind === "theme"
@@ -227,6 +229,22 @@ test("browser chrome and document geometry remain readable from narrow to wide t
     && cell.style.fg?.kind === "theme"
     && cell.style.fg.token === "accent.primary"
   ));
+  const proseRow = wideFrame.cells.find((cell) =>
+    cell.text === "P" && cell.column >= 60 && cell.link === undefined
+  )?.row;
+  assert.ok(proseRow);
+  assert.ok(wideFrame.cells
+    .filter((cell) => cell.row === proseRow && cell.link === undefined)
+    .every((cell) => cell.style?.inverse !== true));
+  assert.ok(wideFrame.cells.some((cell) =>
+    cell.source?.elementId?.startsWith("browser-viewport-")
+    && cell.source.partType === "thumb"
+  ));
+  const toolbarRows = new Set(wideFrame.cells
+    .filter((cell) => cell.source?.elementId?.startsWith("browser-"))
+    .filter((cell) => ["browser-back", "browser-forward", "browser-reload", "browser-new-tab", "browser-bookmark", "browser-library", "browser-menu"].includes(cell.source.elementId))
+    .map((cell) => cell.row));
+  assert.equal(toolbarRows.size, 1);
 
   for (const columns of [40, 80, 120, 240]) {
     await runtime.resize({ columns, rows: 40 });
@@ -234,7 +252,7 @@ test("browser chrome and document geometry remain readable from narrow to wide t
     assert.equal(validateAccessibleSnapshot(frame.accessibility).ok, true);
     assert.ok(frame.cells.every((cell) => cell.column + cell.width - 1 <= columns));
     assert.ok(renderFramePlain(frame).split("\n").every((line) => measureTextCells(line).cells <= columns));
-    if (columns < 64) {
+    if (columns < 96) {
       assert.equal(frame.cells.some((cell) => cell.source?.elementId === "browser-library"), false);
     }
   }

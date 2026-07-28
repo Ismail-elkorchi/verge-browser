@@ -25,6 +25,7 @@ test("extractForms preserves semantic controls, unchecked choices, and duplicate
 
   const form = extractForms(document.tree, "https://example.com/base")[0];
   assert.equal(form?.method, "get");
+  assert.equal(form?.label, "Search terms");
   assert.equal(form?.encoding, "application/x-www-form-urlencoded");
   assert.equal(form?.actionUrl, "https://example.com/search");
   assert.deepEqual(form?.controls.map((control) => [control.kind, control.name]), [
@@ -50,6 +51,7 @@ test("buildGetSubmissionUrl preserves ordering, duplicates, and explicit uncheck
   const form = {
     id: "form:1",
     index: 1,
+    label: "Search",
     method: "get",
     encoding: "application/x-www-form-urlencoded",
     actionUrl: "https://example.com/search",
@@ -72,6 +74,7 @@ test("buildFormSubmissionRequest includes only the activated submitter", () => {
     {
       id: "form:2",
       index: 2,
+      label: "Login",
       method: "post",
       encoding: "application/x-www-form-urlencoded",
       actionUrl: "https://example.com/login",
@@ -96,6 +99,7 @@ test("buildFormSubmissionRequest rejects unsupported encodings and methods", () 
   const base = {
     id: "form:3",
     index: 3,
+    label: "Upload",
     actionUrl: "https://example.com/upload",
     controls: []
   };

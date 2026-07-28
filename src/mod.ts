@@ -82,6 +82,7 @@ export type {
   PageActionPlacement,
   PageBlock,
   PageBlockKind,
+  PageRegion,
   PageContent,
   PageContentInput,
   PageFormAction,

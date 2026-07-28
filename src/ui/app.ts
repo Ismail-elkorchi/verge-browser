@@ -144,9 +144,10 @@ function persistEffect(
 }
 
 function contentColumns(state: BrowserTuiState, terminalColumns: number): number {
-  return state.sidePanel !== null && terminalColumns >= 100
+  const available = state.sidePanel !== null && terminalColumns >= 100
     ? Math.max(1, terminalColumns - 40)
     : Math.max(1, terminalColumns);
+  return Math.max(1, available - 1);
 }
 
 function pageFromSnapshot(
@@ -566,7 +567,7 @@ export function updateBrowser(
 ): TuiUpdateResult<BrowserTuiState, BrowserTuiMessage> {
   const document = activeDocument(state);
   const columns = contentColumns(state, context.terminalSize.columns);
-  const viewportRows = Math.max(1, context.terminalSize.rows - (state.findBar === null ? 5 : 6));
+  const viewportRows = Math.max(1, context.terminalSize.rows - (state.findBar === null ? 3 : 4));
   const layout = documentLayout(document, columns);
   switch (message.kind) {
     case "quit":
@@ -579,6 +580,10 @@ export function updateBrowser(
       }
       return result(updateDocument(state, document.id, (current) =>
         documentWithScrollRow(current, layout, documentScrollRow(current, layout) + message.rows, viewportRows)
+      ));
+    case "scrollTo":
+      return result(updateDocument(state, document.id, (current) =>
+        documentWithScrollRow(current, layout, message.row, viewportRows)
       ));
     case "scrollTop":
       return result(updateDocument(state, document.id, (current) => documentWithScrollRow(current, layout, 0, viewportRows)));

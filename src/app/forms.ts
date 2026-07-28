@@ -93,10 +93,32 @@ export type FormControl =
 export interface FormEntry {
   readonly id: string;
   readonly index: number;
+  readonly label: string;
   readonly method: string;
   readonly encoding: string;
   readonly actionUrl: string;
   readonly controls: readonly FormControl[];
+}
+
+function formLabel(formNode: ElementNode, controls: readonly FormControl[], index: number): string {
+  const explicit = getAttributeValue(formNode, "aria-label") ?? getAttributeValue(formNode, "title");
+  if (explicit?.trim()) return explicit.trim();
+  const legend = formNode.children.find(
+    (child): child is ElementNode =>
+      child.kind === "element" && child.localName.toLowerCase() === "legend"
+  );
+  const legendText = legend === undefined
+    ? ""
+    : extractCompleteText(legend).replace(/\s+/gu, " ").trim();
+  if (legendText.length > 0) return legendText;
+  const searchControl = controls.find(
+    (control): control is FormTextControl =>
+      control.kind === "text" && control.inputType === "search"
+  );
+  if (getAttributeValue(formNode, "role")?.toLowerCase() === "search" || searchControl !== undefined) {
+    return searchControl?.label ?? "Search";
+  }
+  return `Form ${String(index)}`;
 }
 
 export interface FormControlValue {
@@ -296,13 +318,16 @@ export function extractForms(tree: DocumentTree, baseUrl: string): readonly Form
   let formIndex = 0;
   for (const formNode of findAllByTagName(tree, "form")) {
     const actionRaw = getAttributeValue(formNode, "action") ?? baseUrl;
+    const controls = collectFormControls(formNode).map((control) => extractControl(control, labelsByTarget));
+    const index = formIndex + 1;
     forms.push({
       id: `form:${String(formNode.id)}`,
-      index: formIndex + 1,
+      index,
+      label: formLabel(formNode, controls, index),
       method: normalizeMethod(getAttributeValue(formNode, "method")),
       encoding: (getAttributeValue(formNode, "enctype") ?? "application/x-www-form-urlencoded").toLowerCase(),
       actionUrl: resolveHref(actionRaw, baseUrl),
-      controls: collectFormControls(formNode).map((control) => extractControl(control, labelsByTarget))
+      controls
     });
     formIndex += 1;
   }

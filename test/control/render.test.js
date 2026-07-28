@@ -201,7 +201,7 @@ test("renderDocumentToTerminal renders markdown-like table rows", () => {
 
   const joined = renderedPage.lines.join("\n");
   assert.ok(joined.includes("| Name"));
-  assert.ok(joined.includes("| ----"));
+  assert.ok(joined.includes("| ────"));
   assert.ok(joined.includes("Amina"));
 });
 
@@ -307,18 +307,102 @@ test("renderDocumentToTerminal exposes forms as stable visible actions", () => {
     width: 80
   });
 
-  assert.ok(renderedPage.lines.some((line) => line.includes("[Form 1")));
+  assert.ok(renderedPage.lines.some((line) => line === "Form 1"));
   assert.equal(renderedPage.actionables.length, 1);
   assert.deepEqual(renderedPage.actionables[0], {
     kind: "form",
     id: renderedPage.actionables[0].id,
     blockId: renderedPage.actionables[0].blockId,
     index: 1,
-    label: "Form 1 GET https://example.com/search",
+    label: "Form 1",
     method: "get",
     actionUrl: "https://example.com/search",
     fieldCount: 2,
     textOffset: 0,
-    lineIndex: 2
+    lineIndex: 1
   });
+});
+
+test("semantic content follows HTML visibility, landmarks, and disclosure state", () => {
+  const document = parse(`
+    <html><body>
+      <header><p>Site identity</p></header>
+      <main>
+        <p hidden>hidden attribute</p>
+        <p aria-hidden="true">aria hidden</p>
+        <dialog>closed dialog</dialog>
+        <details><summary>Collapsed summary</summary><p>collapsed details</p></details>
+        <details open><summary>Expanded summary</summary><p>expanded details</p></details>
+        <img src="/diagram.png" alt="Architecture diagram">
+        <img src="/decoration.png" alt="">
+      </main>
+    </body></html>
+  `);
+  const content = buildPageContent({
+    tree: document.tree,
+    requestUrl: "https://example.com/",
+    finalUrl: "https://example.com/",
+    status: 200,
+    statusText: "OK",
+    fetchedAtIso: "2026-01-01T00:00:00.000Z"
+  });
+  const joined = content.blocks.map((block) => block.text).join("\n");
+
+  assert.doesNotMatch(joined, /hidden attribute|aria hidden|closed dialog|collapsed details/u);
+  assert.match(joined, /Collapsed summary|Expanded summary|expanded details|▧ Architecture diagram/u);
+  assert.doesNotMatch(joined, /decoration/u);
+  assert.equal(content.blocks.find((block) => block.text === "Site identity")?.region, "banner");
+  assert.ok(content.blocks.filter((block) => block.region === "main").length >= 4);
+});
+
+test("semantic navigation deduplicates equivalent link sets", () => {
+  const document = parse(`
+    <html><body>
+      <nav aria-label="compact"><a href="/blog">Blog</a><a href="/about">About</a></nav>
+      <nav aria-label="expanded"><p>Explore</p><a href="/about">About us</a><a href="/blog">News</a></nav>
+      <main><h1>Page</h1><p>Body</p></main>
+    </body></html>
+  `);
+  const content = buildPageContent({
+    tree: document.tree,
+    requestUrl: "https://example.com/",
+    finalUrl: "https://example.com/",
+    status: 200,
+    statusText: "OK",
+    fetchedAtIso: "2026-01-01T00:00:00.000Z"
+  });
+
+  assert.equal(content.links.length, 2);
+  assert.equal(content.blocks.filter((block) => block.region === "navigation").length, 2);
+});
+
+test("layout uses structural spacing instead of blank rows after every block", () => {
+  const document = parse(`
+    <html><body><main>
+      <h1>Title</h1>
+      <p>Introduction</p>
+      <ul><li>One</li><li>Two</li><li>Three</li></ul>
+      <table><tr><td>A</td></tr><tr><td>B</td></tr></table>
+    </main></body></html>
+  `);
+  const content = buildPageContent({
+    tree: document.tree,
+    requestUrl: "https://example.com/",
+    finalUrl: "https://example.com/",
+    status: 200,
+    statusText: "OK",
+    fetchedAtIso: "2026-01-01T00:00:00.000Z"
+  });
+  const layout = layoutPageContent(content, 80);
+
+  assert.equal(
+    layout.rows.filter((row) => row.text === "" && row.blockId.startsWith("node:")).length,
+    2
+  );
+  assert.deepEqual(
+    layout.rows
+      .filter((row) => row.blockId.includes("node:") && row.text !== "")
+      .map((row) => row.text),
+    ["Title", "Introduction", "- One", "- Two", "- Three", "| A |", "| B |"]
+  );
 });

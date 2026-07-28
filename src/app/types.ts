@@ -71,12 +71,22 @@ export type RenderedActionable = RenderedLink | RenderedFormAction;
 export type PageBlockKind =
   | "heading"
   | "paragraph"
+  | "image"
   | "preformatted"
   | "listItem"
   | "tableRow"
   | "quote"
   | "form"
   | "notice";
+
+/** Semantic page landmark containing a block, when HTML exposes one. */
+export type PageRegion =
+  | "banner"
+  | "navigation"
+  | "main"
+  | "complementary"
+  | "contentinfo"
+  | "search";
 
 /** One semantic document block before terminal layout. */
 export interface PageBlock {
@@ -85,6 +95,7 @@ export interface PageBlock {
   readonly text: string;
   readonly level?: number;
   readonly depth?: number;
+  readonly region?: PageRegion;
 }
 
 interface PageActionBase {

@@ -148,6 +148,7 @@ export type BrowserTuiMessage =
   | { readonly kind: "quit" }
   | { readonly kind: "dismiss" }
   | { readonly kind: "scroll"; readonly rows: number }
+  | { readonly kind: "scrollTo"; readonly row: number }
   | { readonly kind: "scrollTop" }
   | { readonly kind: "scrollBottom" }
   | { readonly kind: "moveSearch"; readonly direction: "next" | "prev" }
