@@ -1,22 +1,41 @@
+import { dirname } from "node:path";
+
 import { outline as buildOutline, type Edit } from "@ismail-elkorchi/html-parser";
 
-import { buildFormSubmissionRequest, extractForms, type FormEntry } from "../app/forms.js";
+import {
+  buildFormSubmissionRequest,
+  extractForms,
+  type FormControlValue,
+  type FormEntry
+} from "../app/forms.js";
 import type { BrowserSession } from "../app/session.js";
-import type { BrowserStore } from "../app/storage.js";
+import {
+  type BrowserWorkspace,
+  type DownloadRecord,
+  type StoredSidePanel,
+  type BrowserStore
+} from "../app/storage.js";
 import type { PageRequestOptions, PageSnapshot } from "../app/types.js";
-import { resolveInputUrl } from "../app/url.js";
+import {
+  DEFAULT_SEARCH_URL_TEMPLATE,
+  resolveInputUrl,
+  resolveOmniboxInput
+} from "../app/url.js";
 import type { BrowserServices } from "./services.js";
 import type {
   BrowserDocumentState,
+  BrowserTuiState,
   DetailKind,
   PickerKind,
   PickerValue
 } from "./model.js";
 
+const DEFAULT_DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024;
+
 function excerpt(lines: readonly string[]): string {
   return lines
     .slice(0, 8)
-    .map((line) => line.replace(/\s+/g, " ").trim())
+    .map((line) => line.replace(/\s+/gu, " ").trim())
     .filter(Boolean)
     .join(" ")
     .slice(0, 220)
@@ -34,16 +53,13 @@ function diagnosticsLines(snapshot: PageSnapshot): readonly string[] {
   return [
     `URL: ${snapshot.finalUrl}`,
     `Status: ${String(snapshot.status)} ${snapshot.statusText}`,
+    `Content type: ${snapshot.contentType ?? "unknown"}`,
     `Parse mode: ${snapshot.diagnostics.parseMode}`,
     `Request method: ${snapshot.diagnostics.requestMethod}`,
     `Network outcome: ${snapshot.diagnostics.networkOutcome.kind}`,
     `Network detail: ${snapshot.diagnostics.networkOutcome.detailMessage}`,
     `Source bytes: ${String(snapshot.diagnostics.sourceBytes)}`,
     `Parse errors: ${String(snapshot.diagnostics.parseErrorCount)}`,
-    `Triage IDs: ${snapshot.diagnostics.triageIds.join(", ") || "(none)"}`,
-    `Fetch ms: ${String(snapshot.diagnostics.fetchDurationMs)}`,
-    `Parse ms: ${String(snapshot.diagnostics.parseDurationMs)}`,
-    `Content ms: ${String(snapshot.diagnostics.contentDurationMs)}`,
     `Total ms: ${String(snapshot.diagnostics.totalDurationMs)}`
   ];
 }
@@ -52,6 +68,9 @@ export interface BrowserControllerOptions {
   readonly store: BrowserStore;
   readonly services: BrowserServices;
   readonly createSession: () => BrowserSession;
+  readonly searchUrlTemplate?: string;
+  readonly downloadDirectory?: string;
+  readonly downloadMaxBytes?: number;
 }
 
 export interface BrowserPickerEntry {
@@ -65,6 +84,9 @@ export class BrowserController {
   readonly #store: BrowserStore;
   readonly #services: BrowserServices;
   readonly #createSession: () => BrowserSession;
+  readonly #searchUrlTemplate: string;
+  readonly #downloadDirectory: string;
+  readonly #downloadMaxBytes: number;
   readonly #sessions = new Map<string, BrowserSession>();
   #nextDocumentNumber = 1;
 
@@ -72,14 +94,92 @@ export class BrowserController {
     this.#store = options.store;
     this.#services = options.services;
     this.#createSession = options.createSession;
+    this.#searchUrlTemplate = options.searchUrlTemplate ?? DEFAULT_SEARCH_URL_TEMPLATE;
+    this.#downloadDirectory = options.downloadDirectory ?? "Downloads";
+    this.#downloadMaxBytes = options.downloadMaxBytes ?? DEFAULT_DOWNLOAD_MAX_BYTES;
   }
 
-  public async openInitial(target: string): Promise<BrowserDocumentState> {
-    const documentId = this.#newDocumentId();
-    const session = this.#createSession();
-    this.#sessions.set(documentId, session);
-    const snapshot = await this.#open(session, target);
-    return this.#document(documentId, snapshot);
+  public library() {
+    return {
+      history: this.#store.listHistory(),
+      bookmarks: this.#store.listBookmarks(),
+      downloads: this.#store.listDownloads()
+    };
+  }
+
+  public workspace(): BrowserWorkspace | null {
+    return this.#store.workspace();
+  }
+
+  public async saveWorkspace(state: BrowserTuiState): Promise<void> {
+    const workspace: BrowserWorkspace = {
+      documents: state.documents.map((document) => ({
+        url: document.snapshot.finalUrl,
+        scrollAnchor: document.scrollAnchor
+      })),
+      activeDocumentIndex: state.activeDocumentIndex,
+      sidePanel: state.sidePanel satisfies StoredSidePanel
+    };
+    await this.#store.saveWorkspace(workspace);
+  }
+
+  public async openInitial(
+    target: string,
+    scrollAnchor?: BrowserDocumentState["scrollAnchor"]
+  ): Promise<BrowserDocumentState> {
+    return this.#openNewDocument(target, undefined, scrollAnchor);
+  }
+
+  public resolveOmnibox(value: string, currentUrl: string): string {
+    return resolveOmniboxInput(value, currentUrl, this.#searchUrlTemplate);
+  }
+
+  public omniboxSuggestions(
+    value: string,
+    document: BrowserDocumentState,
+    limit = 8
+  ): readonly { readonly value: string; readonly label: string; readonly description?: string }[] {
+    const query = value.trim().toLowerCase();
+    const candidates = [
+      ...document.snapshot.content.links.map((link) => ({
+        value: link.resolvedHref,
+        label: link.label,
+        description: "Current page"
+      })),
+      ...this.#store.listBookmarks().map((entry) => ({
+        value: entry.url,
+        label: entry.name,
+        description: "Bookmark"
+      })),
+      ...this.#store.listHistory().map((entry) => ({
+        value: entry.url,
+        label: entry.title,
+        description: "History"
+      })),
+      ...this.#store.searchIndex(value, limit).map((entry) => ({
+        value: entry.url,
+        label: entry.title,
+        description: "Page text"
+      }))
+    ];
+    const seen = new Set<string>();
+    return candidates
+      .filter((entry) => {
+        if (seen.has(entry.value)) return false;
+        seen.add(entry.value);
+        return query.length === 0
+          || entry.value.toLowerCase().includes(query)
+          || entry.label.toLowerCase().includes(query);
+      })
+      .slice(0, limit);
+  }
+
+  public navigationAvailability(document: BrowserDocumentState): {
+    readonly canGoBack: boolean;
+    readonly canGoForward: boolean;
+  } {
+    const session = this.#session(document.id);
+    return { canGoBack: session.canBack(), canGoForward: session.canForward() };
   }
 
   public async navigate(
@@ -88,9 +188,8 @@ export class BrowserController {
     requestOptions: PageRequestOptions = {},
     parseMode: "text" | "stream" = "text"
   ): Promise<PageSnapshot> {
-    const session = this.#session(document.id);
     const resolvedTarget = resolveInputUrl(target, document.snapshot.finalUrl);
-    const snapshot = await session.openWithRequest(
+    const snapshot = await this.#session(document.id).openWithRequest(
       resolvedTarget,
       this.#withCookies(resolvedTarget, requestOptions),
       parseMode
@@ -124,21 +223,21 @@ export class BrowserController {
     return snapshot;
   }
 
-  public async openNew(target: string, signal?: AbortSignal): Promise<BrowserDocumentState> {
-    const id = this.#newDocumentId();
-    const session = this.#createSession();
-    this.#sessions.set(id, session);
-    const snapshot = await this.#open(session, target, signal);
-    return this.#document(id, snapshot);
+  public openNew(
+    target = "about:newtab",
+    signal?: AbortSignal
+  ): Promise<BrowserDocumentState> {
+    return this.#openNewDocument(target, signal);
   }
 
   public async submitForm(
     document: BrowserDocumentState,
     form: FormEntry,
-    values: Readonly<Record<string, string>>,
+    values: readonly FormControlValue[],
+    submitterId: string | undefined,
     signal?: AbortSignal
   ): Promise<PageSnapshot> {
-    const submission = buildFormSubmissionRequest(form, values);
+    const submission = buildFormSubmissionRequest(form, values, submitterId);
     return this.navigate(document, submission.url, {
       ...submission.requestOptions,
       ...(signal === undefined ? {} : { signal })
@@ -162,83 +261,44 @@ export class BrowserController {
   ): readonly BrowserPickerEntry[] {
     const active = documents[activeDocumentIndex];
     if (!active) return [];
-    switch (kind) {
-      case "documents":
-        return documents.map((document, index) => ({
-          id: document.id,
-          label: document.snapshot.content.title,
-          description: document.snapshot.finalUrl,
-          value: { kind: "document", index }
-        }));
-      case "links":
-        return active.snapshot.content.links.map((link) => ({
-          id: `link-${String(link.index)}`,
-          label: link.label,
-          description: link.resolvedHref,
-          value: { kind: "link", index: link.index, target: link.resolvedHref }
-        }));
-      case "history":
-        return this.#store.listHistory().map((entry, index) => ({
-          id: `history-${String(index)}`,
-          label: entry.title,
-          description: entry.url,
-          value: { kind: "history", index, target: entry.url }
-        }));
-      case "bookmarks":
-        return this.#store.listBookmarks().map((entry, index) => ({
-          id: `bookmark-${String(index)}`,
-          label: entry.name,
-          description: entry.url,
-          value: { kind: "bookmark", index, target: entry.url }
-        }));
-      case "forms":
-        return extractForms(active.snapshot.document.tree, active.snapshot.finalUrl).map((form) => ({
-          id: `form-${String(form.index)}`,
-          label: `${form.method.toUpperCase()} ${form.actionUrl}`,
-          description: `${String(form.fields.length)} fields`,
-          value: { kind: "form", index: form.index }
-        }));
-      case "outline":
-        return buildOutline(active.snapshot.document.tree).entries.map((entry, index) => {
-          const blockId = active.snapshot.content.blocks.find(
-            (block) => block.text.toLowerCase().includes(entry.text.trim().toLowerCase())
-          )?.id;
-          return {
-            id: `outline-${String(index)}`,
-            label: entry.text,
-            description: `<${entry.localName}>`,
-            value: {
-              kind: "outline",
-              index,
-              ...(blockId === undefined ? {} : { blockId })
-            }
-          };
-        });
-      case "recall":
-        return this.#store.searchIndex(query, 20).map((entry, index) => ({
-          id: `recall-${String(index)}`,
-          label: entry.title,
-          description: entry.url,
-          value: { kind: "recall", index, target: entry.url }
-        }));
+    if (kind === "links") {
+      return active.snapshot.content.links.map((link) => ({
+        id: `link-${String(link.index)}`,
+        label: link.label,
+        description: link.resolvedHref,
+        value: { kind: "link", index: link.index, target: link.resolvedHref }
+      }));
     }
+    if (kind === "outline") {
+      return buildOutline(active.snapshot.document.tree).entries.map((entry, index) => {
+        const blockId = active.snapshot.content.blocks.find(
+          (block) => block.text.toLowerCase().includes(entry.text.trim().toLowerCase())
+        )?.id;
+        return {
+          id: `outline-${String(index)}`,
+          label: entry.text,
+          description: `<${entry.localName}>`,
+          value: { kind: "outline", index, ...(blockId === undefined ? {} : { blockId }) }
+        };
+      });
+    }
+    return this.#store.searchIndex(query, 20).map((entry, index) => ({
+      id: `recall-${String(index)}`,
+      label: entry.title,
+      description: entry.url,
+      value: { kind: "recall", index, target: entry.url }
+    }));
   }
 
-  public form(document: BrowserDocumentState, formIndex: number) {
-    return extractForms(document.snapshot.document.tree, document.snapshot.finalUrl)
-      .find((form) => form.index === formIndex);
+  public forms(document: BrowserDocumentState): readonly FormEntry[] {
+    return extractForms(document.snapshot.document.tree, document.snapshot.finalUrl);
   }
 
-  public detail(kind: DetailKind, document: BrowserDocumentState): readonly string[] {
-    if (kind === "help") {
-      return [
-        "] / [ focus next / previous link or form",
-        "Enter activate · h back · f forward · r reload",
-        "g location · : actions · / find · n/N next/previous match",
-        "l links · D documents · H history · B bookmarks · F forms · o outline",
-        "m bookmark · t new tab · x close tab · u reopen tab · q quit"
-      ];
-    }
+  public form(document: BrowserDocumentState, formId: string): FormEntry | undefined {
+    return this.forms(document).find((form) => form.id === formId);
+  }
+
+  public detail(kind: Exclude<DetailKind, "help">, document: BrowserDocumentState): readonly string[] {
     if (kind === "diagnostics") return diagnosticsLines(document.snapshot);
     if (kind === "reader") return readerLines(document.snapshot);
     const cookies = this.#store.listCookies();
@@ -251,12 +311,12 @@ export class BrowserController {
       ]);
   }
 
-  public async addBookmark(document: BrowserDocumentState): Promise<string> {
-    const bookmark = await this.#store.addBookmark(
+  public async toggleBookmark(document: BrowserDocumentState, name?: string): Promise<string> {
+    const added = await this.#store.toggleBookmark(
       document.snapshot.finalUrl,
-      document.snapshot.content.title
+      name ?? document.snapshot.content.title
     );
-    return `Saved bookmark: ${bookmark.name}`;
+    return added ? "Bookmark added." : "Bookmark removed.";
   }
 
   public async clearCookies(): Promise<string> {
@@ -264,29 +324,96 @@ export class BrowserController {
     return "Cookie store cleared.";
   }
 
-  public editFormFieldExternally(value: string, label: string): Promise<string> {
-    return this.#services.editTextExternally(value, label);
-  }
-
   public async saveText(path: string, text: string): Promise<string> {
     await this.#services.writeTextFile(path, `${text}\n`);
     return `Saved text export to ${path}.`;
   }
 
-  public async download(document: BrowserDocumentState, path: string): Promise<string> {
+  public async savePage(document: BrowserDocumentState, path: string): Promise<string> {
     const source = document.snapshot.document.sourceText;
-    if (source === null) throw new Error("No HTML snapshot is available to download.");
+    if (source === null) throw new Error("No HTML source is available for this page.");
     await this.#services.writeTextFile(path, source);
-    return `Saved HTML snapshot to ${path}.`;
+    return `Saved page source to ${path}.`;
   }
 
-  public async openExternal(document: BrowserDocumentState): Promise<string> {
-    const actionable = document.focusedActionId === null
-      ? undefined
-      : document.snapshot.content.actions.find((action) => action.id === document.focusedActionId);
-    const target = actionable?.kind === "link" ? actionable.resolvedHref : document.snapshot.finalUrl;
+  public async download(
+    url: string,
+    id: string,
+    signal?: AbortSignal
+  ): Promise<DownloadRecord> {
+    const startedAtIso = new Date().toISOString();
+    const initial: DownloadRecord = {
+      id,
+      url,
+      fileName: new URL(url).pathname.split("/").filter(Boolean).at(-1) ?? "download",
+      destinationPath: null,
+      status: "downloading",
+      receivedBytes: 0,
+      totalBytes: null,
+      error: null,
+      startedAtIso,
+      updatedAtIso: startedAtIso
+    };
+    await this.#store.upsertDownload(initial);
+    try {
+      const cookie = this.#store.cookieHeaderForUrl(url);
+      const downloaded = await this.#services.downloadFile({
+        url,
+        directory: this.#downloadDirectory,
+        maxBytes: this.#downloadMaxBytes,
+        ...(cookie === null ? {} : { headers: { cookie } }),
+        ...(signal === undefined ? {} : { signal })
+      });
+      const completed: DownloadRecord = {
+        ...initial,
+        fileName: downloaded.fileName,
+        destinationPath: downloaded.path,
+        status: "completed",
+        receivedBytes: downloaded.receivedBytes,
+        totalBytes: downloaded.totalBytes,
+        updatedAtIso: new Date().toISOString()
+      };
+      await this.#store.upsertDownload(completed);
+      return completed;
+    } catch (error) {
+      const failed: DownloadRecord = {
+        ...initial,
+        status: signal?.aborted === true ? "interrupted" : "failed",
+        error: error instanceof Error ? error.message : String(error),
+        updatedAtIso: new Date().toISOString()
+      };
+      await this.#store.upsertDownload(failed);
+      throw Object.assign(error instanceof Error ? error : new Error(String(error)), { download: failed });
+    }
+  }
+
+  public async removeDownload(id: string): Promise<string> {
+    await this.#store.removeDownload(id);
+    return "Download removed from the list.";
+  }
+
+  public async openDownload(id: string, location: "file" | "directory"): Promise<string> {
+    const download = this.#store.listDownloads().find((entry) => entry.id === id);
+    if (!download?.destinationPath) throw new Error("The download has no completed file.");
+    await this.#services.openPath(location === "file" ? download.destinationPath : dirname(download.destinationPath));
+    return location === "file" ? "Opened downloaded file." : "Opened download directory.";
+  }
+
+  public async openExternal(target: string): Promise<string> {
     await this.#services.openExternal(target);
     return `Opened ${target} externally.`;
+  }
+
+  async #openNewDocument(
+    target: string,
+    signal?: AbortSignal,
+    scrollAnchor?: BrowserDocumentState["scrollAnchor"]
+  ): Promise<BrowserDocumentState> {
+    const id = this.#newDocumentId();
+    const session = this.#createSession();
+    this.#sessions.set(id, session);
+    const snapshot = await this.#open(session, target, signal);
+    return this.#document(id, snapshot, scrollAnchor);
   }
 
   async #open(session: BrowserSession, target: string, signal?: AbortSignal): Promise<PageSnapshot> {
@@ -309,6 +436,7 @@ export class BrowserController {
   }
 
   async #persist(snapshot: PageSnapshot, applyResponseCookies = true): Promise<void> {
+    if (snapshot.finalUrl.startsWith("about:")) return;
     if (applyResponseCookies && snapshot.setCookieHeaders.length > 0) {
       await this.#store.applySetCookieHeaders(snapshot.finalUrl, snapshot.setCookieHeaders);
     }
@@ -336,15 +464,28 @@ export class BrowserController {
     return id;
   }
 
-  #document(id: string, snapshot: PageSnapshot): BrowserDocumentState {
+  #document(
+    id: string,
+    snapshot: PageSnapshot,
+    restoredScrollAnchor?: BrowserDocumentState["scrollAnchor"]
+  ): BrowserDocumentState {
+    const firstAnchor = { blockId: snapshot.content.blocks[0]?.id ?? "page:empty", rowOffset: 0 };
     return {
       id,
       snapshot,
-      scrollAnchor: { blockId: snapshot.content.blocks[0]?.id ?? "page:empty", rowOffset: 0 },
-      focusedActionId: null,
+      scrollAnchor: restoredScrollAnchor
+        && snapshot.content.blocks.some((block) => block.id === restoredScrollAnchor.blockId)
+        ? restoredScrollAnchor
+        : firstAnchor,
       search: null,
+      formValues: {},
+      formEditors: {},
       savedViews: {},
-      loading: false
+      loading: false,
+      pendingUrl: null,
+      canGoBack: false,
+      canGoForward: false,
+      error: null
     };
   }
 }

@@ -1,180 +1,109 @@
 # @ismail-elkorchi/verge-browser
 
-Terminal browsing primitives with safe fetch helpers, HTML snapshots, and auditable text rendering.
-
-## When To Use
-
-- You need deterministic terminal rendering from HTML input.
-- You need command parsing, URL resolution, and policy-checked fetch helpers.
-- You need reproducible output for automation and audits.
-
-## What This Is Not
-
-- You need full browser JavaScript execution.
-- You need pixel-accurate rendering.
-- You need unrestricted network protocol access.
-
-## Behavioral Boundaries
-
-- The interactive `verge` CLI is supported from the npm package on Node.js.
-- The published JSR package is utility-only. It does not publish a global `verge` command.
-- Navigation retains semantic document blocks and stable link/form identities.
-- Terminal layout is derived from that content at the current width, so wrapping
-  can change without changing action identity or refetching the page.
-- Pages that depend on client-side JavaScript or anti-bot challenges can render partially or fail open with explicit diagnostics.
+A keyboard- and pointer-driven web browser for the terminal, plus reusable HTML
+fetching, parsing, and semantic rendering APIs.
 
 ## Install
 
-Node.js global CLI:
+The interactive CLI requires Node.js 24 or newer:
 
-```bash
+```sh
 npm install --global @ismail-elkorchi/verge-browser
+verge
 ```
 
-Open the built-in help screen or browse a page:
+Pass a URL to open it directly:
 
-```bash
-verge about:help
+```sh
 verge https://example.com
 ```
 
-Node.js library usage:
+Without a URL, Verge restores the previous tabs and scroll positions. A new
+profile starts on the New Tab dashboard.
 
-```bash
+## Browser controls
+
+```text
+Ctrl+L              address or web search
+Alt+Left/Right      back or forward
+Ctrl+R              reload; the toolbar button becomes Stop while loading
+Ctrl+F              find in page
+F3 / Shift+F3       next or previous match
+Ctrl+T / Ctrl+W     new or close tab
+Ctrl+Shift+T        reopen the last closed tab
+Ctrl+Tab            next tab
+Ctrl+1..9           select a tab
+Tab / Shift+Tab     move between browser and page controls
+Enter               activate the focused control
+: / ? / q           actions / help / quit
+```
+
+The address field accepts URLs, relative locations, and search terms. Search
+uses DuckDuckGo HTML by default. Set `VERGE_SEARCH_URL_TEMPLATE` to a URL
+containing `{query}` to use another engine.
+
+Verge renders links and HTML forms as terminal controls, including password
+fields that remain redacted from frames, accessibility snapshots, and
+transcripts. It also provides exact find results, bookmarks, history, downloads,
+reader output, page diagnostics, cookie inspection, and tab/workspace
+persistence. Non-HTML navigation offers to download the resource instead of
+replacing the current page.
+
+Downloads go to `Downloads` unless `VERGE_DOWNLOAD_DIR` is set. Partial files
+are removed after cancellation or failure, and existing files are not
+overwritten.
+
+## Plain output
+
+`--once` loads one target, renders the same browser element tree as plain text,
+and exits without terminal control sequences:
+
+```sh
+verge --once https://example.com
+```
+
+## Library
+
+```sh
 npm install @ismail-elkorchi/verge-browser
 ```
 
-JSR/Deno library usage:
-
-```bash
-deno add jsr:@ismail-elkorchi/verge-browser
-```
-
-The documented CLI distribution is the npm `verge` binary on Node.js. The
-JSR/Deno surface and Bun support in this package are library primitives, not a
-separately published global `verge` command.
-
-## CLI Quickstart
-
-Use the Node.js CLI when you want an interactive terminal session:
-
-```bash
-verge https://example.com
-```
-
-Inside the session, the primary browse loop is page-first:
-
-```txt
-] or Tab   focus the next link or control
-Enter      open the focused target
-h          go back
-g          open the location palette
-l          open the links overview
-?          open help
-q          quit
-```
-
-`verge` opens the first positional target immediately. If no target is provided, the CLI reopens the latest history URL when one exists, otherwise it falls back to `about:help`.
-
-`verge <url> --once` is an automation flag that loads the initial target and
-prints the same element tree as plain text, and exits without entering the
-interactive browsing loop. It does not require a TTY or emit terminal control
-sequences.
-
-Use `:` when you want the action palette instead of direct browse keys. Actions such as `documents`, `history`, `bookmark add`, `save text <path>`, `save csv <path>`, `download <path>`, and `open-external` all run from that palette.
-
-## Import
-
 ```ts
-import { parseCommand, renderDocumentToTerminal } from "@ismail-elkorchi/verge-browser";
-```
+import {
+  BrowserSession,
+  fetchPage,
+  parseHtml,
+  renderDocumentToTerminal,
+  resolveInputUrl
+} from "@ismail-elkorchi/verge-browser";
 
-```ts
-import { DEFAULT_SECURITY_POLICY, assertAllowedUrl, resolveHref, resolveInputUrl } from "jsr:@ismail-elkorchi/verge-browser";
-```
-
-Low-level parsing helpers such as `parseHtml()` are exported from `@ismail-elkorchi/verge-browser`, so npm consumers do not need a separate `@ismail-elkorchi/html-parser` install for normal library usage.
-
-The published JSR package currently exposes the safe URL and fetch-policy utility surface. Use the npm package for the full terminal browser and CLI-oriented API.
-
-## Copy/Paste Examples
-
-### Example 1: Parse command input
-
-```ts
-import { parseCommand } from "@ismail-elkorchi/verge-browser";
-
-const command = parseCommand("open https://example.com");
-console.log(command.kind);
-```
-
-### Example 2: Resolve URLs safely
-
-```ts
-import { resolveHref, resolveInputUrl } from "@ismail-elkorchi/verge-browser";
-
-const base = resolveInputUrl("example.com");
-console.log(resolveHref("/docs", base));
-```
-
-### Example 3: Render HTML to terminal output
-
-```ts
-import { parseHtml, renderDocumentToTerminal } from "@ismail-elkorchi/verge-browser";
-
-const document = parseHtml("<h1>Hello</h1>");
+const target = resolveInputUrl("example.com");
+const page = await fetchPage(target);
+const document = parseHtml(page.html);
 const rendered = renderDocumentToTerminal({
   tree: document.tree,
-  requestUrl: "https://example.com",
-  finalUrl: "https://example.com",
-  status: 200,
-  statusText: "OK",
-  fetchedAtIso: "2026-01-01T00:00:00.000Z",
+  requestUrl: page.requestUrl,
+  finalUrl: page.finalUrl,
+  status: page.status,
+  statusText: page.statusText,
+  fetchedAtIso: page.fetchedAtIso,
   width: 80
 });
 
-console.log(rendered.lines.length > 0);
+console.log(rendered.lines.join("\n"));
 ```
 
-### Example 4: Policy-checked fetch
+The npm package contains the full Node CLI and library. The JSR package exposes
+the permission-light URL and fetch-policy utilities for Deno. Library smoke
+checks also run on Bun.
 
-```ts
-import { assertAllowedUrl, fetchPage } from "@ismail-elkorchi/verge-browser";
+## Boundaries
 
-const url = "https://example.com";
-assertAllowedUrl(url);
-const page = await fetchPage(url);
-console.log(page.status);
-```
+Verge is an HTML browser, not a Chromium replacement. It does not execute page
+JavaScript, render pixels, or implement CSS layout. Client-rendered sites,
+anti-bot challenges, media, and unsupported form encodings may therefore be
+unavailable. Network access remains constrained by the package’s protocol,
+redirect, content-type, timeout, and size policies.
 
-Run packaged examples:
-
-```bash
-npm run examples:run
-```
-
-## Compatibility
-
-Runtime compatibility matrix:
-
-| Runtime | Status |
-| --- | --- |
-| Node.js | Supported (CLI and library) |
-| Deno | Supported (library primitives) |
-| Bun | Supported (library primitives) |
-| Browser (evergreen) | Supported (library primitives) |
-
-The Node.js package surface is verified against Node 24 and 26.
-
-## Security and Safety Notes
-
-- URL and protocol checks are mandatory for network workflows.
-- Parsing/rendering is deterministic but not a sanitizer for downstream HTML execution.
-- Handle `NetworkFetchError` as a first-class expected failure mode.
-- Expect remote output to reflect the package's allow-list, retry policy, and terminal width rather than browser-engine layout.
-
-## Documentation
-
-- [Docs index](https://github.com/Ismail-elkorchi/verge-browser/blob/main/docs/index.md)
-- [First session tutorial](https://github.com/Ismail-elkorchi/verge-browser/blob/main/docs/tutorial/first-session.md)
-- [CLI reference](https://github.com/Ismail-elkorchi/verge-browser/blob/main/docs/reference/cli.md)
+See the [first-session tutorial](docs/tutorial/first-session.md), [CLI
+reference](docs/reference/cli.md), and [API overview](docs/reference/api-overview.md).

@@ -244,7 +244,36 @@ function collectTable(node: ElementNode, collector: ContentCollector): void {
 function collectForm(node: ElementNode, collector: ContentCollector): void {
   const form = collector.formsById.get(`form:${String(node.id)}`);
   if (!form) return;
-  const text = `[Form ${String(form.index)} · ${form.method.toUpperCase()} ${form.actionUrl} · ${String(form.fields.length)} fields]`;
+  const visibleControls = form.controls.filter((control) => control.kind !== "hidden");
+  const radioGroups = new Set<string>();
+  const controlRows: number[] = [];
+  for (const control of visibleControls) {
+    if (control.kind === "radio") {
+      const groupName = control.name.length === 0 ? control.id : control.name;
+      if (radioGroups.has(groupName)) continue;
+      radioGroups.add(groupName);
+      const optionCount = visibleControls.filter((candidate) =>
+        candidate.kind === "radio"
+        && (control.name.length === 0 ? candidate.id === control.id : candidate.name === control.name)
+      ).length;
+      controlRows.push(optionCount + 1);
+      continue;
+    }
+    if (control.kind === "text") controlRows.push(2);
+    else if (control.kind === "textarea") controlRows.push(3);
+    else if (control.kind === "select" && control.multiple) controlRows.push(control.options.length + 1);
+    else controlRows.push(1);
+  }
+  const rowCount = Math.max(
+    2,
+    controlRows.reduce((sum, rows) => sum + rows, 0) + Math.max(0, controlRows.length - 1)
+  );
+  const text = Array.from(
+    { length: rowCount },
+    (_, index) => index === 0
+      ? `[Form ${String(form.index)} · ${form.method.toUpperCase()} ${form.actionUrl}]`
+      : " "
+  ).join("\n");
   const block: PageBlock = { id: form.id, kind: "form", text };
   collector.blocks.push(block);
   collector.actions.push({
@@ -255,7 +284,7 @@ function collectForm(node: ElementNode, collector: ContentCollector): void {
     label: `Form ${String(form.index)} ${form.method.toUpperCase()} ${form.actionUrl}`,
     method: form.method,
     actionUrl: form.actionUrl,
-    fieldCount: form.fields.length,
+    fieldCount: visibleControls.length,
     textOffset: 0
   });
 }
@@ -445,7 +474,13 @@ export function layoutPageContent(content: PageContent, columns: number): PageLa
           && (action.textOffset < row.endOffsetExclusive || row.endOffsetExclusive === block.text.length)
         )
         .map((action) => action.id);
-      rows.push({ blockId: block.id, text: row.text, actionIds });
+      rows.push({
+        blockId: block.id,
+        text: row.text,
+        actionIds,
+        blockTextStartCodeUnitIndex: row.startOffset,
+        blockTextEndCodeUnitIndexExclusive: row.endOffsetExclusive
+      });
       for (const action of blockActions) {
         if (!actionIds.includes(action.id)) continue;
         const prefixWidth = prefixForBlock(block).length;
@@ -457,7 +492,13 @@ export function layoutPageContent(content: PageContent, columns: number): PageLa
         });
       }
     }
-    rows.push({ blockId: `${block.id}:spacing`, text: "", actionIds: [] });
+    rows.push({
+      blockId: `${block.id}:spacing`,
+      text: "",
+      actionIds: [],
+      blockTextStartCodeUnitIndex: 0,
+      blockTextEndCodeUnitIndexExclusive: 0
+    });
   }
   if (rows.at(-1)?.text === "") rows.pop();
   return { columns: normalizedColumns, rows, actionPlacements };

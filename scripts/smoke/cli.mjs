@@ -41,6 +41,9 @@ async function runSmokeCheck() {
     if (!once.stdout.includes("Index") || !once.stdout.includes("Next page")) {
       throw new Error("CLI --once did not render the initial document.");
     }
+    if (!once.stdout.includes(target) || once.stdout.indexOf(target) > once.stdout.indexOf("# Index")) {
+      throw new Error("CLI --once did not render browser chrome before the document.");
+    }
     if (once.stdout.includes("\u001b")) {
       throw new Error("CLI --once emitted terminal control sequences.");
     }

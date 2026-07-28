@@ -35,7 +35,6 @@ test("BrowserStore persists bookmarks and history", async () => {
       "https://example.com/docs"
     ]);
 
-    assert.equal(store.latestHistoryUrl(), "https://example.com/blog");
     assert.equal(store.listCookies().length, 1);
     assert.equal(store.cookieHeaderForUrl("https://example.com/path"), "sid=abc");
 
@@ -68,6 +67,48 @@ test("BrowserStore recovers from corrupted JSON state file", async () => {
     await store.recordHistory("https://example.com/", "Example");
     const payload = JSON.parse(await readFile(statePath, "utf8"));
     assert.equal(payload.history[0].url, "https://example.com/");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("BrowserStore serializes concurrent history, workspace, and download writes", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "verge-store-concurrent-"));
+  const statePath = join(tempDir, "state.json");
+
+  try {
+    const store = await BrowserStore.open({ statePath });
+    const download = {
+      id: "download-1",
+      url: "https://example.com/archive.zip",
+      fileName: "archive.zip",
+      destinationPath: null,
+      status: "downloading",
+      receivedBytes: 0,
+      totalBytes: null,
+      error: null,
+      startedAtIso: "2026-01-01T00:00:00.000Z",
+      updatedAtIso: "2026-01-01T00:00:00.000Z"
+    };
+    const workspace = {
+      documents: [{
+        url: "https://example.com/",
+        scrollAnchor: { blockId: "block:1", rowOffset: 2 }
+      }],
+      activeDocumentIndex: 0,
+      sidePanel: "downloads"
+    };
+
+    await Promise.all([
+      store.recordHistory("https://example.com/", "Example"),
+      store.saveWorkspace(workspace),
+      store.upsertDownload(download)
+    ]);
+
+    const reopened = await BrowserStore.open({ statePath });
+    assert.deepEqual(reopened.workspace(), workspace);
+    assert.equal(reopened.listHistory()[0]?.url, "https://example.com/");
+    assert.equal(reopened.listDownloads()[0]?.status, "interrupted");
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

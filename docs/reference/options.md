@@ -13,7 +13,7 @@
 ### `resolveInputUrl(rawInput, currentUrl?)`
 - `rawInput`: user-provided URL input.
 - `currentUrl`: optional base URL used for resolving relative input.
-- Accepts absolute URLs, relative URLs, bare hosts, and `about:help`.
+- Accepts absolute URLs, relative URLs, bare hosts, `about:help`, and `about:newtab`.
 - Throws when input is empty, invalid, or resolves to an unsupported protocol.
 
 ### `resolveHref(href, baseUrl)`

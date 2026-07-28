@@ -38,15 +38,20 @@ async function main(): Promise<void> {
   const runtimeHost = createNodeHost();
   const services = createNodeBrowserServices();
   const store = await BrowserStore.open();
+  const searchUrlTemplate = process.env["VERGE_SEARCH_URL_TEMPLATE"];
+  const downloadDirectory = process.env["VERGE_DOWNLOAD_DIR"];
   const browserOptions = {
     store,
     services,
     createSession: () => new BrowserSession({
       localFileReader: (path) => runtimeHost.readFileText(path)
-    })
+    }),
+    ...(searchUrlTemplate === undefined ? {} : { searchUrlTemplate }),
+    ...(downloadDirectory === undefined ? {} : { downloadDirectory }),
+    restoreWorkspace: cliFlags.initialTarget === null && !cliFlags.runOnce
   };
 
-  const initialTarget = cliFlags.initialTarget ?? store.latestHistoryUrl() ?? "about:help";
+  const initialTarget = cliFlags.initialTarget ?? "about:newtab";
 
   if (cliFlags.runOnce) {
     const output = await renderBrowserOnce(initialTarget, browserOptions, {

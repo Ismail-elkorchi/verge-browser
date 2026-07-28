@@ -50,6 +50,15 @@ const ABOUT_HELP_HTML = `<!doctype html>
   </body>
 </html>`;
 
+const ABOUT_NEW_TAB_HTML = `<!doctype html>
+<html><head><title>New Tab</title></head><body><h1>New Tab</h1></body></html>`;
+
+function aboutPage(requestUrl: string): { readonly html: string; readonly code: string } | null {
+  if (requestUrl === "about:help") return { html: ABOUT_HELP_HTML, code: "ABOUT_HELP" };
+  if (requestUrl === "about:newtab") return { html: ABOUT_NEW_TAB_HTML, code: "ABOUT_NEW_TAB" };
+  return null;
+}
+
 const UTF8_ENCODER = new TextEncoder();
 
 /** Local text-file reader used for `file://` snapshots and tests. */
@@ -580,14 +589,15 @@ export async function fetchPage(
     ...securityPolicy
   };
 
-  if (requestUrl === "about:help") {
+  const localAboutPage = aboutPage(requestUrl);
+  if (localAboutPage !== null) {
     return {
       requestUrl,
       finalUrl: requestUrl,
       status: 200,
       statusText: "OK",
       contentType: "text/html",
-      html: ABOUT_HELP_HTML,
+      html: localAboutPage.html,
       responseHeaders: {
         "content-type": "text/html"
       },
@@ -597,8 +607,8 @@ export async function fetchPage(
         finalUrl: requestUrl,
         status: 200,
         statusText: "OK",
-        detailCode: "ABOUT_HELP",
-        detailMessage: "Loaded about:help"
+        detailCode: localAboutPage.code,
+        detailMessage: `Loaded ${requestUrl}`
       })
     };
   }
@@ -671,8 +681,9 @@ export async function fetchPageStream(
     ...securityPolicy
   };
 
-  if (requestUrl === "about:help") {
-    const aboutBytes = utf8ByteLength(ABOUT_HELP_HTML);
+  const localAboutPage = aboutPage(requestUrl);
+  if (localAboutPage !== null) {
+    const aboutBytes = utf8ByteLength(localAboutPage.html);
     if (aboutBytes > policy.maxContentBytes) {
       throw new NetworkFetchError(
         createNetworkOutcome("size_limit", {
@@ -688,7 +699,7 @@ export async function fetchPageStream(
       status: 200,
       statusText: "OK",
       contentType: "text/html",
-      stream: streamFromUtf8(ABOUT_HELP_HTML),
+      stream: streamFromUtf8(localAboutPage.html),
       responseHeaders: {
         "content-type": "text/html"
       },
@@ -698,8 +709,8 @@ export async function fetchPageStream(
         finalUrl: requestUrl,
         status: 200,
         statusText: "OK",
-        detailCode: "ABOUT_HELP",
-        detailMessage: "Loaded about:help"
+        detailCode: localAboutPage.code,
+        detailMessage: `Loaded ${requestUrl}`
       })
     };
   }

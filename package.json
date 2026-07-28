@@ -1,7 +1,7 @@
 {
   "name": "@ismail-elkorchi/verge-browser",
   "version": "0.2.0",
-  "description": "Terminal browsing primitives with safe fetch helpers, HTML snapshots, and auditable text rendering.",
+  "description": "A terminal web browser with semantic HTML rendering and reusable browsing primitives.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -56,7 +56,7 @@
   },
   "dependencies": {
     "@ismail-elkorchi/html-parser": "0.2.1",
-    "@ismail-elkorchi/terminal-ui": "git+https://github.com/Ismail-elkorchi/terminal-ui.git#4c80bb3db2aa17bad8302a43b43b199837aa014c"
+    "@ismail-elkorchi/terminal-ui": "git+https://github.com/Ismail-elkorchi/terminal-ui.git#5398f512a62c08233dbb018140060bd7622d5452"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

@@ -20,10 +20,15 @@ export function documentScrollRow(document: BrowserDocumentState, layout: PageLa
 export function documentWithScrollRow(
   document: BrowserDocumentState,
   layout: PageLayout,
-  requestedRow: number
+  requestedRow: number,
+  viewportRows = 1
 ): BrowserDocumentState {
   if (layout.rows.length === 0) return document;
-  const rowIndex = Math.max(0, Math.min(layout.rows.length - 1, requestedRow));
+  const normalizedViewportRows = Math.max(1, Math.floor(viewportRows));
+  const rowIndex = Math.max(
+    0,
+    Math.min(Math.max(0, layout.rows.length - normalizedViewportRows), requestedRow)
+  );
   const row = layout.rows[rowIndex];
   if (!row) return document;
   const first = layout.rows.findIndex((candidate) => candidate.blockId === row.blockId);
@@ -45,33 +50,9 @@ export function actionById(
     : document.snapshot.content.actions.find((action) => action.id === actionId);
 }
 
-export function scrollToAction(
-  document: BrowserDocumentState,
-  layout: PageLayout,
-  actionId: string
-): BrowserDocumentState {
-  const placement = layout.actionPlacements.find((candidate) => candidate.actionId === actionId);
-  return placement === undefined
-    ? document
-    : documentWithScrollRow(document, layout, placement.rowIndex);
-}
-
-export function blockSearch(
-  document: BrowserDocumentState,
-  query: string
-): NonNullable<BrowserDocumentState["search"]> {
-  const normalized = query.trim().toLocaleLowerCase();
-  const blockIds = normalized.length === 0
-    ? []
-    : document.snapshot.content.blocks
-      .filter((block) => block.text.toLocaleLowerCase().includes(normalized))
-      .map((block) => block.id);
-  return { query, blockIds, activeMatchIndex: 0 };
-}
-
-export function activeSearchBlockId(document: BrowserDocumentState): string | undefined {
+export function activeSearchMatch(document: BrowserDocumentState) {
   const search = document.search;
-  return search?.blockIds[search.activeMatchIndex];
+  return search?.matches[search.activeMatchIndex];
 }
 
 export function scrollToBlock(

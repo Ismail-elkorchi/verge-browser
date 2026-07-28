@@ -129,6 +129,8 @@ export interface PageLayoutRow {
   readonly blockId: string;
   readonly text: string;
   readonly actionIds: readonly string[];
+  readonly blockTextStartCodeUnitIndex: number;
+  readonly blockTextEndCodeUnitIndexExclusive: number;
 }
 
 /** Terminal geometry for one stable page action. */

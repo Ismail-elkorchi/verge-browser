@@ -8,10 +8,8 @@
 export type BrowserCommand =
   | { readonly kind: "help" }
   | { readonly kind: "quit" }
-  | { readonly kind: "view" }
   | { readonly kind: "reader" }
   | { readonly kind: "links" }
-  | { readonly kind: "documents" }
   | { readonly kind: "diag" }
   | { readonly kind: "outline" }
   | { readonly kind: "page-down" }
@@ -26,22 +24,17 @@ export type BrowserCommand =
   | { readonly kind: "reload" }
   | { readonly kind: "bookmark-list" }
   | { readonly kind: "bookmark-add"; readonly name?: string }
-  | { readonly kind: "bookmark-open"; readonly index: number }
   | { readonly kind: "cookie-list" }
   | { readonly kind: "cookie-clear" }
   | { readonly kind: "history-list" }
-  | { readonly kind: "history-open"; readonly index: number }
+  | { readonly kind: "download-list" }
   | { readonly kind: "recall"; readonly query: string }
-  | { readonly kind: "recall-open"; readonly index: number }
-  | { readonly kind: "form-list" }
-  | { readonly kind: "form-submit"; readonly index: number; readonly overrides: Readonly<Record<string, string>> }
   | { readonly kind: "close-document" }
   | { readonly kind: "reopen-document" }
-  | { readonly kind: "download"; readonly path: string }
+  | { readonly kind: "download"; readonly target?: string }
+  | { readonly kind: "save-page"; readonly path: string }
   | { readonly kind: "save-text"; readonly path: string }
-  | { readonly kind: "save-csv"; readonly path: string }
   | { readonly kind: "open-external" }
-  | { readonly kind: "open-link"; readonly index: number }
   | { readonly kind: "go"; readonly target: string }
   | { readonly kind: "go-stream"; readonly target: string }
   | { readonly kind: "patch-remove-node"; readonly target: number }
@@ -63,23 +56,6 @@ function parsePositiveInteger(value: string): number | null {
   return parsedValue;
 }
 
-function parseOverrides(tokens: readonly string[]): Readonly<Record<string, string>> {
-  const overrides: Record<string, string> = {};
-  for (const token of tokens) {
-    const separator = token.indexOf("=");
-    if (separator <= 0) {
-      continue;
-    }
-    const key = token.slice(0, separator).trim();
-    const value = token.slice(separator + 1).trim();
-    if (key.length === 0) {
-      continue;
-    }
-    overrides[key] = value;
-  }
-  return overrides;
-}
-
 /**
  * Parses action-palette input into a structured {@link BrowserCommand}.
  *
@@ -94,8 +70,8 @@ function parseOverrides(tokens: readonly string[]): Readonly<Record<string, stri
  * @example Basic commands
  * ```ts
  * console.log(parseCommand("bookmark add docs").kind);
- * console.log(parseCommand("form submit 2 name=alice").kind);
- * console.log(parseCommand("bookmark open nope").kind);
+ * console.log(parseCommand("save page ./snapshot.html").kind);
+ * console.log(parseCommand("bookmark unknown").kind);
  * ```
  */
 export function parseCommand(rawInput: string): BrowserCommand {
@@ -110,11 +86,9 @@ export function parseCommand(rawInput: string): BrowserCommand {
 
   if (headLower === "help" || headLower === "?") return { kind: "help" };
   if (headLower === "quit" || headLower === "exit" || headLower === "q") return { kind: "quit" };
-  if (headLower === "view") return { kind: "view" };
   if (headLower === "reader") return { kind: "reader" };
   if (headLower === "links") return { kind: "links" };
-  if (headLower === "documents" || headLower === "docs") return { kind: "documents" };
-  if (headLower === "diag" || headLower === "status") return { kind: "diag" };
+  if (headLower === "diag" || headLower === "diagnostics" || headLower === "status") return { kind: "diag" };
   if (headLower === "outline") return { kind: "outline" };
   if (headLower === "pagedown" || headLower === "pd") return { kind: "page-down" };
   if (headLower === "pageup" || headLower === "pu") return { kind: "page-up" };
@@ -126,7 +100,7 @@ export function parseCommand(rawInput: string): BrowserCommand {
   if (headLower === "forward") return { kind: "forward" };
   if (headLower === "reload") return { kind: "reload" };
 
-  if (headLower === "bookmark" || headLower === "bm") {
+  if (headLower === "bookmark" || headLower === "bookmarks" || headLower === "bm") {
     if (tail.length === 0 || tail.toLowerCase() === "list") {
       return { kind: "bookmark-list" };
     }
@@ -137,15 +111,7 @@ export function parseCommand(rawInput: string): BrowserCommand {
     if (bookmarkSubcommand === "add") {
       return bookmarkRest.length > 0 ? { kind: "bookmark-add", name: bookmarkRest } : { kind: "bookmark-add" };
     }
-    if (bookmarkSubcommand === "open") {
-      const bookmarkIndex = parsePositiveInteger(bookmarkRest);
-      if (bookmarkIndex === null) {
-        return { kind: "invalid", reason: "bookmark open requires a positive numeric index" };
-      }
-      return { kind: "bookmark-open", index: bookmarkIndex };
-    }
-
-    return { kind: "invalid", reason: "bookmark supports: list | add [name] | open <index>" };
+    return { kind: "invalid", reason: "bookmark supports: list | add [name]" };
   }
 
   if (headLower === "cookie" || headLower === "cookies") {
@@ -163,73 +129,32 @@ export function parseCommand(rawInput: string): BrowserCommand {
       return { kind: "history-list" };
     }
 
-    const historyParts = tail.split(/\s+/);
-    const historySubcommand = historyParts[0]?.toLowerCase() ?? "";
-    const historyRest = historyParts.slice(1).join(" ").trim();
-    if (historySubcommand === "open") {
-      const historyIndex = parsePositiveInteger(historyRest);
-      if (historyIndex === null) {
-        return { kind: "invalid", reason: "history open requires a positive numeric index" };
-      }
-      return { kind: "history-open", index: historyIndex };
-    }
-
-    return { kind: "invalid", reason: "history supports: list | open <index>" };
+    return { kind: "invalid", reason: "history supports: list" };
   }
+
+  if (headLower === "downloads") return { kind: "download-list" };
 
   if (headLower === "recall") {
     if (tail.length === 0) {
-      return { kind: "invalid", reason: "recall requires a query, or: recall open <index>" };
-    }
-    const recallParts = tail.split(/\s+/);
-    const recallSubcommand = recallParts[0]?.toLowerCase() ?? "";
-    if (recallSubcommand === "open") {
-      const recallIndex = parsePositiveInteger(recallParts[1] ?? "");
-      if (recallIndex === null) {
-        return { kind: "invalid", reason: "recall open requires a positive numeric index" };
-      }
-      return { kind: "recall-open", index: recallIndex };
+      return { kind: "invalid", reason: "recall requires a query" };
     }
     return { kind: "recall", query: tail };
   }
 
-  if (headLower === "form" || headLower === "forms") {
-    if (tail.length === 0 || tail.toLowerCase() === "list") {
-      return { kind: "form-list" };
-    }
-
-    const formParts = tail.split(/\s+/);
-    const formSubcommand = formParts[0]?.toLowerCase() ?? "";
-    if (formSubcommand === "submit") {
-      const indexToken = formParts[1] ?? "";
-      const formIndex = parsePositiveInteger(indexToken);
-      if (formIndex === null) {
-        return { kind: "invalid", reason: "form submit requires a positive form index" };
-      }
-      const overrides = parseOverrides(formParts.slice(2));
-      return { kind: "form-submit", index: formIndex, overrides };
-    }
-
-    return { kind: "invalid", reason: "form supports: list | submit <index> [name=value ...]" };
-  }
-
   if (headLower === "download") {
-    if (tail.length === 0) {
-      return { kind: "invalid", reason: "download requires a target path" };
-    }
-    return { kind: "download", path: tail };
+    return tail.length === 0 ? { kind: "download" } : { kind: "download", target: tail };
   }
 
   if (headLower === "save") {
     const saveParts = tail.split(/\s+/).filter((part) => part.length > 0);
     const saveMode = saveParts[0]?.toLowerCase() ?? "";
     const savePath = saveParts.slice(1).join(" ").trim();
-    if ((saveMode !== "text" && saveMode !== "csv") || savePath.length === 0) {
-      return { kind: "invalid", reason: "save supports: text <path> | csv <path>" };
+    if ((saveMode !== "text" && saveMode !== "page") || savePath.length === 0) {
+      return { kind: "invalid", reason: "save supports: page <path> | text <path>" };
     }
-    return saveMode === "text"
-      ? { kind: "save-text", path: savePath }
-      : { kind: "save-csv", path: savePath };
+    return saveMode === "page"
+      ? { kind: "save-page", path: savePath }
+      : { kind: "save-text", path: savePath };
   }
 
   if (headLower === "open-external") {
@@ -246,11 +171,7 @@ export function parseCommand(rawInput: string): BrowserCommand {
 
   if (headLower === "open") {
     if (tail.length === 0) {
-      return { kind: "invalid", reason: "open requires a link index or URL" };
-    }
-    const linkIndex = parsePositiveInteger(tail);
-    if (linkIndex !== null) {
-      return { kind: "open-link", index: linkIndex };
+      return { kind: "invalid", reason: "open requires a URL" };
     }
     return { kind: "go", target: tail };
   }
@@ -351,11 +272,6 @@ export function parseCommand(rawInput: string): BrowserCommand {
     return { kind: "find", query: tail };
   }
 
-  const singleNumber = parsePositiveInteger(trimmedInput);
-  if (singleNumber !== null) {
-    return { kind: "open-link", index: singleNumber };
-  }
-
   return { kind: "go", target: trimmedInput };
 }
 
@@ -366,51 +282,46 @@ export function parseCommand(rawInput: string): BrowserCommand {
  * grammar, and CLI flags. Tests and smoke coverage treat it as user-facing
  * reference output.
  *
- * @returns Multi-line help text covering the first browse loop, browse keys,
- * action examples, and CLI flags.
+ * @returns Multi-line help text covering browser controls, action examples,
+ * and CLI flags.
  *
  * @example Usage
  * ```ts
  * const help = formatHelpText();
- * console.log(help.includes("First browse loop:"));
+ * console.log(help.includes("Browser controls:"));
  * ```
  */
 export function formatHelpText(): string {
   return [
-    "First browse loop:",
-    "  1. Start with: verge https://example.com",
-    "  2. Press ] or Tab to focus the next link or control",
-    "  3. Press Enter to open the focused target",
-    "  4. Press h to go back",
-    "  5. Press g to enter a new URL",
-    "  6. Press / to search in the current page",
-    "  7. Press q to quit",
+    "Browser controls:",
+    "  Ctrl+L              Focus the address and search field",
+    "  Alt+Left/Right      Go back or forward",
+    "  Ctrl+R              Reload the page",
+    "  Ctrl+F              Find in the current page",
+    "  F3 / Shift+F3       Next or previous match",
+    "  Tab / Shift+Tab     Move between browser and page controls",
+    "  Enter               Activate the focused control",
     "",
-    "Browse keys:",
+    "Tabs and page:",
+    "  Ctrl+T / Ctrl+W     Open or close a tab",
+    "  Ctrl+Shift+T        Reopen the last closed tab",
+    "  Ctrl+Tab            Select the next tab",
+    "  Ctrl+1..9           Select a tab by number",
     "  Up/Down             Scroll the current screen",
     "  PageUp/PageDown     Move by one page",
     "  Home/End            Jump to top or bottom",
-    "  [ / ]               Move to previous or next link/control",
-    "  Enter               Open the focused link/control",
-    "  h / f / r           Back / forward / reload",
-    "  g / :               Location palette / action palette",
-    "  / / n / N           Find / next match / previous match",
-    "  l / D / H / B / F   Links / documents / history / bookmarks / forms",
-    "  o / d               Outline / diagnostics",
-    "  m / t / x / u       Bookmark / new document / close / reopen",
-    "  Esc                 Back out of search, focus, or transient screens",
-    "  q                   Quit",
+    "  Esc                 Close a dialog, find bar, or page focus",
+    "  : / ? / q           Actions / help / quit",
     "",
     "Action palette examples:",
     "  links               Open the links picker",
-    "  documents           Open the documents picker",
+    "  outline             Open the heading outline",
     "  history             Open persisted history",
     "  bookmark add [name] Save the current page as a bookmark",
-    "  download <path>     Save the current HTML snapshot",
-    "  save text <path>    Export the current screen as plain text",
-    "  save csv <path>     Export the current picker as CSV",
-    "  open-external       Open the current page or focused link outside verge",
-    "  form submit <n>     Submit form n, optionally with name=value overrides",
+    "  download [url]      Download the current resource or a URL",
+    "  save page <path>    Save the current HTML source",
+    "  save text <path>    Export the readable page text",
+    "  open-external       Open the current page outside Verge",
     "  patch ...           Apply a low-level HTML patch to the current page",
     "",
     "CLI flags:",

@@ -14,16 +14,31 @@ export interface BrowserTuiOptions {
   readonly store: BrowserStore;
   readonly services: BrowserServices;
   readonly createSession: () => BrowserSession;
+  readonly searchUrlTemplate?: string;
+  readonly downloadDirectory?: string;
+  readonly downloadMaxBytes?: number;
+  readonly restoreWorkspace?: boolean;
 }
 
 export async function prepareBrowserTui(initialTarget: string, options: BrowserTuiOptions) {
   const controller = new BrowserController(options);
-  const document = await controller.openInitial(initialTarget);
-  const state = createBrowserInitialState(document);
+  const workspace = options.restoreWorkspace === true ? controller.workspace() : null;
+  const storedDocuments = workspace?.documents ?? [];
+  const documents = storedDocuments.length === 0
+    ? [await controller.openInitial(initialTarget)]
+    : await Promise.all(storedDocuments.map((document) =>
+      controller.openInitial(document.url, document.scrollAnchor)
+    ));
+  const state = createBrowserInitialState(
+    documents,
+    workspace?.activeDocumentIndex ?? 0,
+    controller,
+    workspace?.sidePanel ?? null
+  );
   return {
     controller,
     state,
-    app: createBrowserApp(document, controller)
+    app: createBrowserApp(state, controller)
   };
 }
 
@@ -32,7 +47,14 @@ export async function runBrowserTui(initialTarget: string, options: BrowserTuiOp
   const exit = await runTui(
     prepared.app,
     createTerminalHost({ runtime: "node" }),
-    { initialFocus: { kind: "element", elementId: `browser-${prepared.state.documents[0]?.id ?? ""}` } }
+    {
+      initialFocus: prepared.state.documents[prepared.state.activeDocumentIndex]?.snapshot.finalUrl === "about:newtab"
+        ? { kind: "element", elementId: "browser-omnibox" }
+        : {
+          kind: "element",
+          elementId: `browser-${prepared.state.documents[prepared.state.activeDocumentIndex]?.id ?? ""}`
+        }
+    }
   );
   if (exit.status === "error") {
     throw new Error("The terminal UI stopped because of a runtime error.");

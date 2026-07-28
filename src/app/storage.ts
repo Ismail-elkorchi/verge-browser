@@ -36,12 +36,45 @@ export interface IndexSearchResult {
   readonly excerpt: string;
 }
 
+export type DownloadStatus = "queued" | "downloading" | "completed" | "failed" | "interrupted";
+
+export interface DownloadRecord {
+  readonly id: string;
+  readonly url: string;
+  readonly fileName: string;
+  readonly destinationPath: string | null;
+  readonly status: DownloadStatus;
+  readonly receivedBytes: number;
+  readonly totalBytes: number | null;
+  readonly error: string | null;
+  readonly startedAtIso: string;
+  readonly updatedAtIso: string;
+}
+
+export type StoredSidePanel = "history" | "bookmarks" | "downloads" | null;
+
+export interface StoredBrowserDocument {
+  readonly url: string;
+  readonly scrollAnchor: {
+    readonly blockId: string;
+    readonly rowOffset: number;
+  };
+}
+
+export interface BrowserWorkspace {
+  readonly documents: readonly StoredBrowserDocument[];
+  readonly activeDocumentIndex: number;
+  readonly sidePanel: StoredSidePanel;
+}
+
 interface BrowserState {
   readonly version: 2;
   readonly bookmarks: readonly BookmarkEntry[];
   readonly history: readonly HistoryEntry[];
   readonly cookies: readonly CookieEntry[];
   readonly indexDocuments: readonly IndexDocument[];
+  readonly downloads: readonly DownloadRecord[];
+  readonly workspace: BrowserWorkspace | null;
 }
 
 const DEFAULT_HISTORY_LIMIT = 500;
@@ -65,7 +98,9 @@ function createEmptyState(): BrowserState {
     bookmarks: [],
     history: [],
     cookies: [],
-    indexDocuments: []
+    indexDocuments: [],
+    downloads: [],
+    workspace: null
   };
 }
 
@@ -117,6 +152,58 @@ function isIndexDocument(value: unknown): value is IndexDocument {
   );
 }
 
+function isDownloadRecord(value: unknown): value is DownloadRecord {
+  if (value === null || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate["id"] === "string"
+    && typeof candidate["url"] === "string"
+    && typeof candidate["fileName"] === "string"
+    && (candidate["destinationPath"] === null || typeof candidate["destinationPath"] === "string")
+    && ["queued", "downloading", "completed", "failed", "interrupted"].includes(String(candidate["status"]))
+    && Number.isSafeInteger(candidate["receivedBytes"])
+    && (candidate["totalBytes"] === null || Number.isSafeInteger(candidate["totalBytes"]))
+    && (candidate["error"] === null || typeof candidate["error"] === "string")
+    && typeof candidate["startedAtIso"] === "string"
+    && typeof candidate["updatedAtIso"] === "string";
+}
+
+function normalizeWorkspace(value: unknown): BrowserWorkspace | null {
+  if (value === null || typeof value !== "object") return null;
+  const candidate = value as Record<string, unknown>;
+  if (!Array.isArray(candidate["documents"])) return null;
+  const documents = candidate["documents"].flatMap((entry): StoredBrowserDocument[] => {
+    if (entry === null || typeof entry !== "object") return [];
+    const document = entry as Record<string, unknown>;
+    const anchor = document["scrollAnchor"];
+    if (typeof document["url"] !== "string" || anchor === null || typeof anchor !== "object") return [];
+    const anchorRecord = anchor as Record<string, unknown>;
+    if (
+      typeof anchorRecord["blockId"] !== "string"
+      || !Number.isSafeInteger(anchorRecord["rowOffset"])
+      || Number(anchorRecord["rowOffset"]) < 0
+    ) return [];
+    return [{
+      url: document["url"],
+      scrollAnchor: {
+        blockId: anchorRecord["blockId"],
+        rowOffset: Number(anchorRecord["rowOffset"])
+      }
+    }];
+  });
+  if (documents.length === 0) return null;
+  const rawActiveIndex = Number.isSafeInteger(candidate["activeDocumentIndex"])
+    ? Number(candidate["activeDocumentIndex"])
+    : 0;
+  const sidePanel = candidate["sidePanel"];
+  return {
+    documents,
+    activeDocumentIndex: Math.max(0, Math.min(documents.length - 1, rawActiveIndex)),
+    sidePanel: sidePanel === "history" || sidePanel === "bookmarks" || sidePanel === "downloads"
+      ? sidePanel
+      : null
+  };
+}
+
 function normalizeState(value: unknown): BrowserState {
   if (value === null || typeof value !== "object") {
     return createEmptyState();
@@ -127,18 +214,26 @@ function normalizeState(value: unknown): BrowserState {
   const historyRaw = Array.isArray(candidate["history"]) ? candidate["history"] : [];
   const cookiesRaw = Array.isArray(candidate["cookies"]) ? candidate["cookies"] : [];
   const indexDocumentsRaw = Array.isArray(candidate["indexDocuments"]) ? candidate["indexDocuments"] : [];
+  const downloadsRaw = Array.isArray(candidate["downloads"]) ? candidate["downloads"] : [];
 
   const bookmarks = bookmarksRaw.filter((entry): entry is BookmarkEntry => isBookmarkEntry(entry));
   const history = historyRaw.filter((entry): entry is HistoryEntry => isHistoryEntry(entry));
   const cookies = cookiesRaw.filter((entry): entry is CookieEntry => isCookieEntry(entry));
   const indexDocuments = indexDocumentsRaw.filter((entry): entry is IndexDocument => isIndexDocument(entry));
+  const downloads = downloadsRaw
+    .filter((entry): entry is DownloadRecord => isDownloadRecord(entry))
+    .map((entry) => entry.status === "downloading"
+      ? { ...entry, status: "interrupted" as const, error: "Download interrupted when the browser stopped." }
+      : entry);
 
   return {
     version: STATE_FILE_VERSION,
     bookmarks,
     history,
     cookies,
-    indexDocuments
+    indexDocuments,
+    downloads,
+    workspace: normalizeWorkspace(candidate["workspace"])
   };
 }
 
@@ -172,6 +267,7 @@ export class BrowserStore {
   private readonly historyLimit: number;
   private readonly indexLimit: number;
   private state: BrowserState;
+  private saveTail: Promise<void> = Promise.resolve();
 
   private constructor(statePath: string, historyLimit: number, indexLimit: number, state: BrowserState) {
     this.statePath = statePath;
@@ -192,10 +288,6 @@ export class BrowserStore {
     return new BrowserStore(statePath, historyLimit, indexLimit, state);
   }
 
-  public getStatePath(): string {
-    return this.statePath;
-  }
-
   public listBookmarks(): readonly BookmarkEntry[] {
     return this.state.bookmarks;
   }
@@ -204,9 +296,16 @@ export class BrowserStore {
     return this.state.history;
   }
 
-  public latestHistoryUrl(): string | null {
-    const latest = this.state.history[0];
-    return latest ? latest.url : null;
+  public workspace(): BrowserWorkspace | null {
+    return this.state.workspace;
+  }
+
+  public listDownloads(): readonly DownloadRecord[] {
+    return this.state.downloads;
+  }
+
+  public isBookmarked(url: string): boolean {
+    return this.state.bookmarks.some((bookmark) => bookmark.url === url);
   }
 
   public listCookies(): readonly CookieEntry[] {
@@ -218,7 +317,7 @@ export class BrowserStore {
       ...this.state,
       cookies: []
     };
-    await saveStateToPath(this.statePath, this.state);
+    await this.save();
   }
 
   public async applySetCookieHeaders(requestUrl: string, setCookieHeaders: readonly string[]): Promise<void> {
@@ -227,7 +326,7 @@ export class BrowserStore {
       ...this.state,
       cookies: nextCookies
     };
-    await saveStateToPath(this.statePath, this.state);
+    await this.save();
   }
 
   public cookieHeaderForUrl(requestUrl: string): string | null {
@@ -248,8 +347,45 @@ export class BrowserStore {
       bookmarks: [entry, ...filteredBookmarks]
     };
 
-    await saveStateToPath(this.statePath, this.state);
+    await this.save();
     return entry;
+  }
+
+  public async toggleBookmark(url: string, name: string): Promise<boolean> {
+    if (this.isBookmarked(url)) {
+      this.state = {
+        ...this.state,
+        bookmarks: this.state.bookmarks.filter((bookmark) => bookmark.url !== url)
+      };
+      await this.save();
+      return false;
+    }
+    await this.addBookmark(url, name);
+    return true;
+  }
+
+  public async saveWorkspace(workspace: BrowserWorkspace): Promise<void> {
+    this.state = { ...this.state, workspace };
+    await this.save();
+  }
+
+  public async upsertDownload(download: DownloadRecord): Promise<void> {
+    this.state = {
+      ...this.state,
+      downloads: [
+        download,
+        ...this.state.downloads.filter((entry) => entry.id !== download.id)
+      ].slice(0, 200)
+    };
+    await this.save();
+  }
+
+  public async removeDownload(id: string): Promise<void> {
+    this.state = {
+      ...this.state,
+      downloads: this.state.downloads.filter((entry) => entry.id !== id)
+    };
+    await this.save();
   }
 
   public async recordHistory(url: string, title: string, excerpt?: string): Promise<HistoryEntry> {
@@ -268,7 +404,7 @@ export class BrowserStore {
       history: nextHistory
     };
 
-    await saveStateToPath(this.statePath, this.state);
+    await this.save();
     return entry;
   }
 
@@ -292,7 +428,7 @@ export class BrowserStore {
       ...this.state,
       indexDocuments: nextIndexDocuments
     };
-    await saveStateToPath(this.statePath, this.state);
+    await this.save();
   }
 
   public searchIndex(query: string, limit = 10): readonly IndexSearchResult[] {
@@ -334,5 +470,12 @@ export class BrowserStore {
       });
 
     return ranked.slice(0, Math.max(1, Math.floor(limit)));
+  }
+
+  private save(): Promise<void> {
+    const snapshot = this.state;
+    const completion = this.saveTail.then(() => saveStateToPath(this.statePath, snapshot));
+    this.saveTail = completion.catch(() => undefined);
+    return completion;
   }
 }

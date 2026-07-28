@@ -45,7 +45,8 @@ export {
   buildGetSubmissionUrl,
   buildFormSubmissionRequest,
   type FormEntry,
-  type FormField,
+  type FormControl,
+  type FormControlValue,
   type FormSubmissionRequest
 } from "./app/forms.js";
 export {
@@ -98,7 +99,12 @@ export type {
   PageSnapshot,
   KeyboardKey
 } from "./app/types.js";
-export { resolveInputUrl, resolveHref } from "./app/url.js";
+export {
+  DEFAULT_SEARCH_URL_TEMPLATE,
+  resolveInputUrl,
+  resolveOmniboxInput,
+  resolveHref
+} from "./app/url.js";
 export { createBunHost } from "./runtime/bun-host.js";
 export { createDenoHost } from "./runtime/deno-host.js";
 export { createNodeHost } from "./runtime/node-host.js";
