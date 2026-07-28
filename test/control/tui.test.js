@@ -280,7 +280,34 @@ test("browser chrome and document geometry remain readable from narrow to wide t
     .filter((cell) => cell.source?.elementId?.startsWith("browser-"))
     .filter((cell) => ["browser-back", "browser-forward", "browser-reload", "browser-new-tab", "browser-bookmark", "browser-library", "browser-menu"].includes(cell.source.elementId))
     .map((cell) => cell.row));
+  const tabRows = new Set(wideFrame.cells
+    .filter((cell) => cell.source?.elementId === "browser-tabs")
+    .map((cell) => cell.row));
+  const tabLabelRows = new Set(wideFrame.cells
+    .filter((cell) =>
+      cell.source?.elementId === "browser-tabs"
+      && cell.source.partName === "label"
+    )
+    .map((cell) => cell.row));
+  const toolbarSurfaceRows = new Set(wideFrame.cells
+    .filter((cell) =>
+      cell.source?.elementId === "browser-toolbar-surface"
+      && cell.source.partName === "background"
+    )
+    .map((cell) => cell.row));
+  const omniboxText = wideFrame.cells
+    .filter((cell) => cell.source?.elementId === "browser-omnibox")
+    .toSorted((left, right) => left.row - right.row || left.column - right.column)
+    .map((cell) => cell.text)
+    .join("");
+
   assert.equal(toolbarRows.size, 1);
+  assert.equal(tabRows.size, 2);
+  assert.deepEqual([...tabLabelRows], [Math.max(...tabRows)]);
+  assert.equal(toolbarSurfaceRows.size, 2);
+  assert.equal(Math.min(...toolbarSurfaceRows), Math.max(...tabRows) + 1);
+  assert.equal([...toolbarRows][0], Math.min(...toolbarSurfaceRows));
+  assert.doesNotMatch(omniboxText, /›/u);
   assert.ok(wideFrame.cells.some((cell) =>
     cell.source?.elementId === "browser-tabs"
     && cell.source.partName === "header.background"
@@ -358,6 +385,51 @@ test("browser chrome and document geometry remain readable from narrow to wide t
       assert.equal(frame.cells.some((cell) => cell.source?.elementId === "browser-library"), false);
     }
   }
+});
+
+test("browser and link actions use anchored menus instead of modal button grids", async () => {
+  const { runtime, writes } = await fixture();
+
+  await runtime.dispatch({ kind: "browserMenuAction", action: { kind: "open" } });
+  assert.equal(runtime.state().overlay?.kind, "browserMenu");
+  assert.match(renderFramePlain(runtime.frame()), /History/u);
+  assert.equal(findRoleWithLabel(runtime.frame().accessibility.root, "dialog", "Browser menu"), undefined);
+
+  await runtime.dispatch({
+    kind: "browserMenuAction",
+    action: { kind: "menu", action: { kind: "activate", id: "history" } }
+  });
+  assert.equal(runtime.state().overlay, null);
+  assert.equal(runtime.state().sidePanel, "history");
+
+  const link = runtime.state().documents[0].snapshot.content.links[0];
+  const linkTarget = runtime.frame().hitTargets?.find((target) =>
+    target.id.startsWith(`activate:${link.id}:`)
+  );
+  assert.ok(linkTarget);
+  await runtime.handleInput({
+    kind: "mouse",
+    sequence: "",
+    encoding: "sgr",
+    action: "press",
+    button: "right",
+    row: linkTarget.bounds.row,
+    column: linkTarget.bounds.column,
+    rawCode: 2,
+    modifiers: { shift: false, alt: false, ctrl: false }
+  });
+  assert.equal(runtime.state().overlay?.kind, "linkMenu");
+  assert.ok(findRoleWithLabel(runtime.frame().accessibility.root, "menu", "Link"));
+  assert.equal(findRoleWithLabel(runtime.frame().accessibility.root, "dialog", "Link"), undefined);
+
+  await runtime.dispatch({
+    kind: "linkMenuAction",
+    action: { kind: "menu", action: { kind: "activate", id: "external" } }
+  });
+  await waitUntil(runtime, () => writes.some((entry) =>
+    entry.kind === "openExternal" && entry.target === link.resolvedHref
+  ));
+  assert.equal(runtime.state().overlay, null);
 });
 
 test("browser runtime errors retain the terminal diagnostic cause", () => {
@@ -578,7 +650,13 @@ test("non-HTML navigation offers a download instead of replacing the page", asyn
   const dialogRows = new Set(runtime.frame().cells
     .filter((cell) => cell.source?.elementId === "download-prompt")
     .map((cell) => cell.row));
+  const backdropCell = runtime.frame().cells.find((cell) =>
+    cell.source?.elementId?.startsWith("browser-page-surface-")
+  );
   assert.ok(dialogRows.size > 0 && dialogRows.size < 9);
+  assert.deepEqual(backdropCell?.style?.bg, { kind: "theme", token: "surface.backdrop" });
+  assert.equal(backdropCell?.style?.dim, true);
+  assert.equal(backdropCell?.link, undefined);
 
   await runtime.dispatch({ kind: "download", target: archiveUrl });
   await waitUntil(runtime, () => runtime.state().downloads[0]?.status === "completed");

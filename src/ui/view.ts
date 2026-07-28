@@ -1,8 +1,10 @@
 import {
   commandInputPresentation,
+  contextMenuPresentation,
   createNumberInputConfiguration,
   createScrollState,
   createTextAreaState,
+  dropdownMenuPresentation,
   numberInputPresentation,
   scrollReducer,
   selectedSearchPickerEntry,
@@ -13,7 +15,9 @@ import {
   checkbox,
   checkboxGroup,
   commandInput,
+  contextMenu,
   dialog,
+  dropdownMenu,
   field,
   form,
   numberInput,
@@ -58,6 +62,7 @@ import type {
   LinkMenuOverlay,
   PickerOverlay
 } from "./model.js";
+import { browserMenuItems, linkMenuItems } from "./model.js";
 
 function actionForId(document: BrowserDocumentState, id: string | undefined): PageAction | undefined {
   return id === undefined
@@ -580,17 +585,23 @@ const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, Bro
           accepts: ["click" as const, "contextMenu" as const],
           cursor: "pointer" as const,
           focus: { kind: "target" as const, targetId: placement.actionId },
-          message: (event: RoutedPointerEvent): BrowserTuiMessage => ({
-            kind: "activateActionAt",
-            actionId: placement.actionId,
-            disposition: event.kind === "contextMenu" || event.button === "right"
-              ? "context"
-              : event.button === "middle"
-                ? "newBackground"
-                : event.modifiers.ctrl
-                  ? "newForeground"
-                  : "current"
-          })
+          message: (event: RoutedPointerEvent): BrowserTuiMessage =>
+            event.kind === "contextMenu" || event.button === "right"
+              ? {
+                kind: "openLinkMenu",
+                actionId: placement.actionId,
+                row: event.row,
+                column: event.column
+              }
+              : {
+                kind: "activateActionAt",
+                actionId: placement.actionId,
+                disposition: event.button === "middle"
+                  ? "newBackground"
+                  : event.modifiers.ctrl
+                    ? "newForeground"
+                    : "current"
+              }
         };
       });
   }
@@ -632,11 +643,13 @@ function newTabDashboard(state: BrowserTuiState): Element<BrowserTuiMessage> {
   const recent = state.history.slice(0, 5).map((entry, index) => button({
     id: `new-tab-recent-${String(index)}`,
     label: entry.title,
+    tone: "ghost",
     onPress: (): BrowserTuiMessage => ({ kind: "omniboxSubmit", value: entry.url })
   }));
   const bookmarks = state.bookmarks.slice(0, 5).map((entry, index) => button({
     id: `new-tab-bookmark-${String(index)}`,
     label: `★ ${entry.name}`,
+    tone: "ghost",
     onPress: (): BrowserTuiMessage => ({ kind: "omniboxSubmit", value: entry.url })
   }));
   return surface(column([
@@ -657,6 +670,7 @@ function panelEntryButton(id: string, label: string, target: string): Element<Br
   return button({
     id,
     label,
+    tone: "ghost",
     onPress: (): BrowserTuiMessage => ({ kind: "omniboxSubmit", value: target })
   });
 }
@@ -746,19 +760,19 @@ function sidePanel(state: BrowserTuiState): Element<BrowserTuiMessage> {
       button({
         id: "panel-history",
         label: "History",
-        tone: panel === "history" ? "primary" : "default",
+        tone: panel === "history" ? "primary" : "ghost",
         onPress: (): BrowserTuiMessage => ({ kind: "toggleSidePanel", panel: "history" })
       }),
       button({
         id: "panel-bookmarks",
         label: "Bookmarks",
-        tone: panel === "bookmarks" ? "primary" : "default",
+        tone: panel === "bookmarks" ? "primary" : "ghost",
         onPress: (): BrowserTuiMessage => ({ kind: "toggleSidePanel", panel: "bookmarks" })
       }),
       button({
         id: "panel-downloads",
         label: "Downloads",
-        tone: panel === "downloads" ? "primary" : "default",
+        tone: panel === "downloads" ? "primary" : "ghost",
         onPress: (): BrowserTuiMessage => ({ kind: "toggleSidePanel", panel: "downloads" })
       })
     ], { gap: 1 });
@@ -778,7 +792,7 @@ function sidePanel(state: BrowserTuiState): Element<BrowserTuiMessage> {
     sizes: [{ kind: "fixed", cells: 1 }, { kind: "fill" }]
   }), {
     id: "browser-side-panel",
-    padding: 1,
+    padding: { left: 1, right: 1 },
     appearance: "inset",
     border: { kind: "none" },
     meta: { accessibility: { role: "complementary", label: panel } }
@@ -791,7 +805,7 @@ function toolbar(
   columns: number
 ): Element<BrowserTuiMessage> {
   const bookmarked = state.bookmarks.some((entry) => entry.url === document.snapshot.finalUrl);
-  const omnibox = surface(commandInput({
+  const omnibox = commandInput({
     id: "browser-omnibox",
     prompt: document.loading ? "… " : "⌕ ",
     placeholder: "Search or enter address",
@@ -802,33 +816,42 @@ function toolbar(
     onAction: (action): BrowserTuiMessage => ({ kind: "omniboxAction", action }),
     onSubmit: (value): BrowserTuiMessage => ({ kind: "omniboxSubmit", value }),
     keys: { escape: (): BrowserTuiMessage => ({ kind: "cancelOmnibox" }) }
-  }), {
-    id: "browser-omnibox-surface",
-    appearance: "inset"
   });
   const showLibrary = columns >= 96;
   return surface(row([
-    button({ id: "browser-back", label: "←", density: "compact", disabled: !document.canGoBack, onPress: (): BrowserTuiMessage => ({ kind: "navigate", operation: "back" }) }),
-    button({ id: "browser-forward", label: "→", density: "compact", disabled: !document.canGoForward, onPress: (): BrowserTuiMessage => ({ kind: "navigate", operation: "forward" }) }),
+    button({ id: "browser-back", label: "←", density: "compact", tone: "ghost", disabled: !document.canGoBack, onPress: (): BrowserTuiMessage => ({ kind: "navigate", operation: "back" }) }),
+    button({ id: "browser-forward", label: "→", density: "compact", tone: "ghost", disabled: !document.canGoForward, onPress: (): BrowserTuiMessage => ({ kind: "navigate", operation: "forward" }) }),
     button({
       id: "browser-reload",
       label: document.loading ? "■" : "↻",
       density: "compact",
+      tone: "ghost",
       onPress: (): BrowserTuiMessage => ({ kind: "navigate", operation: document.loading ? "stop" : "reload" })
     }),
-    button({ id: "browser-new-tab", label: "+", density: "compact", onPress: (): BrowserTuiMessage => ({ kind: "newDocument" }) }),
+    button({ id: "browser-new-tab", label: "+", density: "compact", tone: "ghost", onPress: (): BrowserTuiMessage => ({ kind: "newDocument" }) }),
     omnibox,
-    button({ id: "browser-bookmark", label: bookmarked ? "★" : "☆", density: "compact", onPress: (): BrowserTuiMessage => ({ kind: "toggleBookmark" }) }),
+    button({ id: "browser-bookmark", label: bookmarked ? "★" : "☆", density: "compact", tone: "ghost", onPress: (): BrowserTuiMessage => ({ kind: "toggleBookmark" }) }),
     ...(showLibrary
       ? [button({
           id: "browser-library",
           label: "Library",
           density: "compact",
-          tone: state.sidePanel === null ? "default" : "primary",
+          tone: state.sidePanel === null ? "ghost" : "primary",
           onPress: (): BrowserTuiMessage => ({ kind: "toggleSidePanel", panel: "history" })
         })]
       : []),
-    button({ id: "browser-menu", label: "☰", density: "compact", onPress: (): BrowserTuiMessage => ({ kind: "openBrowserMenu" }) })
+    dropdownMenu({
+      id: "browser-menu",
+      items: browserMenuItems,
+      presentation: dropdownMenuPresentation(
+        browserMenuItems,
+        state.overlay?.kind === "browserMenu" ? state.overlay.state : { kind: "closed" }
+      ),
+      placeholder: "☰",
+      density: "compact",
+      placement: "below",
+      onAction: (action): BrowserTuiMessage => ({ kind: "browserMenuAction", action })
+    })
   ], {
     id: "browser-toolbar",
     gap: 1,
@@ -846,7 +869,8 @@ function toolbar(
     meta: { accessibility: { role: "toolbar", label: "Browser navigation" } }
   }), {
     id: "browser-toolbar-surface",
-    appearance: "bar"
+    appearance: "bar",
+    padding: { right: 1, bottom: 1, left: 1 }
   });
 }
 
@@ -865,9 +889,9 @@ function findBar(state: BrowserTuiState): Element<BrowserTuiMessage> | null {
     text(search === null || search === undefined || search.matches.length === 0
       ? "0/0"
       : `${String(search.activeMatchIndex + 1)}/${String(search.matches.length)}`),
-    button({ id: "find-previous", label: "↑", onPress: (): BrowserTuiMessage => ({ kind: "moveSearch", direction: "prev" }) }),
-    button({ id: "find-next", label: "↓", onPress: (): BrowserTuiMessage => ({ kind: "moveSearch", direction: "next" }) }),
-    button({ id: "find-close", label: "×", onPress: (): BrowserTuiMessage => ({ kind: "closeFind" }) })
+    button({ id: "find-previous", label: "↑", tone: "ghost", onPress: (): BrowserTuiMessage => ({ kind: "moveSearch", direction: "prev" }) }),
+    button({ id: "find-next", label: "↓", tone: "ghost", onPress: (): BrowserTuiMessage => ({ kind: "moveSearch", direction: "next" }) }),
+    button({ id: "find-close", label: "×", tone: "ghost", onPress: (): BrowserTuiMessage => ({ kind: "closeFind" }) })
   ], {
     id: "browser-find",
     gap: 1,
@@ -908,7 +932,7 @@ function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMe
   ], {
     id: "browser-selected-tab",
     sizes: [
-      { kind: "fixed", cells: 1 },
+      { kind: "fixed", cells: 2 },
       ...(find === null ? [] : [{ kind: "fixed" as const, cells: 1 }]),
       { kind: "fill" }
     ]
@@ -917,6 +941,8 @@ function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMe
     tabs({
       id: "browser-tabs",
       selected: selected.id,
+      maxTabWidth: 36,
+      tabBarRows: 2,
       tabs: state.documents.map((document) => ({
         id: document.id,
         label: `${document.loading ? "◌ " : ""}${document.snapshot.content.title}`,
@@ -969,14 +995,14 @@ function actionPaletteView(palette: ActionPaletteOverlay): Element<BrowserTuiMes
     modal: true,
     focusPolicy: { initialFocus: { kind: "element", elementId: "browser-action-input" }, returnFocus: "restore" },
     width: 72,
-    maxHeight: 12
+    maxHeight: 12,
+    padding: { left: 1, right: 1 }
   });
 }
 
 function pickerView(picker: PickerOverlay): Element<BrowserTuiMessage> {
   return dialog(searchPicker({
     id: "browser-picker-list",
-    title: picker.title,
     searchPickerIndex: picker.index,
     query: picker.state.query,
     selectedIndex: picker.state.selectedIndex,
@@ -995,95 +1021,40 @@ function pickerView(picker: PickerOverlay): Element<BrowserTuiMessage> {
     modal: true,
     focusPolicy: { initialFocus: { kind: "element", elementId: "browser-picker-list" }, returnFocus: "restore" },
     width: 76,
-    maxHeight: 18
+    maxHeight: 18,
+    padding: { left: 1, right: 1 }
   });
 }
 
 function detailView(detail: DetailOverlay): Element<BrowserTuiMessage> {
-  return dialog(surface(column(detail.lines.slice(detail.scrollRow).map((line, index) => text(line, {
+  return dialog(column(detail.lines.slice(detail.scrollRow).map((line, index) => text(line, {
     id: `detail-line-${String(index)}`
-  }))), { id: "browser-detail-surface", padding: 1 }), {
+  }))), {
     id: "browser-detail",
     title: detail.title,
     modal: true,
     focusPolicy: { returnFocus: "restore" },
     keys: { escape: (): BrowserTuiMessage => ({ kind: "dismiss" }) },
     width: 82,
-    maxHeight: 22
+    maxHeight: 22,
+    padding: { left: 1, right: 1 }
   });
 }
 
-function linkMenuView(state: BrowserTuiState, menu: LinkMenuOverlay): Element<BrowserTuiMessage> {
-  const document = state.documents[state.activeDocumentIndex];
-  const action = document?.snapshot.content.links.find((entry) => entry.id === menu.actionId);
-  return dialog(column([
-    text(action?.resolvedHref ?? "Link"),
-    button({ id: "link-menu-open", label: "Open", onPress: (): BrowserTuiMessage => ({ kind: "activateActionAt", actionId: menu.actionId }) }),
-    button({ id: "link-menu-new-tab", label: "Open in new tab", onPress: (): BrowserTuiMessage => ({ kind: "activateActionAt", actionId: menu.actionId, disposition: "newForeground" }) }),
-    button({ id: "link-menu-background", label: "Open in background tab", onPress: (): BrowserTuiMessage => ({ kind: "activateActionAt", actionId: menu.actionId, disposition: "newBackground" }) }),
-    button({
-      id: "link-menu-download",
-      label: "Download link",
-      onPress: (): BrowserTuiMessage => ({
-        kind: "download",
-        ...(action === undefined ? {} : { target: action.resolvedHref })
-      })
-    }),
-    button({
-      id: "link-menu-external",
-      label: "Open link externally",
-      onPress: (): BrowserTuiMessage => ({
-        kind: "openExternal",
-        ...(action === undefined ? {} : { target: action.resolvedHref })
-      })
-    })
-  ], { gap: 1 }), {
+function linkMenuView(menu: LinkMenuOverlay): Element<BrowserTuiMessage> {
+  return contextMenu({
     id: "browser-link-menu",
     title: "Link",
-    modal: true,
-    focusPolicy: { returnFocus: "restore" },
-    keys: { escape: (): BrowserTuiMessage => ({ kind: "dismiss" }) },
-    width: 52,
-    maxHeight: 12
-  });
-}
-
-function browserMenuView(): Element<BrowserTuiMessage> {
-  return dialog(column([
-    row([
-      button({ id: "menu-history", label: "History", onPress: (): BrowserTuiMessage => ({ kind: "toggleSidePanel", panel: "history" }) }),
-      button({ id: "menu-bookmarks", label: "Bookmarks", onPress: (): BrowserTuiMessage => ({ kind: "toggleSidePanel", panel: "bookmarks" }) }),
-      button({ id: "menu-downloads", label: "Downloads", onPress: (): BrowserTuiMessage => ({ kind: "toggleSidePanel", panel: "downloads" }) })
-    ], { gap: 1 }),
-    button({ id: "menu-reader", label: "Reader view", onPress: (): BrowserTuiMessage => ({ kind: "openDetail", detail: "reader" }) }),
-    button({ id: "menu-diagnostics", label: "Page diagnostics", onPress: (): BrowserTuiMessage => ({ kind: "openDetail", detail: "diagnostics" }) }),
-    button({ id: "menu-cookies", label: "Cookies", onPress: (): BrowserTuiMessage => ({ kind: "openDetail", detail: "cookies" }) }),
-    button({ id: "menu-download-page", label: "Download current resource", onPress: (): BrowserTuiMessage => ({ kind: "download" }) }),
-    button({ id: "menu-open-external", label: "Open externally", onPress: (): BrowserTuiMessage => ({ kind: "openExternal" }) }),
-    button({ id: "menu-help", label: "Help", onPress: (): BrowserTuiMessage => ({ kind: "openDetail", detail: "help" }) })
-  ], { gap: 1 }), {
-    id: "browser-menu-dialog",
-    title: "Browser menu",
-    modal: true,
-    focusPolicy: { returnFocus: "restore" },
-    keys: { escape: (): BrowserTuiMessage => ({ kind: "dismiss" }) },
-    width: 52,
-    maxHeight: 16
+    presentation: contextMenuPresentation(linkMenuItems, menu.state),
+    placement: "cursor",
+    onAction: (action): BrowserTuiMessage => ({ kind: "linkMenuAction", action })
   });
 }
 
 function downloadPromptView(prompt: DownloadPromptOverlay): Element<BrowserTuiMessage> {
   return dialog(column([
     text("This resource is not an HTML page."),
-    text(prompt.target),
-    row([
-      button({
-        id: "download-prompt-confirm",
-        label: "Download",
-        onPress: (): BrowserTuiMessage => ({ kind: "download", target: prompt.target })
-      }),
-      button({ id: "download-prompt-cancel", label: "Cancel", onPress: (): BrowserTuiMessage => ({ kind: "dismiss" }) })
-    ], { gap: 1 })
+    text(prompt.target)
   ], { gap: 1 }), {
     id: "download-prompt",
     title: "Download resource?",
@@ -1092,9 +1063,19 @@ function downloadPromptView(prompt: DownloadPromptOverlay): Element<BrowserTuiMe
       initialFocus: { kind: "element", elementId: "download-prompt-confirm" },
       returnFocus: "restore"
     },
+    actions: row([
+      button({
+        id: "download-prompt-confirm",
+        label: "Download",
+        tone: "primary",
+        onPress: (): BrowserTuiMessage => ({ kind: "download", target: prompt.target })
+      }),
+      button({ id: "download-prompt-cancel", label: "Cancel", onPress: (): BrowserTuiMessage => ({ kind: "dismiss" }) })
+    ], { gap: 1 }),
     keys: { escape: (): BrowserTuiMessage => ({ kind: "dismiss" }) },
     width: 64,
-    maxHeight: 9
+    maxHeight: 9,
+    padding: { left: 1, right: 1 }
   });
 }
 
@@ -1103,7 +1084,7 @@ export function browserView(
   context: Pick<TuiContext, "terminalSize"> = { terminalSize: { columns: 80, rows: 24 } }
 ): Element<BrowserTuiMessage> {
   const base = baseView(state, context.terminalSize.columns);
-  if (state.overlay === null) return base;
+  if (state.overlay === null || state.overlay.kind === "browserMenu") return base;
   const transient = state.overlay.kind === "actionPalette"
     ? actionPaletteView(state.overlay)
     : state.overlay.kind === "picker"
@@ -1111,9 +1092,7 @@ export function browserView(
       : state.overlay.kind === "detail"
         ? detailView(state.overlay)
         : state.overlay.kind === "linkMenu"
-          ? linkMenuView(state, state.overlay)
-          : state.overlay.kind === "browserMenu"
-            ? browserMenuView()
-            : downloadPromptView(state.overlay);
+          ? linkMenuView(state.overlay)
+          : downloadPromptView(state.overlay);
   return overlay([base, transient], { id: "browser-layers" });
 }

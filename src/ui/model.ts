@@ -1,5 +1,8 @@
 import type {
   CommandInputAction,
+  ContextMenuAction,
+  DropdownMenuAction,
+  MenuItem,
   NumberInputControlAction,
   SearchPickerAction,
   SelectAction,
@@ -9,6 +12,8 @@ import type {
 } from "@ismail-elkorchi/terminal-ui/components";
 import type {
   CommandInputState,
+  ContextMenuState,
+  DropdownMenuState,
   NumberInputState,
   SearchPickerState,
   SelectPresentation,
@@ -25,6 +30,26 @@ import type { PageSnapshot } from "../app/types.js";
 export type PickerKind = "links" | "outline" | "recall";
 export type DetailKind = "help" | "diagnostics" | "reader" | "cookies";
 export type SidePanelKind = "history" | "bookmarks" | "downloads";
+
+export const browserMenuItems = [
+  { kind: "action", id: "history", label: "History" },
+  { kind: "action", id: "bookmarks", label: "Bookmarks" },
+  { kind: "action", id: "downloads", label: "Downloads" },
+  { kind: "action", id: "reader", label: "Reader view" },
+  { kind: "action", id: "diagnostics", label: "Page diagnostics" },
+  { kind: "action", id: "cookies", label: "Cookies" },
+  { kind: "action", id: "download", label: "Download current resource" },
+  { kind: "action", id: "external", label: "Open externally" },
+  { kind: "action", id: "help", label: "Help" }
+] as const satisfies readonly MenuItem[];
+
+export const linkMenuItems = [
+  { kind: "action", id: "open", label: "Open" },
+  { kind: "action", id: "newForeground", label: "Open in new tab" },
+  { kind: "action", id: "newBackground", label: "Open in background tab" },
+  { kind: "action", id: "download", label: "Download link" },
+  { kind: "action", id: "external", label: "Open link externally" }
+] as const satisfies readonly MenuItem[];
 
 export interface StatusMessage {
   readonly text: string;
@@ -102,10 +127,12 @@ export interface DetailOverlay {
 export interface LinkMenuOverlay {
   readonly kind: "linkMenu";
   readonly actionId: string;
+  readonly state: ContextMenuState;
 }
 
 export interface BrowserMenuOverlay {
   readonly kind: "browserMenu";
+  readonly state: DropdownMenuState;
 }
 
 export interface DownloadPromptOverlay {
@@ -155,15 +182,22 @@ export type BrowserTuiMessage =
   | {
       readonly kind: "activateActionAt";
       readonly actionId: string;
-      readonly disposition?: "current" | "newForeground" | "newBackground" | "context";
+      readonly disposition?: "current" | "newForeground" | "newBackground";
     }
+  | {
+      readonly kind: "openLinkMenu";
+      readonly actionId: string;
+      readonly row: number;
+      readonly column: number;
+    }
+  | { readonly kind: "linkMenuAction"; readonly action: ContextMenuAction }
   | { readonly kind: "navigate"; readonly operation: "back" | "forward" | "reload" | "stop" }
   | { readonly kind: "omniboxAction"; readonly action: CommandInputAction }
   | { readonly kind: "omniboxSubmit"; readonly value: string }
   | { readonly kind: "focusOmnibox" }
   | { readonly kind: "cancelOmnibox" }
   | { readonly kind: "openActionPalette" }
-  | { readonly kind: "openBrowserMenu" }
+  | { readonly kind: "browserMenuAction"; readonly action: DropdownMenuAction }
   | { readonly kind: "openPicker"; readonly picker: PickerKind; readonly query?: string }
   | { readonly kind: "openDetail"; readonly detail: DetailKind }
   | { readonly kind: "toggleSidePanel"; readonly panel: SidePanelKind }

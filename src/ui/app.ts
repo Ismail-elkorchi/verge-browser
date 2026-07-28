@@ -1,8 +1,10 @@
 import {
   commandInputReducer,
+  contextMenuReducer,
   createNumberInputConfiguration,
   createScrollState,
   createTextAreaState,
+  dropdownMenuReducer,
   prepareSearchPickerIndex,
   numberInputReducer,
   searchPickerReducer,
@@ -42,6 +44,7 @@ import type {
   PickerKind,
   StatusMessage
 } from "./model.js";
+import { browserMenuItems, linkMenuItems } from "./model.js";
 import { browserView } from "./view.js";
 
 const ACTION_SUGGESTIONS = [
@@ -605,9 +608,6 @@ export function updateBrowser(
     case "activateActionAt": {
       const action = actionById(document, message.actionId);
       if (!action) return result({ ...state, status: status("Focus a link or form first.", "error") });
-      if (message.disposition === "context") {
-        return result({ ...state, overlay: { kind: "linkMenu", actionId: action.id } });
-      }
       if (action.kind === "form") {
         const firstControl = controller.form(document, action.id)?.controls.find(
           (control) => control.kind !== "hidden" && control.kind !== "unsupported"
@@ -633,6 +633,55 @@ export function updateBrowser(
         "replace",
         document.id
       ));
+    }
+    case "openLinkMenu": {
+      const action = actionById(document, message.actionId);
+      if (action?.kind !== "link") {
+        return result({ ...state, status: status("The selected item is not a link.", "error") });
+      }
+      const menu = contextMenuReducer(
+        { kind: "closed" },
+        {
+          kind: "open",
+          anchor: { kind: "cursor", row: message.row, column: message.column }
+        },
+        linkMenuItems
+      );
+      return result({
+        ...state,
+        overlay: { kind: "linkMenu", actionId: action.id, state: menu }
+      });
+    }
+    case "linkMenuAction": {
+      if (state.overlay?.kind !== "linkMenu") return result(state);
+      const menu = contextMenuReducer(state.overlay.state, message.action, linkMenuItems);
+      if (message.action.kind === "menu" && message.action.action.kind === "activate") {
+        const link = actionById(document, state.overlay.actionId);
+        if (link?.kind !== "link") {
+          return result({ ...state, overlay: null, status: status("The selected link is no longer available.", "error") });
+        }
+        const id = message.action.action.id;
+        const next: BrowserTuiMessage | undefined = id === "open"
+          ? { kind: "activateActionAt", actionId: link.id, disposition: "current" }
+          : id === "newForeground"
+            ? { kind: "activateActionAt", actionId: link.id, disposition: "newForeground" }
+            : id === "newBackground"
+              ? { kind: "activateActionAt", actionId: link.id, disposition: "newBackground" }
+              : id === "download"
+                ? { kind: "download", target: link.resolvedHref }
+                : id === "external"
+                  ? { kind: "openExternal", target: link.resolvedHref }
+                  : undefined;
+        return next === undefined
+          ? result({ ...state, overlay: null })
+          : updateBrowser(controller, { ...state, overlay: null }, next, context);
+      }
+      return result({
+        ...state,
+        overlay: menu.kind === "closed"
+          ? null
+          : { ...state.overlay, state: menu }
+      });
     }
     case "navigate":
       if (message.operation === "stop") {
@@ -703,8 +752,35 @@ export function updateBrowser(
           state: { input: { text: "", cursor: 0 }, history: [], suggestions: ACTION_SUGGESTIONS }
         }
       }, { focus: { kind: "element", elementId: "browser-action-input" } });
-    case "openBrowserMenu":
-      return result({ ...state, overlay: { kind: "browserMenu" } });
+    case "browserMenuAction": {
+      const current = state.overlay?.kind === "browserMenu"
+        ? state.overlay.state
+        : { kind: "closed" as const };
+      const menu = dropdownMenuReducer(current, message.action, browserMenuItems);
+      if (message.action.kind === "menu" && message.action.action.kind === "activate") {
+        const id = message.action.action.id;
+        const next: BrowserTuiMessage | undefined = id === "history"
+          ? { kind: "toggleSidePanel", panel: "history" }
+          : id === "bookmarks"
+            ? { kind: "toggleSidePanel", panel: "bookmarks" }
+            : id === "downloads"
+              ? { kind: "toggleSidePanel", panel: "downloads" }
+              : id === "reader" || id === "diagnostics" || id === "cookies" || id === "help"
+                ? { kind: "openDetail", detail: id }
+                : id === "download"
+                  ? { kind: "download" }
+                  : id === "external"
+                    ? { kind: "openExternal" }
+                    : undefined;
+        return next === undefined
+          ? result({ ...state, overlay: null })
+          : updateBrowser(controller, { ...state, overlay: null }, next, context);
+      }
+      return result({
+        ...state,
+        overlay: menu.kind === "closed" ? null : { kind: "browserMenu", state: menu }
+      });
+    }
     case "openPicker":
       return result(openPicker(controller, state, message.picker, message.query));
     case "openDetail":
