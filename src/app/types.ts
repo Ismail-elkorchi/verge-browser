@@ -90,14 +90,98 @@ export type PageRegion =
   | "contentinfo"
   | "search";
 
+/** Computed terminal color derived from author CSS. */
+export interface PageColor {
+  readonly r: number;
+  readonly g: number;
+  readonly b: number;
+}
+
+/** Computed inline style that terminal rendering can represent faithfully. */
+export interface PageTextStyle {
+  readonly foreground?: PageColor;
+  readonly background?: PageColor;
+  readonly bold?: boolean;
+  readonly italic?: boolean;
+  readonly underline?: boolean;
+  readonly strikethrough?: boolean;
+}
+
+/** One styled half-open range in a semantic page block. */
+export interface PageTextRun {
+  readonly startCodeUnitIndex: number;
+  readonly endCodeUnitIndexExclusive: number;
+  readonly style: PageTextStyle;
+}
+
+export type PageWhiteSpace = "normal" | "nowrap" | "pre" | "pre-wrap" | "pre-line";
+export type PageTextAlign = "left" | "center" | "right";
+
+/** Terminal-independent block styling computed from supported CSS properties. */
+export interface PageBlockStyle {
+  readonly whiteSpace: PageWhiteSpace;
+  readonly textAlign: PageTextAlign;
+  readonly marginTopRows: number;
+  readonly marginRightCells: number;
+  readonly marginBottomRows: number;
+  readonly marginLeftCells: number;
+  readonly paddingTopRows: number;
+  readonly paddingRightCells: number;
+  readonly paddingBottomRows: number;
+  readonly paddingLeftCells: number;
+  readonly textIndentCells: number;
+  readonly background?: PageColor;
+}
+
 /** One semantic document block before terminal layout. */
 export interface PageBlock {
   readonly id: string;
   readonly kind: PageBlockKind;
   readonly text: string;
+  readonly style: PageBlockStyle;
+  readonly textRuns: readonly PageTextRun[];
   readonly level?: number;
   readonly depth?: number;
   readonly region?: PageRegion;
+}
+
+export type PageStyleIssueCode =
+  | "stylesheet-fetch"
+  | "stylesheet-limit"
+  | "stylesheet-media"
+  | "stylesheet-parse"
+  | "unsupported-at-rule"
+  | "selector-parse"
+  | "selector-unknown"
+  | "property-invalid"
+  | "property-unsupported"
+  | "value-unsupported";
+
+/** Recoverable author-style issue retained for page diagnostics. */
+export interface PageStyleIssue {
+  readonly code: PageStyleIssueCode;
+  readonly message: string;
+  readonly sourceUrl: string;
+}
+
+/** One external stylesheet fetched in document order. */
+export interface PageStylesheetResource {
+  readonly ownerNodeId: number;
+  readonly requestUrl: string;
+  readonly finalUrl: string;
+  readonly contentType: string | null;
+  readonly bytes: Uint8Array;
+  readonly transportEncodingLabel?: string;
+}
+
+/** Buffered CSS resource returned by the default stylesheet loader. */
+export interface FetchStylesheetResult {
+  readonly requestUrl: string;
+  readonly finalUrl: string;
+  readonly contentType: string | null;
+  readonly bytes: Uint8Array;
+  readonly responseHeaders: Readonly<Record<string, string>>;
+  readonly transportEncodingLabel?: string;
 }
 
 interface PageActionBase {
@@ -133,8 +217,17 @@ export interface PageContent {
   readonly blocks: readonly PageBlock[];
   readonly links: readonly PageLinkAction[];
   readonly actions: readonly PageAction[];
+  readonly styleIssues: readonly PageStyleIssue[];
+  readonly stylesheetCount: number;
   readonly parseErrorCount: number;
   readonly fetchedAtIso: string;
+}
+
+/** One styled half-open range in a terminal layout row. */
+export interface PageLayoutStyleRun {
+  readonly startCodeUnitIndex: number;
+  readonly endCodeUnitIndexExclusive: number;
+  readonly style: PageTextStyle;
 }
 
 /** One terminal row derived from a semantic block. */
@@ -144,6 +237,11 @@ export interface PageLayoutRow {
   readonly actionIds: readonly string[];
   readonly blockTextStartCodeUnitIndex: number;
   readonly blockTextEndCodeUnitIndexExclusive: number;
+  readonly contentStartCodeUnitIndex: number;
+  readonly styleRuns: readonly PageLayoutStyleRun[];
+  readonly background?: PageColor;
+  readonly backgroundStartCodeUnitIndex?: number;
+  readonly backgroundEndCodeUnitIndexExclusive?: number;
 }
 
 /** Terminal geometry for one rendered segment of a stable page action. */
@@ -264,6 +362,12 @@ export interface PageDiagnostics {
   readonly parseDurationMs: number;
   /** Time spent building semantic page content in milliseconds. */
   readonly contentDurationMs: number;
+  /** Time spent fetching external stylesheets in milliseconds. */
+  readonly stylesheetDurationMs: number;
+  /** Number of embedded and successfully loaded external stylesheets parsed for the page. */
+  readonly stylesheetCount: number;
+  /** Number of recoverable stylesheet, selector, and property issues. */
+  readonly styleIssueCount: number;
   /** End-to-end time for fetch, parse, and semantic content construction in milliseconds. */
   readonly totalDurationMs: number;
   /** Whether request headers included a Cookie header. */
@@ -290,6 +394,12 @@ export interface RenderInput {
   readonly fetchedAtIso: string;
   /** Target terminal width in columns. */
   readonly width: number;
+  /** External author stylesheets already fetched in document order. */
+  readonly stylesheets?: readonly PageStylesheetResource[];
+  /** Recoverable stylesheet loading issues collected before page construction. */
+  readonly stylesheetIssues?: readonly PageStyleIssue[];
+  /** Whether author styles participate in page construction. */
+  readonly authorStyles?: "apply" | "ignore";
 }
 
 /** Input accepted by semantic page-content construction. */

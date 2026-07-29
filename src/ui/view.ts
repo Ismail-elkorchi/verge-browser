@@ -45,7 +45,12 @@ import type { RenderSpan, TerminalStyle } from "@ismail-elkorchi/terminal-ui/ren
 import type { TuiContext } from "@ismail-elkorchi/terminal-ui/tui";
 
 import { extractForms, type FormControl, type FormEntry } from "../app/forms.js";
-import type { PageAction, PageBlock, PageLayoutRow } from "../app/types.js";
+import type {
+  PageAction,
+  PageBlock,
+  PageLayoutRow,
+  PageTextStyle
+} from "../app/types.js";
 import {
   activeSearchMatch,
   documentContentBounds,
@@ -101,6 +106,22 @@ function blockStyle(block: PageBlock): TerminalStyle {
   return { fg: { kind: "theme", token: "text.default" } };
 }
 
+function terminalStyle(style: PageTextStyle | undefined): TerminalStyle {
+  if (style === undefined) return {};
+  return {
+    ...(style.foreground === undefined
+      ? {}
+      : { fg: { kind: "rgb" as const, ...style.foreground } }),
+    ...(style.background === undefined
+      ? {}
+      : { bg: { kind: "rgb" as const, ...style.background } }),
+    ...(style.bold === undefined ? {} : { bold: style.bold }),
+    ...(style.italic === undefined ? {} : { italic: style.italic }),
+    ...(style.underline === undefined ? {} : { underline: style.underline }),
+    ...(style.strikethrough === undefined ? {} : { strikethrough: style.strikethrough })
+  };
+}
+
 function rowSegments(
   document: BrowserDocumentState,
   block: PageBlock,
@@ -109,11 +130,7 @@ function rowSegments(
   focusedActionId: string | undefined
 ): readonly RenderSpan[] {
   const rowText = layoutRow.text;
-  const visibleBlockText = block.text.slice(
-    layoutRow.blockTextStartCodeUnitIndex,
-    layoutRow.blockTextEndCodeUnitIndexExclusive
-  );
-  const contentStart = Math.max(0, rowText.length - visibleBlockText.length);
+  const contentStart = layoutRow.contentStartCodeUnitIndex;
   const links = document.snapshot.content.links.flatMap((link) => {
     if (link.blockId !== block.id) return [];
     const start = Math.max(link.textOffset, layoutRow.blockTextStartCodeUnitIndex);
@@ -153,6 +170,17 @@ function rowSegments(
     boundaries.add(range.start);
     boundaries.add(range.end);
   }
+  for (const run of layoutRow.styleRuns) {
+    boundaries.add(run.startCodeUnitIndex);
+    boundaries.add(run.endCodeUnitIndexExclusive);
+  }
+  if (
+    layoutRow.backgroundStartCodeUnitIndex !== undefined
+    && layoutRow.backgroundEndCodeUnitIndexExclusive !== undefined
+  ) {
+    boundaries.add(layoutRow.backgroundStartCodeUnitIndex);
+    boundaries.add(layoutRow.backgroundEndCodeUnitIndexExclusive);
+  }
   const positions = [...boundaries].sort((left, right) => left - right);
   const spans: RenderSpan[] = [];
   for (let index = 0; index < positions.length - 1; index += 1) {
@@ -161,6 +189,12 @@ function rowSegments(
     if (start >= end) continue;
     const link = links.find((range) => range.start <= start && range.end >= end)?.link;
     const search = searchRanges.find((range) => range.start <= start && range.end >= end);
+    const authored = layoutRow.styleRuns.find((run) =>
+      run.startCodeUnitIndex <= start && run.endCodeUnitIndexExclusive >= end
+    )?.style;
+    const inBackground = layoutRow.background !== undefined
+      && (layoutRow.backgroundStartCodeUnitIndex ?? 0) <= start
+      && (layoutRow.backgroundEndCodeUnitIndexExclusive ?? rowText.length) >= end;
     const style: TerminalStyle = {
       ...blockStyle(block),
       ...(link === undefined
@@ -169,6 +203,10 @@ function rowSegments(
           fg: { kind: "theme" as const, token: "link.foreground" as const },
           underline: true
         }),
+      ...(!inBackground
+        ? {}
+        : { bg: { kind: "rgb" as const, ...layoutRow.background } }),
+      ...terminalStyle(authored),
       ...(link !== undefined && link.id === focusedActionId ? { inverse: true, bold: true } : {}),
       ...(search === undefined
         ? {}

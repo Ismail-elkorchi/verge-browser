@@ -49,6 +49,11 @@ reader output, page diagnostics, cookie inspection, and tab/workspace
 persistence. Non-HTML navigation offers to download the resource instead of
 replacing the current page.
 
+Author stylesheets, embedded styles, and style attributes contribute colors,
+text emphasis, visibility, whitespace, alignment, list markers, and bounded
+terminal-cell spacing. Reader view ignores author styling, and page CSS never
+controls browser chrome or focus indication.
+
 Downloads go to `Downloads` unless `VERGE_DOWNLOAD_DIR` is set. Partial files
 are removed after cancellation or failure, and existing files are not
 overwritten.
@@ -100,10 +105,12 @@ checks also run on Bun.
 ## Boundaries
 
 Verge is an HTML browser, not a Chromium replacement. It does not execute page
-JavaScript, render pixels, or implement CSS layout. Client-rendered sites,
-anti-bot challenges, media, and unsupported form encodings may therefore be
-unavailable. Network access remains constrained by the package’s protocol,
-redirect, content-type, timeout, and size policies.
+JavaScript or attempt pixel layout. CSS flexbox, grid, positioning, fonts,
+generated content, animation, images, and unresolved custom properties are
+reported but not rendered. Client-rendered sites, anti-bot challenges, media,
+and unsupported form encodings may therefore be unavailable. Network access
+remains constrained by the package’s protocol, redirect, content-type, timeout,
+and size policies.
 
 See the [first-session tutorial](docs/tutorial/first-session.md), [CLI
 reference](docs/reference/cli.md), and [API overview](docs/reference/api-overview.md).

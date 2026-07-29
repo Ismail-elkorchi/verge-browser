@@ -8,6 +8,7 @@ import {
   type FormControlValue,
   type FormEntry
 } from "../app/forms.js";
+import { buildPageContent } from "../app/render.js";
 import type { BrowserSession } from "../app/session.js";
 import {
   type BrowserWorkspace,
@@ -43,7 +44,16 @@ function excerpt(lines: readonly string[]): string {
 }
 
 function readerLines(snapshot: PageSnapshot): readonly string[] {
-  const lines = snapshot.content.blocks
+  const readerContent = buildPageContent({
+    tree: snapshot.document.tree,
+    requestUrl: snapshot.requestUrl,
+    finalUrl: snapshot.finalUrl,
+    status: snapshot.status,
+    statusText: snapshot.statusText,
+    fetchedAtIso: snapshot.fetchedAtIso,
+    authorStyles: "ignore"
+  });
+  const lines = readerContent.blocks
     .filter((block) => block.kind !== "form")
     .map((block) => block.text.replace(/\s+\[\d+\]/gu, "").trimEnd());
   return lines.length > 0 ? lines : ["No readable content."];
@@ -60,7 +70,12 @@ function diagnosticsLines(snapshot: PageSnapshot): readonly string[] {
     `Network detail: ${snapshot.diagnostics.networkOutcome.detailMessage}`,
     `Source bytes: ${String(snapshot.diagnostics.sourceBytes)}`,
     `Parse errors: ${String(snapshot.diagnostics.parseErrorCount)}`,
-    `Total ms: ${String(snapshot.diagnostics.totalDurationMs)}`
+    `Stylesheets: ${String(snapshot.diagnostics.stylesheetCount)}`,
+    `Style issues: ${String(snapshot.diagnostics.styleIssueCount)}`,
+    `Total ms: ${String(snapshot.diagnostics.totalDurationMs)}`,
+    ...snapshot.content.styleIssues.slice(0, 12).map((issue) =>
+      `CSS ${issue.code}: ${issue.message} (${issue.sourceUrl})`
+    )
   ];
 }
 
@@ -248,7 +263,7 @@ export class BrowserController {
     document: BrowserDocumentState,
     edits: readonly Edit[]
   ): Promise<PageSnapshot> {
-    const snapshot = this.#session(document.id).applyEdits(edits);
+    const snapshot = await this.#session(document.id).applyEdits(edits);
     await this.#persist(snapshot);
     return snapshot;
   }

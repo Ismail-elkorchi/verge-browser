@@ -41,9 +41,16 @@
 - Returns a streaming body in `stream` instead of buffered `html`.
 - Applies `maxContentBytes` while the stream is consumed.
 
+### `fetchStylesheet(requestUrl, timeoutMs?, securityPolicy?, requestOptions?, readLocalFileText?)`
+- Returns bounded transport bytes so css-parser can apply CSS encoding rules.
+- Accepts `text/css` responses and preserves a transport charset when supplied.
+- Uses the same redirect, timeout, cancellation, retry, protocol, and byte-limit behavior as page fetching.
+
 ### `BrowserSessionOptions`
 - `loader` and `streamLoader` replace the built-in page fetchers.
 - `contentBuilder` replaces semantic page-content construction.
+- `stylesheetLoader` replaces external CSS fetching.
+- `stylesheetPolicy` bounds stylesheet count, per-resource bytes, and aggregate bytes.
 - `parseOptions` defaults to the package's bounded HTML parse profile.
 - `defaultParseMode` defaults to `"text"` and may be set to `"stream"`.
 - `localFileReader` overrides `file://` reads for tests or custom hosts.
@@ -61,11 +68,13 @@
   `parseHtml()` calls retain it only when requested with
   `sourceRetention: "text"`.
 - `content` contains terminal-independent blocks, links, forms, and stable
-  action identities. Use `layoutPageContent(content, columns)` when terminal
-  rows and action geometry are needed.
-- The package does not expose a full external CSS snapshot field.
-- If you need CSS alongside the HTML snapshot, extract inline `<style>` blocks
-  from `document.sourceText` and fetch linked stylesheets separately.
+  action identities, plus computed block styles and styled text ranges. Use
+  `layoutPageContent(content, columns)` when terminal rows, styles, and action
+  geometry are needed.
+- `content.styleIssues` records recoverable CSS fetch, parse, selector, and
+  terminal-profile limitations.
+- `applyEdits()` is asynchronous because changed HTML can change linked
+  stylesheet resources.
 
 ## Related
 - [API overview](./api-overview.md)

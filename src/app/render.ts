@@ -9,6 +9,13 @@ import {
 import { measureTextCells, segmentGraphemes } from "@ismail-elkorchi/terminal-ui/text";
 
 import { extractForms, type FormEntry } from "./forms.js";
+import { assertAllowedProtocol } from "./security.js";
+import {
+  resolvePageStyles,
+  transformStyledText,
+  type ComputedElementStyle,
+  type PageStyleResolution
+} from "./styles.js";
 import { extractCompleteText } from "./text.js";
 import { resolveHref } from "./url.js";
 import type {
@@ -20,8 +27,11 @@ import type {
   PageContentInput,
   PageLayout,
   PageLayoutRow,
+  PageLayoutStyleRun,
   PageLinkAction,
   PageRegion,
+  PageTextRun,
+  PageTextStyle,
   RenderInput,
   RenderedActionable,
   RenderedLink,
@@ -48,6 +58,7 @@ const CONTAINER_TAGS = new Set([
 
 interface ContentCollector {
   readonly baseUrl: string;
+  readonly styles: PageStyleResolution;
   readonly blocks: PageBlock[];
   readonly links: PageLinkAction[];
   readonly actions: PageAction[];
@@ -58,16 +69,37 @@ interface ContentCollector {
 interface InlineResult {
   readonly text: string;
   readonly links: readonly Omit<PageLinkAction, "blockId">[];
+  readonly textRuns: readonly PageTextRun[];
 }
 
 interface WrappedRow {
   readonly text: string;
   readonly startOffset: number;
   readonly endOffsetExclusive: number;
+  readonly contentStartCodeUnitIndex: number;
 }
 
 function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/gu, " ").trim();
+}
+
+const DEFAULT_TEXT_STYLE: PageTextStyle = Object.freeze({});
+const DEFAULT_BLOCK_STYLE = Object.freeze({
+  whiteSpace: "normal" as const,
+  textAlign: "left" as const,
+  marginTopRows: 0,
+  marginRightCells: 0,
+  marginBottomRows: 0,
+  marginLeftCells: 0,
+  paddingTopRows: 0,
+  paddingRightCells: 0,
+  paddingBottomRows: 0,
+  paddingLeftCells: 0,
+  textIndentCells: 0
+});
+
+function elementStyle(node: HtmlNode, collector: ContentCollector): ComputedElementStyle | undefined {
+  return node.kind === "element" ? collector.styles.byElement.get(node) : undefined;
 }
 
 function imageLabel(node: ElementNode): string | null {
@@ -84,11 +116,12 @@ function imageLabel(node: ElementNode): string | null {
   return fallback.length === 0 ? "Image" : fallback;
 }
 
-function isHidden(node: ElementNode): boolean {
+function prunesSubtree(node: ElementNode, styles?: PageStyleResolution): boolean {
   const ariaHidden = getAttributeValue(node, "aria-hidden")?.trim().toLowerCase();
   return hasAttribute(node, "hidden")
     || ariaHidden === "true"
-    || (node.localName.toLowerCase() === "dialog" && !hasAttribute(node, "open"));
+    || (node.localName.toLowerCase() === "dialog" && !hasAttribute(node, "open"))
+    || styles?.byElement.get(node)?.display === "none";
 }
 
 function pageRegion(node: ElementNode, inherited: PageRegion | undefined): PageRegion | undefined {
@@ -112,12 +145,12 @@ function pageRegion(node: ElementNode, inherited: PageRegion | undefined): PageR
   return inherited;
 }
 
-function navigationAnchors(node: ElementNode): readonly ElementNode[] {
+function navigationAnchors(node: ElementNode, styles: PageStyleResolution): readonly ElementNode[] {
   const anchors: ElementNode[] = [];
   const pending = [...node.children].reverse();
   while (pending.length > 0) {
     const current = pending.pop();
-    if (!current || current.kind !== "element" || isHidden(current)) continue;
+    if (!current || current.kind !== "element" || prunesSubtree(current, styles)) continue;
     if (current.localName.toLowerCase() === "a") {
       anchors.push(current);
       continue;
@@ -132,7 +165,7 @@ function navigationAnchors(node: ElementNode): readonly ElementNode[] {
 
 function collectNavigation(node: ElementNode, collector: ContentCollector): void {
   const seenTargets = new Set(collector.links.map((link) => link.resolvedHref));
-  for (const anchor of navigationAnchors(node)) {
+  for (const anchor of navigationAnchors(node, collector.styles)) {
     const href = getAttributeValue(anchor, "href");
     if (!href) continue;
     const target = resolveHref(href, collector.baseUrl);
@@ -141,6 +174,7 @@ function collectNavigation(node: ElementNode, collector: ContentCollector): void
     const inline = inlineContent([anchor], collector);
     addBlock(collector, anchor, "listItem", `- ${inline.text}`, {
       region: "navigation",
+      textRuns: offsetTextRuns(inline.textRuns, 2),
       links: inline.links.map((link) => ({ ...link, textOffset: link.textOffset + 2 }))
     });
   }
@@ -159,52 +193,106 @@ function bodyChildren(tree: DocumentTree): readonly HtmlNode[] {
   return tree.children;
 }
 
+/** Returns the effective HTML document base used by links, forms, and stylesheets. */
+export function documentBaseUrl(tree: DocumentTree, fallbackUrl: string): string {
+  for (const base of findAllByTagName(tree, "base")) {
+    const href = getAttributeValue(base, "href");
+    if (href === undefined || href.trim().length === 0) continue;
+    try {
+      const resolved = new URL(href, fallbackUrl);
+      assertAllowedProtocol(resolved);
+      return resolved.toString();
+    } catch {
+      continue;
+    }
+  }
+  return fallbackUrl;
+}
+
 function blockId(node: HtmlNode, fallback: number): string {
   return node.kind === "element" ? `node:${String(node.id)}` : `text:${String(fallback)}`;
 }
 
-function inlineContent(nodes: readonly HtmlNode[], collector: ContentCollector): InlineResult {
+function inlineContent(
+  nodes: readonly HtmlNode[],
+  collector: ContentCollector,
+  inheritedStyle?: ComputedElementStyle
+): InlineResult {
   let text = "";
   const links: Omit<PageLinkAction, "blockId">[] = [];
+  const textRuns: PageTextRun[] = [];
 
-  const append = (fragment: string): void => {
-    const normalized = normalizeWhitespace(fragment);
-    if (normalized.length === 0) return;
-    if (text.length > 0 && !text.endsWith("\n")) text += " ";
-    text += normalized;
+  const appendRun = (fragment: string, style: PageTextStyle): void => {
+    if (fragment.length === 0) return;
+    const startCodeUnitIndex = text.length;
+    text += fragment;
+    textRuns.push({
+      startCodeUnitIndex,
+      endCodeUnitIndexExclusive: text.length,
+      style
+    });
   };
 
-  const visit = (node: HtmlNode): void => {
+  const append = (fragment: string, style: ComputedElementStyle | undefined): void => {
+    const transformed = transformStyledText(fragment, style?.textTransform ?? "none");
+    const whiteSpace = style?.block.whiteSpace ?? "normal";
+    if (whiteSpace === "pre" || whiteSpace === "pre-wrap") {
+      appendRun(transformed.replace(/\r\n?/gu, "\n"), style?.text ?? DEFAULT_TEXT_STYLE);
+      return;
+    }
+    const normalized = whiteSpace === "pre-line"
+      ? transformed
+        .replace(/\r\n?/gu, "\n")
+        .split("\n")
+        .map((line) => line.replace(/[^\S\n]+/gu, " ").trim())
+        .join("\n")
+      : transformed.replace(/\s+/gu, " ").trim();
+    if (normalized.length === 0) return;
+    if (text.length > 0 && !text.endsWith("\n") && !text.endsWith(" ")) {
+      appendRun(" ", style?.text ?? DEFAULT_TEXT_STYLE);
+    }
+    appendRun(normalized, style?.text ?? DEFAULT_TEXT_STYLE);
+  };
+
+  const visit = (node: HtmlNode, parentStyle: ComputedElementStyle | undefined): void => {
     if (node.kind === "text") {
-      append(node.value);
+      if (parentStyle?.visibility !== "hidden") append(node.value, parentStyle);
       return;
     }
     if (node.kind !== "element") return;
     const tag = node.localName.toLowerCase();
-    if (SKIP_TAGS.has(tag) || isHidden(node)) return;
+    if (SKIP_TAGS.has(tag) || prunesSubtree(node, collector.styles)) return;
+    const style = elementStyle(node, collector) ?? parentStyle;
     if (tag === "br") {
-      text = text.trimEnd();
-      if (!text.endsWith("\n")) text += "\n";
+      if (style?.visibility !== "hidden") {
+        text = text.trimEnd();
+        if (!text.endsWith("\n")) text += "\n";
+      }
       return;
     }
     if (tag === "img") {
-      const label = imageLabel(node);
-      if (label !== null) append(`▧ ${label}`);
+      if (style?.visibility !== "hidden") {
+        const label = imageLabel(node);
+        if (label !== null) append(`▧ ${label}`, style);
+      }
       return;
     }
     if (tag === "a") {
       const href = getAttributeValue(node, "href");
-      const nested = inlineContent(node.children, collector).text;
       if (!href) {
-        append(nested);
+        for (const child of node.children) visit(child, style);
         return;
       }
-      const label = nested.length > 0 ? nested : href;
-      if (text.length > 0 && !text.endsWith("\n")) text += " ";
+      if (text.length > 0 && !text.endsWith("\n") && !text.endsWith(" ")) {
+        appendRun(" ", style?.text ?? DEFAULT_TEXT_STYLE);
+      }
       const textOffset = text.length;
+      for (const child of node.children) visit(child, style);
+      if (text.length === textOffset && style?.visibility !== "hidden") append(href, style);
+      const label = text.slice(textOffset);
+      if (label.length === 0) return;
       const index = collector.nextLinkNumber;
       collector.nextLinkNumber += 1;
-      text += label;
       links.push({
         id: `link:${String(node.id)}`,
         kind: "link",
@@ -216,11 +304,52 @@ function inlineContent(nodes: readonly HtmlNode[], collector: ContentCollector):
       });
       return;
     }
-    for (const child of node.children) visit(child);
+    if (
+      style?.visibility !== "hidden"
+      && style?.display === "block"
+      && text.length > 0
+      && !text.endsWith("\n")
+    ) {
+      appendRun("\n", style.text);
+    }
+    for (const child of node.children) visit(child, style);
+    if (
+      style?.visibility !== "hidden"
+      && style?.display === "block"
+      && text.length > 0
+      && !text.endsWith("\n")
+    ) {
+      appendRun("\n", style.text);
+    }
   };
 
-  for (const node of nodes) visit(node);
-  return { text: text.trim(), links };
+  for (const node of nodes) visit(node, inheritedStyle);
+  const leading = text.length - text.trimStart().length;
+  const trimmed = text.trim();
+  return {
+    text: trimmed,
+    links: links.flatMap((link) => {
+      const textOffset = link.textOffset - leading;
+      return textOffset < 0 || textOffset >= trimmed.length
+        ? []
+        : [{ ...link, textOffset, label: trimmed.slice(textOffset, textOffset + link.label.length) }];
+    }),
+    textRuns: textRuns.flatMap((run) => {
+      const startCodeUnitIndex = Math.max(0, run.startCodeUnitIndex - leading);
+      const endCodeUnitIndexExclusive = Math.min(trimmed.length, run.endCodeUnitIndexExclusive - leading);
+      return startCodeUnitIndex >= endCodeUnitIndexExclusive
+        ? []
+        : [{ ...run, startCodeUnitIndex, endCodeUnitIndexExclusive }];
+    })
+  };
+}
+
+function offsetTextRuns(runs: readonly PageTextRun[], offset: number): readonly PageTextRun[] {
+  return runs.map((run) => ({
+    ...run,
+    startCodeUnitIndex: run.startCodeUnitIndex + offset,
+    endCodeUnitIndexExclusive: run.endCodeUnitIndexExclusive + offset
+  }));
 }
 
 function addBlock(
@@ -233,6 +362,8 @@ function addBlock(
     readonly depth?: number;
     readonly region?: PageRegion;
     readonly links?: InlineResult["links"];
+    readonly textRuns?: readonly PageTextRun[];
+    readonly computedStyle?: ComputedElementStyle;
   } = {}
 ): void {
   const text = kind === "preformatted"
@@ -240,10 +371,18 @@ function addBlock(
     : rawText.trim();
   if (text.length === 0) return;
   const id = blockId(node, collector.blocks.length);
+  const style = options.computedStyle ?? elementStyle(node, collector);
+  const textRuns = options.textRuns ?? [{
+    startCodeUnitIndex: 0,
+    endCodeUnitIndexExclusive: text.length,
+    style: style?.text ?? DEFAULT_TEXT_STYLE
+  }];
   collector.blocks.push({
     id,
     kind,
     text,
+    style: style?.block ?? DEFAULT_BLOCK_STYLE,
+    textRuns,
     ...(options.level === undefined ? {} : { level: options.level }),
     ...(options.depth === undefined ? {} : { depth: options.depth }),
     ...(options.region === undefined ? {} : { region: options.region })
@@ -272,14 +411,18 @@ function collectList(
     const inlineNodes = item.children.filter(
       (child) => child.kind !== "element" || !["ul", "ol"].includes(child.localName.toLowerCase())
     );
-    const inline = inlineContent(inlineNodes, collector);
-    const marker = ordered ? `${String(index + 1)}.` : "-";
-    addBlock(collector, item, "listItem", `${marker} ${inline.text}`, {
+    const inline = inlineContent(inlineNodes, collector, elementStyle(item, collector));
+    const listStyleType = elementStyle(item, collector)?.listStyleType
+      ?? (ordered ? "decimal" : "disc");
+    const marker = listMarker(listStyleType, index);
+    const markerPrefix = marker.length === 0 ? "" : `${marker} `;
+    addBlock(collector, item, "listItem", `${markerPrefix}${inline.text}`, {
       depth,
       ...(region === undefined ? {} : { region }),
+      textRuns: offsetTextRuns(inline.textRuns, markerPrefix.length),
       links: inline.links.map((link) => ({
         ...link,
-        textOffset: link.textOffset + marker.length + 1
+        textOffset: link.textOffset + markerPrefix.length
       }))
     });
     for (const child of item.children) {
@@ -287,6 +430,30 @@ function collectList(
         collectList(child, collector, depth + 1, region);
       }
     }
+  }
+}
+
+function alphabeticMarker(index: number, uppercase: boolean): string {
+  let value = index + 1;
+  let marker = "";
+  while (value > 0) {
+    value -= 1;
+    marker = String.fromCharCode((uppercase ? 65 : 97) + value % 26) + marker;
+    value = Math.floor(value / 26);
+  }
+  return marker;
+}
+
+function listMarker(listStyleType: string, index: number): string {
+  switch (listStyleType) {
+    case "none": return "";
+    case "circle": return "◦";
+    case "square": return "▪";
+    case "decimal": return `${String(index + 1)}.`;
+    case "decimal-leading-zero": return `${String(index + 1).padStart(2, "0")}.`;
+    case "lower-alpha": return `${alphabeticMarker(index, false)}.`;
+    case "upper-alpha": return `${alphabeticMarker(index, true)}.`;
+    default: return "-";
   }
 }
 
@@ -311,7 +478,7 @@ function collectDefinitionList(
   region: PageRegion | undefined
 ): void {
   for (const item of definitionItems(node)) {
-    const inline = inlineContent(item.children, collector);
+    const inline = inlineContent(item.children, collector, elementStyle(item, collector));
     addBlock(
       collector,
       item,
@@ -319,6 +486,7 @@ function collectDefinitionList(
       inline.text,
       {
         ...(region === undefined ? {} : { region }),
+        textRuns: inline.textRuns,
         links: inline.links
       }
     );
@@ -348,11 +516,13 @@ function collectTable(
     );
     let text = "| ";
     const links: Omit<PageLinkAction, "blockId">[] = [];
+    const textRuns: PageTextRun[] = [];
     for (const [cellIndex, cell] of cells.entries()) {
       if (cellIndex > 0) text += " | ";
-      const inline = inlineContent(cell.children, collector);
+      const inline = inlineContent(cell.children, collector, elementStyle(cell, collector));
       const cellOffset = text.length;
       text += inline.text;
+      textRuns.push(...offsetTextRuns(inline.textRuns, cellOffset));
       links.push(...inline.links.map((link) => ({
         ...link,
         textOffset: cellOffset + link.textOffset
@@ -360,6 +530,7 @@ function collectTable(
     }
     text += " |";
     addBlock(collector, row, "tableRow", text, {
+      textRuns,
       links,
       ...(region === undefined ? {} : { region })
     });
@@ -368,6 +539,8 @@ function collectTable(
         id: `${blockId(row, rowIndex)}:separator`,
         kind: "tableRow",
         text: `| ${cells.map(() => "────").join(" | ")} |`,
+        style: elementStyle(row, collector)?.block ?? DEFAULT_BLOCK_STYLE,
+        textRuns: [],
         ...(region === undefined ? {} : { region })
       });
     }
@@ -415,6 +588,12 @@ function collectForm(
     id: form.id,
     kind: "form",
     text,
+    style: elementStyle(node, collector)?.block ?? DEFAULT_BLOCK_STYLE,
+    textRuns: [{
+      startCodeUnitIndex: 0,
+      endCodeUnitIndexExclusive: text.length,
+      style: elementStyle(node, collector)?.text ?? DEFAULT_TEXT_STYLE
+    }],
     ...(region === undefined ? {} : { region })
   };
   collector.blocks.push(block);
@@ -435,22 +614,30 @@ function collectNode(
   node: HtmlNode,
   collector: ContentCollector,
   quoteDepth = 0,
-  inheritedRegion?: PageRegion
+  inheritedRegion?: PageRegion,
+  inheritedStyle?: ComputedElementStyle
 ): void {
   if (node.kind === "text") {
-    const text = normalizeWhitespace(node.value);
+    if (inheritedStyle?.visibility === "hidden") return;
+    const text = normalizeWhitespace(transformStyledText(
+      node.value,
+      inheritedStyle?.textTransform ?? "none"
+    ));
     if (text.length > 0) {
       addBlock(collector, node, quoteDepth > 0 ? "quote" : "paragraph", text, {
         depth: quoteDepth,
-        ...(inheritedRegion === undefined ? {} : { region: inheritedRegion })
+        ...(inheritedRegion === undefined ? {} : { region: inheritedRegion }),
+        ...(inheritedStyle === undefined ? {} : { computedStyle: inheritedStyle })
       });
     }
     return;
   }
   if (node.kind !== "element") return;
   const tag = node.localName.toLowerCase();
-  if (SKIP_TAGS.has(tag) || isHidden(node)) return;
+  if (SKIP_TAGS.has(tag) || prunesSubtree(node, collector.styles)) return;
+  const currentStyle = elementStyle(node, collector) ?? inheritedStyle;
   const region = pageRegion(node, inheritedRegion);
+  if (tag === "form" && currentStyle?.visibility === "hidden") return;
   if (tag === "nav" || (region === "navigation" && inheritedRegion !== "navigation")) {
     collectNavigation(node, collector);
     return;
@@ -460,24 +647,28 @@ function collectNode(
       (child): child is ElementNode =>
         child.kind === "element" && child.localName.toLowerCase() === "summary"
     );
-    if (summary !== undefined) collectNode(summary, collector, quoteDepth, region);
+    if (summary !== undefined) collectNode(summary, collector, quoteDepth, region, currentStyle);
     return;
   }
   if (tag === "details") {
-    for (const child of node.children) collectNode(child, collector, quoteDepth, region);
+    for (const child of node.children) collectNode(child, collector, quoteDepth, region, currentStyle);
     return;
   }
   if (/^h[1-6]$/u.test(tag)) {
-    const inline = inlineContent(node.children, collector);
+    const inline = inlineContent(node.children, collector, elementStyle(node, collector));
     addBlock(collector, node, "heading", inline.text, {
       level: Number.parseInt(tag.slice(1), 10),
       ...(region === undefined ? {} : { region }),
+      textRuns: inline.textRuns,
       links: inline.links
     });
     return;
   }
   if (tag === "pre") {
-    addBlock(collector, node, "preformatted", extractCompleteText(node), {
+    addBlock(collector, node, "preformatted", transformStyledText(
+      extractCompleteText(node),
+      currentStyle?.textTransform ?? "none"
+    ), {
       ...(region === undefined ? {} : { region })
     });
     return;
@@ -496,12 +687,13 @@ function collectNode(
     addBlock(collector, node, quoteDepth > 0 ? "quote" : "paragraph", inline.text, {
       depth: quoteDepth,
       ...(region === undefined ? {} : { region }),
+      textRuns: inline.textRuns,
       links: inline.links
     });
     return;
   }
   if (tag === "blockquote") {
-    for (const child of node.children) collectNode(child, collector, quoteDepth + 1, region);
+    for (const child of node.children) collectNode(child, collector, quoteDepth + 1, region, currentStyle);
     return;
   }
   if (tag === "ul" || tag === "ol") {
@@ -521,31 +713,41 @@ function collectNode(
     return;
   }
   if (tag === "p" || tag === "li") {
-    const inline = inlineContent(node.children, collector);
+    const inline = inlineContent(node.children, collector, elementStyle(node, collector));
     addBlock(collector, node, quoteDepth > 0 ? "quote" : "paragraph", inline.text, {
       depth: quoteDepth,
       ...(region === undefined ? {} : { region }),
+      textRuns: inline.textRuns,
       links: inline.links
     });
     return;
   }
   if (CONTAINER_TAGS.has(tag)) {
-    for (const child of node.children) collectNode(child, collector, quoteDepth, region);
+    for (const child of node.children) collectNode(child, collector, quoteDepth, region, currentStyle);
     return;
   }
-  const inline = inlineContent(node.children, collector);
+  const inline = inlineContent(node.children, collector, elementStyle(node, collector));
   addBlock(collector, node, quoteDepth > 0 ? "quote" : "paragraph", inline.text, {
     depth: quoteDepth,
     ...(region === undefined ? {} : { region }),
+    textRuns: inline.textRuns,
     links: inline.links
   });
 }
 
 /** Builds terminal-independent semantic page content from a parsed document. */
 export function buildPageContent(input: PageContentInput): PageContent {
-  const forms = extractForms(input.tree, input.finalUrl);
+  const baseUrl = documentBaseUrl(input.tree, input.finalUrl);
+  const styles = resolvePageStyles(
+    input.tree,
+    input.stylesheets ?? [],
+    input.stylesheetIssues ?? [],
+    { authorStyles: input.authorStyles ?? "apply" }
+  );
+  const forms = extractForms(input.tree, baseUrl);
   const collector: ContentCollector = {
-    baseUrl: input.finalUrl,
+    baseUrl,
+    styles,
     blocks: [],
     links: [],
     actions: [],
@@ -559,18 +761,28 @@ export function buildPageContent(input: PageContentInput): PageContent {
     const blocked = input.status === 403 && title.toLowerCase().includes("just a moment");
     if (blocked) {
       collector.blocks.push(
-        { id: "page:blocked", kind: "notice", text: "Blocked by anti-bot challenge." },
+        {
+          id: "page:blocked",
+          kind: "notice",
+          text: "Blocked by anti-bot challenge.",
+          style: DEFAULT_BLOCK_STYLE,
+          textRuns: []
+        },
         {
           id: "page:blocked-detail",
           kind: "notice",
-          text: "This page requires JavaScript/browser verification and cannot be rendered in CLI mode."
+          text: "This page requires JavaScript/browser verification and cannot be rendered in CLI mode.",
+          style: DEFAULT_BLOCK_STYLE,
+          textRuns: []
         }
       );
     } else {
       collector.blocks.push({
         id: "page:empty",
         kind: "notice",
-        text: "No visible content after script/style filtering."
+        text: "No visible content after script/style filtering.",
+        style: DEFAULT_BLOCK_STYLE,
+        textRuns: []
       });
     }
   }
@@ -578,7 +790,9 @@ export function buildPageContent(input: PageContentInput): PageContent {
     collector.blocks.push({
       id: "page:parse-errors",
       kind: "notice",
-      text: `Parser reported ${String(input.tree.errors.length)} recoverable issue(s).`
+      text: `Parser reported ${String(input.tree.errors.length)} recoverable issue(s).`,
+      style: DEFAULT_BLOCK_STYLE,
+      textRuns: []
     });
   }
 
@@ -589,6 +803,8 @@ export function buildPageContent(input: PageContentInput): PageContent {
     blocks: collector.blocks,
     links: collector.links,
     actions: collector.actions,
+    styleIssues: styles.issues,
+    stylesheetCount: styles.stylesheetCount,
     parseErrorCount: input.tree.errors.length,
     fetchedAtIso: input.fetchedAtIso
   };
@@ -602,7 +818,9 @@ function prefixForBlock(block: PageBlock): string {
 }
 
 function wrapLine(value: string, width: number): readonly WrappedRow[] {
-  if (value.length === 0) return [{ text: "", startOffset: 0, endOffsetExclusive: 0 }];
+  if (value.length === 0) {
+    return [{ text: "", startOffset: 0, endOffsetExclusive: 0, contentStartCodeUnitIndex: 0 }];
+  }
   const graphemes = segmentGraphemes(value);
   const rows: WrappedRow[] = [];
   let startIndex = 0;
@@ -636,28 +854,67 @@ function wrapLine(value: string, width: number): readonly WrappedRow[] {
     rows.push({
       text: value.slice(startOffset, endOffsetExclusive),
       startOffset,
-      endOffsetExclusive
+      endOffsetExclusive,
+      contentStartCodeUnitIndex: 0
     });
     startIndex = Math.max(startIndex + 1, nextStartIndex);
   }
   return rows;
 }
 
+function wrapExactLine(value: string, width: number): readonly WrappedRow[] {
+  if (value.length === 0) {
+    return [{ text: "", startOffset: 0, endOffsetExclusive: 0, contentStartCodeUnitIndex: 0 }];
+  }
+  const graphemes = segmentGraphemes(value);
+  const rows: WrappedRow[] = [];
+  let startIndex = 0;
+  while (startIndex < graphemes.length) {
+    let cells = 0;
+    let endIndex = startIndex;
+    while (endIndex < graphemes.length) {
+      const segment = graphemes[endIndex];
+      if (!segment) break;
+      if (endIndex > startIndex && cells + segment.cells > width) break;
+      cells += segment.cells;
+      endIndex += 1;
+      if (cells >= width) break;
+    }
+    const startOffset = graphemes[startIndex]?.startOffset ?? value.length;
+    const endOffsetExclusive = graphemes[endIndex]?.startOffset ?? value.length;
+    rows.push({
+      text: value.slice(startOffset, endOffsetExclusive),
+      startOffset,
+      endOffsetExclusive,
+      contentStartCodeUnitIndex: 0
+    });
+    startIndex = Math.max(startIndex + 1, endIndex);
+  }
+  return rows;
+}
+
 function wrapBlock(block: PageBlock, columns: number): readonly WrappedRow[] {
   const prefix = prefixForBlock(block);
-  const width = Math.max(1, columns - measureTextCells(prefix).cells);
-  if (block.kind === "preformatted") {
-    let offset = 0;
-    return block.text.split("\n").map((line) => {
-      const row = { text: line, startOffset: offset, endOffsetExclusive: offset + line.length };
-      offset += line.length + 1;
-      return row;
-    });
-  }
+  const prefixCells = measureTextCells(prefix).cells;
+  const leftMargin = block.style.marginLeftCells;
+  const rightMargin = block.style.marginRightCells;
+  const leftPadding = block.style.paddingLeftCells;
+  const rightPadding = block.style.paddingRightCells;
+  const width = Math.max(
+    1,
+    columns - leftMargin - rightMargin - prefixCells - leftPadding - rightPadding
+  );
   const rows: WrappedRow[] = [];
   let lineOffset = 0;
-  for (const line of block.text.split("\n")) {
-    rows.push(...wrapLine(line, width).map((row) => ({
+  for (const [sourceLineIndex, line] of block.text.split("\n").entries()) {
+    const indent = sourceLineIndex === 0 ? block.style.textIndentCells : 0;
+    const lineWidth = Math.max(1, width - indent);
+    const wrapped = block.style.whiteSpace === "nowrap" || block.style.whiteSpace === "pre"
+      ? [{ text: line, startOffset: 0, endOffsetExclusive: line.length, contentStartCodeUnitIndex: 0 }]
+      : block.style.whiteSpace === "pre-wrap"
+        ? wrapExactLine(line, lineWidth)
+        : wrapLine(line, lineWidth);
+    rows.push(...wrapped.map((row) => ({
       ...row,
       startOffset: lineOffset + row.startOffset,
       endOffsetExclusive: lineOffset + row.endOffsetExclusive
@@ -666,7 +923,42 @@ function wrapBlock(block: PageBlock, columns: number): readonly WrappedRow[] {
   }
   return rows.map((row, index) => ({
     ...row,
-    text: `${index === 0 ? prefix : " ".repeat(prefix.length)}${row.text}`
+    text: (() => {
+      const leadingPrefix = index === 0 ? prefix : " ".repeat(prefix.length);
+      const indent = index === 0 ? block.style.textIndentCells : 0;
+      const available = Math.max(
+        1,
+        columns - leftMargin - rightMargin - prefixCells - leftPadding - rightPadding - indent
+      );
+      const contentCells = measureTextCells(row.text).cells;
+      const alignment = block.style.textAlign === "center"
+        ? Math.floor(Math.max(0, available - contentCells) / 2)
+        : block.style.textAlign === "right"
+          ? Math.max(0, available - contentCells)
+          : 0;
+      const before = `${" ".repeat(leftMargin)}${leadingPrefix}${" ".repeat(leftPadding + indent + alignment)}`;
+      const raw = `${before}${row.text}`;
+      return block.style.background === undefined
+        ? raw
+        : `${raw}${" ".repeat(Math.max(
+          0,
+          columns - rightMargin - measureTextCells(raw).cells
+        ))}`;
+    })(),
+    contentStartCodeUnitIndex: (() => {
+      const indent = index === 0 ? block.style.textIndentCells : 0;
+      const available = Math.max(
+        1,
+        columns - leftMargin - rightMargin - prefixCells - leftPadding - rightPadding - indent
+      );
+      const contentCells = measureTextCells(row.text).cells;
+      const alignment = block.style.textAlign === "center"
+        ? Math.floor(Math.max(0, available - contentCells) / 2)
+        : block.style.textAlign === "right"
+          ? Math.max(0, available - contentCells)
+          : 0;
+      return leftMargin + prefix.length + leftPadding + indent + alignment;
+    })()
   }));
 }
 
@@ -677,7 +969,8 @@ export function documentContentColumns(availableColumns: number): number {
 }
 
 function blockGapRows(previous: PageBlock | undefined, current: PageBlock): number {
-  if (previous === undefined) return 0;
+  if (previous === undefined) return current.style.marginTopRows;
+  const authorGap = Math.max(previous.style.marginBottomRows, current.style.marginTopRows);
   if (
     previous.kind === "heading"
     || previous.kind === "listItem" && current.kind === "listItem"
@@ -685,9 +978,54 @@ function blockGapRows(previous: PageBlock | undefined, current: PageBlock): numb
     || previous.kind.startsWith("definition") && current.kind.startsWith("definition")
     || previous.region === "navigation" && current.region === "navigation"
   ) {
-    return 0;
+    return authorGap;
   }
-  return 1;
+  return Math.max(1, authorGap);
+}
+
+function styleRunsForRow(block: PageBlock, row: WrappedRow): readonly PageLayoutStyleRun[] {
+  return block.textRuns.flatMap((run): PageLayoutStyleRun[] => {
+    const overlapStart = Math.max(run.startCodeUnitIndex, row.startOffset);
+    const overlapEnd = Math.min(run.endCodeUnitIndexExclusive, row.endOffsetExclusive);
+    if (overlapStart >= overlapEnd) return [];
+    return [{
+      startCodeUnitIndex:
+        row.contentStartCodeUnitIndex + overlapStart - row.startOffset,
+      endCodeUnitIndexExclusive:
+        row.contentStartCodeUnitIndex + overlapEnd - row.startOffset,
+      style: run.style
+    }];
+  });
+}
+
+function spacingRow(
+  blockId: string,
+  columns: number,
+  background = undefined as PageBlock["style"]["background"],
+  horizontalMargins: {
+    readonly left: number;
+    readonly right: number;
+  } = { left: 0, right: 0 }
+): PageLayoutRow {
+  const backgroundWidth = Math.max(0, columns - horizontalMargins.left - horizontalMargins.right);
+  return {
+    blockId,
+    text: background === undefined
+      ? ""
+      : `${" ".repeat(horizontalMargins.left)}${" ".repeat(backgroundWidth)}`,
+    actionIds: [],
+    blockTextStartCodeUnitIndex: 0,
+    blockTextEndCodeUnitIndexExclusive: 0,
+    contentStartCodeUnitIndex: 0,
+    styleRuns: [],
+    ...(background === undefined
+      ? {}
+      : {
+        background,
+        backgroundStartCodeUnitIndex: horizontalMargins.left,
+        backgroundEndCodeUnitIndexExclusive: horizontalMargins.left + backgroundWidth
+      })
+  };
 }
 
 /** Derives terminal rows and action geometry from semantic page content. */
@@ -704,14 +1042,16 @@ export function layoutPageContent(content: PageContent, columns: number): PageLa
 
   for (const [blockIndex, block] of content.blocks.entries()) {
     const previous = content.blocks[blockIndex - 1];
-    if (blockGapRows(previous, block) > 0) {
-      rows.push({
-        blockId: `${block.id}:spacing-before`,
-        text: "",
-        actionIds: [],
-        blockTextStartCodeUnitIndex: 0,
-        blockTextEndCodeUnitIndexExclusive: 0
-      });
+    for (let gap = 0; gap < blockGapRows(previous, block); gap += 1) {
+      rows.push(spacingRow(`${block.id}:spacing-before:${String(gap)}`, normalizedColumns));
+    }
+    for (let padding = 0; padding < block.style.paddingTopRows; padding += 1) {
+      rows.push(spacingRow(
+        block.id,
+        normalizedColumns,
+        block.style.background,
+        { left: block.style.marginLeftCells, right: block.style.marginRightCells }
+      ));
     }
     const blockRows = wrapBlock(block, normalizedColumns);
     const blockActions = actionsByBlock.get(block.id) ?? [];
@@ -723,7 +1063,17 @@ export function layoutPageContent(content: PageContent, columns: number): PageLa
         text: row.text,
         actionIds,
         blockTextStartCodeUnitIndex: row.startOffset,
-        blockTextEndCodeUnitIndexExclusive: row.endOffsetExclusive
+        blockTextEndCodeUnitIndexExclusive: row.endOffsetExclusive,
+        contentStartCodeUnitIndex: row.contentStartCodeUnitIndex,
+        styleRuns: styleRunsForRow(block, row),
+        ...(block.style.background === undefined
+          ? {}
+          : {
+            background: block.style.background,
+            backgroundStartCodeUnitIndex: block.style.marginLeftCells,
+            backgroundEndCodeUnitIndexExclusive:
+              Math.max(block.style.marginLeftCells, normalizedColumns - block.style.marginRightCells)
+          })
       });
       for (const action of blockActions) {
         const actionStart = action.textOffset;
@@ -732,11 +1082,11 @@ export function layoutPageContent(content: PageContent, columns: number): PageLa
         const overlapEnd = Math.min(actionEnd, row.endOffsetExclusive);
         if (overlapStart >= overlapEnd) continue;
         actionIds.push(action.id);
-        const prefixWidth = measureTextCells(prefixForBlock(block)).cells;
         actionPlacements.push({
           actionId: action.id,
           rowIndex: firstRowIndex + localIndex,
-          columnIndex: prefixWidth + measureTextCells(
+          columnIndex: measureTextCells(row.text.slice(0, row.contentStartCodeUnitIndex)).cells
+            + measureTextCells(
             block.text.slice(row.startOffset, overlapStart)
           ).cells,
           width: Math.max(1, Math.min(
@@ -745,6 +1095,23 @@ export function layoutPageContent(content: PageContent, columns: number): PageLa
           ))
         });
       }
+    }
+    for (let padding = 0; padding < block.style.paddingBottomRows; padding += 1) {
+      rows.push(spacingRow(
+        block.id,
+        normalizedColumns,
+        block.style.background,
+        { left: block.style.marginLeftCells, right: block.style.marginRightCells }
+      ));
+    }
+  }
+  const lastBlock = content.blocks.at(-1);
+  if (lastBlock) {
+    for (let gap = 0; gap < lastBlock.style.marginBottomRows; gap += 1) {
+      rows.push(spacingRow(
+        `${lastBlock.id}:spacing-after:${String(gap)}`,
+        normalizedColumns
+      ));
     }
   }
   return { columns: normalizedColumns, rows, actionPlacements };

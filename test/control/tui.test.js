@@ -50,9 +50,9 @@ async function fixture(options = {}) {
   const htmlMap = new Map([
     [
       "https://example.test/",
-      `<html><head><title>Index</title></head><body><h1>Index</h1><p><a href="/next">Next page</a></p>${Array.from(
+      `<html><head><title>Index</title><style>.authored { color: #123456; background-color: #f0e0d0; font-style: italic; }</style></head><body><h1>Index</h1><p><a href="/next">Next page</a></p>${Array.from(
         { length: 40 },
-        (_, index) => `<p>Paragraph ${String(index + 1)} alpha</p>`
+        (_, index) => `<p${index === 0 ? ' class="authored"' : ""}>Paragraph ${String(index + 1)} alpha</p>`
       ).join("")}<form action="/search" method="get"><label for="query">Query</label><input id="query" name="q" value="alpha" required><label for="secret">Secret</label><input id="secret" type="password" name="secret" value="hidden"><label for="language">Language</label><select id="language" name="lang" required><option value="en" selected>English</option><option value="fr">French</option></select><label for="count">Count</label><input id="count" type="number" name="count" value="2" min="1" max="9" step="1"><textarea name="notes">hello</textarea><button type="submit" name="intent" value="search">Search</button></form></body></html>`
     ],
     [
@@ -264,6 +264,18 @@ test("browser chrome and document geometry remain readable from narrow to wide t
     && cell.style?.bold === true
     && cell.style.fg?.kind === "theme"
     && cell.style.fg.token === "accent.primary"
+  ));
+  assert.ok(wideFrame.cells.some((cell) =>
+    cell.text === "P"
+    && cell.style?.fg?.kind === "rgb"
+    && cell.style.fg.r === 18
+    && cell.style.fg.g === 52
+    && cell.style.fg.b === 86
+    && cell.style?.bg?.kind === "rgb"
+    && cell.style.bg.r === 240
+    && cell.style.bg.g === 224
+    && cell.style.bg.b === 208
+    && cell.style.italic === true
   ));
   const proseRow = wideFrame.cells.find((cell) =>
     cell.text === "P" && cell.column >= 60 && cell.link === undefined

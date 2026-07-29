@@ -4,12 +4,14 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { TextDecoder } from "node:util";
 
 import {
   NetworkFetchError,
   classifyNetworkFailure,
   fetchPage,
   fetchPageStream,
+  fetchStylesheet,
   readByteStreamToText
 } from "../../dist/app/fetch-page.js";
 
@@ -73,6 +75,52 @@ test("fetchPage blocks unsupported redirect protocols", async () => {
   }
 });
 
+test("fetchPage does not forward credentials across redirect origins", async () => {
+  let redirectedHeaders;
+  const destination = createServer((request, response) => {
+    redirectedHeaders = request.headers;
+    response.statusCode = 200;
+    response.setHeader("content-type", "text/html");
+    response.end("<p>redirected</p>");
+  });
+  await new Promise((resolve) => destination.listen(0, "127.0.0.1", resolve));
+  const destinationAddress = destination.address();
+  if (!destinationAddress || typeof destinationAddress === "string") {
+    throw new Error("destination address unavailable");
+  }
+  const source = createServer((_, response) => {
+    response.statusCode = 302;
+    response.setHeader(
+      "location",
+      `http://127.0.0.1:${String(destinationAddress.port)}/result`
+    );
+    response.end();
+  });
+  await new Promise((resolve) => source.listen(0, "127.0.0.1", resolve));
+  const sourceAddress = source.address();
+  if (!sourceAddress || typeof sourceAddress === "string") {
+    throw new Error("source address unavailable");
+  }
+
+  try {
+    await fetchPage(`http://127.0.0.1:${String(sourceAddress.port)}/start`, 15_000, undefined, {
+      headers: {
+        authorization: "Bearer secret",
+        cookie: "session=secret",
+        "x-browser-test": "retained"
+      }
+    });
+    assert.equal(redirectedHeaders?.authorization, undefined);
+    assert.equal(redirectedHeaders?.cookie, undefined);
+    assert.equal(redirectedHeaders?.["x-browser-test"], "retained");
+  } finally {
+    await Promise.all([
+      new Promise((resolve) => source.close(resolve)),
+      new Promise((resolve) => destination.close(resolve))
+    ]);
+  }
+});
+
 test("fetchPage enforces maxContentBytes", async () => {
   const server = createServer((_, response) => {
     response.statusCode = 200;
@@ -114,6 +162,56 @@ test("fetchPageStream enforces maxContentBytes", async () => {
   try {
     const streamPage = await fetchPageStream(url, 15_000, { maxContentBytes: 64 });
     await assert.rejects(readByteStreamToText(streamPage.stream), /maxContentBytes/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("fetchStylesheet preserves transport bytes and encoding evidence", async () => {
+  const css = "@charset \"windows-1252\";p{color:red}";
+  const server = createServer((_, response) => {
+    response.statusCode = 200;
+    response.setHeader("content-type", "text/css; charset=windows-1252");
+    response.end(css);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("server address unavailable");
+  try {
+    const result = await fetchStylesheet(`http://127.0.0.1:${String(address.port)}/site.css`);
+    assert.equal(new TextDecoder().decode(result.bytes), css);
+    assert.equal(result.transportEncodingLabel, "windows-1252");
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("fetchStylesheet rejects invalid media types and oversized payloads", async () => {
+  const server = createServer((request, response) => {
+    response.statusCode = 200;
+    if (request.url === "/wrong") {
+      response.setHeader("content-type", "text/html");
+      response.end("<p>not CSS</p>");
+      return;
+    }
+    response.setHeader("content-type", "text/css");
+    response.end("p{}".padEnd(128, " "));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("server address unavailable");
+  const base = `http://127.0.0.1:${String(address.port)}`;
+  try {
+    await assert.rejects(
+      fetchStylesheet(`${base}/wrong`),
+      (error) => error instanceof NetworkFetchError
+        && error.networkOutcome.kind === "content_type_block"
+    );
+    await assert.rejects(
+      fetchStylesheet(`${base}/large`, 15_000, { maxContentBytes: 32 }),
+      (error) => error instanceof NetworkFetchError
+        && error.networkOutcome.kind === "size_limit"
+    );
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

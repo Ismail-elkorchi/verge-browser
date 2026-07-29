@@ -29,8 +29,8 @@ Node/npm type surface is shipped from `dist/mod.d.ts` (source module: `src/mod.t
 Node/npm includes the full browser runtime stack and the packaged `verge` CLI binary:
 - command parsing and formatting
 - cookie parsing/merging
-- fetch + stream fetch adapters
-- session, paging, search, rendering, terminal helpers
+- page, stream, and stylesheet fetch adapters
+- CSS-aware session, paging, search, rendering, and terminal helpers
 - runtime hosts (Node/Deno/Bun)
 - exported runtime and diagnostics types
 

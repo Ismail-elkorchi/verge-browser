@@ -163,7 +163,7 @@ test("BrowserSession applyEdits mutates current snapshot deterministically", asy
   const paragraphTextNode = paragraphNode.children.find((child) => child.kind === "text");
   assert.ok(paragraphTextNode && paragraphTextNode.kind === "text");
 
-  const patched = session.applyEdits([
+  const patched = await session.applyEdits([
     {
       kind: "replaceText",
       target: paragraphTextNode.id,

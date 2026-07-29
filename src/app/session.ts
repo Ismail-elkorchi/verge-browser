@@ -3,22 +3,35 @@ import {
   computePatch,
   parse,
   parseStream,
+  findAllByTagName,
+  getAttributeValue,
+  hasAttribute,
   type DocumentTree,
   type Edit,
   type ParseOptions,
   type ParsedDocument
 } from "@ismail-elkorchi/html-parser";
 
-import { fetchPage, fetchPageStream, type LocalFileReader } from "./fetch-page.js";
-import { buildPageContent } from "./render.js";
+import {
+  fetchPage,
+  fetchPageStream,
+  fetchStylesheet,
+  type LocalFileReader
+} from "./fetch-page.js";
+import { buildPageContent, documentBaseUrl } from "./render.js";
+import { terminalMediaApplies } from "./styles.js";
 import type {
   FetchPagePayload,
   FetchPageResult,
   FetchPageStreamResult,
+  FetchStylesheetResult,
   PageContent,
+  PageContentInput,
   PageDiagnostics,
   PageRequestOptions,
-  PageSnapshot
+  PageSnapshot,
+  PageStyleIssue,
+  PageStylesheetResource
 } from "./types.js";
 
 export type PageLoader = (
@@ -31,14 +44,32 @@ export type PageStreamLoader = (
   requestOptions?: PageRequestOptions
 ) => Promise<FetchPageStreamResult>;
 
-export type PageContentBuilder = (input: {
-  readonly tree: DocumentTree;
-  readonly requestUrl: string;
-  readonly finalUrl: string;
-  readonly status: number;
-  readonly statusText: string;
-  readonly fetchedAtIso: string;
-}) => PageContent;
+export type PageContentBuilder = (input: PageContentInput) => PageContent;
+
+export type StylesheetLoader = (
+  requestUrl: string,
+  requestOptions?: Pick<PageRequestOptions, "headers" | "signal">
+) => Promise<FetchStylesheetResult>;
+
+export interface StylesheetPolicyOptions {
+  readonly maxStylesheets?: number;
+  readonly maxStylesheetBytes?: number;
+  readonly maxTotalStylesheetBytes?: number;
+}
+
+const DEFAULT_STYLESHEET_POLICY: Required<StylesheetPolicyOptions> = Object.freeze({
+  maxStylesheets: 32,
+  maxStylesheetBytes: 512 * 1024,
+  maxTotalStylesheetBytes: 2 * 1024 * 1024
+});
+
+function stylesheetLimit(value: number | undefined, fallback: number, name: string): number {
+  const resolved = value ?? fallback;
+  if (!Number.isSafeInteger(resolved) || resolved < 0) {
+    throw new RangeError(`${name} must be a non-negative safe integer.`);
+  }
+  return resolved;
+}
 
 type ParseMode = "text" | "stream";
 
@@ -46,6 +77,7 @@ interface NavigationTimings {
   readonly fetchDurationMs: number;
   readonly parseDurationMs: number;
   readonly contentDurationMs: number;
+  readonly stylesheetDurationMs: number;
   readonly totalDurationMs: number;
 }
 
@@ -58,6 +90,8 @@ export interface BrowserSessionOptions {
   readonly loader?: PageLoader;
   readonly streamLoader?: PageStreamLoader;
   readonly contentBuilder?: PageContentBuilder;
+  readonly stylesheetLoader?: StylesheetLoader;
+  readonly stylesheetPolicy?: StylesheetPolicyOptions;
   readonly parseOptions?: ParseOptions;
   readonly defaultParseMode?: ParseMode;
   readonly localFileReader?: LocalFileReader;
@@ -120,6 +154,7 @@ function unknownNetworkOutcome(): PageDiagnostics["networkOutcome"] {
 
 function diagnosticsFromDocument(
   document: ParsedDocument,
+  content: PageContent,
   parseMode: ParseMode,
   requestMethod: "GET" | "POST",
   timings: NavigationTimings,
@@ -137,6 +172,9 @@ function diagnosticsFromDocument(
     fetchDurationMs: timings.fetchDurationMs,
     parseDurationMs: timings.parseDurationMs,
     contentDurationMs: timings.contentDurationMs,
+    stylesheetDurationMs: timings.stylesheetDurationMs,
+    stylesheetCount: content.stylesheetCount,
+    styleIssueCount: content.styleIssues.length,
     totalDurationMs: timings.totalDurationMs,
     usedCookies,
     networkOutcome: outcome,
@@ -144,10 +182,72 @@ function diagnosticsFromDocument(
   };
 }
 
+function linkedStylesheets(tree: DocumentTree): readonly {
+  readonly ownerNodeId: number;
+  readonly href: string;
+  readonly media?: string;
+}[] {
+  const links: { ownerNodeId: number; href: string; media?: string }[] = [];
+  for (const node of findAllByTagName(tree, "link")) {
+    const relations = (getAttributeValue(node, "rel") ?? "")
+      .toLowerCase()
+      .split(/\s+/u)
+      .filter(Boolean);
+    const href = getAttributeValue(node, "href");
+    const type = getAttributeValue(node, "type")?.trim().toLowerCase();
+    if (
+      !relations.includes("stylesheet")
+      || relations.includes("alternate")
+      || hasAttribute(node, "disabled")
+      || href === undefined
+      || href.trim().length === 0
+      || type !== undefined && type !== "text/css"
+    ) {
+      continue;
+    }
+    const media = getAttributeValue(node, "media");
+    links.push({
+      ownerNodeId: node.id,
+      href,
+      ...(media === undefined ? {} : { media })
+    });
+  }
+  return links;
+}
+
+function stylesheetRequestHeaders(
+  documentUrl: string,
+  stylesheetUrl: string,
+  headers: Readonly<Record<string, string>> | undefined
+): Readonly<Record<string, string>> | undefined {
+  if (headers === undefined) return undefined;
+  let sameOrigin = false;
+  try {
+    sameOrigin = new URL(documentUrl).origin === new URL(stylesheetUrl).origin;
+  } catch {
+    return undefined;
+  }
+  const filtered = Object.fromEntries(Object.entries(headers).filter(([name]) => {
+    const normalized = name.toLowerCase();
+    if (normalized === "accept" || normalized === "content-type" || normalized === "content-length") {
+      return false;
+    }
+    return sameOrigin || normalized !== "cookie" && normalized !== "authorization";
+  }));
+  return Object.keys(filtered).length === 0 ? undefined : filtered;
+}
+
+interface LoadedStylesheets {
+  readonly resources: readonly PageStylesheetResource[];
+  readonly issues: readonly PageStyleIssue[];
+}
+
 export class BrowserSession {
   readonly #loader: PageLoader;
   readonly #streamLoader: PageStreamLoader;
   readonly #contentBuilder: PageContentBuilder;
+  readonly #stylesheetLoader: StylesheetLoader;
+  readonly #stylesheetPolicy: Required<StylesheetPolicyOptions>;
   readonly #parseOptions: ParseOptions;
   readonly #defaultParseMode: ParseMode;
   readonly #history: HistoryEntry[] = [];
@@ -163,6 +263,34 @@ export class BrowserSession {
       ?? ((requestUrl, requestOptions) =>
         fetchPageStream(requestUrl, undefined, undefined, requestOptions, localFileReader));
     this.#contentBuilder = options.contentBuilder ?? buildPageContent;
+    this.#stylesheetLoader = options.stylesheetLoader
+      ?? ((requestUrl, requestOptions) =>
+        fetchStylesheet(
+          requestUrl,
+          undefined,
+          options.stylesheetPolicy?.maxStylesheetBytes === undefined
+            ? {}
+            : { maxContentBytes: options.stylesheetPolicy.maxStylesheetBytes },
+          requestOptions,
+          localFileReader
+        ));
+    this.#stylesheetPolicy = {
+      maxStylesheets: stylesheetLimit(
+        options.stylesheetPolicy?.maxStylesheets,
+        DEFAULT_STYLESHEET_POLICY.maxStylesheets,
+        "maxStylesheets"
+      ),
+      maxStylesheetBytes: stylesheetLimit(
+        options.stylesheetPolicy?.maxStylesheetBytes,
+        DEFAULT_STYLESHEET_POLICY.maxStylesheetBytes,
+        "maxStylesheetBytes"
+      ),
+      maxTotalStylesheetBytes: stylesheetLimit(
+        options.stylesheetPolicy?.maxTotalStylesheetBytes,
+        DEFAULT_STYLESHEET_POLICY.maxTotalStylesheetBytes,
+        "maxTotalStylesheetBytes"
+      )
+    };
     this.#parseOptions = {
       ...DEFAULT_PARSE_OPTIONS,
       ...options.parseOptions,
@@ -246,7 +374,118 @@ export class BrowserSession {
     });
   }
 
-  public applyEdits(edits: readonly Edit[]): PageSnapshot {
+  async #loadStylesheets(
+    tree: DocumentTree,
+    finalUrl: string,
+    requestOptions: PageRequestOptions
+  ): Promise<LoadedStylesheets> {
+    const resources: PageStylesheetResource[] = [];
+    const issues: PageStyleIssue[] = [];
+    const baseUrl = documentBaseUrl(tree, finalUrl);
+    const links = linkedStylesheets(tree);
+    if (links.length > this.#stylesheetPolicy.maxStylesheets) {
+      issues.push({
+        code: "stylesheet-limit",
+        message: `Only the first ${String(this.#stylesheetPolicy.maxStylesheets)} external stylesheets were considered.`,
+        sourceUrl: finalUrl
+      });
+    }
+    const candidates: {
+      readonly link: (typeof links)[number];
+      readonly requestUrl: string;
+    }[] = [];
+    for (const link of links.slice(0, this.#stylesheetPolicy.maxStylesheets)) {
+      requestOptions.signal?.throwIfAborted();
+      if (!terminalMediaApplies(link.media)) {
+        issues.push({
+          code: "stylesheet-media",
+          message: "Skipped a stylesheet whose media query does not target terminal rendering.",
+          sourceUrl: finalUrl
+        });
+        continue;
+      }
+      try {
+        candidates.push({
+          link,
+          requestUrl: new URL(link.href, baseUrl).toString()
+        });
+      } catch {
+        issues.push({
+          code: "stylesheet-fetch",
+          message: `Invalid stylesheet URL: ${link.href}`,
+          sourceUrl: finalUrl
+        });
+      }
+    }
+    const fetchedStylesheets = await Promise.all(candidates.map(async (candidate) => {
+      const headers = stylesheetRequestHeaders(
+        finalUrl,
+        candidate.requestUrl,
+        requestOptions.headers
+      );
+      try {
+        const fetched = await this.#stylesheetLoader(candidate.requestUrl, {
+          ...(headers === undefined ? {} : { headers }),
+          ...(requestOptions.signal === undefined ? {} : { signal: requestOptions.signal })
+        });
+        return { ...candidate, fetched } as const;
+      } catch (error) {
+        requestOptions.signal?.throwIfAborted();
+        return { ...candidate, error } as const;
+      }
+    }));
+    let totalBytes = 0;
+    for (const result of fetchedStylesheets) {
+      if ("error" in result) {
+        issues.push({
+          code: "stylesheet-fetch",
+          message: result.error instanceof Error ? result.error.message : String(result.error),
+          sourceUrl: result.requestUrl
+        });
+        continue;
+      }
+      const { fetched, link } = result;
+      const mediaType = fetched.contentType?.toLowerCase().split(";", 1)[0]?.trim();
+      if (mediaType !== undefined && mediaType !== "text/css") {
+        issues.push({
+          code: "stylesheet-fetch",
+          message: `Blocked non-CSS content-type: ${String(fetched.contentType)}`,
+          sourceUrl: fetched.finalUrl
+        });
+        continue;
+      }
+      if (fetched.bytes.byteLength > this.#stylesheetPolicy.maxStylesheetBytes) {
+        issues.push({
+          code: "stylesheet-limit",
+          message: `Stylesheet exceeded ${String(this.#stylesheetPolicy.maxStylesheetBytes)} bytes.`,
+          sourceUrl: fetched.finalUrl
+        });
+        continue;
+      }
+      if (totalBytes + fetched.bytes.byteLength > this.#stylesheetPolicy.maxTotalStylesheetBytes) {
+        issues.push({
+          code: "stylesheet-limit",
+          message: `Aggregate stylesheet data exceeded ${String(this.#stylesheetPolicy.maxTotalStylesheetBytes)} bytes.`,
+          sourceUrl: fetched.finalUrl
+        });
+        break;
+      }
+      totalBytes += fetched.bytes.byteLength;
+      resources.push({
+        ownerNodeId: link.ownerNodeId,
+        requestUrl: fetched.requestUrl,
+        finalUrl: fetched.finalUrl,
+        contentType: fetched.contentType,
+        bytes: fetched.bytes,
+        ...(fetched.transportEncodingLabel === undefined
+          ? {}
+          : { transportEncodingLabel: fetched.transportEncodingLabel })
+      });
+    }
+    return { resources, issues };
+  }
+
+  public async applyEdits(edits: readonly Edit[]): Promise<PageSnapshot> {
     const current = this.#current;
     if (!current) throw new Error("No page is loaded");
     if (current.document.sourceText === null) {
@@ -257,6 +496,9 @@ export class BrowserSession {
     const parseStartedAtMs = Date.now();
     const document = parse(patchedHtml, this.#parseOptions);
     const parseDurationMs = Date.now() - parseStartedAtMs;
+    const stylesheetStartedAtMs = Date.now();
+    const stylesheets = await this.#loadStylesheets(document.tree, current.finalUrl, {});
+    const stylesheetDurationMs = Date.now() - stylesheetStartedAtMs;
     const contentStartedAtMs = Date.now();
     const content = this.#contentBuilder({
       tree: document.tree,
@@ -264,7 +506,9 @@ export class BrowserSession {
       finalUrl: current.finalUrl,
       status: current.status,
       statusText: current.statusText,
-      fetchedAtIso: current.fetchedAtIso
+      fetchedAtIso: current.fetchedAtIso,
+      stylesheets: stylesheets.resources,
+      stylesheetIssues: stylesheets.issues
     });
     const contentDurationMs = Date.now() - contentStartedAtMs;
     const snapshot: PageSnapshot = {
@@ -274,12 +518,14 @@ export class BrowserSession {
       content,
       diagnostics: diagnosticsFromDocument(
         document,
+        content,
         current.diagnostics.parseMode,
         current.diagnostics.requestMethod,
         {
           fetchDurationMs: 0,
           parseDurationMs,
           contentDurationMs,
+          stylesheetDurationMs,
           totalDurationMs: Date.now() - startedAtMs
         },
         current.diagnostics.usedCookies,
@@ -344,6 +590,14 @@ export class BrowserSession {
     const document = await this.#parseFetchedPayload(parseMode, fetchedPage, requestOptions.signal);
     const parseDurationMs = Date.now() - parseStartedAtMs;
     requestOptions.signal?.throwIfAborted();
+    const stylesheetStartedAtMs = Date.now();
+    const stylesheets = await this.#loadStylesheets(
+      document.tree,
+      fetchedPage.finalUrl,
+      requestOptions
+    );
+    const stylesheetDurationMs = Date.now() - stylesheetStartedAtMs;
+    requestOptions.signal?.throwIfAborted();
     const contentStartedAtMs = Date.now();
     const content = this.#contentBuilder({
       tree: document.tree,
@@ -351,7 +605,9 @@ export class BrowserSession {
       finalUrl: fetchedPage.finalUrl,
       status: fetchedPage.status,
       statusText: fetchedPage.statusText,
-      fetchedAtIso: fetchedPage.fetchedAtIso
+      fetchedAtIso: fetchedPage.fetchedAtIso,
+      stylesheets: stylesheets.resources,
+      stylesheetIssues: stylesheets.issues
     });
     const contentDurationMs = Date.now() - contentStartedAtMs;
     const snapshot: PageSnapshot = {
@@ -367,12 +623,14 @@ export class BrowserSession {
       content,
       diagnostics: diagnosticsFromDocument(
         document,
+        content,
         parseMode,
         requestOptions.method ?? "GET",
         {
           fetchDurationMs,
           parseDurationMs,
           contentDurationMs,
+          stylesheetDurationMs,
           totalDurationMs: Date.now() - startedAtMs
         },
         hasCookieHeader(requestOptions.headers),

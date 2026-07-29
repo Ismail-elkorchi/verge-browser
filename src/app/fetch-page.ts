@@ -3,6 +3,7 @@ import { DEFAULT_SECURITY_POLICY, assertAllowedProtocol, isHtmlLikeContentType, 
 import type {
   FetchPageResult,
   FetchPageStreamResult,
+  FetchStylesheetResult,
   NetworkOutcome,
   NetworkOutcomeKind,
   PageRequestOptions
@@ -266,7 +267,7 @@ export function classifyNetworkFailure(error: unknown, finalUrl: string): Networ
       detailMessage: message
     });
   }
-  if (messageUpper.includes("NON-HTML CONTENT-TYPE")) {
+  if (messageUpper.includes("CONTENT-TYPE") && messageUpper.includes("BLOCKED NON-")) {
     return createNetworkOutcome("content_type_block", {
       finalUrl,
       detailCode: detailCode ?? "CONTENT_TYPE_BLOCK",
@@ -407,6 +408,29 @@ async function readResponseBodyWithLimit(stream: ReadableStream<Uint8Array> | nu
   return readByteStreamToText(limitedStream);
 }
 
+async function readResponseBytesWithLimit(
+  stream: ReadableStream<Uint8Array> | null,
+  maxContentBytes: number
+): Promise<Uint8Array> {
+  if (!stream) return new Uint8Array();
+  const reader = withByteLimit(stream, maxContentBytes).getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  for (;;) {
+    const next = await reader.read();
+    if (next.done) break;
+    chunks.push(next.value);
+    length += next.value.byteLength;
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
 function isRedirectStatus(status: number): boolean {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 }
@@ -422,6 +446,26 @@ interface NetworkFetchResult {
   readonly setCookieHeaders: readonly string[];
   readonly fetchedAtIso: string;
 }
+
+interface NetworkResourceProfile {
+  readonly accept: string;
+  readonly label: string;
+  readonly acceptsContentType: (contentType: string | null) => boolean;
+}
+
+const HTML_RESOURCE_PROFILE: NetworkResourceProfile = {
+  accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  label: "HTML",
+  acceptsContentType: isHtmlLikeContentType
+};
+
+const CSS_RESOURCE_PROFILE: NetworkResourceProfile = {
+  accept: "text/css,*/*;q=0.1",
+  label: "CSS",
+  acceptsContentType(contentType) {
+    return contentType === null || contentType.toLowerCase().split(";", 1)[0]?.trim() === "text/css";
+  }
+};
 
 function readSetCookieHeaders(headers: Headers): readonly string[] {
   const headersWithSetCookie = headers as Headers & {
@@ -457,17 +501,19 @@ async function fetchNetworkResponse(
   requestUrl: string,
   timeoutMs: number,
   securityPolicy: Required<SecurityPolicyOptions>,
-  requestOptions: PageRequestOptions
+  requestOptions: PageRequestOptions,
+  resourceProfile: NetworkResourceProfile = HTML_RESOURCE_PROFILE
 ): Promise<NetworkFetchResult> {
   let currentUrl = requestUrl;
+  let forwardedHeaders = requestOptions.headers;
   for (let redirectCount = 0; redirectCount <= securityPolicy.maxRedirects; redirectCount += 1) {
     const parsedCurrentUrl = new URL(currentUrl);
     assertAllowedProtocol(parsedCurrentUrl);
     const method = requestOptions.method ?? "GET";
     const requestHeaders: Record<string, string> = {
-      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      accept: resourceProfile.accept,
       "user-agent": "verge-browser/0.1 (+terminal; html-parser)",
-      ...(requestOptions.headers ?? {})
+      ...(forwardedHeaders ?? {})
     };
 
     for (let attemptIndex = 0; attemptIndex <= securityPolicy.maxRequestRetries; attemptIndex += 1) {
@@ -496,13 +542,21 @@ async function fetchNetworkResponse(
           }
           const nextUrl = new URL(location, currentUrl);
           assertAllowedProtocol(nextUrl);
+          if (nextUrl.origin !== parsedCurrentUrl.origin && forwardedHeaders !== undefined) {
+            forwardedHeaders = Object.fromEntries(
+              Object.entries(forwardedHeaders).filter(([name]) => {
+                const normalized = name.toLowerCase();
+                return normalized !== "authorization" && normalized !== "cookie";
+              })
+            );
+          }
           currentUrl = nextUrl.toString();
           break;
         }
 
         const contentType = response.headers.get("content-type");
-        if (!isHtmlLikeContentType(contentType)) {
-          throw new Error(`Blocked non-HTML content-type: ${contentType ?? "unknown"}`);
+        if (!resourceProfile.acceptsContentType(contentType)) {
+          throw new Error(`Blocked non-${resourceProfile.label} content-type: ${contentType ?? "unknown"}`);
         }
 
         return {
@@ -647,6 +701,76 @@ export async function fetchPage(
     fetchedAtIso: networkResult.fetchedAtIso,
     networkOutcome: outcomeFromHttpStatus(networkResult.finalUrl, networkResult.status, networkResult.statusText)
   };
+}
+
+function contentTypeEncoding(contentType: string | null): string | undefined {
+  const match = /(?:^|;)\s*charset\s*=\s*"?([^;"\s]+)"?/iu.exec(contentType ?? "");
+  return match?.[1];
+}
+
+/** Fetches one external stylesheet as bounded transport bytes. */
+export async function fetchStylesheet(
+  requestUrl: string,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  securityPolicy: SecurityPolicyOptions = {
+    ...DEFAULT_SECURITY_POLICY,
+    maxContentBytes: 512 * 1024
+  },
+  requestOptions: Pick<PageRequestOptions, "headers" | "signal"> = {},
+  readLocalFileText: LocalFileReader = defaultReadLocalFileText
+): Promise<FetchStylesheetResult> {
+  requestOptions.signal?.throwIfAborted();
+  const policy = {
+    ...DEFAULT_SECURITY_POLICY,
+    maxContentBytes: 512 * 1024,
+    ...securityPolicy
+  };
+  if (requestUrl.startsWith("file://")) {
+    const fileUrl = new URL(requestUrl);
+    assertAllowedProtocol(fileUrl);
+    const css = await readLocalFileText(decodeURIComponent(fileUrl.pathname));
+    const bytes = UTF8_ENCODER.encode(css);
+    if (bytes.byteLength > policy.maxContentBytes) {
+      throw new NetworkFetchError(classifyNetworkFailure(
+        new Error(`Response exceeded maxContentBytes=${String(policy.maxContentBytes)}`),
+        requestUrl
+      ));
+    }
+    return {
+      requestUrl,
+      finalUrl: requestUrl,
+      contentType: "text/css",
+      bytes,
+      responseHeaders: { "content-type": "text/css" },
+      transportEncodingLabel: "utf-8"
+    };
+  }
+  let result: NetworkFetchResult;
+  try {
+    result = await fetchNetworkResponse(
+      requestUrl,
+      timeoutMs,
+      policy,
+      { ...requestOptions, method: "GET" },
+      CSS_RESOURCE_PROFILE
+    );
+    if (result.status < 200 || result.status >= 300) {
+      throw new Error(`Stylesheet request failed with ${String(result.status)} ${result.statusText}`);
+    }
+    const bytes = await readResponseBytesWithLimit(result.body, policy.maxContentBytes);
+    const transportEncodingLabel = contentTypeEncoding(result.contentType);
+    return {
+      requestUrl: result.requestUrl,
+      finalUrl: result.finalUrl,
+      contentType: result.contentType,
+      bytes,
+      responseHeaders: result.responseHeaders,
+      ...(transportEncodingLabel === undefined ? {} : { transportEncodingLabel })
+    };
+  } catch (error) {
+    if (requestOptions.signal?.aborted === true) throw requestOptions.signal.reason;
+    throw new NetworkFetchError(classifyNetworkFailure(error, requestUrl));
+  }
 }
 
 /**
