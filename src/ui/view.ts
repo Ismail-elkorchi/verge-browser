@@ -124,45 +124,43 @@ function terminalStyle(style: PageTextStyle | undefined): TerminalStyle {
 
 function rowSegments(
   document: BrowserDocumentState,
-  block: PageBlock,
   layoutRow: PageLayoutRow,
   rowIndex: number,
   focusedActionId: string | undefined
 ): readonly RenderSpan[] {
   const rowText = layoutRow.text;
-  const contentStart = layoutRow.contentStartCodeUnitIndex;
+  const blocksById = new Map(document.snapshot.content.blocks.map((block) => [block.id, block]));
   const links = document.snapshot.content.links.flatMap((link) => {
-    if (link.blockId !== block.id) return [];
-    const start = Math.max(link.textOffset, layoutRow.blockTextStartCodeUnitIndex);
-    const end = Math.min(
-      link.textOffset + link.label.length,
-      layoutRow.blockTextEndCodeUnitIndexExclusive
-    );
-    return start >= end
-      ? []
-      : [{
-        link,
-        start: contentStart + start - layoutRow.blockTextStartCodeUnitIndex,
-        end: contentStart + end - layoutRow.blockTextStartCodeUnitIndex
-      }];
+    return layoutRow.fragments.flatMap((fragment) => {
+      if (link.blockId !== fragment.blockId) return [];
+      const start = Math.max(link.textOffset, fragment.blockStartCodeUnitIndex);
+      const end = Math.min(
+        link.textOffset + link.label.length,
+        fragment.blockEndCodeUnitIndexExclusive
+      );
+      return start >= end
+        ? []
+        : [{
+          link,
+          start: fragment.rowStartCodeUnitIndex + start - fragment.blockStartCodeUnitIndex,
+          end: fragment.rowStartCodeUnitIndex + end - fragment.blockStartCodeUnitIndex
+        }];
+    });
   });
-  const query = document.search?.query ?? "";
   const active = activeSearchMatch(document);
   const searchRanges: { readonly start: number; readonly end: number; readonly active: boolean }[] = [];
-  if (query.length > 0) {
-    const normalizedRow = rowText.toLocaleLowerCase();
-    const normalizedQuery = query.toLocaleLowerCase();
-    let start = 0;
-    while (start < rowText.length) {
-      const match = normalizedRow.indexOf(normalizedQuery, start);
-      if (match < 0) break;
+  for (const match of document.search?.matches ?? []) {
+    if (match.rowIndex !== rowIndex) continue;
+    for (const fragment of layoutRow.fragments) {
+      if (fragment.blockId !== match.blockId) continue;
+      const start = Math.max(match.startCodeUnitIndex, fragment.blockStartCodeUnitIndex);
+      const end = Math.min(match.endCodeUnitIndexExclusive, fragment.blockEndCodeUnitIndexExclusive);
+      if (start >= end) continue;
       searchRanges.push({
-        start: match,
-        end: match + query.length,
-        active: active?.rowIndex === rowIndex
-          && active.startCodeUnitIndex === layoutRow.blockTextStartCodeUnitIndex + match - contentStart
+        start: fragment.rowStartCodeUnitIndex + start - fragment.blockStartCodeUnitIndex,
+        end: fragment.rowStartCodeUnitIndex + end - fragment.blockStartCodeUnitIndex,
+        active: active === match
       });
-      start = match + Math.max(1, query.length);
     }
   }
   const boundaries = new Set([0, rowText.length]);
@@ -174,12 +172,9 @@ function rowSegments(
     boundaries.add(run.startCodeUnitIndex);
     boundaries.add(run.endCodeUnitIndexExclusive);
   }
-  if (
-    layoutRow.backgroundStartCodeUnitIndex !== undefined
-    && layoutRow.backgroundEndCodeUnitIndexExclusive !== undefined
-  ) {
-    boundaries.add(layoutRow.backgroundStartCodeUnitIndex);
-    boundaries.add(layoutRow.backgroundEndCodeUnitIndexExclusive);
+  for (const fragment of layoutRow.fragments) {
+    boundaries.add(fragment.rowStartCodeUnitIndex);
+    boundaries.add(fragment.rowEndCodeUnitIndexExclusive);
   }
   const positions = [...boundaries].sort((left, right) => left - right);
   const spans: RenderSpan[] = [];
@@ -189,24 +184,28 @@ function rowSegments(
     if (start >= end) continue;
     const link = links.find((range) => range.start <= start && range.end >= end)?.link;
     const search = searchRanges.find((range) => range.start <= start && range.end >= end);
-    const authored = layoutRow.styleRuns.find((run) =>
-      run.startCodeUnitIndex <= start && run.endCodeUnitIndexExclusive >= end
-    )?.style;
-    const inBackground = layoutRow.background !== undefined
-      && (layoutRow.backgroundStartCodeUnitIndex ?? 0) <= start
-      && (layoutRow.backgroundEndCodeUnitIndexExclusive ?? rowText.length) >= end;
+    const fragment = layoutRow.fragments.find((candidate) =>
+      candidate.rowStartCodeUnitIndex <= start
+      && candidate.rowEndCodeUnitIndexExclusive >= end
+    );
+    const block = fragment === undefined ? undefined : blocksById.get(fragment.blockId);
+    const authored = Object.assign(
+      {},
+      ...layoutRow.styleRuns
+        .filter((run) =>
+          run.startCodeUnitIndex <= start && run.endCodeUnitIndexExclusive >= end
+        )
+        .map((run) => terminalStyle(run.style))
+    ) as TerminalStyle;
     const style: TerminalStyle = {
-      ...blockStyle(block),
+      ...(block === undefined ? {} : blockStyle(block)),
       ...(link === undefined
         ? {}
         : {
           fg: { kind: "theme" as const, token: "link.foreground" as const },
           underline: true
         }),
-      ...(!inBackground
-        ? {}
-        : { bg: { kind: "rgb" as const, ...layoutRow.background } }),
-      ...terminalStyle(authored),
+      ...authored,
       ...(link !== undefined && link.id === focusedActionId ? { inverse: true, bold: true } : {}),
       ...(search === undefined
         ? {}
@@ -484,8 +483,12 @@ const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, Bro
     return Array.from({ length: childCount }, (_, index) => {
       const entry = entries[index];
       if (!entry) return { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 };
-      const first = layout.rows.findIndex((candidate) => candidate.blockId === entry.id);
-      const count = layout.rows.filter((candidate) => candidate.blockId === entry.id).length;
+      const first = layout.rows.findIndex((candidate) =>
+        candidate.fragments.some((fragment) => fragment.blockId === entry.id)
+      );
+      const count = layout.rows.filter((candidate) =>
+        candidate.fragments.some((fragment) => fragment.blockId === entry.id)
+      ).length;
       if (first < 0) {
         return { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 };
       }
@@ -503,22 +506,30 @@ const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, Bro
     const layout = documentLayout(state, bounds.width);
     const focusedAction = actionForId(state, focusedTargetId);
     const contentBounds = documentContentBounds(bounds);
-    const blocksById = new Map(state.snapshot.content.blocks.map((block) => [block.id, block]));
     const formIds = new Set(forms(state).map((entry) => entry.id));
     const startIndex = Math.max(0, visibleBounds.row - contentBounds.row);
     const endIndexExclusive = Math.min(
       layout.rows.length,
       visibleBounds.row + visibleBounds.height - contentBounds.row
     );
+    const canvas = terminalStyle(layout.canvasStyle);
+    if (canvas.bg !== undefined || canvas.fg !== undefined) {
+      for (let rowIndex = startIndex; rowIndex < endIndexExclusive; rowIndex += 1) {
+        target.write(
+          contentBounds.row + rowIndex,
+          contentBounds.column,
+          [{ text: " ".repeat(contentBounds.width), style: canvas }]
+        );
+      }
+    }
     for (let rowIndex = startIndex; rowIndex < endIndexExclusive; rowIndex += 1) {
       const layoutRow = layout.rows[rowIndex];
-      if (!layoutRow || formIds.has(layoutRow.blockId)) continue;
-      const block = blocksById.get(layoutRow.blockId);
-      if (!block) continue;
+      if (!layoutRow || layoutRow.fragments.length > 0
+        && layoutRow.fragments.every((fragment) => formIds.has(fragment.blockId))) continue;
       target.write(
         contentBounds.row + rowIndex,
         contentBounds.column,
-        rowSegments(state, block, layoutRow, rowIndex, focusedAction?.id)
+        rowSegments(state, layoutRow, rowIndex, focusedAction?.id)
       );
     }
   },
@@ -533,7 +544,11 @@ const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, Bro
       Math.max(startIndex, visibleBounds.row + visibleBounds.height - contentBounds.row),
       layout.rows.length
     );
-    const visibleBlockIds = new Set(layout.rows.slice(startIndex, endIndexExclusive).map((row) => row.blockId));
+    const visibleBlockIds = new Set(
+      layout.rows
+        .slice(startIndex, endIndexExclusive)
+        .flatMap((row) => row.fragments.map((fragment) => fragment.blockId))
+    );
     const focusedAction = actionForId(state, focusedTargetId);
     const visibleActions = state.snapshot.content.actions.filter((action) =>
       layout.actionPlacements.some((placement) =>

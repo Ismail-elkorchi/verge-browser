@@ -74,7 +74,7 @@ function diagnosticsLines(snapshot: PageSnapshot): readonly string[] {
     `Style issues: ${String(snapshot.diagnostics.styleIssueCount)}`,
     `Total ms: ${String(snapshot.diagnostics.totalDurationMs)}`,
     ...snapshot.content.styleIssues.slice(0, 12).map((issue) =>
-      `CSS ${issue.code}: ${issue.message} (${issue.sourceUrl})`
+      `CSS ${issue.code}${issue.occurrences > 1 ? ` ×${String(issue.occurrences)}` : ""}: ${issue.message} (${issue.sourceUrl})`
     )
   ];
 }

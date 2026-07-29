@@ -112,6 +112,8 @@ export interface PageTextRun {
   readonly startCodeUnitIndex: number;
   readonly endCodeUnitIndexExclusive: number;
   readonly style: PageTextStyle;
+  readonly visible: boolean;
+  readonly sourceElementId?: number;
 }
 
 export type PageWhiteSpace = "normal" | "nowrap" | "pre" | "pre-wrap" | "pre-line";
@@ -138,8 +140,6 @@ export interface PageBlock {
   readonly id: string;
   readonly kind: PageBlockKind;
   readonly text: string;
-  readonly style: PageBlockStyle;
-  readonly textRuns: readonly PageTextRun[];
   readonly level?: number;
   readonly depth?: number;
   readonly region?: PageRegion;
@@ -162,6 +162,8 @@ export interface PageStyleIssue {
   readonly code: PageStyleIssueCode;
   readonly message: string;
   readonly sourceUrl: string;
+  /** Number of equivalent occurrences represented by this diagnostic. */
+  readonly occurrences: number;
 }
 
 /** One external stylesheet fetched in document order. */
@@ -171,6 +173,8 @@ export interface PageStylesheetResource {
   readonly finalUrl: string;
   readonly contentType: string | null;
   readonly bytes: Uint8Array;
+  /** Original link media condition, evaluated against the terminal width during layout. */
+  readonly media?: string;
   readonly transportEncodingLabel?: string;
 }
 
@@ -230,18 +234,20 @@ export interface PageLayoutStyleRun {
   readonly style: PageTextStyle;
 }
 
-/** One terminal row derived from a semantic block. */
-export interface PageLayoutRow {
+/** Mapping from one row slice back to its semantic block text. */
+export interface PageLayoutFragment {
   readonly blockId: string;
+  readonly rowStartCodeUnitIndex: number;
+  readonly rowEndCodeUnitIndexExclusive: number;
+  readonly blockStartCodeUnitIndex: number;
+  readonly blockEndCodeUnitIndexExclusive: number;
+}
+
+/** One terminal row, which may contain several side-by-side semantic blocks. */
+export interface PageLayoutRow {
   readonly text: string;
-  readonly actionIds: readonly string[];
-  readonly blockTextStartCodeUnitIndex: number;
-  readonly blockTextEndCodeUnitIndexExclusive: number;
-  readonly contentStartCodeUnitIndex: number;
+  readonly fragments: readonly PageLayoutFragment[];
   readonly styleRuns: readonly PageLayoutStyleRun[];
-  readonly background?: PageColor;
-  readonly backgroundStartCodeUnitIndex?: number;
-  readonly backgroundEndCodeUnitIndexExclusive?: number;
 }
 
 /** Terminal geometry for one rendered segment of a stable page action. */
@@ -257,6 +263,8 @@ export interface PageLayout {
   readonly columns: number;
   readonly rows: readonly PageLayoutRow[];
   readonly actionPlacements: readonly PageActionPlacement[];
+  readonly canvasStyle: PageTextStyle;
+  readonly styleIssues: readonly PageStyleIssue[];
 }
 
 /** Terminal-rendered page output produced from a parsed HTML document. */

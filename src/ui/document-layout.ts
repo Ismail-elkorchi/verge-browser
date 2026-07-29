@@ -19,14 +19,13 @@ export function documentContentBounds(bounds: Rect): Rect {
 }
 
 export function documentScrollRow(document: BrowserDocumentState, layout: PageLayout): number {
-  const first = layout.rows.findIndex((row) => row.blockId === document.scrollAnchor.blockId);
-  if (first < 0) return 0;
-  let blockRowCount = 0;
-  for (let index = first; index < layout.rows.length; index += 1) {
-    if (layout.rows[index]?.blockId !== document.scrollAnchor.blockId) break;
-    blockRowCount += 1;
-  }
-  return first + Math.min(document.scrollAnchor.rowOffset, Math.max(0, blockRowCount - 1));
+  const rows = layout.rows.flatMap((row, index) =>
+    row.fragments.some((fragment) => fragment.blockId === document.scrollAnchor.blockId)
+      ? [index]
+      : []
+  );
+  if (rows.length === 0) return 0;
+  return rows[Math.min(document.scrollAnchor.rowOffset, rows.length - 1)] ?? 0;
 }
 
 export function documentWithScrollRow(
@@ -43,12 +42,25 @@ export function documentWithScrollRow(
   );
   const row = layout.rows[rowIndex];
   if (!row) return document;
-  const first = layout.rows.findIndex((candidate) => candidate.blockId === row.blockId);
+  const blockId = row.fragments[0]?.blockId;
+  if (blockId === undefined) {
+    const next = layout.rows.slice(rowIndex).find((candidate) => candidate.fragments.length > 0)
+      ?? [...layout.rows.slice(0, rowIndex)].reverse().find(
+        (candidate) => candidate.fragments.length > 0
+      );
+    const nextBlockId = next?.fragments[0]?.blockId;
+    return nextBlockId === undefined
+      ? document
+      : { ...document, scrollAnchor: { blockId: nextBlockId, rowOffset: 0 } };
+  }
+  const matchingRows = layout.rows.flatMap((candidate, index) =>
+    candidate.fragments.some((fragment) => fragment.blockId === blockId) ? [index] : []
+  );
   return {
     ...document,
     scrollAnchor: {
-      blockId: row.blockId,
-      rowOffset: Math.max(0, rowIndex - Math.max(0, first))
+      blockId,
+      rowOffset: Math.max(0, matchingRows.indexOf(rowIndex))
     }
   };
 }

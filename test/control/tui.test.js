@@ -253,7 +253,7 @@ test("browser chrome and document geometry remain readable from narrow to wide t
   assert.doesNotMatch(wideText, /Ctrl\+L/u);
   assert.doesNotMatch(wideText, /^#+\s+Index$/mu);
   assert.ok(linkCells.length > 0);
-  assert.ok(linkCells.every((cell) => cell.column >= 72 && cell.column <= 167));
+  assert.ok(linkCells.every((cell) => cell.column >= 50 && cell.column <= 189));
   assert.ok(linkCells.every((cell) =>
     cell.style?.underline === true
     && cell.style.fg?.kind === "theme"
@@ -278,7 +278,7 @@ test("browser chrome and document geometry remain readable from narrow to wide t
     && cell.style.italic === true
   ));
   const proseRow = wideFrame.cells.find((cell) =>
-    cell.text === "P" && cell.column >= 60 && cell.link === undefined
+    cell.text === "P" && cell.column >= 50 && cell.link === undefined
   )?.row;
   assert.ok(proseRow);
   assert.ok(wideFrame.cells

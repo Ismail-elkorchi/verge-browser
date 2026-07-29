@@ -20,16 +20,19 @@ import { extractCompleteText } from "./text.js";
 import { resolveHref } from "./url.js";
 import type {
   PageAction,
-  PageActionPlacement,
   PageBlock,
   PageBlockKind,
+  PageBlockStyle,
   PageContent,
   PageContentInput,
   PageLayout,
+  PageLayoutFragment,
   PageLayoutRow,
   PageLayoutStyleRun,
   PageLinkAction,
   PageRegion,
+  PageStyleIssue,
+  PageStylesheetResource,
   PageTextRun,
   PageTextStyle,
   RenderInput,
@@ -63,8 +66,25 @@ interface ContentCollector {
   readonly links: PageLinkAction[];
   readonly actions: PageAction[];
   readonly formsById: ReadonlyMap<string, FormEntry>;
+  readonly sourceNodeByBlockId: Map<string, HtmlNode>;
+  readonly blockStyleById: Map<string, PageBlockStyle>;
+  readonly textRunsByBlockId: Map<string, readonly PageTextRun[]>;
   nextLinkNumber: number;
 }
+
+interface PreparedPageContent {
+  readonly tree: DocumentTree;
+  readonly stylesheets: readonly PageStylesheetResource[];
+  readonly stylesheetIssues: readonly PageStyleIssue[];
+  readonly authorStyles: "apply" | "ignore";
+  readonly sourceNodeByBlockId: ReadonlyMap<string, HtmlNode>;
+  readonly blockStyleById: ReadonlyMap<string, PageBlockStyle>;
+  readonly textRunsByBlockId: ReadonlyMap<string, readonly PageTextRun[]>;
+  readonly styleCache: Map<number, PageStyleResolution>;
+  readonly layoutCache: Map<number, PageLayout>;
+}
+
+const PREPARED_PAGE_CONTENT = new WeakMap<PageContent, PreparedPageContent>();
 
 interface InlineResult {
   readonly text: string;
@@ -77,6 +97,11 @@ interface WrappedRow {
   readonly startOffset: number;
   readonly endOffsetExclusive: number;
   readonly contentStartCodeUnitIndex: number;
+}
+
+interface StyledPageBlock extends PageBlock {
+  readonly style: PageBlockStyle;
+  readonly textRuns: readonly PageTextRun[];
 }
 
 function normalizeWhitespace(value: string): string {
@@ -116,12 +141,11 @@ function imageLabel(node: ElementNode): string | null {
   return fallback.length === 0 ? "Image" : fallback;
 }
 
-function prunesSubtree(node: ElementNode, styles?: PageStyleResolution): boolean {
+function prunesSubtree(node: ElementNode): boolean {
   const ariaHidden = getAttributeValue(node, "aria-hidden")?.trim().toLowerCase();
   return hasAttribute(node, "hidden")
     || ariaHidden === "true"
-    || (node.localName.toLowerCase() === "dialog" && !hasAttribute(node, "open"))
-    || styles?.byElement.get(node)?.display === "none";
+    || (node.localName.toLowerCase() === "dialog" && !hasAttribute(node, "open"));
 }
 
 function pageRegion(node: ElementNode, inherited: PageRegion | undefined): PageRegion | undefined {
@@ -145,12 +169,12 @@ function pageRegion(node: ElementNode, inherited: PageRegion | undefined): PageR
   return inherited;
 }
 
-function navigationAnchors(node: ElementNode, styles: PageStyleResolution): readonly ElementNode[] {
+function navigationAnchors(node: ElementNode): readonly ElementNode[] {
   const anchors: ElementNode[] = [];
   const pending = [...node.children].reverse();
   while (pending.length > 0) {
     const current = pending.pop();
-    if (!current || current.kind !== "element" || prunesSubtree(current, styles)) continue;
+    if (!current || current.kind !== "element" || prunesSubtree(current)) continue;
     if (current.localName.toLowerCase() === "a") {
       anchors.push(current);
       continue;
@@ -165,17 +189,17 @@ function navigationAnchors(node: ElementNode, styles: PageStyleResolution): read
 
 function collectNavigation(node: ElementNode, collector: ContentCollector): void {
   const seenTargets = new Set(collector.links.map((link) => link.resolvedHref));
-  for (const anchor of navigationAnchors(node, collector.styles)) {
+  for (const anchor of navigationAnchors(node)) {
     const href = getAttributeValue(anchor, "href");
     if (!href) continue;
     const target = resolveHref(href, collector.baseUrl);
     if (seenTargets.has(target)) continue;
     seenTargets.add(target);
     const inline = inlineContent([anchor], collector);
-    addBlock(collector, anchor, "listItem", `- ${inline.text}`, {
+    addBlock(collector, anchor, "paragraph", inline.text, {
       region: "navigation",
-      textRuns: offsetTextRuns(inline.textRuns, 2),
-      links: inline.links.map((link) => ({ ...link, textOffset: link.textOffset + 2 }))
+      textRuns: inline.textRuns,
+      links: inline.links
     });
   }
 }
@@ -216,28 +240,45 @@ function blockId(node: HtmlNode, fallback: number): string {
 function inlineContent(
   nodes: readonly HtmlNode[],
   collector: ContentCollector,
-  inheritedStyle?: ComputedElementStyle
+  inheritedStyle?: ComputedElementStyle,
+  inheritedElement?: ElementNode
 ): InlineResult {
   let text = "";
   const links: Omit<PageLinkAction, "blockId">[] = [];
   const textRuns: PageTextRun[] = [];
 
-  const appendRun = (fragment: string, style: PageTextStyle): void => {
+  const appendRun = (
+    fragment: string,
+    style: PageTextStyle,
+    visible: boolean,
+    source?: ElementNode
+  ): void => {
     if (fragment.length === 0) return;
     const startCodeUnitIndex = text.length;
     text += fragment;
     textRuns.push({
       startCodeUnitIndex,
       endCodeUnitIndexExclusive: text.length,
-      style
+      style,
+      visible,
+      ...(source === undefined ? {} : { sourceElementId: source.id })
     });
   };
 
-  const append = (fragment: string, style: ComputedElementStyle | undefined): void => {
+  const append = (
+    fragment: string,
+    style: ComputedElementStyle | undefined,
+    source?: ElementNode
+  ): void => {
     const transformed = transformStyledText(fragment, style?.textTransform ?? "none");
     const whiteSpace = style?.block.whiteSpace ?? "normal";
     if (whiteSpace === "pre" || whiteSpace === "pre-wrap") {
-      appendRun(transformed.replace(/\r\n?/gu, "\n"), style?.text ?? DEFAULT_TEXT_STYLE);
+      appendRun(
+        transformed.replace(/\r\n?/gu, "\n"),
+        style?.text ?? DEFAULT_TEXT_STYLE,
+        style?.visibility !== "hidden",
+        source
+      );
       return;
     }
     const normalized = whiteSpace === "pre-line"
@@ -249,46 +290,46 @@ function inlineContent(
       : transformed.replace(/\s+/gu, " ").trim();
     if (normalized.length === 0) return;
     if (text.length > 0 && !text.endsWith("\n") && !text.endsWith(" ")) {
-      appendRun(" ", style?.text ?? DEFAULT_TEXT_STYLE);
+      appendRun(" ", style?.text ?? DEFAULT_TEXT_STYLE, style?.visibility !== "hidden", source);
     }
-    appendRun(normalized, style?.text ?? DEFAULT_TEXT_STYLE);
+    appendRun(normalized, style?.text ?? DEFAULT_TEXT_STYLE, style?.visibility !== "hidden", source);
   };
 
-  const visit = (node: HtmlNode, parentStyle: ComputedElementStyle | undefined): void => {
+  const visit = (
+    node: HtmlNode,
+    parentStyle: ComputedElementStyle | undefined,
+    parentElement?: ElementNode
+  ): void => {
     if (node.kind === "text") {
-      if (parentStyle?.visibility !== "hidden") append(node.value, parentStyle);
+      append(node.value, parentStyle, parentElement);
       return;
     }
     if (node.kind !== "element") return;
     const tag = node.localName.toLowerCase();
-    if (SKIP_TAGS.has(tag) || prunesSubtree(node, collector.styles)) return;
+    if (SKIP_TAGS.has(tag) || prunesSubtree(node)) return;
     const style = elementStyle(node, collector) ?? parentStyle;
     if (tag === "br") {
-      if (style?.visibility !== "hidden") {
-        text = text.trimEnd();
-        if (!text.endsWith("\n")) text += "\n";
-      }
+      text = text.trimEnd();
+      if (!text.endsWith("\n")) text += "\n";
       return;
     }
     if (tag === "img") {
-      if (style?.visibility !== "hidden") {
-        const label = imageLabel(node);
-        if (label !== null) append(`▧ ${label}`, style);
-      }
+      const label = imageLabel(node);
+      if (label !== null) append(`▧ ${label}`, style, node);
       return;
     }
     if (tag === "a") {
       const href = getAttributeValue(node, "href");
       if (!href) {
-        for (const child of node.children) visit(child, style);
+        for (const child of node.children) visit(child, style, node);
         return;
       }
       if (text.length > 0 && !text.endsWith("\n") && !text.endsWith(" ")) {
-        appendRun(" ", style?.text ?? DEFAULT_TEXT_STYLE);
+        appendRun(" ", style?.text ?? DEFAULT_TEXT_STYLE, style?.visibility !== "hidden", node);
       }
       const textOffset = text.length;
-      for (const child of node.children) visit(child, style);
-      if (text.length === textOffset && style?.visibility !== "hidden") append(href, style);
+      for (const child of node.children) visit(child, style, node);
+      if (text.length === textOffset) append(href, style, node);
       const label = text.slice(textOffset);
       if (label.length === 0) return;
       const index = collector.nextLinkNumber;
@@ -305,25 +346,23 @@ function inlineContent(
       return;
     }
     if (
-      style?.visibility !== "hidden"
-      && style?.display === "block"
+      style?.display === "block"
       && text.length > 0
       && !text.endsWith("\n")
     ) {
-      appendRun("\n", style.text);
+      appendRun("\n", style.text, style.visibility !== "hidden", node);
     }
-    for (const child of node.children) visit(child, style);
+    for (const child of node.children) visit(child, style, node);
     if (
-      style?.visibility !== "hidden"
-      && style?.display === "block"
+      style?.display === "block"
       && text.length > 0
       && !text.endsWith("\n")
     ) {
-      appendRun("\n", style.text);
+      appendRun("\n", style.text, style.visibility !== "hidden", node);
     }
   };
 
-  for (const node of nodes) visit(node, inheritedStyle);
+  for (const node of nodes) visit(node, inheritedStyle, inheritedElement);
   const leading = text.length - text.trimStart().length;
   const trimmed = text.trim();
   return {
@@ -375,18 +414,21 @@ function addBlock(
   const textRuns = options.textRuns ?? [{
     startCodeUnitIndex: 0,
     endCodeUnitIndexExclusive: text.length,
-    style: style?.text ?? DEFAULT_TEXT_STYLE
+    style: style?.text ?? DEFAULT_TEXT_STYLE,
+    visible: style?.visibility !== "hidden",
+    ...(node.kind === "element" ? { sourceElementId: node.id } : {})
   }];
   collector.blocks.push({
     id,
     kind,
     text,
-    style: style?.block ?? DEFAULT_BLOCK_STYLE,
-    textRuns,
     ...(options.level === undefined ? {} : { level: options.level }),
     ...(options.depth === undefined ? {} : { depth: options.depth }),
     ...(options.region === undefined ? {} : { region: options.region })
   });
+  collector.sourceNodeByBlockId.set(id, node);
+  collector.blockStyleById.set(id, style?.block ?? DEFAULT_BLOCK_STYLE);
+  collector.textRunsByBlockId.set(id, textRuns);
   for (const link of options.links ?? []) {
     const action = { ...link, blockId: id };
     collector.links.push(action);
@@ -411,7 +453,7 @@ function collectList(
     const inlineNodes = item.children.filter(
       (child) => child.kind !== "element" || !["ul", "ol"].includes(child.localName.toLowerCase())
     );
-    const inline = inlineContent(inlineNodes, collector, elementStyle(item, collector));
+    const inline = inlineContent(inlineNodes, collector, elementStyle(item, collector), item);
     const listStyleType = elementStyle(item, collector)?.listStyleType
       ?? (ordered ? "decimal" : "disc");
     const marker = listMarker(listStyleType, index);
@@ -478,7 +520,7 @@ function collectDefinitionList(
   region: PageRegion | undefined
 ): void {
   for (const item of definitionItems(node)) {
-    const inline = inlineContent(item.children, collector, elementStyle(item, collector));
+    const inline = inlineContent(item.children, collector, elementStyle(item, collector), item);
     addBlock(
       collector,
       item,
@@ -519,7 +561,7 @@ function collectTable(
     const textRuns: PageTextRun[] = [];
     for (const [cellIndex, cell] of cells.entries()) {
       if (cellIndex > 0) text += " | ";
-      const inline = inlineContent(cell.children, collector, elementStyle(cell, collector));
+      const inline = inlineContent(cell.children, collector, elementStyle(cell, collector), cell);
       const cellOffset = text.length;
       text += inline.text;
       textRuns.push(...offsetTextRuns(inline.textRuns, cellOffset));
@@ -539,10 +581,14 @@ function collectTable(
         id: `${blockId(row, rowIndex)}:separator`,
         kind: "tableRow",
         text: `| ${cells.map(() => "────").join(" | ")} |`,
-        style: elementStyle(row, collector)?.block ?? DEFAULT_BLOCK_STYLE,
-        textRuns: [],
         ...(region === undefined ? {} : { region })
       });
+      collector.sourceNodeByBlockId.set(`${blockId(row, rowIndex)}:separator`, row);
+      collector.blockStyleById.set(
+        `${blockId(row, rowIndex)}:separator`,
+        elementStyle(row, collector)?.block ?? DEFAULT_BLOCK_STYLE
+      );
+      collector.textRunsByBlockId.set(`${blockId(row, rowIndex)}:separator`, []);
     }
   }
 }
@@ -588,15 +634,21 @@ function collectForm(
     id: form.id,
     kind: "form",
     text,
-    style: elementStyle(node, collector)?.block ?? DEFAULT_BLOCK_STYLE,
-    textRuns: [{
-      startCodeUnitIndex: 0,
-      endCodeUnitIndexExclusive: text.length,
-      style: elementStyle(node, collector)?.text ?? DEFAULT_TEXT_STYLE
-    }],
     ...(region === undefined ? {} : { region })
   };
   collector.blocks.push(block);
+  collector.sourceNodeByBlockId.set(block.id, node);
+  collector.blockStyleById.set(
+    block.id,
+    elementStyle(node, collector)?.block ?? DEFAULT_BLOCK_STYLE
+  );
+  collector.textRunsByBlockId.set(block.id, [{
+    startCodeUnitIndex: 0,
+    endCodeUnitIndexExclusive: text.length,
+    style: elementStyle(node, collector)?.text ?? DEFAULT_TEXT_STYLE,
+    visible: elementStyle(node, collector)?.visibility !== "hidden",
+    sourceElementId: node.id
+  }]);
   collector.actions.push({
     id: form.id,
     blockId: form.id,
@@ -618,7 +670,6 @@ function collectNode(
   inheritedStyle?: ComputedElementStyle
 ): void {
   if (node.kind === "text") {
-    if (inheritedStyle?.visibility === "hidden") return;
     const text = normalizeWhitespace(transformStyledText(
       node.value,
       inheritedStyle?.textTransform ?? "none"
@@ -634,10 +685,9 @@ function collectNode(
   }
   if (node.kind !== "element") return;
   const tag = node.localName.toLowerCase();
-  if (SKIP_TAGS.has(tag) || prunesSubtree(node, collector.styles)) return;
+  if (SKIP_TAGS.has(tag) || prunesSubtree(node)) return;
   const currentStyle = elementStyle(node, collector) ?? inheritedStyle;
   const region = pageRegion(node, inheritedRegion);
-  if (tag === "form" && currentStyle?.visibility === "hidden") return;
   if (tag === "nav" || (region === "navigation" && inheritedRegion !== "navigation")) {
     collectNavigation(node, collector);
     return;
@@ -655,7 +705,7 @@ function collectNode(
     return;
   }
   if (/^h[1-6]$/u.test(tag)) {
-    const inline = inlineContent(node.children, collector, elementStyle(node, collector));
+    const inline = inlineContent(node.children, collector, elementStyle(node, collector), node);
     addBlock(collector, node, "heading", inline.text, {
       level: Number.parseInt(tag.slice(1), 10),
       ...(region === undefined ? {} : { region }),
@@ -713,7 +763,7 @@ function collectNode(
     return;
   }
   if (tag === "p" || tag === "li") {
-    const inline = inlineContent(node.children, collector, elementStyle(node, collector));
+    const inline = inlineContent(node.children, collector, elementStyle(node, collector), node);
     addBlock(collector, node, quoteDepth > 0 ? "quote" : "paragraph", inline.text, {
       depth: quoteDepth,
       ...(region === undefined ? {} : { region }),
@@ -726,7 +776,7 @@ function collectNode(
     for (const child of node.children) collectNode(child, collector, quoteDepth, region, currentStyle);
     return;
   }
-  const inline = inlineContent(node.children, collector, elementStyle(node, collector));
+  const inline = inlineContent(node.children, collector, elementStyle(node, collector), node);
   addBlock(collector, node, quoteDepth > 0 ? "quote" : "paragraph", inline.text, {
     depth: quoteDepth,
     ...(region === undefined ? {} : { region }),
@@ -752,6 +802,9 @@ export function buildPageContent(input: PageContentInput): PageContent {
     links: [],
     actions: [],
     formsById: new Map(forms.map((form) => [form.id, form])),
+    sourceNodeByBlockId: new Map(),
+    blockStyleById: new Map(),
+    textRunsByBlockId: new Map(),
     nextLinkNumber: 1
   };
   for (const node of bodyChildren(input.tree)) collectNode(node, collector);
@@ -764,25 +817,19 @@ export function buildPageContent(input: PageContentInput): PageContent {
         {
           id: "page:blocked",
           kind: "notice",
-          text: "Blocked by anti-bot challenge.",
-          style: DEFAULT_BLOCK_STYLE,
-          textRuns: []
+          text: "Blocked by anti-bot challenge."
         },
         {
           id: "page:blocked-detail",
           kind: "notice",
-          text: "This page requires JavaScript/browser verification and cannot be rendered in CLI mode.",
-          style: DEFAULT_BLOCK_STYLE,
-          textRuns: []
+          text: "This page requires JavaScript/browser verification and cannot be rendered in CLI mode."
         }
       );
     } else {
       collector.blocks.push({
         id: "page:empty",
         kind: "notice",
-        text: "No visible content after script/style filtering.",
-        style: DEFAULT_BLOCK_STYLE,
-        textRuns: []
+        text: "No visible content after script/style filtering."
       });
     }
   }
@@ -790,13 +837,11 @@ export function buildPageContent(input: PageContentInput): PageContent {
     collector.blocks.push({
       id: "page:parse-errors",
       kind: "notice",
-      text: `Parser reported ${String(input.tree.errors.length)} recoverable issue(s).`,
-      style: DEFAULT_BLOCK_STYLE,
-      textRuns: []
+      text: `Parser reported ${String(input.tree.errors.length)} recoverable issue(s).`
     });
   }
 
-  return {
+  const content: PageContent = {
     title: firstTitle(input.tree),
     displayUrl: input.finalUrl,
     statusLine: `${String(input.status)} ${input.statusText}`,
@@ -808,6 +853,18 @@ export function buildPageContent(input: PageContentInput): PageContent {
     parseErrorCount: input.tree.errors.length,
     fetchedAtIso: input.fetchedAtIso
   };
+  PREPARED_PAGE_CONTENT.set(content, {
+    tree: input.tree,
+    stylesheets: input.stylesheets ?? [],
+    stylesheetIssues: input.stylesheetIssues ?? [],
+    authorStyles: input.authorStyles ?? "apply",
+    sourceNodeByBlockId: collector.sourceNodeByBlockId,
+    blockStyleById: collector.blockStyleById,
+    textRunsByBlockId: collector.textRunsByBlockId,
+    styleCache: new Map([[80, styles]]),
+    layoutCache: new Map()
+  });
+  return content;
 }
 
 function prefixForBlock(block: PageBlock): string {
@@ -893,7 +950,7 @@ function wrapExactLine(value: string, width: number): readonly WrappedRow[] {
   return rows;
 }
 
-function wrapBlock(block: PageBlock, columns: number): readonly WrappedRow[] {
+function wrapBlock(block: StyledPageBlock, columns: number): readonly WrappedRow[] {
   const prefix = prefixForBlock(block);
   const prefixCells = measureTextCells(prefix).cells;
   const leftMargin = block.style.marginLeftCells;
@@ -965,26 +1022,12 @@ function wrapBlock(block: PageBlock, columns: number): readonly WrappedRow[] {
 /** Returns a readable document width with gutters on ordinary terminals. */
 export function documentContentColumns(availableColumns: number): number {
   const columns = Math.max(1, Math.floor(availableColumns));
-  return columns < 40 ? columns : Math.min(96, columns - 4);
+  return columns < 40 ? columns : Math.min(140, columns - 4);
 }
 
-function blockGapRows(previous: PageBlock | undefined, current: PageBlock): number {
-  if (previous === undefined) return current.style.marginTopRows;
-  const authorGap = Math.max(previous.style.marginBottomRows, current.style.marginTopRows);
-  if (
-    previous.kind === "heading"
-    || previous.kind === "listItem" && current.kind === "listItem"
-    || previous.kind === "tableRow" && current.kind === "tableRow"
-    || previous.kind.startsWith("definition") && current.kind.startsWith("definition")
-    || previous.region === "navigation" && current.region === "navigation"
-  ) {
-    return authorGap;
-  }
-  return Math.max(1, authorGap);
-}
-
-function styleRunsForRow(block: PageBlock, row: WrappedRow): readonly PageLayoutStyleRun[] {
+function styleRunsForRow(block: StyledPageBlock, row: WrappedRow): readonly PageLayoutStyleRun[] {
   return block.textRuns.flatMap((run): PageLayoutStyleRun[] => {
+    if (!run.visible) return [];
     const overlapStart = Math.max(run.startCodeUnitIndex, row.startOffset);
     const overlapEnd = Math.min(run.endCodeUnitIndexExclusive, row.endOffsetExclusive);
     if (overlapStart >= overlapEnd) return [];
@@ -998,123 +1041,731 @@ function styleRunsForRow(block: PageBlock, row: WrappedRow): readonly PageLayout
   });
 }
 
-function spacingRow(
-  blockId: string,
-  columns: number,
-  background = undefined as PageBlock["style"]["background"],
-  horizontalMargins: {
-    readonly left: number;
-    readonly right: number;
-  } = { left: 0, right: 0 }
-): PageLayoutRow {
-  const backgroundWidth = Math.max(0, columns - horizontalMargins.left - horizontalMargins.right);
+interface RelativeActionPlacement {
+  readonly actionId: string;
+  readonly rowIndex: number;
+  readonly columnIndex: number;
+  readonly width: number;
+}
+
+interface LayoutBox {
+  readonly rows: readonly PageLayoutRow[];
+  readonly actions: readonly RelativeActionPlacement[];
+  readonly width: number;
+  readonly centered: boolean;
+}
+
+interface FlowBlock {
+  readonly kind: "block";
+  readonly block: PageBlock;
+  readonly order: number;
+}
+
+interface FlowContainer {
+  readonly kind: "container";
+  readonly element?: ElementNode;
+  readonly children: readonly FlowNode[];
+  readonly order: number;
+}
+
+type FlowNode = FlowBlock | FlowContainer;
+
+interface MutableFlowContainer {
+  readonly element?: ElementNode;
+  readonly children: (MutableFlowContainer | FlowBlock)[];
+  readonly byElement: Map<ElementNode, MutableFlowContainer>;
+  order: number;
+}
+
+function emptyLayoutRow(width = 0, style: PageTextStyle = {}): PageLayoutRow {
+  const text = " ".repeat(Math.max(0, width));
   return {
-    blockId,
-    text: background === undefined
-      ? ""
-      : `${" ".repeat(horizontalMargins.left)}${" ".repeat(backgroundWidth)}`,
-    actionIds: [],
-    blockTextStartCodeUnitIndex: 0,
-    blockTextEndCodeUnitIndexExclusive: 0,
-    contentStartCodeUnitIndex: 0,
-    styleRuns: [],
-    ...(background === undefined
-      ? {}
+    text,
+    fragments: [],
+    styleRuns: text.length === 0 || Object.keys(style).length === 0
+      ? []
+      : [{ startCodeUnitIndex: 0, endCodeUnitIndexExclusive: text.length, style }]
+  };
+}
+
+function parentNodes(tree: DocumentTree): ReadonlyMap<HtmlNode, ElementNode | undefined> {
+  const parents = new Map<HtmlNode, ElementNode | undefined>();
+  const visit = (node: HtmlNode, parent: ElementNode | undefined): void => {
+    parents.set(node, parent);
+    if (node.kind !== "element" && node.kind !== "templateContent") return;
+    const nextParent = node.kind === "element" ? node : parent;
+    for (const child of node.children) visit(child, nextParent);
+  };
+  for (const child of tree.children) visit(child, undefined);
+  return parents;
+}
+
+function flowTree(content: PageContent, prepared: PreparedPageContent): FlowContainer {
+  const parents = parentNodes(prepared.tree);
+  const root: MutableFlowContainer = {
+    children: [],
+    byElement: new Map(),
+    order: Number.MAX_SAFE_INTEGER
+  };
+  for (const [order, block] of content.blocks.entries()) {
+    const source = prepared.sourceNodeByBlockId.get(block.id);
+    const path: ElementNode[] = [];
+    let current = source?.kind === "element" ? parents.get(source) : source === undefined ? undefined : parents.get(source);
+    while (current !== undefined) {
+      path.push(current);
+      current = parents.get(current);
+    }
+    path.reverse();
+    let container = root;
+    container.order = Math.min(container.order, order);
+    for (const element of path) {
+      let child = container.byElement.get(element);
+      if (child === undefined) {
+        child = {
+          element,
+          children: [],
+          byElement: new Map(),
+          order
+        };
+        container.byElement.set(element, child);
+        container.children.push(child);
+      }
+      child.order = Math.min(child.order, order);
+      container = child;
+    }
+    container.children.push({ kind: "block", block, order });
+  }
+  const freezeContainer = (container: MutableFlowContainer): FlowContainer => ({
+    kind: "container",
+    ...(container.element === undefined ? {} : { element: container.element }),
+    order: container.order,
+    children: container.children
+      .sort((left, right) => left.order - right.order)
+      .map((child) => "byElement" in child ? freezeContainer(child) : child)
+  });
+  return freezeContainer(root);
+}
+
+function offsetRow(row: PageLayoutRow, prefix: string): PageLayoutRow {
+  if (prefix.length === 0) return row;
+  const offset = prefix.length;
+  return {
+    text: `${prefix}${row.text}`,
+    fragments: row.fragments.map((fragment) => ({
+      ...fragment,
+      rowStartCodeUnitIndex: fragment.rowStartCodeUnitIndex + offset,
+      rowEndCodeUnitIndexExclusive: fragment.rowEndCodeUnitIndexExclusive + offset
+    })),
+    styleRuns: row.styleRuns.map((run) => ({
+      ...run,
+      startCodeUnitIndex: run.startCodeUnitIndex + offset,
+      endCodeUnitIndexExclusive: run.endCodeUnitIndexExclusive + offset
+    }))
+  };
+}
+
+function padRow(row: PageLayoutRow, width: number, style: PageTextStyle = {}): PageLayoutRow {
+  const cells = measureTextCells(row.text).cells;
+  const padding = " ".repeat(Math.max(0, width - cells));
+  if (padding.length === 0) return row;
+  const start = row.text.length;
+  return {
+    ...row,
+    text: `${row.text}${padding}`,
+    styleRuns: Object.keys(style).length === 0
+      ? row.styleRuns
+      : [
+        ...row.styleRuns,
+        { startCodeUnitIndex: start, endCodeUnitIndexExclusive: start + padding.length, style }
+      ]
+  };
+}
+
+function overlayRowStyle(row: PageLayoutRow, style: PageTextStyle): PageLayoutRow {
+  return row.text.length === 0 || Object.keys(style).length === 0
+    ? row
+    : {
+      ...row,
+      styleRuns: [
+        { startCodeUnitIndex: 0, endCodeUnitIndexExclusive: row.text.length, style },
+        ...row.styleRuns
+      ]
+    };
+}
+
+function leafBox(
+  block: PageBlock,
+  style: ComputedElementStyle | undefined,
+  actions: readonly PageAction[],
+  columns: number,
+  baseStyle: PageBlockStyle,
+  baseTextRuns: readonly PageTextRun[],
+  styleByElementId: ReadonlyMap<number, ComputedElementStyle>
+): LayoutBox {
+  if (style?.display === "none" || style?.box.visuallyHidden) {
+    return { rows: [], actions: [], width: 0, centered: false };
+  }
+  const textRuns = baseTextRuns.map((run): PageTextRun => {
+    const currentStyle = run.sourceElementId === undefined
+      ? undefined
+      : styleByElementId.get(run.sourceElementId);
+    return currentStyle === undefined
+      ? run
       : {
-        background,
-        backgroundStartCodeUnitIndex: horizontalMargins.left,
-        backgroundEndCodeUnitIndexExclusive: horizontalMargins.left + backgroundWidth
-      })
+        ...run,
+        style: currentStyle.text,
+        visible: currentStyle.display !== "none"
+          && !currentStyle.box.visuallyHidden
+          && currentStyle.visibility !== "hidden"
+      };
+  });
+  let visibleText = block.text;
+  for (const run of textRuns) {
+    if (run.visible) continue;
+    visibleText = `${visibleText.slice(0, run.startCodeUnitIndex)}${visibleText
+      .slice(run.startCodeUnitIndex, run.endCodeUnitIndexExclusive)
+      .replace(/[^\n]/gu, (value) => " ".repeat(value.length))}${visibleText.slice(run.endCodeUnitIndexExclusive)}`;
+  }
+  const styledBlock: StyledPageBlock = {
+    ...block,
+    text: visibleText,
+    style: style?.block ?? baseStyle,
+    textRuns
+  };
+  const rows: PageLayoutRow[] = [];
+  const placements: RelativeActionPlacement[] = [];
+  for (let index = 0; index < styledBlock.style.marginTopRows; index += 1) {
+    rows.push(emptyLayoutRow());
+  }
+  for (let index = 0; index < styledBlock.style.paddingTopRows; index += 1) {
+    rows.push(emptyLayoutRow(columns, style?.text.background === undefined
+      ? {}
+      : { background: style.text.background }));
+  }
+  for (const wrapped of wrapBlock(styledBlock, columns)) {
+    const semanticStart = wrapped.contentStartCodeUnitIndex;
+    const semanticEnd = semanticStart + wrapped.endOffsetExclusive - wrapped.startOffset;
+    const rowIndex = rows.length;
+    const baseStyle: PageTextStyle = styledBlock.style.background === undefined
+      ? {}
+      : { background: styledBlock.style.background };
+    const row: PageLayoutRow = {
+      text: wrapped.text,
+      fragments: [{
+        blockId: block.id,
+        rowStartCodeUnitIndex: semanticStart,
+        rowEndCodeUnitIndexExclusive: semanticEnd,
+        blockStartCodeUnitIndex: wrapped.startOffset,
+        blockEndCodeUnitIndexExclusive: wrapped.endOffsetExclusive
+      }],
+      styleRuns: [
+        ...(Object.keys(baseStyle).length === 0 || wrapped.text.length === 0
+          ? []
+          : [{
+            startCodeUnitIndex: 0,
+            endCodeUnitIndexExclusive: wrapped.text.length,
+            style: baseStyle
+          }]),
+        ...styleRunsForRow(styledBlock, wrapped)
+      ]
+    };
+    rows.push(row);
+    for (const action of actions) {
+      const overlapStart = Math.max(action.textOffset, wrapped.startOffset);
+      const overlapEnd = Math.min(
+        action.textOffset + action.label.length,
+        wrapped.endOffsetExclusive
+      );
+      if (overlapStart >= overlapEnd) continue;
+      if (!textRuns.some((run) =>
+        run.visible
+        && run.startCodeUnitIndex < overlapEnd
+        && run.endCodeUnitIndexExclusive > overlapStart
+      )) {
+        continue;
+      }
+      placements.push({
+        actionId: action.id,
+        rowIndex,
+        columnIndex: measureTextCells(wrapped.text.slice(0, semanticStart)).cells
+          + measureTextCells(block.text.slice(wrapped.startOffset, overlapStart)).cells,
+        width: Math.max(1, measureTextCells(block.text.slice(overlapStart, overlapEnd)).cells)
+      });
+    }
+  }
+  for (let index = 0; index < styledBlock.style.paddingBottomRows; index += 1) {
+    rows.push(emptyLayoutRow(columns, style?.text.background === undefined
+      ? {}
+      : { background: style.text.background }));
+  }
+  for (let index = 0; index < styledBlock.style.marginBottomRows; index += 1) {
+    rows.push(emptyLayoutRow());
+  }
+  return {
+    rows,
+    actions: placements,
+    width: Math.min(columns, Math.max(1, ...rows.map((row) => measureTextCells(row.text).cells))),
+    centered: style?.box.marginInlineAuto ?? false
+  };
+}
+
+function cssCells(value: string | undefined, available: number): number | null {
+  if (value === undefined) return null;
+  const normalized = value.trim().toLowerCase();
+  const minMatch = /^min\(\s*100%\s*,\s*(.+)\)$/u.exec(normalized);
+  if (minMatch?.[1]) return Math.min(available, cssCells(minMatch[1], available) ?? available);
+  const match = /^([+]?(?:\d+(?:\.\d+)?|\.\d+))(px|rem|em|ch|%)$/u.exec(normalized);
+  if (!match?.[1] || !match[2]) return null;
+  const number = Number.parseFloat(match[1]);
+  if (!Number.isFinite(number)) return null;
+  if (match[2] === "%") return Math.round(available * number / 100);
+  if (match[2] === "px") return Math.round(number / 8);
+  if (match[2] === "ch") return Math.round(number);
+  return Math.round(number * 2);
+}
+
+function constrainedWidth(style: ComputedElementStyle | undefined, available: number): number {
+  let width = cssCells(style?.box.width, available) ?? available;
+  const minimum = cssCells(style?.box.minWidth, available);
+  const maximum = cssCells(style?.box.maxWidth, available);
+  if (minimum !== null) width = Math.max(width, minimum);
+  if (maximum !== null) width = Math.min(width, maximum);
+  return Math.max(1, Math.min(available, width));
+}
+
+function intrinsicFlowWidth(node: FlowNode): number {
+  if (node.kind === "block") {
+    return Math.max(1, ...node.block.text.split("\n").map((line) => measureTextCells(line).cells));
+  }
+  return Math.max(1, ...node.children.map(intrinsicFlowWidth));
+}
+
+function gridColumnCount(template: string | undefined, width: number, gap: number): number {
+  if (template === undefined) return 1;
+  const fixed = /repeat\(\s*(\d+)\s*,/iu.exec(template);
+  if (fixed?.[1]) return Math.max(1, Math.min(12, Number.parseInt(fixed[1], 10)));
+  if (/repeat\(\s*(?:auto-fit|auto-fill)\s*,/iu.test(template)) {
+    const lengths = [...template.matchAll(/(\d+(?:\.\d+)?)(rem|em|ch|px)/giu)]
+      .map((match) => cssCells(`${match[1] ?? "0"}${match[2] ?? "px"}`, width) ?? 0);
+    const minimum = Math.max(12, ...lengths);
+    return Math.max(1, Math.floor((width + gap) / (minimum + gap)));
+  }
+  let depth = 0;
+  let tracks = 0;
+  let inTrack = false;
+  for (const character of template.trim()) {
+    if (character === "(") depth += 1;
+    else if (character === ")") depth = Math.max(0, depth - 1);
+    else if (/\s/u.test(character) && depth === 0) {
+      if (inTrack) tracks += 1;
+      inTrack = false;
+      continue;
+    }
+    inTrack = true;
+  }
+  if (inTrack) tracks += 1;
+  return Math.max(1, Math.min(12, tracks));
+}
+
+function mergeRows(parts: readonly {
+  readonly box: LayoutBox;
+  readonly width: number;
+  readonly rowOffset: number;
+  readonly columnOffset: number;
+}[], totalWidth: number): LayoutBox {
+  const height = Math.max(0, ...parts.map((part) => part.rowOffset + part.box.rows.length));
+  const rows: PageLayoutRow[] = [];
+  const actions: RelativeActionPlacement[] = [];
+  for (let rowIndex = 0; rowIndex < height; rowIndex += 1) {
+    let text = "";
+    const fragments: PageLayoutFragment[] = [];
+    const styleRuns: PageLayoutStyleRun[] = [];
+    for (const part of parts) {
+      if (part.columnOffset > measureTextCells(text).cells) {
+        text += " ".repeat(part.columnOffset - measureTextCells(text).cells);
+      }
+      const localRow = part.box.rows[rowIndex - part.rowOffset] ?? emptyLayoutRow(part.width);
+      const padded = padRow(localRow, part.width);
+      const codeUnitOffset = text.length;
+      text += padded.text;
+      fragments.push(...padded.fragments.map((fragment) => ({
+        ...fragment,
+        rowStartCodeUnitIndex: fragment.rowStartCodeUnitIndex + codeUnitOffset,
+        rowEndCodeUnitIndexExclusive: fragment.rowEndCodeUnitIndexExclusive + codeUnitOffset
+      })));
+      styleRuns.push(...padded.styleRuns.map((run) => ({
+        ...run,
+        startCodeUnitIndex: run.startCodeUnitIndex + codeUnitOffset,
+        endCodeUnitIndexExclusive: run.endCodeUnitIndexExclusive + codeUnitOffset
+      })));
+    }
+    rows.push(padRow({ text, fragments, styleRuns }, totalWidth));
+  }
+  for (const part of parts) {
+    actions.push(...part.box.actions.map((action) => ({
+      ...action,
+      rowIndex: action.rowIndex + part.rowOffset,
+      columnIndex: action.columnIndex + part.columnOffset
+    })));
+  }
+  return { rows, actions, width: totalWidth, centered: false };
+}
+
+function verticalBoxes(boxes: readonly LayoutBox[], width: number, gap: number): LayoutBox {
+  const rows: PageLayoutRow[] = [];
+  const actions: RelativeActionPlacement[] = [];
+  const visible = boxes.filter((box) => box.rows.length > 0);
+  for (const [index, box] of visible.entries()) {
+    if (index > 0) {
+      for (let gapIndex = 0; gapIndex < gap; gapIndex += 1) rows.push(emptyLayoutRow());
+    }
+    const rowOffset = rows.length;
+    const columnOffset = box.centered ? Math.max(0, Math.floor((width - box.width) / 2)) : 0;
+    rows.push(...box.rows.map((row) => offsetRow(row, " ".repeat(columnOffset))));
+    actions.push(...box.actions.map((action) => ({
+      ...action,
+      rowIndex: action.rowIndex + rowOffset,
+      columnIndex: action.columnIndex + columnOffset
+    })));
+  }
+  return { rows, actions, width, centered: false };
+}
+
+function containerStyle(
+  box: LayoutBox,
+  style: ComputedElementStyle | undefined,
+  width: number
+): LayoutBox {
+  if (style === undefined || style.display === "contents") return box;
+  const block = style.block;
+  const border = style.box.border;
+  const decorates = border
+    || block.background !== undefined
+    || block.paddingTopRows > 0
+    || block.paddingRightCells > 0
+    || block.paddingBottomRows > 0
+    || block.paddingLeftCells > 0
+    || block.marginTopRows > 0
+    || block.marginRightCells > 0
+    || block.marginBottomRows > 0
+    || block.marginLeftCells > 0;
+  if (!decorates) {
+    return {
+      ...box,
+      width,
+      centered: style.box.marginInlineAuto
+    };
+  }
+  const left = block.paddingLeftCells + block.marginLeftCells + (border ? 1 : 0);
+  const right = block.paddingRightCells + block.marginRightCells + (border ? 1 : 0);
+  const contentWidth = Math.max(1, width - left - right);
+  const backgroundStyle: PageTextStyle = {
+    ...(style.text.background === undefined ? {} : { background: style.text.background }),
+    ...(style.box.borderColor === undefined ? {} : { foreground: style.box.borderColor })
+  };
+  const rows: PageLayoutRow[] = [];
+  const actions: RelativeActionPlacement[] = [];
+  for (let index = 0; index < block.marginTopRows; index += 1) rows.push(emptyLayoutRow());
+  if (border) {
+    rows.push(overlayRowStyle({
+      text: `┌${"─".repeat(Math.max(0, width - block.marginLeftCells - block.marginRightCells - 2))}┐`,
+      fragments: [],
+      styleRuns: []
+    }, backgroundStyle));
+  }
+  for (let index = 0; index < block.paddingTopRows; index += 1) {
+    rows.push(overlayRowStyle(emptyLayoutRow(width - block.marginLeftCells - block.marginRightCells), backgroundStyle));
+  }
+  const contentRowOffset = rows.length;
+  for (const row of box.rows) {
+    const padded = padRow(row, contentWidth, backgroundStyle);
+    const withSides = offsetRow(padded, `${border ? "│" : ""}${" ".repeat(block.paddingLeftCells)}`);
+    const suffix = `${" ".repeat(block.paddingRightCells)}${border ? "│" : ""}`;
+    rows.push(overlayRowStyle({
+      ...withSides,
+      text: `${withSides.text}${suffix}`
+    }, backgroundStyle));
+  }
+  actions.push(...box.actions.map((action) => ({
+    ...action,
+    rowIndex: action.rowIndex + contentRowOffset,
+    columnIndex: action.columnIndex + block.paddingLeftCells + (border ? 1 : 0)
+  })));
+  for (let index = 0; index < block.paddingBottomRows; index += 1) {
+    rows.push(overlayRowStyle(emptyLayoutRow(width - block.marginLeftCells - block.marginRightCells), backgroundStyle));
+  }
+  if (border) {
+    rows.push(overlayRowStyle({
+      text: `└${"─".repeat(Math.max(0, width - block.marginLeftCells - block.marginRightCells - 2))}┘`,
+      fragments: [],
+      styleRuns: []
+    }, backgroundStyle));
+  }
+  for (let index = 0; index < block.marginBottomRows; index += 1) rows.push(emptyLayoutRow());
+  const prefixed = rows.map((row) => offsetRow(row, " ".repeat(block.marginLeftCells)));
+  return {
+    rows: prefixed,
+    actions: actions.map((action) => ({
+      ...action,
+      columnIndex: action.columnIndex + block.marginLeftCells
+    })),
+    width,
+    centered: style.box.marginInlineAuto
+  };
+}
+
+function flowChildren(
+  node: FlowContainer,
+  styles: PageStyleResolution
+): readonly FlowNode[] {
+  return node.children.flatMap((child): readonly FlowNode[] => {
+    if (child.kind !== "container" || child.element === undefined) return [child];
+    return styles.byElement.get(child.element)?.display === "contents"
+      ? flowChildren(child, styles)
+      : [child];
+  });
+}
+
+function layoutFlow(
+  node: FlowNode,
+  width: number,
+  styles: PageStyleResolution,
+  styleByElementId: ReadonlyMap<number, ComputedElementStyle>,
+  actionsByBlock: ReadonlyMap<string, readonly PageAction[]>,
+  prepared: PreparedPageContent,
+  parents: ReadonlyMap<HtmlNode, ElementNode | undefined>
+): LayoutBox {
+  if (node.kind === "block") {
+    const source = prepared.sourceNodeByBlockId.get(node.block.id);
+    const element = source?.kind === "element" ? source : source === undefined ? undefined : parents.get(source);
+    return leafBox(
+      node.block,
+      element === undefined ? undefined : styles.byElement.get(element),
+      actionsByBlock.get(node.block.id) ?? [],
+      width,
+      prepared.blockStyleById.get(node.block.id) ?? DEFAULT_BLOCK_STYLE,
+      prepared.textRunsByBlockId.get(node.block.id) ?? [],
+      styleByElementId
+    );
+  }
+  const style = node.element === undefined ? undefined : styles.byElement.get(node.element);
+  if (style?.display === "none" || style?.box.visuallyHidden) {
+    return { rows: [], actions: [], width: 0, centered: false };
+  }
+  const targetWidth = constrainedWidth(style, width);
+  const horizontalOverhead = (style?.block.paddingLeftCells ?? 0)
+    + (style?.block.paddingRightCells ?? 0)
+    + (style?.box.border ? 2 : 0);
+  const innerWidth = Math.max(1, targetWidth - horizontalOverhead);
+  const children = flowChildren(node, styles).filter((child) => {
+    if (child.kind !== "container" || child.element === undefined) return true;
+    const childStyle = styles.byElement.get(child.element);
+    return childStyle?.display !== "none" && childStyle?.box.visuallyHidden !== true;
+  });
+  let body: LayoutBox;
+  if (style?.display === "grid" && children.length > 0) {
+    const columns = Math.min(
+      children.length,
+      gridColumnCount(style.box.gridTemplateColumns, innerWidth, style.box.columnGapCells)
+    );
+    const gap = style.box.columnGapCells;
+    const columnWidth = Math.max(1, Math.floor((innerWidth - gap * (columns - 1)) / columns));
+    const sortedChildren = [...children].sort((left, right) => {
+      const leftColumn = left.kind === "container" && left.element !== undefined
+        ? styles.byElement.get(left.element)?.box.gridColumn
+        : undefined;
+      const rightColumn = right.kind === "container" && right.element !== undefined
+        ? styles.byElement.get(right.element)?.box.gridColumn
+        : undefined;
+      return (leftColumn ?? left.order) - (rightColumn ?? right.order);
+    });
+    const gridRows: LayoutBox[] = [];
+    for (let start = 0; start < sortedChildren.length; start += columns) {
+      const rowChildren = sortedChildren.slice(start, start + columns);
+      const boxes = rowChildren.map((child) =>
+        layoutFlow(child, columnWidth, styles, styleByElementId, actionsByBlock, prepared, parents)
+      );
+      const maxHeight = Math.max(0, ...boxes.map((box) => box.rows.length));
+      gridRows.push(mergeRows(boxes.map((box, index) => ({
+        box,
+        width: columnWidth,
+        rowOffset: style.box.alignItems === "center"
+          ? Math.floor((maxHeight - box.rows.length) / 2)
+          : style.box.alignItems === "end"
+            ? maxHeight - box.rows.length
+            : 0,
+        columnOffset: index * (columnWidth + gap)
+      })), innerWidth));
+    }
+    body = verticalBoxes(gridRows, innerWidth, style.box.rowGapRows);
+  } else if (style?.display === "flex" && style.box.flexDirection === "row" && children.length > 0) {
+    const rows: LayoutBox[] = [];
+    let pending: FlowNode[] = [];
+    let pendingWidth = 0;
+    const flush = (): void => {
+      if (pending.length === 0) return;
+      const preferred = pending.map((child) =>
+        Math.max(1, Math.min(innerWidth, intrinsicFlowWidth(child) + 8))
+      );
+      const required = preferred.reduce((sum, value) => sum + value, 0)
+        + style.box.columnGapCells * Math.max(0, pending.length - 1);
+      const spare = Math.max(0, innerWidth - required);
+      const leading = style.box.justifyContent === "center"
+        ? Math.floor(spare / 2)
+        : style.box.justifyContent === "end"
+          ? spare
+          : 0;
+      const between = style.box.justifyContent === "space-between" && pending.length > 1
+        ? style.box.columnGapCells + Math.floor(spare / (pending.length - 1))
+        : style.box.columnGapCells;
+      const boxes = pending.map((child, index) =>
+        layoutFlow(
+          child,
+          preferred[index] ?? 1,
+          styles,
+          styleByElementId,
+          actionsByBlock,
+          prepared,
+          parents
+        )
+      );
+      const maxHeight = Math.max(0, ...boxes.map((box) => box.rows.length));
+      let column = leading;
+      const parts = boxes.map((box, index) => {
+        const widthForPart = preferred[index] ?? 1;
+        const part = {
+          box,
+          width: widthForPart,
+          rowOffset: style.box.alignItems === "center"
+            ? Math.floor((maxHeight - box.rows.length) / 2)
+            : style.box.alignItems === "end"
+              ? maxHeight - box.rows.length
+              : 0,
+          columnOffset: column
+        };
+        column += widthForPart + between;
+        return part;
+      });
+      rows.push(mergeRows(parts, innerWidth));
+      pending = [];
+      pendingWidth = 0;
+    };
+    for (const child of children) {
+      const preferred = Math.max(1, Math.min(innerWidth, intrinsicFlowWidth(child) + 8));
+      const nextWidth = pendingWidth
+        + (pending.length === 0 ? 0 : style.box.columnGapCells)
+        + preferred;
+      if (style.box.flexWrap && pending.length > 0 && nextWidth > innerWidth) flush();
+      pending.push(child);
+      pendingWidth += (pending.length === 1 ? 0 : style.box.columnGapCells) + preferred;
+    }
+    flush();
+    body = verticalBoxes(rows, innerWidth, style.box.rowGapRows);
+  } else {
+    const childBoxes = children.map((child) =>
+      layoutFlow(child, innerWidth, styles, styleByElementId, actionsByBlock, prepared, parents)
+    );
+    body = verticalBoxes(childBoxes, innerWidth, style?.box.rowGapRows ?? 1);
+  }
+  if (style !== undefined && body.rows.length < style.box.minHeightRows) {
+    const missing = style.box.minHeightRows - body.rows.length;
+    const before = style.box.alignItems === "center" ? Math.floor(missing / 2) : 0;
+    const after = missing - before;
+    body = {
+      ...body,
+      rows: [
+        ...Array.from({ length: before }, () => emptyLayoutRow(innerWidth)),
+        ...body.rows,
+        ...Array.from({ length: after }, () => emptyLayoutRow(innerWidth))
+      ],
+      actions: body.actions.map((action) => ({ ...action, rowIndex: action.rowIndex + before }))
+    };
+  }
+  return containerStyle(body, style, targetWidth);
+}
+
+function actionsByBlock(content: PageContent): ReadonlyMap<string, readonly PageAction[]> {
+  const result = new Map<string, PageAction[]>();
+  for (const action of content.actions) {
+    const blockActions = result.get(action.blockId) ?? [];
+    blockActions.push(action);
+    result.set(action.blockId, blockActions);
+  }
+  return result;
+}
+
+function layoutUnpreparedContent(content: PageContent, columns: number): PageLayout {
+  const actionMap = actionsByBlock(content);
+  const boxes = content.blocks.map((block) => leafBox(
+    block,
+    undefined,
+    actionMap.get(block.id) ?? [],
+    columns,
+    DEFAULT_BLOCK_STYLE,
+    [{
+      startCodeUnitIndex: 0,
+      endCodeUnitIndexExclusive: block.text.length,
+      style: DEFAULT_TEXT_STYLE,
+      visible: true
+    }],
+    new Map()
+  ));
+  const box = verticalBoxes(boxes, columns, 1);
+  return {
+    columns,
+    rows: box.rows,
+    actionPlacements: box.actions,
+    canvasStyle: {},
+    styleIssues: content.styleIssues
   };
 }
 
 /** Derives terminal rows and action geometry from semantic page content. */
 export function layoutPageContent(content: PageContent, columns: number): PageLayout {
   const normalizedColumns = Math.max(1, Math.floor(columns));
-  const rows: PageLayoutRow[] = [];
-  const actionPlacements: PageActionPlacement[] = [];
-  const actionsByBlock = new Map<string, PageAction[]>();
-  for (const action of content.actions) {
-    const actions = actionsByBlock.get(action.blockId) ?? [];
-    actions.push(action);
-    actionsByBlock.set(action.blockId, actions);
+  const prepared = PREPARED_PAGE_CONTENT.get(content);
+  if (prepared === undefined) return layoutUnpreparedContent(content, normalizedColumns);
+  const cached = prepared.layoutCache.get(normalizedColumns);
+  if (cached !== undefined) return cached;
+  let styles = prepared.styleCache.get(normalizedColumns);
+  if (styles === undefined) {
+    styles = resolvePageStyles(
+      prepared.tree,
+      prepared.stylesheets,
+      prepared.stylesheetIssues,
+      { authorStyles: prepared.authorStyles, columns: normalizedColumns }
+    );
+    prepared.styleCache.set(normalizedColumns, styles);
   }
-
-  for (const [blockIndex, block] of content.blocks.entries()) {
-    const previous = content.blocks[blockIndex - 1];
-    for (let gap = 0; gap < blockGapRows(previous, block); gap += 1) {
-      rows.push(spacingRow(`${block.id}:spacing-before:${String(gap)}`, normalizedColumns));
-    }
-    for (let padding = 0; padding < block.style.paddingTopRows; padding += 1) {
-      rows.push(spacingRow(
-        block.id,
-        normalizedColumns,
-        block.style.background,
-        { left: block.style.marginLeftCells, right: block.style.marginRightCells }
-      ));
-    }
-    const blockRows = wrapBlock(block, normalizedColumns);
-    const blockActions = actionsByBlock.get(block.id) ?? [];
-    const firstRowIndex = rows.length;
-    for (const [localIndex, row] of blockRows.entries()) {
-      const actionIds: string[] = [];
-      rows.push({
-        blockId: block.id,
-        text: row.text,
-        actionIds,
-        blockTextStartCodeUnitIndex: row.startOffset,
-        blockTextEndCodeUnitIndexExclusive: row.endOffsetExclusive,
-        contentStartCodeUnitIndex: row.contentStartCodeUnitIndex,
-        styleRuns: styleRunsForRow(block, row),
-        ...(block.style.background === undefined
-          ? {}
-          : {
-            background: block.style.background,
-            backgroundStartCodeUnitIndex: block.style.marginLeftCells,
-            backgroundEndCodeUnitIndexExclusive:
-              Math.max(block.style.marginLeftCells, normalizedColumns - block.style.marginRightCells)
-          })
-      });
-      for (const action of blockActions) {
-        const actionStart = action.textOffset;
-        const actionEnd = action.textOffset + action.label.length;
-        const overlapStart = Math.max(actionStart, row.startOffset);
-        const overlapEnd = Math.min(actionEnd, row.endOffsetExclusive);
-        if (overlapStart >= overlapEnd) continue;
-        actionIds.push(action.id);
-        actionPlacements.push({
-          actionId: action.id,
-          rowIndex: firstRowIndex + localIndex,
-          columnIndex: measureTextCells(row.text.slice(0, row.contentStartCodeUnitIndex)).cells
-            + measureTextCells(
-            block.text.slice(row.startOffset, overlapStart)
-          ).cells,
-          width: Math.max(1, Math.min(
-            measureTextCells(block.text.slice(overlapStart, overlapEnd)).cells,
-            normalizedColumns
-          ))
-        });
-      }
-    }
-    for (let padding = 0; padding < block.style.paddingBottomRows; padding += 1) {
-      rows.push(spacingRow(
-        block.id,
-        normalizedColumns,
-        block.style.background,
-        { left: block.style.marginLeftCells, right: block.style.marginRightCells }
-      ));
-    }
+  const actionMap = actionsByBlock(content);
+  const parents = parentNodes(prepared.tree);
+  const styleByElementId = new Map<number, ComputedElementStyle>();
+  for (const [element, elementStyle] of styles.byElement) {
+    styleByElementId.set(element.id, elementStyle);
   }
-  const lastBlock = content.blocks.at(-1);
-  if (lastBlock) {
-    for (let gap = 0; gap < lastBlock.style.marginBottomRows; gap += 1) {
-      rows.push(spacingRow(
-        `${lastBlock.id}:spacing-after:${String(gap)}`,
-        normalizedColumns
-      ));
-    }
-  }
-  return { columns: normalizedColumns, rows, actionPlacements };
+  const box = layoutFlow(
+    flowTree(content, prepared),
+    normalizedColumns,
+    styles,
+    styleByElementId,
+    actionMap,
+    prepared,
+    parents
+  );
+  const body = [...findAllByTagName(prepared.tree, "body")][0];
+  const bodyStyle = body === undefined ? undefined : styles.byElement.get(body);
+  const layout: PageLayout = {
+    columns: normalizedColumns,
+    rows: box.rows,
+    actionPlacements: box.actions.map((action) => ({
+      ...action,
+      rowIndex: action.rowIndex
+    })),
+    canvasStyle: bodyStyle?.text ?? {},
+    styleIssues: styles.issues
+  };
+  prepared.layoutCache.set(normalizedColumns, layout);
+  return layout;
 }
 
 /** Renders semantic page content through the same responsive layout used by the TUI. */
@@ -1123,15 +1774,19 @@ export function renderDocumentToTerminal(input: RenderInput): RenderedPage {
   const contentWidth = documentContentColumns(input.width);
   const layout = layoutPageContent(content, contentWidth);
   const lineByActionId = new Map(layout.actionPlacements.map((placement) => [placement.actionId, placement.rowIndex]));
-  const links: RenderedLink[] = content.links.map((link) => ({
+  const links: RenderedLink[] = content.links
+    .filter((link) => lineByActionId.has(link.id))
+    .map((link) => ({
     ...link,
     lineIndex: lineByActionId.get(link.id) ?? 0
   }));
-  const actionables: RenderedActionable[] = content.actions.map((action) => ({
+  const actionables: RenderedActionable[] = content.actions
+    .filter((action) => lineByActionId.has(action.id))
+    .map((action) => ({
     ...action,
     lineIndex: lineByActionId.get(action.id) ?? 0
   }));
-  const lines = layout.rows.map((row) => row.text);
+  const lines = layout.rows.map((row) => row.text.trimEnd());
   if (links.length > 0) {
     lines.push("", "Links:");
     for (const link of links) {

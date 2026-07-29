@@ -98,6 +98,7 @@ export interface BrowserSessionOptions {
 }
 
 const DEFAULT_PARSE_OPTIONS: ParseOptions = Object.freeze({
+  scriptingMode: "disabled",
   captureSpans: true,
   sourceRetention: "text",
   trace: "summary",
@@ -387,7 +388,8 @@ export class BrowserSession {
       issues.push({
         code: "stylesheet-limit",
         message: `Only the first ${String(this.#stylesheetPolicy.maxStylesheets)} external stylesheets were considered.`,
-        sourceUrl: finalUrl
+        sourceUrl: finalUrl,
+        occurrences: 1
       });
     }
     const candidates: {
@@ -400,7 +402,8 @@ export class BrowserSession {
         issues.push({
           code: "stylesheet-media",
           message: "Skipped a stylesheet whose media query does not target terminal rendering.",
-          sourceUrl: finalUrl
+          sourceUrl: finalUrl,
+          occurrences: 1
         });
         continue;
       }
@@ -413,7 +416,8 @@ export class BrowserSession {
         issues.push({
           code: "stylesheet-fetch",
           message: `Invalid stylesheet URL: ${link.href}`,
-          sourceUrl: finalUrl
+          sourceUrl: finalUrl,
+          occurrences: 1
         });
       }
     }
@@ -440,7 +444,8 @@ export class BrowserSession {
         issues.push({
           code: "stylesheet-fetch",
           message: result.error instanceof Error ? result.error.message : String(result.error),
-          sourceUrl: result.requestUrl
+          sourceUrl: result.requestUrl,
+          occurrences: 1
         });
         continue;
       }
@@ -450,7 +455,8 @@ export class BrowserSession {
         issues.push({
           code: "stylesheet-fetch",
           message: `Blocked non-CSS content-type: ${String(fetched.contentType)}`,
-          sourceUrl: fetched.finalUrl
+          sourceUrl: fetched.finalUrl,
+          occurrences: 1
         });
         continue;
       }
@@ -458,7 +464,8 @@ export class BrowserSession {
         issues.push({
           code: "stylesheet-limit",
           message: `Stylesheet exceeded ${String(this.#stylesheetPolicy.maxStylesheetBytes)} bytes.`,
-          sourceUrl: fetched.finalUrl
+          sourceUrl: fetched.finalUrl,
+          occurrences: 1
         });
         continue;
       }
@@ -466,7 +473,8 @@ export class BrowserSession {
         issues.push({
           code: "stylesheet-limit",
           message: `Aggregate stylesheet data exceeded ${String(this.#stylesheetPolicy.maxTotalStylesheetBytes)} bytes.`,
-          sourceUrl: fetched.finalUrl
+          sourceUrl: fetched.finalUrl,
+          occurrences: 1
         });
         break;
       }
@@ -477,6 +485,7 @@ export class BrowserSession {
         finalUrl: fetched.finalUrl,
         contentType: fetched.contentType,
         bytes: fetched.bytes,
+        ...(link.media === undefined ? {} : { media: link.media }),
         ...(fetched.transportEncodingLabel === undefined
           ? {}
           : { transportEncodingLabel: fetched.transportEncodingLabel })

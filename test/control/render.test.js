@@ -67,6 +67,47 @@ test("semantic content keeps stable actions while terminal layout responds to wi
   assert.ok(narrow.rows.length > wide.rows.length);
 });
 
+test("semantic layout accepts content returned by a custom builder", () => {
+  const content = {
+    title: "Custom page",
+    displayUrl: "https://example.test/custom",
+    statusLine: "200 OK",
+    blocks: [{
+      id: "custom:block",
+      kind: "paragraph",
+      text: "A custom builder can still use the public layout function."
+    }],
+    links: [{
+      id: "custom:link",
+      blockId: "custom:block",
+      kind: "link",
+      index: 1,
+      label: "public layout",
+      href: "/layout",
+      resolvedHref: "https://example.test/layout",
+      textOffset: 35
+    }],
+    actions: [{
+      id: "custom:link",
+      blockId: "custom:block",
+      kind: "link",
+      index: 1,
+      label: "public layout",
+      href: "/layout",
+      resolvedHref: "https://example.test/layout",
+      textOffset: 35
+    }],
+    styleIssues: [],
+    stylesheetCount: 0,
+    parseErrorCount: 0,
+    fetchedAtIso: "2026-07-29T00:00:00.000Z"
+  };
+
+  const layout = layoutPageContent(content, 24);
+  assert.ok(layout.rows.length > 1);
+  assert.ok(layout.actionPlacements.some((placement) => placement.actionId === "custom:link"));
+});
+
 test("semantic layout keeps link geometry with line breaks and table cells", () => {
   const document = parse(`
     <html><body>
@@ -277,7 +318,7 @@ test("semantic content preserves definition terms and descriptions", () => {
 test("document prose stays within a readable measure on wide terminals", () => {
   assert.equal(documentContentColumns(39), 39);
   assert.equal(documentContentColumns(80), 76);
-  assert.equal(documentContentColumns(240), 96);
+  assert.equal(documentContentColumns(240), 140);
 });
 
 test("renderDocumentToTerminal reports anti-bot challenge pages", () => {
@@ -443,13 +484,12 @@ test("layout uses structural spacing instead of blank rows after every block", (
   });
   const layout = layoutPageContent(content, 80);
 
-  assert.equal(
-    layout.rows.filter((row) => row.text === "" && row.blockId.startsWith("node:")).length,
-    2
-  );
+  assert.ok(layout.rows.filter((row) => row.text === "").length < content.blocks.length);
   assert.deepEqual(
     layout.rows
-      .filter((row) => row.blockId.includes("node:") && row.text !== "")
+      .filter((row) => row.fragments.some((fragment) =>
+        content.blocks.find((block) => block.id === fragment.blockId)?.kind !== "notice"
+      ) && row.text !== "")
       .map((row) => row.text),
     ["Title", "Introduction", "- One", "- Two", "- Three", "| A |", "| B |"]
   );

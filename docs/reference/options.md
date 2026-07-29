@@ -68,11 +68,11 @@
   `parseHtml()` calls retain it only when requested with
   `sourceRetention: "text"`.
 - `content` contains terminal-independent blocks, links, forms, and stable
-  action identities, plus computed block styles and styled text ranges. Use
-  `layoutPageContent(content, columns)` when terminal rows, styles, and action
-  geometry are needed.
+  action identities. Use `layoutPageContent(content, columns)` for responsive
+  terminal rows, page and text styles, and action geometry.
 - `content.styleIssues` records recoverable CSS fetch, parse, selector, and
-  terminal-profile limitations.
+  terminal-profile limitations. Equivalent issues are aggregated and expose an
+  `occurrences` count.
 - `applyEdits()` is asynchronous because changed HTML can change linked
   stylesheet resources.
 

@@ -285,14 +285,14 @@ function searchDocument(
     while (start <= haystack.length - normalizedQuery.length) {
       const found = haystack.indexOf(normalizedQuery, start);
       if (found < 0) break;
-      const rowIndex = layout.rows.findIndex((row) =>
-        row.blockId === block.id
-        && found >= row.blockTextStartCodeUnitIndex
+      const rowIndex = layout.rows.findIndex((row) => row.fragments.some((fragment) =>
+        fragment.blockId === block.id
+        && found >= fragment.blockStartCodeUnitIndex
         && found < Math.max(
-          row.blockTextEndCodeUnitIndexExclusive,
-          row.blockTextStartCodeUnitIndex + 1
+          fragment.blockEndCodeUnitIndexExclusive,
+          fragment.blockStartCodeUnitIndex + 1
         )
-      );
+      ));
       matches.push({
         blockId: block.id,
         rowIndex: Math.max(0, rowIndex),

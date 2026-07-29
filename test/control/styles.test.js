@@ -23,6 +23,16 @@ function contentFor(html, options = {}) {
   });
 }
 
+function rowFor(layout, blockId) {
+  return layout.rows.find((row) =>
+    row.fragments.some((fragment) => fragment.blockId === blockId)
+  );
+}
+
+function authoredStyles(row) {
+  return row?.styleRuns.map((run) => run.style) ?? [];
+}
+
 test("author CSS resolves cascade, inheritance, inline runs, and hidden content", () => {
   const content = contentFor(`
     <style>
@@ -36,15 +46,23 @@ test("author CSS resolves cascade, inheritance, inline runs, and hidden content"
   `);
 
   assert.equal(content.stylesheetCount, 1);
-  assert.equal(content.blocks.some((block) => block.text.includes("Hidden")), false);
+  assert.equal(content.blocks.some((block) => block.text.includes("Hidden")), true);
   const paragraph = content.blocks.find((block) => block.text === "Hello world");
   assert.ok(paragraph);
-  assert.equal(paragraph.style.textAlign, "center");
-  assert.equal(paragraph.style.paddingTopRows, 1);
-  assert.equal(paragraph.style.paddingRightCells, 2);
-  assert.deepEqual(paragraph.textRuns[0]?.style.foreground, { r: 0, g: 128, b: 0 });
-  assert.equal(paragraph.textRuns.at(-1)?.style.bold, true);
-  assert.equal(paragraph.textRuns.at(-1)?.style.italic, true);
+  const layout = layoutPageContent(content, 40);
+  const row = rowFor(layout, paragraph.id);
+  assert.ok(row);
+  assert.ok(row.text.startsWith("  "));
+  assert.ok(authoredStyles(row).some((style) =>
+    style.foreground?.r === 0 && style.foreground.g === 128 && style.foreground.b === 0
+  ));
+  assert.ok(authoredStyles(row).some((style) => style.bold === true));
+  assert.ok(authoredStyles(row).some((style) => style.italic === true));
+  assert.equal(layout.rows.some((candidate) =>
+    candidate.fragments.some((fragment) =>
+      content.blocks.find((block) => block.id === fragment.blockId)?.text.includes("Hidden")
+    )
+  ), false);
 });
 
 test("shorthands follow cascade order and hidden visibility can be restored by descendants", () => {
@@ -67,12 +85,18 @@ test("shorthands follow cascade order and hidden visibility can be restored by d
   `);
 
   const box = content.blocks.find((block) => block.text === "Box");
-  assert.equal(box?.style.paddingLeftCells, 4);
-  assert.equal(box?.style.marginLeftCells, 2);
-  assert.deepEqual(box?.style.background, { r: 0, g: 0, b: 255 });
-  assert.equal(content.blocks.some((block) => block.text.includes("Hidden")), false);
-  assert.equal(content.blocks.some((block) => block.text === "Visible child"), true);
-  assert.equal(content.links.some((link) => link.resolvedHref.endsWith("/hidden")), false);
+  assert.ok(box);
+  const layout = layoutPageContent(content, 40);
+  const boxRow = rowFor(layout, box.id);
+  assert.ok(boxRow?.text.startsWith("      "));
+  assert.ok(authoredStyles(boxRow).some((style) =>
+    style.background?.r === 0 && style.background.g === 0 && style.background.b === 255
+  ));
+  assert.equal(content.blocks.some((block) => block.text.includes("Hidden")), true);
+  assert.ok(layout.rows.some((row) => row.text.includes("Visible child")));
+  const hiddenLink = content.links.find((link) => link.resolvedHref.endsWith("/hidden"));
+  assert.ok(hiddenLink);
+  assert.equal(layout.actionPlacements.some((placement) => placement.actionId === hiddenLink.id), false);
 });
 
 test("browser link styling survives an inherited page color", () => {
@@ -82,7 +106,8 @@ test("browser link styling survives an inherited page color", () => {
   `);
   const paragraph = content.blocks.find((block) => block.text === "Link");
   assert.ok(paragraph);
-  assert.equal(paragraph.textRuns[0]?.style.foreground, undefined);
+  const row = rowFor(layoutPageContent(content, 30), paragraph.id);
+  assert.equal(authoredStyles(row).some((style) => style.foreground?.r === 255), false);
 });
 
 test("terminal layout retains styled ranges, backgrounds, alignment, and action geometry", () => {
@@ -95,35 +120,176 @@ test("terminal layout retains styled ranges, backgrounds, alignment, and action 
   const paragraph = content.blocks.find((block) => block.kind === "paragraph");
   assert.ok(paragraph);
   const layout = layoutPageContent(content, 30);
-  const row = layout.rows.find((candidate) => candidate.blockId === paragraph.id);
+  const row = rowFor(layout, paragraph.id);
   assert.ok(row);
-  assert.deepEqual(row.background, { r: 18, g: 52, b: 86 });
-  assert.ok(row.contentStartCodeUnitIndex > 2);
+  assert.ok(authoredStyles(row).some((style) =>
+    style.background?.r === 18 && style.background.g === 52 && style.background.b === 86
+  ));
+  assert.ok((row.fragments[0]?.rowStartCodeUnitIndex ?? 0) > 2);
   assert.ok(row.styleRuns.length > 0);
-  assert.ok(layout.actionPlacements[0]?.columnIndex >= row.contentStartCodeUnitIndex);
+  assert.ok(layout.actionPlacements[0]?.columnIndex >= (row.fragments[0]?.rowStartCodeUnitIndex ?? 0));
 });
 
 test("reader construction ignores author styles while retaining semantic content", () => {
   const html = "<style>p { display: none }</style><p>Reader survives</p>";
   const styled = contentFor(html);
   const reader = contentFor(html, { authorStyles: "ignore" });
-  assert.equal(styled.blocks.some((block) => block.text === "Reader survives"), false);
+  const styledBlock = styled.blocks.find((block) => block.text === "Reader survives");
+  assert.ok(styledBlock);
+  assert.equal(rowFor(layoutPageContent(styled, 30), styledBlock.id), undefined);
   assert.equal(reader.blocks.some((block) => block.text === "Reader survives"), true);
   assert.equal(reader.stylesheetCount, 0);
 });
 
-test("selector and unsupported CSS outcomes remain recoverable diagnostics", () => {
+test("dynamic selectors and media rules use the terminal rendering context", () => {
   const content = contentFor(`
     <style>
       p:hover { color: red }
-      @media print { p { color: black } }
-      p { width: 10px; color: var(--ink) }
+      :root { --ink: #123456 }
+      @media (max-width: 40rem) { p { color: var(--ink) } }
+      p { width: 10px; font-size: 12px }
     </style>
     <p>Text</p>
   `);
-  assert.ok(content.styleIssues.some((issue) => issue.code === "selector-unknown"));
-  assert.ok(content.styleIssues.some((issue) => issue.code === "unsupported-at-rule"));
+  assert.equal(content.styleIssues.some((issue) => issue.code === "selector-unknown"), false);
   assert.ok(content.styleIssues.some((issue) => issue.code === "property-unsupported"));
+  const paragraph = content.blocks.find((block) => block.text === "Text");
+  assert.ok(paragraph);
+  const narrow = rowFor(layoutPageContent(content, 60), paragraph.id);
+  assert.ok(authoredStyles(narrow).some((style) => style.foreground?.r === 18));
+});
+
+test("custom properties, responsive grids, logical spacing, and visual clipping compose at layout time", () => {
+  const content = contentFor(`
+    <style>
+      :root {
+        --ink: var(--missing, #123456);
+        --edge: #654321;
+        --cycle-a: var(--cycle-b);
+        --cycle-b: var(--cycle-a);
+      }
+      body { color: var(--ink); background-color: #fdfcf8; }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 1ch;
+      }
+      .card {
+        border: 1px solid var(--edge);
+        padding-inline: 1ch;
+      }
+      .fallback { color: var(--cycle-a, #010203); }
+      .screen-reader {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+      }
+      @media (max-width: 30rem) {
+        .grid { grid-template-columns: 1fr; }
+      }
+    </style>
+    <a class="screen-reader" href="#main">Skip</a>
+    <main id="main" class="grid">
+      <article class="card"><h2>First</h2><p>Alpha</p></article>
+      <article class="card"><h2>Second</h2><p class="fallback">Beta</p></article>
+    </main>
+  `);
+  const first = content.blocks.find((block) => block.text === "First");
+  const second = content.blocks.find((block) => block.text === "Second");
+  const beta = content.blocks.find((block) => block.text === "Beta");
+  const skip = content.links.find((link) => link.label === "Skip");
+  assert.ok(first && second && beta && skip);
+
+  const wide = layoutPageContent(content, 80);
+  const narrow = layoutPageContent(content, 40);
+  assert.strictEqual(layoutPageContent(content, 80), wide);
+  assert.equal(
+    wide.rows.some((row) => {
+      const ids = new Set(row.fragments.map((fragment) => fragment.blockId));
+      return ids.has(first.id) && ids.has(second.id);
+    }),
+    true
+  );
+  assert.equal(
+    narrow.rows.some((row) => {
+      const ids = new Set(row.fragments.map((fragment) => fragment.blockId));
+      return ids.has(first.id) && ids.has(second.id);
+    }),
+    false
+  );
+  assert.equal(wide.actionPlacements.some((placement) => placement.actionId === skip.id), false);
+  assert.deepEqual(wide.canvasStyle.background, { r: 253, g: 252, b: 248 });
+  assert.ok(authoredStyles(rowFor(wide, beta.id)).some((style) =>
+    style.foreground?.r === 1 && style.foreground.g === 2 && style.foreground.b === 3
+  ));
+  assert.ok(wide.rows.some((row) => row.text.includes("┌") && row.text.includes("┐")));
+});
+
+test("linked stylesheet media conditions are evaluated at the current layout width", async () => {
+  let stylesheetLoads = 0;
+  const session = new BrowserSession({
+    loader: async (requestUrl) => ({
+      requestUrl,
+      finalUrl: requestUrl,
+      status: 200,
+      statusText: "OK",
+      contentType: "text/html",
+      html: `
+        <link rel="stylesheet" href="/narrow.css" media="screen and (max-width: 50rem)">
+        <p>Responsive text</p>
+      `,
+      responseHeaders: { "content-type": "text/html" },
+      setCookieHeaders: [],
+      fetchedAtIso: "2026-07-29T00:00:00.000Z",
+      networkOutcome: {
+        finalUrl: requestUrl,
+        kind: "ok",
+        status: 200,
+        statusText: "OK",
+        detailCode: "HTTP_200",
+        detailMessage: "200 OK"
+      }
+    }),
+    stylesheetLoader: async (requestUrl) => {
+      stylesheetLoads += 1;
+      return {
+        requestUrl,
+        finalUrl: requestUrl,
+        contentType: "text/css",
+        responseHeaders: { "content-type": "text/css" },
+        bytes: new TextEncoder().encode("p { color: #123456 }")
+      };
+    }
+  });
+
+  const snapshot = await session.open("https://example.test/start");
+  const paragraph = snapshot.content.blocks.find((block) => block.text === "Responsive text");
+  assert.ok(paragraph);
+  assert.equal(stylesheetLoads, 1);
+  assert.ok(authoredStyles(rowFor(layoutPageContent(snapshot.content, 60), paragraph.id)).some((style) =>
+    style.foreground?.r === 18 && style.foreground.g === 52 && style.foreground.b === 86
+  ));
+  assert.equal(authoredStyles(rowFor(layoutPageContent(snapshot.content, 120), paragraph.id)).some((style) =>
+    style.foreground?.r === 18 && style.foreground.g === 52 && style.foreground.b === 86
+  ), false);
+});
+
+test("equivalent CSS diagnostics are aggregated", () => {
+  const content = contentFor(`
+    <style>
+      p { font-size: 10px }
+      div { font-size: 10px }
+    </style>
+    <p>First</p>
+    <div>Second</div>
+  `);
+  const issue = content.styleIssues.find((candidate) =>
+    candidate.code === "property-unsupported"
+    && candidate.message.includes("font-size")
+  );
+  assert.equal(issue?.occurrences, 2);
 });
 
 test("BrowserSession loads external stylesheets in document order and records failures", async () => {
@@ -174,7 +340,10 @@ test("BrowserSession loads external stylesheets in document order and records fa
     "https://cdn.example.test/site/missing.css"
   ]);
   const paragraph = snapshot.content.blocks.find((block) => block.text === "Styled");
-  assert.deepEqual(paragraph?.textRuns[0]?.style.foreground, { r: 0, g: 0, b: 255 });
+  assert.ok(paragraph);
+  assert.ok(authoredStyles(rowFor(layoutPageContent(snapshot.content, 40), paragraph.id)).some((style) =>
+    style.foreground?.r === 0 && style.foreground.g === 0 && style.foreground.b === 255
+  ));
   assert.ok(snapshot.content.styleIssues.some((issue) =>
     issue.code === "stylesheet-fetch" && issue.message.includes("missing stylesheet")
   ));

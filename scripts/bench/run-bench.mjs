@@ -26,11 +26,25 @@ function createBenchmarkHtml(index) {
 
   return `<!doctype html>
 <html>
-  <head><title>Benchmark ${String(index)}</title></head>
+  <head>
+    <title>Benchmark ${String(index)}</title>
+    <style>
+      :root { --ink: #18231f; --edge: #789186; }
+      body { color: var(--ink); }
+      main { max-width: 60rem; margin-inline: auto; }
+      .cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1ch; }
+      .card { border: 1px solid var(--edge); padding-inline: 1ch; }
+      @media (max-width: 50rem) { .cards { grid-template-columns: 1fr; } }
+    </style>
+  </head>
   <body>
     <main>
       <h1>Case ${String(index)}</h1>
       <p>Deterministic terminal rendering benchmark with links, lists, tables, and text wrapping.</p>
+      <section class="cards">
+        <article class="card"><h2>Summary</h2><p>Responsive layout case ${String(index)}.</p></article>
+        <article class="card"><h2>Details</h2><p>Custom properties and terminal spacing.</p></article>
+      </section>
       <ul>${listItems}</ul>
       <table><thead><tr><th>Row</th><th>Value</th></tr></thead><tbody>${tableRows}</tbody></table>
       <pre>line one

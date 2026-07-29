@@ -4,13 +4,16 @@ import {
   parseStylesheet,
   parseStylesheetBytes,
   querySelectorList,
+  resolveCssProperty,
   serializeCssComponentValues,
   specificitiesOfSelectorList,
   validateCssPropertyValue,
   type ComplexSelector,
   type CssDeclaration,
   type CssQualifiedRule,
+  type CssRule,
   type CssStylesheet,
+  type ComponentValue,
   type SelectorElementData,
   type SelectorEnvironment,
   type SelectorList,
@@ -41,9 +44,36 @@ import type {
 
 type StyleTreeNode = DocumentTree | HtmlNode;
 
-export type ComputedDisplay = "none" | "inline" | "block" | "list-item" | "table";
+export type ComputedDisplay =
+  | "none"
+  | "contents"
+  | "inline"
+  | "block"
+  | "list-item"
+  | "table"
+  | "flex"
+  | "grid";
 export type ComputedVisibility = "visible" | "hidden";
 export type ComputedTextTransform = "none" | "uppercase" | "lowercase" | "capitalize";
+
+export interface ComputedBoxLayout {
+  readonly flexDirection: "row" | "column";
+  readonly flexWrap: boolean;
+  readonly justifyContent: "start" | "center" | "end" | "space-between";
+  readonly alignItems: "start" | "center" | "end" | "stretch";
+  readonly columnGapCells: number;
+  readonly rowGapRows: number;
+  readonly gridTemplateColumns?: string;
+  readonly gridColumn?: number;
+  readonly width?: string;
+  readonly minWidth?: string;
+  readonly maxWidth?: string;
+  readonly minHeightRows: number;
+  readonly marginInlineAuto: boolean;
+  readonly borderColor?: PageColor;
+  readonly border: boolean;
+  readonly visuallyHidden: boolean;
+}
 
 export interface ComputedElementStyle {
   readonly display: ComputedDisplay;
@@ -52,6 +82,8 @@ export interface ComputedElementStyle {
   readonly listStyleType: string;
   readonly text: PageTextStyle;
   readonly block: PageBlockStyle;
+  readonly box: ComputedBoxLayout;
+  readonly customProperties: ReadonlyMap<string, readonly ComponentValue[]>;
 }
 
 export interface PageStyleResolution {
@@ -63,6 +95,7 @@ export interface PageStyleResolution {
 interface StylesheetSource {
   readonly sourceUrl: string;
   readonly stylesheet: CssStylesheet;
+  readonly media?: string;
 }
 
 interface CascadeCandidate {
@@ -112,7 +145,43 @@ const SUPPORTED_PROPERTIES = new Set([
   "padding-right",
   "padding-bottom",
   "padding-left",
-  "text-indent"
+  "padding-block",
+  "padding-block-start",
+  "padding-block-end",
+  "padding-inline",
+  "padding-inline-start",
+  "padding-inline-end",
+  "margin-block",
+  "margin-block-start",
+  "margin-block-end",
+  "margin-inline",
+  "margin-inline-start",
+  "margin-inline-end",
+  "text-indent",
+  "width",
+  "min-width",
+  "max-width",
+  "min-height",
+  "gap",
+  "row-gap",
+  "column-gap",
+  "flex-direction",
+  "flex-wrap",
+  "justify-content",
+  "align-items",
+  "grid-template-columns",
+  "grid-column",
+  "border",
+  "border-width",
+  "border-style",
+  "border-color",
+  "overflow",
+  "overflow-x",
+  "overflow-y",
+  "position",
+  "clip",
+  "clip-path",
+  "height"
 ]);
 const INHERITED_PROPERTIES = new Set([
   "visibility",
@@ -131,6 +200,7 @@ const ASCII_INSENSITIVE_ATTRIBUTES = new Set([
   "shape", "spellcheck", "target", "type", "wrap"
 ]);
 const MAX_ISSUES = 128;
+const MAX_ISSUES_PER_CODE = 32;
 
 const NAMED_COLORS: Readonly<Record<string, PageColor>> = Object.freeze({
   aliceblue: { r: 240, g: 248, b: 255 },
@@ -165,13 +235,28 @@ const NAMED_COLORS: Readonly<Record<string, PageColor>> = Object.freeze({
 
 class IssueCollector {
   readonly #issues: PageStyleIssue[] = [];
-  readonly #seen = new Set<string>();
+  readonly #indices = new Map<string, number>();
+  readonly #countsByCode = new Map<PageStyleIssue["code"], number>();
 
   add(code: PageStyleIssue["code"], message: string, sourceUrl: string): void {
     const identity = `${code}\u0000${sourceUrl}\u0000${message}`;
-    if (this.#seen.has(identity) || this.#issues.length >= MAX_ISSUES) return;
-    this.#seen.add(identity);
-    this.#issues.push({ code, message, sourceUrl });
+    const existingIndex = this.#indices.get(identity);
+    if (existingIndex !== undefined) {
+      const existing = this.#issues[existingIndex];
+      if (existing !== undefined) {
+        this.#issues[existingIndex] = {
+          ...existing,
+          occurrences: existing.occurrences + 1
+        };
+      }
+      return;
+    }
+    if (this.#issues.length >= MAX_ISSUES) return;
+    const codeCount = this.#countsByCode.get(code) ?? 0;
+    if (codeCount >= MAX_ISSUES_PER_CODE) return;
+    this.#indices.set(identity, this.#issues.length);
+    this.#countsByCode.set(code, codeCount + 1);
+    this.#issues.push({ code, message, sourceUrl, occurrences: 1 });
   }
 
   values(): readonly PageStyleIssue[] {
@@ -243,6 +328,15 @@ function selectorEnvironment(): SelectorEnvironment<StyleTreeNode> {
           : "no-match";
       }
       if (pseudo.name === "visited") return "no-match";
+      if (
+        pseudo.name === "hover"
+        || pseudo.name === "active"
+        || pseudo.name === "focus"
+        || pseudo.name === "focus-visible"
+        || pseudo.name === "focus-within"
+      ) {
+        return "no-match";
+      }
       return "unknown";
     }
   };
@@ -289,11 +383,117 @@ function textOfElement(node: ElementNode): string {
   return values.join("");
 }
 
+function splitMediaQueries(value: string): readonly string[] {
+  const queries: string[] = [];
+  let start = 0;
+  let depth = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (character === "(") depth += 1;
+    else if (character === ")") depth = Math.max(0, depth - 1);
+    else if (character === "," && depth === 0) {
+      queries.push(value.slice(start, index));
+      start = index + 1;
+    }
+  }
+  queries.push(value.slice(start));
+  return queries;
+}
+
+/**
+ * Returns whether a stylesheet can target a screen. Width-dependent conditions
+ * remain fetchable because they are evaluated again during terminal layout.
+ */
 export function terminalMediaApplies(value: string | undefined): boolean {
   if (value === undefined || value.trim().length === 0) return true;
-  return value.split(",").some((part) => {
+  return splitMediaQueries(value).some((part) => {
     const normalized = part.trim().toLowerCase();
-    return normalized === "all" || normalized === "screen";
+    if (normalized.startsWith("not ")) return true;
+    return !/(?:^|\s)print(?:\s|$)/u.test(normalized)
+      || /(?:^|\s)(?:all|screen)(?:\s|$)/u.test(normalized);
+  });
+}
+
+function mediaLengthPx(value: string): number | null {
+  const match = /^([+]?(?:\d+(?:\.\d+)?|\.\d+))(px|rem|em|ch)$/iu.exec(value.trim());
+  if (!match?.[1] || !match[2]) return null;
+  const number = Number.parseFloat(match[1]);
+  if (!Number.isFinite(number)) return null;
+  const unit = match[2].toLowerCase();
+  if (unit === "px") return number;
+  if (unit === "ch") return number * 8;
+  return number * 16;
+}
+
+function mediaFeatureApplies(feature: string, viewportWidthPx: number): boolean | null {
+  const normalized = feature
+    .replaceAll(/\/\*[\s\S]*?\*\//gu, "")
+    .trim()
+    .toLowerCase();
+  if (normalized === "prefers-reduced-motion"
+    || normalized === "prefers-reduced-motion: reduce") {
+    return true;
+  }
+  if (normalized === "hover:hover" || normalized === "hover: hover") return false;
+  if (normalized.startsWith("min-resolution:")) return false;
+  const legacy = /^(min-width|max-width|width)\s*:\s*(.+)$/u.exec(normalized);
+  if (legacy?.[1] && legacy[2]) {
+    const boundary = mediaLengthPx(legacy[2]);
+    if (boundary === null) return null;
+    if (legacy[1] === "min-width") return viewportWidthPx >= boundary;
+    if (legacy[1] === "max-width") return viewportWidthPx <= boundary;
+    return viewportWidthPx === boundary;
+  }
+  const range = /^width\s*(<=|>=|<|>)\s*(.+)$/u.exec(normalized);
+  if (range?.[1] && range[2]) {
+    const boundary = mediaLengthPx(range[2]);
+    if (boundary === null) return null;
+    if (range[1] === "<=") return viewportWidthPx <= boundary;
+    if (range[1] === ">=") return viewportWidthPx >= boundary;
+    if (range[1] === "<") return viewportWidthPx < boundary;
+    return viewportWidthPx > boundary;
+  }
+  return null;
+}
+
+function mediaQueryApplies(
+  value: string | undefined,
+  columns: number,
+  issues: IssueCollector,
+  sourceUrl: string
+): boolean {
+  if (value === undefined || value.trim().length === 0) return true;
+  const viewportWidthPx = Math.max(1, Math.floor(columns)) * 8;
+  return splitMediaQueries(value).some((query) => {
+    let normalized = query
+      .replaceAll(/\/\*[\s\S]*?\*\//gu, "")
+      .trim()
+      .toLowerCase();
+    let negated = false;
+    if (normalized.startsWith("not ")) {
+      negated = true;
+      normalized = normalized.slice(4).trim();
+    }
+    const mediaType = /^(all|screen|print)\b/u.exec(normalized)?.[1];
+    if (mediaType !== undefined) {
+      normalized = normalized.slice(mediaType.length).replace(/^\s*and\s*/u, "").trim();
+    }
+    let applies = mediaType !== "print";
+    const features = [...normalized.matchAll(/\(([^()]*)\)/gu)].map((match) => match[1] ?? "");
+    if (normalized.length > 0 && features.length === 0) {
+      issues.add("stylesheet-media", `Unsupported media query ${query.trim()}.`, sourceUrl);
+      applies = false;
+    }
+    for (const feature of features) {
+      const featureResult = mediaFeatureApplies(feature, viewportWidthPx);
+      if (featureResult === null) {
+        issues.add("stylesheet-media", `Unsupported media feature (${feature.trim()}).`, sourceUrl);
+        applies = false;
+      } else {
+        applies &&= featureResult;
+      }
+    }
+    return negated ? !applies : applies;
   });
 }
 
@@ -309,7 +509,8 @@ function stylesheetSources(
     signal?.throwIfAborted();
     const tag = element.localName.toLowerCase();
     if (tag === "style") {
-      if (!terminalMediaApplies(getAttributeValue(element, "media"))) {
+      const media = getAttributeValue(element, "media");
+      if (!terminalMediaApplies(media)) {
         issues.add("stylesheet-media", "Skipped a stylesheet whose media query does not target terminal rendering.", "inline");
         continue;
       }
@@ -332,7 +533,11 @@ function stylesheetSources(
         continue;
       }
       for (const error of parsed.errors) issues.add("stylesheet-parse", error.message, "inline");
-      sources.push({ sourceUrl: "inline", stylesheet: parsed.value });
+      sources.push({
+        sourceUrl: "inline",
+        stylesheet: parsed.value,
+        ...(media === undefined ? {} : { media })
+      });
       continue;
     }
     if (tag !== "link") continue;
@@ -367,7 +572,11 @@ function stylesheetSources(
       continue;
     }
     for (const error of parsed.errors) issues.add("stylesheet-parse", error.message, resource.finalUrl);
-    sources.push({ sourceUrl: resource.finalUrl, stylesheet: parsed.value });
+    sources.push({
+      sourceUrl: resource.finalUrl,
+      stylesheet: parsed.value,
+      ...(resource.media === undefined ? {} : { media: resource.media })
+    });
   }
   return sources;
 }
@@ -390,6 +599,12 @@ function outranks(left: CascadeCandidate, right: CascadeCandidate): boolean {
   return specificity !== 0 ? specificity > 0 : left.sourceOrder >= right.sourceOrder;
 }
 
+function canonicalProperty(name: string): string | null {
+  const semantics = resolveCssProperty(name.toLowerCase());
+  if (semantics === null) return null;
+  return semantics.kind === "custom" ? semantics.name : semantics.name;
+}
+
 function recordCandidate(
   candidates: CandidateMap,
   element: ElementNode,
@@ -399,7 +614,7 @@ function recordCandidate(
   sourceOrder: number,
   inline: boolean
 ): void {
-  const property = declaration.name.toLowerCase();
+  const property = canonicalProperty(declaration.name) ?? declaration.name.toLowerCase();
   const byProperty = candidates.get(element) ?? new Map<string, CascadeCandidate>();
   const next: CascadeCandidate = {
     declaration,
@@ -423,14 +638,24 @@ function collectRuleCandidates(
   sources: readonly StylesheetSource[],
   candidates: CandidateMap,
   issues: IssueCollector,
+  columns: number,
   signal?: AbortSignal
 ): number {
   const environment = selectorEnvironment();
   let sourceOrder = 0;
   for (const source of sources) {
-    for (const rule of source.stylesheet.rules) {
+    if (!mediaQueryApplies(source.media, columns, issues, source.sourceUrl)) continue;
+    const visitRules = (rules: CssStylesheet["rules"]): void => {
+      for (const rule of rules) {
       signal?.throwIfAborted();
       if (rule.kind === "at-rule") {
+        if (rule.name.toLowerCase() === "media" && rule.block !== null) {
+          const media = serializeCssComponentValues(rule.prelude).trim();
+          if (mediaQueryApplies(media, columns, issues, source.sourceUrl)) {
+            visitRules(rule.block.items.filter((item): item is CssRule => item.kind !== "declaration"));
+          }
+          continue;
+        }
         issues.add(
           "unsupported-at-rule",
           `Unsupported @${rule.name} rule was ignored.`,
@@ -488,9 +713,18 @@ function collectRuleCandidates(
           }
         }
       }
+      if (matchingSpecificity.size === 0) continue;
       for (const declaration of declarationsOf(rule)) {
-        const property = declaration.name.toLowerCase();
-        if (!SUPPORTED_PROPERTIES.has(property)) {
+        const property = canonicalProperty(declaration.name);
+        if (property === null) {
+          issues.add(
+            "property-invalid",
+            `Unknown property ${declaration.name.toLowerCase()}.`,
+            source.sourceUrl
+          );
+          continue;
+        }
+        if (!property.startsWith("--") && !SUPPORTED_PROPERTIES.has(property)) {
           issues.add(
             "property-unsupported",
             `Property ${property} is outside Verge's terminal CSS profile.`,
@@ -512,6 +746,8 @@ function collectRuleCandidates(
         }
       }
     }
+    };
+    visitRules(source.stylesheet.rules);
   }
   return sourceOrder;
 }
@@ -538,8 +774,12 @@ function collectInlineCandidates(
     for (const error of parsed.errors) issues.add("stylesheet-parse", error.message, "inline");
     for (const item of parsed.value) {
       if (item.kind !== "declaration") continue;
-      const property = item.name.toLowerCase();
-      if (!SUPPORTED_PROPERTIES.has(property)) {
+      const property = canonicalProperty(item.name);
+      if (property === null) {
+        issues.add("property-invalid", `Unknown property ${item.name.toLowerCase()}.`, "inline");
+        continue;
+      }
+      if (!property.startsWith("--") && !SUPPORTED_PROPERTIES.has(property)) {
         issues.add(
           "property-unsupported",
           `Property ${property} is outside Verge's terminal CSS profile.`,
@@ -565,21 +805,138 @@ function cssValue(declaration: CssDeclaration): string {
   return serializeCssComponentValues(declaration.value).trim();
 }
 
+function customPropertyValues(
+  parent: ReadonlyMap<string, readonly ComponentValue[]> | undefined,
+  candidates: ReadonlyMap<string, CascadeCandidate> | undefined
+): ReadonlyMap<string, readonly ComponentValue[]> {
+  let hasLocalCustomProperty = false;
+  for (const name of candidates?.keys() ?? []) {
+    if (!name.startsWith("--")) continue;
+    hasLocalCustomProperty = true;
+    break;
+  }
+  if (!hasLocalCustomProperty) return parent ?? new Map();
+  const inherited = new Map(parent ?? []);
+  const local = new Map<string, readonly ComponentValue[]>();
+  for (const [name, candidate] of candidates ?? []) {
+    if (!name.startsWith("--")) continue;
+    const wide = cssWide(cssValue(candidate.declaration));
+    if (wide === "initial") {
+      inherited.delete(name);
+      continue;
+    }
+    if (wide === "inherit" || wide === "unset" || wide === "revert") continue;
+    local.set(name, candidate.declaration.value);
+  }
+
+  const resolvedLocal = new Map<string, readonly ComponentValue[] | null>();
+  const resolveLocal = (name: string, stack: ReadonlySet<string>): readonly ComponentValue[] | null => {
+    const known = resolvedLocal.get(name);
+    if (known !== undefined) return known;
+    if (stack.has(name)) {
+      resolvedLocal.set(name, null);
+      return null;
+    }
+    const raw = local.get(name);
+    if (raw === undefined) return inherited.get(name) ?? null;
+    const nextStack = new Set(stack);
+    nextStack.add(name);
+    const resolved = substituteComponents(raw, (reference) =>
+      local.has(reference)
+        ? resolveLocal(reference, nextStack)
+        : inherited.get(reference) ?? null
+    );
+    resolvedLocal.set(name, resolved);
+    return resolved;
+  };
+
+  for (const name of local.keys()) {
+    const value = resolveLocal(name, new Set());
+    if (value === null) inherited.delete(name);
+    else inherited.set(name, value);
+  }
+  return inherited;
+}
+
+function substituteComponents(
+  values: readonly ComponentValue[],
+  lookup: (name: string) => readonly ComponentValue[] | null
+): readonly ComponentValue[] | null {
+  const output: ComponentValue[] = [];
+  for (const value of values) {
+    if (value.kind === "function-block" && value.name.toLowerCase() === "var") {
+      const commaIndex = value.value.findIndex((component) => component.kind === "comma");
+      const nameValues = commaIndex < 0 ? value.value : value.value.slice(0, commaIndex);
+      const name = serializeCssComponentValues(nameValues).trim();
+      if (!name.startsWith("--")) return null;
+      const replacement = lookup(name)
+        ?? (commaIndex < 0
+          ? null
+          : substituteComponents(value.value.slice(commaIndex + 1), lookup));
+      if (replacement === null) return null;
+      output.push(...replacement);
+      continue;
+    }
+    if (value.kind === "function-block") {
+      const nested = substituteComponents(value.value, lookup);
+      if (nested === null) return null;
+      output.push({ ...value, value: nested });
+      continue;
+    }
+    if (value.kind === "simple-block") {
+      const nested = substituteComponents(value.value, lookup);
+      if (nested === null) return null;
+      output.push({ ...value, value: nested });
+      continue;
+    }
+    output.push(value);
+  }
+  return output;
+}
+
+function resolvedDeclaration(
+  candidate: CascadeCandidate,
+  customProperties: ReadonlyMap<string, readonly ComponentValue[]>
+): CssDeclaration | null {
+  const value = substituteComponents(
+    candidate.declaration.value,
+    (name) => customProperties.get(name) ?? null
+  );
+  if (value === null) return null;
+  const property = canonicalProperty(candidate.declaration.name);
+  if (property === null) return null;
+  return {
+    ...candidate.declaration,
+    name: property,
+    value
+  };
+}
+
 function validatedCandidate(
   candidate: CascadeCandidate | undefined,
+  customProperties: ReadonlyMap<string, readonly ComponentValue[]>,
   issues: IssueCollector
-): CascadeCandidate | undefined {
+): { readonly candidate: CascadeCandidate; readonly declaration: CssDeclaration } | undefined {
   if (candidate === undefined) return undefined;
-  const property = candidate.declaration.name.toLowerCase();
-  if (!SUPPORTED_PROPERTIES.has(property)) {
+  const property = canonicalProperty(candidate.declaration.name);
+  if (property === null || property.startsWith("--") || !SUPPORTED_PROPERTIES.has(property)) {
     issues.add(
       "property-unsupported",
-      `Property ${property} is outside Verge's terminal CSS profile.`,
+      `Property ${candidate.declaration.name.toLowerCase()} is outside Verge's terminal CSS profile.`,
       candidate.sourceUrl
     );
     return undefined;
   }
-  const validation = validateCssPropertyValue(candidate.declaration);
+  const declaration = resolvedDeclaration(candidate, customProperties);
+  if (declaration === null) {
+    issues.add(
+      "property-invalid",
+      `Value for ${property} contains an unresolved custom property.`,
+      candidate.sourceUrl
+    );
+    return undefined;
+  }
+  const validation = validateCssPropertyValue(declaration);
   if (validation.status === "invalid") {
     issues.add("property-invalid", `Invalid value for ${property}.`, candidate.sourceUrl);
     return undefined;
@@ -592,12 +949,13 @@ function validatedCandidate(
     );
     return undefined;
   }
-  return candidate;
+  return { candidate, declaration };
 }
 
 function candidateValue(
   candidates: ReadonlyMap<string, CascadeCandidate> | undefined,
   properties: string | readonly string[],
+  customProperties: ReadonlyMap<string, readonly ComponentValue[]>,
   issues: IssueCollector
 ): {
   readonly property: string;
@@ -614,13 +972,13 @@ function candidateValue(
       candidate = current;
     }
   }
-  candidate = validatedCandidate(candidate, issues);
-  return candidate === undefined
+  const validated = validatedCandidate(candidate, customProperties, issues);
+  return validated === undefined
     ? undefined
     : {
-      property: property ?? candidate.declaration.name.toLowerCase(),
-      value: cssValue(candidate.declaration),
-      sourceUrl: candidate.sourceUrl
+      property: property ?? validated.declaration.name.toLowerCase(),
+      value: cssValue(validated.declaration),
+      sourceUrl: validated.candidate.sourceUrl
     };
 }
 
@@ -674,7 +1032,6 @@ function inheritedBase(parent: ComputedElementStyle | undefined, element: Elemen
       ...(usesBrowserLinkColor || parent?.text.foreground === undefined
         ? {}
         : { foreground: parent.text.foreground }),
-      ...(parent?.text.background === undefined ? {} : { background: parent.text.background }),
       ...(parent?.text.bold === true ? { bold: true } : {}),
       ...(parent?.text.italic === true ? { italic: true } : {}),
       ...(parent?.text.underline === true ? { underline: true } : {}),
@@ -685,7 +1042,20 @@ function inheritedBase(parent: ComputedElementStyle | undefined, element: Elemen
       ...initialBlockStyle(element),
       whiteSpace: parent?.block.whiteSpace ?? initialBlockStyle(element).whiteSpace,
       textAlign: parent?.block.textAlign ?? "left"
-    }
+    },
+    box: {
+      flexDirection: "row",
+      flexWrap: false,
+      justifyContent: "start",
+      alignItems: "stretch",
+      columnGapCells: 0,
+      rowGapRows: 0,
+      minHeightRows: 0,
+      marginInlineAuto: false,
+      border: false,
+      visuallyHidden: false
+    },
+    customProperties: parent?.customProperties ?? new Map()
   };
 }
 
@@ -803,6 +1173,7 @@ function parseColor(value: string, currentColor: PageColor | undefined): PageCol
 function displayValue(value: string, initial: ComputedDisplay): ComputedDisplay | null {
   switch (value.trim().toLowerCase()) {
     case "none": return "none";
+    case "contents": return "contents";
     case "inline":
     case "inline-block":
       return "inline";
@@ -814,6 +1185,12 @@ function displayValue(value: string, initial: ComputedDisplay): ComputedDisplay 
     case "block":
     case "flow-root":
       return "block";
+    case "flex":
+    case "inline-flex":
+      return "flex";
+    case "grid":
+    case "inline-grid":
+      return "grid";
     default:
       return cssWide(value) === null ? null : initial;
   }
@@ -862,8 +1239,10 @@ function computeElementStyle(
   issues: IssueCollector
 ): ComputedElementStyle {
   let computed = inheritedBase(parent, element);
+  const customProperties = customPropertyValues(parent?.customProperties, candidates);
+  computed = { ...computed, customProperties };
   const valueFor = (property: string): { readonly value: string; readonly sourceUrl: string } | undefined =>
-    candidateValue(candidates, property, issues);
+    candidateValue(candidates, property, customProperties, issues);
 
   const display = valueFor("display");
   if (display) {
@@ -900,7 +1279,12 @@ function computeElementStyle(
       computed = { ...computed, textTransform: value };
     } else supportedValueIssue(issues, transform.sourceUrl, "text-transform", transform.value);
   }
-  const listStyle = candidateValue(candidates, ["list-style-type", "list-style"], issues);
+  const listStyle = candidateValue(
+    candidates,
+    ["list-style-type", "list-style"],
+    customProperties,
+    issues
+  );
   if (listStyle) {
     const value = resolvedValue("list-style-type", listStyle.value, "disc", parent?.listStyleType);
     const supportedMarkers = [
@@ -926,7 +1310,12 @@ function computeElementStyle(
     if (color === null) supportedValueIssue(issues, foreground.sourceUrl, "color", foreground.value);
     else computed = { ...computed, text: { ...computed.text, ...(color === undefined ? {} : { foreground: color }) } };
   }
-  const background = candidateValue(candidates, ["background-color", "background"], issues);
+  const background = candidateValue(
+    candidates,
+    ["background-color", "background"],
+    customProperties,
+    issues
+  );
   if (background) {
     const raw = cssWide(background.value) === null ? background.value : "transparent";
     const color = parseColor(raw, computed.text.foreground);
@@ -961,7 +1350,12 @@ function computeElementStyle(
       computed = { ...computed, text: { ...computed.text, italic: value !== "normal" } };
     } else supportedValueIssue(issues, fontStyle.sourceUrl, "font-style", fontStyle.value);
   }
-  const decoration = candidateValue(candidates, ["text-decoration-line", "text-decoration"], issues);
+  const decoration = candidateValue(
+    candidates,
+    ["text-decoration-line", "text-decoration"],
+    customProperties,
+    issues
+  );
   if (decoration) {
     const value = decoration.value.toLowerCase();
     computed = {
@@ -974,22 +1368,63 @@ function computeElementStyle(
     };
   }
 
+  const rightIsInlineStart = getAttributeValue(element, "dir")?.trim().toLowerCase() === "rtl";
   const sideProperties = [
-    ["margin-top", "margin", "marginTopRows", 0, "vertical", 8],
-    ["margin-right", "margin", "marginRightCells", 1, "horizontal", 16],
-    ["margin-bottom", "margin", "marginBottomRows", 2, "vertical", 8],
-    ["margin-left", "margin", "marginLeftCells", 3, "horizontal", 16],
-    ["padding-top", "padding", "paddingTopRows", 0, "vertical", 8],
-    ["padding-right", "padding", "paddingRightCells", 1, "horizontal", 16],
-    ["padding-bottom", "padding", "paddingBottomRows", 2, "vertical", 8],
-    ["padding-left", "padding", "paddingLeftCells", 3, "horizontal", 16]
+    ["margin-top", ["margin-top", "margin", "margin-block-start", "margin-block"], "marginTopRows", 0, "vertical", 8],
+    ["margin-right", [
+      "margin-right",
+      "margin",
+      rightIsInlineStart ? "margin-inline-start" : "margin-inline-end",
+      "margin-inline"
+    ], "marginRightCells", 1, "horizontal", 16],
+    ["margin-bottom", ["margin-bottom", "margin", "margin-block-end", "margin-block"], "marginBottomRows", 2, "vertical", 8],
+    ["margin-left", [
+      "margin-left",
+      "margin",
+      rightIsInlineStart ? "margin-inline-end" : "margin-inline-start",
+      "margin-inline"
+    ], "marginLeftCells", 3, "horizontal", 16],
+    ["padding-top", ["padding-top", "padding", "padding-block-start", "padding-block"], "paddingTopRows", 0, "vertical", 8],
+    ["padding-right", [
+      "padding-right",
+      "padding",
+      rightIsInlineStart ? "padding-inline-start" : "padding-inline-end",
+      "padding-inline"
+    ], "paddingRightCells", 1, "horizontal", 16],
+    ["padding-bottom", ["padding-bottom", "padding", "padding-block-end", "padding-block"], "paddingBottomRows", 2, "vertical", 8],
+    ["padding-left", [
+      "padding-left",
+      "padding",
+      rightIsInlineStart ? "padding-inline-end" : "padding-inline-start",
+      "padding-inline"
+    ], "paddingLeftCells", 3, "horizontal", 16]
   ] as const;
-  for (const [property, shorthand, field, sideIndex, axis, maximum] of sideProperties) {
-    const entry = candidateValue(candidates, [property, shorthand], issues);
+  for (const [property, propertyNames, field, sideIndex, axis, maximum] of sideProperties) {
+    const entry = candidateValue(candidates, propertyNames, customProperties, issues);
     if (!entry) continue;
-    const rawValue = entry.property === shorthand
+    const isFourSideShorthand = entry.property === "margin" || entry.property === "padding";
+    const isAxisShorthand = entry.property === "margin-block"
+      || entry.property === "margin-inline"
+      || entry.property === "padding-block"
+      || entry.property === "padding-inline";
+    const rawValue = isFourSideShorthand
       ? boxValues(entry.value)?.[sideIndex]
-      : entry.value;
+      : isAxisShorthand
+        ? (() => {
+          const values = entry.value.trim().split(/\s+/u);
+          if (values.length < 1 || values.length > 2) return undefined;
+          const isEnd = property.endsWith("right") || property.endsWith("bottom");
+          return isEnd ? values[1] ?? values[0] : values[0];
+        })()
+        : entry.value;
+    if (axis === "horizontal" && rawValue?.trim().toLowerCase() === "auto") {
+      computed = {
+        ...computed,
+        box: { ...computed.box, marginInlineAuto: true },
+        block: { ...computed.block, [field]: 0 }
+      };
+      continue;
+    }
     const length = rawValue === undefined ? null : parseLength(rawValue, axis, maximum);
     if (length === null) supportedValueIssue(issues, entry.sourceUrl, property, entry.value);
     else computed = { ...computed, block: { ...computed.block, [field]: length } };
@@ -1005,6 +1440,164 @@ function computeElementStyle(
         block: { ...computed.block, textIndentCells: length }
       };
     }
+  }
+  const flexDirection = valueFor("flex-direction");
+  if (flexDirection) {
+    const value = flexDirection.value.trim().toLowerCase();
+    if (value === "row" || value === "row-reverse") {
+      computed = { ...computed, box: { ...computed.box, flexDirection: "row" } };
+    } else if (value === "column" || value === "column-reverse") {
+      computed = { ...computed, box: { ...computed.box, flexDirection: "column" } };
+    } else supportedValueIssue(issues, flexDirection.sourceUrl, "flex-direction", flexDirection.value);
+  }
+  const flexWrap = valueFor("flex-wrap");
+  if (flexWrap) {
+    const value = flexWrap.value.trim().toLowerCase();
+    if (value === "wrap" || value === "wrap-reverse" || value === "nowrap") {
+      computed = { ...computed, box: { ...computed.box, flexWrap: value !== "nowrap" } };
+    } else supportedValueIssue(issues, flexWrap.sourceUrl, "flex-wrap", flexWrap.value);
+  }
+  const justify = valueFor("justify-content");
+  if (justify) {
+    const value = justify.value.trim().toLowerCase();
+    const normalized = value === "flex-start" ? "start" : value === "flex-end" ? "end" : value;
+    if (normalized === "start" || normalized === "center" || normalized === "end" || normalized === "space-between") {
+      computed = {
+        ...computed,
+        box: {
+          ...computed.box,
+          justifyContent: normalized
+        }
+      };
+    } else supportedValueIssue(issues, justify.sourceUrl, "justify-content", justify.value);
+  }
+  const align = valueFor("align-items");
+  if (align) {
+    const value = align.value.trim().toLowerCase();
+    const normalized = value === "flex-start" ? "start" : value === "flex-end" ? "end" : value;
+    if (normalized === "start" || normalized === "center" || normalized === "end" || normalized === "stretch") {
+      computed = {
+        ...computed,
+        box: {
+          ...computed.box,
+          alignItems: normalized
+        }
+      };
+    } else supportedValueIssue(issues, align.sourceUrl, "align-items", align.value);
+  }
+  const gap = candidateValue(
+    candidates,
+    ["gap", "column-gap", "row-gap"],
+    customProperties,
+    issues
+  );
+  const columnGap = candidateValue(candidates, ["column-gap", "gap"], customProperties, issues);
+  const rowGap = candidateValue(candidates, ["row-gap", "gap"], customProperties, issues);
+  const gapPart = (entry: typeof gap, index: number): string | undefined => {
+    if (!entry) return undefined;
+    const parts = entry.value.trim().split(/\s+/u);
+    return entry.property === "gap" ? parts[index] ?? parts[0] : parts[0];
+  };
+  const columnGapCells = parseLength(
+    gapPart(columnGap, 1) ?? gapPart(gap, 1) ?? "0",
+    "horizontal",
+    16
+  );
+  const rowGapRows = parseLength(
+    gapPart(rowGap, 0) ?? gapPart(gap, 0) ?? "0",
+    "vertical",
+    8
+  );
+  computed = {
+    ...computed,
+    box: {
+      ...computed.box,
+      columnGapCells: columnGapCells ?? 0,
+      rowGapRows: rowGapRows ?? 0
+    }
+  };
+  const gridTemplate = valueFor("grid-template-columns");
+  if (gridTemplate) {
+    computed = {
+      ...computed,
+      box: { ...computed.box, gridTemplateColumns: gridTemplate.value }
+    };
+  }
+  const gridColumn = valueFor("grid-column");
+  if (gridColumn) {
+    const value = Number.parseInt(gridColumn.value, 10);
+    if (Number.isSafeInteger(value) && value > 0) {
+      computed = { ...computed, box: { ...computed.box, gridColumn: value } };
+    }
+  }
+  const dimensions = [
+    ["width", "width"],
+    ["min-width", "minWidth"],
+    ["max-width", "maxWidth"]
+  ] as const;
+  for (const [property, field] of dimensions) {
+    const entry = valueFor(property);
+    if (entry) computed = { ...computed, box: { ...computed.box, [field]: entry.value } };
+  }
+  const minHeight = valueFor("min-height");
+  if (minHeight) {
+    const rows = parseLength(minHeight.value, "vertical", 12);
+    if (rows !== null) computed = { ...computed, box: { ...computed.box, minHeightRows: rows } };
+  }
+  const border = candidateValue(
+    candidates,
+    ["border", "border-style", "border-width"],
+    customProperties,
+    issues
+  );
+  const borderColor = candidateValue(
+    candidates,
+    ["border-color", "border"],
+    customProperties,
+    issues
+  );
+  const borderValue = border?.value.toLowerCase() ?? "";
+  const hasBorder = border !== undefined
+    && !/\b(?:none|hidden|0(?:px|rem|em|ch)?)\b/u.test(borderValue);
+  const parsedBorderColor = borderColor === undefined
+    ? undefined
+    : borderColor.value
+      .split(/\s+/u)
+      .map((part) => parseColor(part, computed.text.foreground))
+      .find((color): color is PageColor => color !== null && color !== undefined);
+  computed = {
+    ...computed,
+    box: {
+      ...computed.box,
+      border: hasBorder,
+      ...(parsedBorderColor === undefined ? {} : { borderColor: parsedBorderColor })
+    }
+  };
+  const position = valueFor("position")?.value.trim().toLowerCase();
+  const overflow = candidateValue(
+    candidates,
+    ["overflow", "overflow-x", "overflow-y"],
+    customProperties,
+    issues
+  )?.value.trim().toLowerCase();
+  const clip = candidateValue(
+    candidates,
+    ["clip-path", "clip"],
+    customProperties,
+    issues
+  )?.value.trim().toLowerCase();
+  const width = valueFor("width")?.value.trim().toLowerCase();
+  const height = valueFor("height")?.value.trim().toLowerCase();
+  const tinyWidth = width === "1px" || width === "0" || width === "0px";
+  const tinyHeight = height === "1px" || height === "0" || height === "0px";
+  if (
+    (position === "absolute" || position === "fixed")
+    && overflow === "hidden"
+    && tinyWidth
+    && tinyHeight
+    && clip !== undefined
+  ) {
+    computed = { ...computed, box: { ...computed.box, visuallyHidden: true } };
   }
   return computed;
 }
@@ -1026,18 +1619,30 @@ export function resolvePageStyles(
   initialIssues: readonly PageStyleIssue[] = [],
   options: {
     readonly authorStyles?: "apply" | "ignore";
+    readonly columns?: number;
     readonly signal?: AbortSignal;
   } = {}
 ): PageStyleResolution {
   const issues = new IssueCollector();
-  for (const issue of initialIssues) issues.add(issue.code, issue.message, issue.sourceUrl);
+  for (const issue of initialIssues) {
+    for (let occurrence = 0; occurrence < issue.occurrences; occurrence += 1) {
+      issues.add(issue.code, issue.message, issue.sourceUrl);
+    }
+  }
   const elements = allElements(tree);
   const candidates: CandidateMap = new Map();
   let stylesheetCount = 0;
   if (options.authorStyles !== "ignore") {
     const sources = stylesheetSources(tree, resources, issues, options.signal);
     stylesheetCount = sources.length;
-    const lastSourceOrder = collectRuleCandidates(tree, sources, candidates, issues, options.signal);
+    const lastSourceOrder = collectRuleCandidates(
+      tree,
+      sources,
+      candidates,
+      issues,
+      options.columns ?? 80,
+      options.signal
+    );
     collectInlineCandidates(elements, candidates, issues, lastSourceOrder, options.signal);
   }
   const parents = parentIndex(tree);
