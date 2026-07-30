@@ -77,26 +77,19 @@ npm install @ismail-elkorchi/verge-browser
 ```ts
 import {
   BrowserSession,
-  fetchPage,
-  parseHtml,
-  renderDocumentToTerminal,
+  layoutPageContent,
   resolveInputUrl
 } from "@ismail-elkorchi/verge-browser";
 
 const target = resolveInputUrl("example.com");
-const page = await fetchPage(target);
-const document = parseHtml(page.html);
-const rendered = renderDocumentToTerminal({
-  tree: document.tree,
-  requestUrl: page.requestUrl,
-  finalUrl: page.finalUrl,
-  status: page.status,
-  statusText: page.statusText,
-  fetchedAtIso: page.fetchedAtIso,
-  width: 80
-});
-
-console.log(rendered.lines.join("\n"));
+const session = new BrowserSession();
+try {
+  const page = await session.open(target);
+  const layout = layoutPageContent(page.content, 80);
+  console.log(layout.rows.map((row) => row.text).join("\n"));
+} finally {
+  await session.close();
+}
 ```
 
 The npm package contains the full Node CLI and library. The JSR package exposes

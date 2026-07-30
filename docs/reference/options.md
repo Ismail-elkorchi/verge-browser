@@ -30,7 +30,8 @@
 - `timeoutMs` defaults to `15000`.
 - `securityPolicy` merges with `DEFAULT_SECURITY_POLICY`.
 - `requestOptions.method` defaults to `GET`; `POST` is supported.
-- `requestOptions.headers` adds deterministic request headers such as cookies or auth.
+- `requestOptions.headers` adds request fields. A managed HTTP session owns the
+  `Cookie` field.
 - `requestOptions.bodyText` is only used for `POST`.
 - Returns a fully buffered HTML payload plus `networkOutcome`.
 - Throws `NetworkFetchError` for pre-response failures such as DNS, timeout, TLS, redirect-limit, content-type, and size-limit failures.
@@ -50,18 +51,29 @@
 - Reuses connection pools across page, stream, and stylesheet requests.
 - Provides `fetchPage()`, `fetchPageStream()`, and `fetchStylesheet()` with the
   same arguments and results as the standalone functions.
+- `navigatePage()` and `navigatePageStream()` allow a directly entered local or
+  private-network target. Page and stylesheet fetches retain the public-network
+  boundary, including after redirects.
+- `session` supplies request credentials and accepts every redirect and final
+  response through `HttpSessionAdapter`.
+- Response metadata is retained as ordered `HttpFields`, including repeated
+  field lines.
 - Call `close()` after normal use or `destroy(error)` to cancel active work.
 - Standalone fetch functions create and release an operation-scoped client.
 
 ### `BrowserSessionOptions`
 - `networkClient` shares an existing `PageNetworkClient`; its owner remains
   responsible for closing it.
+- `httpSession` attaches one session adapter to an internally owned network
+  client. It cannot be combined with `networkClient`.
 - `loader` and `streamLoader` replace the built-in page fetchers.
 - `contentBuilder` replaces semantic page-content construction.
 - `stylesheetLoader` replaces external CSS fetching.
 - `stylesheetPolicy` bounds stylesheet count, per-resource bytes, and aggregate bytes.
 - `parseOptions` defaults to the package's bounded HTML parse profile.
-- `defaultParseMode` defaults to `"text"` and may be set to `"stream"`.
+- `defaultParseMode` defaults to `"stream"` so the HTML parser receives the
+  response bytes and transport encoding evidence. Use `"text"` only with a
+  loader that already decoded the HTML.
 - `localFileReader` overrides `file://` reads for tests or custom hosts.
 - A session that creates its own network client releases it through `close()`
   or `destroy(error)`.
@@ -69,6 +81,8 @@
 ### `PageRequestOptions`
 - `method`: `"GET"` or `"POST"`.
 - `headers`: request headers merged into the deterministic defaults.
+- A `Cookie` field is rejected when the network client has a session adapter;
+  the adapter recalculates cookies for every redirect hop.
 - `bodyText`: UTF-8 request body for `POST`; supplying it with `GET` is rejected.
 - `signal`: aborts the request, retry wait, and session navigation.
 
@@ -86,6 +100,7 @@
   `occurrences` count.
 - `applyEdits()` is asynchronous because changed HTML can change linked
   stylesheet resources.
+- `responseFields` preserves ordered response field lines as `HttpFields`.
 
 ## Related
 - [API overview](./api-overview.md)

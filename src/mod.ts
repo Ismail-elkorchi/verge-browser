@@ -31,7 +31,6 @@
  * @module
  */
 export { formatHelpText, parseCommand, type BrowserCommand } from "./app/commands.js";
-export { parseSetCookie, mergeSetCookieHeaders, pruneExpiredCookies, cookieHeaderForUrl, type CookieEntry } from "./app/cookies.js";
 export {
   fetchPage,
   fetchPageStream,
@@ -39,7 +38,8 @@ export {
   readByteStreamToText,
   NetworkFetchError,
   PageNetworkClient,
-  type LocalFileReader
+  type LocalFileReader,
+  type PageNetworkClientOptions
 } from "./app/fetch-page.js";
 export {
   extractForms,

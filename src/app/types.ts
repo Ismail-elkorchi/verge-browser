@@ -1,4 +1,5 @@
 import type { DocumentTree, ParsedDocument } from "@ismail-elkorchi/html-parser";
+import type { HttpFields } from "@ismail-elkorchi/http-client";
 
 /** Classified network outcome kinds surfaced by fetch helpers and page snapshots. */
 export type NetworkOutcomeKind =
@@ -10,6 +11,7 @@ export type NetworkOutcomeKind =
   | "redirect_limit"
   | "content_type_block"
   | "size_limit"
+  | "network_block"
   | "unsupported_protocol"
   | "unknown";
 
@@ -184,7 +186,7 @@ export interface FetchStylesheetResult {
   readonly finalUrl: string;
   readonly contentType: string | null;
   readonly bytes: Uint8Array;
-  readonly responseHeaders: Readonly<Record<string, string>>;
+  readonly responseFields: HttpFields;
   readonly transportEncodingLabel?: string;
 }
 
@@ -301,10 +303,8 @@ export interface FetchPageResult {
   readonly contentType: string | null;
   /** Buffered HTML payload. */
   readonly html: string;
-  /** Lower-cased flattened response headers. */
-  readonly responseHeaders: Readonly<Record<string, string>>;
-  /** Set-Cookie headers captured from the response. */
-  readonly setCookieHeaders: readonly string[];
+  /** Ordered response field lines. */
+  readonly responseFields: HttpFields;
   /** ISO timestamp recorded when the payload was fetched. */
   readonly fetchedAtIso: string;
   /** Structured outcome classification for the request. */
@@ -325,10 +325,10 @@ export interface FetchPageStreamResult {
   readonly contentType: string | null;
   /** Stream of HTML bytes subject to the configured size limit. */
   readonly stream: ReadableStream<Uint8Array>;
-  /** Lower-cased flattened response headers. */
-  readonly responseHeaders: Readonly<Record<string, string>>;
-  /** Set-Cookie headers captured from the response. */
-  readonly setCookieHeaders: readonly string[];
+  /** Ordered response field lines. */
+  readonly responseFields: HttpFields;
+  /** Optional HTTP transport encoding label supplied to HTML encoding sniffing. */
+  readonly transportEncodingLabel?: string;
   /** ISO timestamp recorded when the payload was fetched. */
   readonly fetchedAtIso: string;
   /** Structured outcome classification for the request. */
@@ -378,8 +378,6 @@ export interface PageDiagnostics {
   readonly styleIssueCount: number;
   /** End-to-end time for fetch, parse, and semantic content construction in milliseconds. */
   readonly totalDurationMs: number;
-  /** Whether request headers included a Cookie header. */
-  readonly usedCookies: boolean;
   /** Structured network outcome carried into the snapshot. */
   readonly networkOutcome: NetworkOutcome;
   /** Stable triage identifiers derived from network and parse outcomes. */
@@ -425,12 +423,10 @@ export interface PageSnapshot {
   readonly statusText: string;
   /** Response content type when known. */
   readonly contentType: string | null;
-  /** Lower-cased flattened response headers. */
-  readonly responseHeaders: Readonly<Record<string, string>>;
+  /** Ordered response field lines. */
+  readonly responseFields: HttpFields;
   /** ISO timestamp recorded when the source was fetched. */
   readonly fetchedAtIso: string;
-  /** Set-Cookie headers captured from the response. */
-  readonly setCookieHeaders: readonly string[];
   /** Parsed HTML document, including its tree, source, and resource metadata. */
   readonly document: ParsedDocument;
   /** Semantic page content retained independently from terminal size. */

@@ -6,6 +6,8 @@ import {
   type HttpClientConfiguration,
   type HttpErrorCode,
   type HttpRequestOptions,
+  type HttpSessionAdapter,
+  type StreamingHttpResult,
   type StreamingHttpResponse
 } from "@ismail-elkorchi/http-client";
 
@@ -203,6 +205,12 @@ function outcomeFromHttpClientError(
         detailCode: "UNSUPPORTED_PROTOCOL",
         detailMessage: error.message
       });
+    case "NETWORK_SAFETY_REJECTED":
+      return createNetworkOutcome("network_block", {
+        finalUrl,
+        detailCode: error.code,
+        detailMessage: error.message
+      });
     default:
       return createNetworkOutcome("unknown", {
         finalUrl,
@@ -242,10 +250,9 @@ async function fetchFileUrl(requestUrl: string, readLocalFileText: LocalFileRead
     statusText: "OK",
     contentType: "text/html",
     html,
-    responseHeaders: {
-      "content-type": "text/html"
-    },
-    setCookieHeaders: [],
+    responseFields: new HttpFields([
+      { name: "content-type", value: "text/html" }
+    ]),
     fetchedAtIso: nowIso(),
     networkOutcome: createNetworkOutcome("ok", {
       finalUrl: requestUrl,
@@ -321,9 +328,8 @@ interface NetworkFetchResult {
   readonly status: number;
   readonly statusText: string;
   readonly contentType: string | null;
-  readonly responseHeaders: Readonly<Record<string, string>>;
+  readonly responseFields: HttpFields;
   readonly body: ReadableStream<Uint8Array>;
-  readonly setCookieHeaders: readonly string[];
   readonly fetchedAtIso: string;
 }
 
@@ -347,25 +353,10 @@ const CSS_RESOURCE_PROFILE: NetworkResourceProfile = {
   }
 };
 
-function flattenFields(fields: HttpFields): Readonly<Record<string, string>> {
-  const groupedValues = new Map<string, string[]>();
-  for (const { name, value } of fields) {
-    const normalizedName = name.toLowerCase();
-    const values = groupedValues.get(normalizedName) ?? [];
-    values.push(value);
-    groupedValues.set(normalizedName, values);
-  }
-
-  const flattened: Record<string, string> = {};
-  for (const name of [...groupedValues.keys()].sort((left, right) => left.localeCompare(right))) {
-    flattened[name] = (groupedValues.get(name) ?? []).join(", ");
-  }
-  return flattened;
-}
-
 function requestFields(
   resourceProfile: NetworkResourceProfile,
-  supplied: Readonly<Record<string, string>> | undefined
+  supplied: Readonly<Record<string, string>> | undefined,
+  session: HttpSessionAdapter | undefined
 ): HttpFields {
   const defaults = new HttpFields([
     { name: "accept", value: resourceProfile.accept },
@@ -376,6 +367,11 @@ function requestFields(
     : new HttpFields(
       Object.entries(supplied).map(([name, value]) => ({ name, value }))
     );
+  if (session !== undefined && caller?.has("cookie") === true) {
+    throw new TypeError(
+      "Cookie fields are managed by the browser HTTP session."
+    );
+  }
   return mergeHttpFields(defaults, caller);
 }
 
@@ -468,12 +464,14 @@ function buildHttpRequestOptions(
   policy: Required<SecurityPolicyOptions>,
   options: PageRequestOptions,
   fields: HttpFields,
-  signal: AbortSignal
+  signal: AbortSignal,
+  session: HttpSessionAdapter | undefined
 ): HttpRequestOptions {
   const method = pageRequestMethod(options);
   const common = {
     fields: fields.lines(),
     signal,
+    ...(session === undefined ? {} : { session }),
     maxRedirects: policy.maxRedirects,
     timeouts: {
       totalMs: null,
@@ -495,8 +493,14 @@ function buildHttpRequestOptions(
   };
 }
 
+type HttpFetch = (
+  requestUrl: string,
+  options: HttpRequestOptions
+) => Promise<StreamingHttpResult>;
+
 async function fetchNetworkResponse(
-  client: NodeHttpClient,
+  fetchHttp: HttpFetch,
+  session: HttpSessionAdapter | undefined,
   requestUrl: string,
   timeoutMs: number,
   securityPolicy: Required<SecurityPolicyOptions>,
@@ -514,8 +518,9 @@ async function fetchNetworkResponse(
     timeoutMs,
     securityPolicy,
     requestOptions,
-    requestFields(resourceProfile, requestOptions.headers),
-    signal
+    requestFields(resourceProfile, requestOptions.headers, session),
+    signal,
+    session
   );
 
   try {
@@ -525,7 +530,7 @@ async function fetchNetworkResponse(
       attemptIndex += 1
     ) {
       signal.throwIfAborted();
-      const result = await client.fetch(requestUrl, options);
+      const result = await fetchHttp(requestUrl, options);
       if (result.kind === "failure") {
         if (
           shouldRetryHttpFailure(
@@ -564,9 +569,8 @@ async function fetchNetworkResponse(
         status: result.statusCode,
         statusText: result.statusMessage ?? "",
         contentType,
-        responseHeaders: flattenFields(result.fields),
+        responseFields: result.fields,
         body: responseStream(result, requestOptions.signal, timeoutSignal),
-        setCookieHeaders: result.fields.all("set-cookie"),
         fetchedAtIso: nowIso()
       };
     }
@@ -612,7 +616,8 @@ async function fetchNetworkResponse(
  * ```
  */
 async function fetchPageWithClient(
-  client: NodeHttpClient,
+  fetchHttp: HttpFetch,
+  session: HttpSessionAdapter | undefined,
   requestUrl: string,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   securityPolicy: SecurityPolicyOptions = DEFAULT_SECURITY_POLICY,
@@ -633,10 +638,9 @@ async function fetchPageWithClient(
       statusText: "OK",
       contentType: "text/html",
       html: localAboutPage.html,
-      responseHeaders: {
-        "content-type": "text/html"
-      },
-      setCookieHeaders: [],
+      responseFields: new HttpFields([
+        { name: "content-type", value: "text/html" }
+      ]),
       fetchedAtIso: nowIso(),
       networkOutcome: createNetworkOutcome("ok", {
         finalUrl: requestUrl,
@@ -657,7 +661,8 @@ async function fetchPageWithClient(
   let networkResult: NetworkFetchResult;
   try {
     networkResult = await fetchNetworkResponse(
-      client,
+      fetchHttp,
+      session,
       requestUrl,
       timeoutMs,
       policy,
@@ -683,8 +688,7 @@ async function fetchPageWithClient(
     statusText: networkResult.statusText,
     contentType: networkResult.contentType,
     html,
-    responseHeaders: networkResult.responseHeaders,
-    setCookieHeaders: networkResult.setCookieHeaders,
+    responseFields: networkResult.responseFields,
     fetchedAtIso: networkResult.fetchedAtIso,
     networkOutcome: outcomeFromHttpStatus(networkResult.finalUrl, networkResult.status, networkResult.statusText)
   };
@@ -697,7 +701,8 @@ function contentTypeEncoding(contentType: string | null): string | undefined {
 
 /** Fetches one external stylesheet as bounded transport bytes. */
 async function fetchStylesheetWithClient(
-  client: NodeHttpClient,
+  fetchHttp: HttpFetch,
+  session: HttpSessionAdapter | undefined,
   requestUrl: string,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   securityPolicy: SecurityPolicyOptions = {
@@ -733,14 +738,17 @@ async function fetchStylesheetWithClient(
       finalUrl: requestUrl,
       contentType: "text/css",
       bytes,
-      responseHeaders: { "content-type": "text/css" },
+      responseFields: new HttpFields([
+        { name: "content-type", value: "text/css" }
+      ]),
       transportEncodingLabel: "utf-8"
     };
   }
   let result: NetworkFetchResult;
   try {
     result = await fetchNetworkResponse(
-      client,
+      fetchHttp,
+      session,
       requestUrl,
       timeoutMs,
       policy,
@@ -766,7 +774,7 @@ async function fetchStylesheetWithClient(
       finalUrl: result.finalUrl,
       contentType: result.contentType,
       bytes,
-      responseHeaders: result.responseHeaders,
+      responseFields: result.responseFields,
       ...(transportEncodingLabel === undefined ? {} : { transportEncodingLabel })
     };
   } catch (error) {
@@ -795,7 +803,8 @@ async function fetchStylesheetWithClient(
  * ```
  */
 async function fetchPageStreamWithClient(
-  client: NodeHttpClient,
+  fetchHttp: HttpFetch,
+  session: HttpSessionAdapter | undefined,
   requestUrl: string,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   securityPolicy: SecurityPolicyOptions = DEFAULT_SECURITY_POLICY,
@@ -826,10 +835,10 @@ async function fetchPageStreamWithClient(
       statusText: "OK",
       contentType: "text/html",
       stream: streamFromUtf8(localAboutPage.html),
-      responseHeaders: {
-        "content-type": "text/html"
-      },
-      setCookieHeaders: [],
+      responseFields: new HttpFields([
+        { name: "content-type", value: "text/html" }
+      ]),
+      transportEncodingLabel: "utf-8",
       fetchedAtIso: nowIso(),
       networkOutcome: createNetworkOutcome("ok", {
         finalUrl: requestUrl,
@@ -861,8 +870,8 @@ async function fetchPageStreamWithClient(
       statusText: filePage.statusText,
       contentType: filePage.contentType,
       stream: streamFromUtf8(filePage.html),
-      responseHeaders: filePage.responseHeaders,
-      setCookieHeaders: [],
+      responseFields: filePage.responseFields,
+      transportEncodingLabel: "utf-8",
       fetchedAtIso: filePage.fetchedAtIso,
       networkOutcome: filePage.networkOutcome
     };
@@ -871,7 +880,8 @@ async function fetchPageStreamWithClient(
   let networkResult: NetworkFetchResult;
   try {
     networkResult = await fetchNetworkResponse(
-      client,
+      fetchHttp,
+      session,
       requestUrl,
       timeoutMs,
       policy,
@@ -881,6 +891,9 @@ async function fetchPageStreamWithClient(
     if (requestOptions.signal?.aborted === true) throw requestOptions.signal.reason;
     throw networkFailure(error, requestUrl);
   }
+  const transportEncodingLabel = contentTypeEncoding(
+    networkResult.contentType
+  );
   return {
     requestUrl: networkResult.requestUrl,
     finalUrl: networkResult.finalUrl,
@@ -888,8 +901,10 @@ async function fetchPageStreamWithClient(
     statusText: networkResult.statusText,
     contentType: networkResult.contentType,
     stream: networkResult.body,
-    responseHeaders: networkResult.responseHeaders,
-    setCookieHeaders: networkResult.setCookieHeaders,
+    responseFields: networkResult.responseFields,
+    ...(transportEncodingLabel === undefined
+      ? {}
+      : { transportEncodingLabel }),
     fetchedAtIso: networkResult.fetchedAtIso,
     networkOutcome: outcomeFromHttpStatus(networkResult.finalUrl, networkResult.status, networkResult.statusText)
   };
@@ -900,15 +915,56 @@ async function fetchPageStreamWithClient(
  *
  * Close the client when its browsing scope ends.
  */
-export class PageNetworkClient {
-  readonly #client: NodeHttpClient;
+export interface PageNetworkClientOptions {
+  readonly transport?: Omit<HttpClientConfiguration, "networkSafety">;
+  readonly session?: HttpSessionAdapter;
+  readonly publicAddressPolicy?:
+    | "public-only"
+    | "allow-private-and-local";
+}
 
-  public constructor(configuration: HttpClientConfiguration = {}) {
-    this.#client = new NodeHttpClient({
-      ...configuration,
+export class PageNetworkClient {
+  readonly #publicClient: NodeHttpClient;
+  readonly #localNavigationClient: NodeHttpClient;
+  readonly #session: HttpSessionAdapter | undefined;
+
+  public constructor(options: PageNetworkClientOptions = {}) {
+    const publicAddressPolicy: unknown =
+      options.publicAddressPolicy;
+    if (
+      publicAddressPolicy !== undefined
+      && publicAddressPolicy !== "public-only"
+      && publicAddressPolicy !== "allow-private-and-local"
+    ) {
+      throw new TypeError(
+        "publicAddressPolicy must be public-only or allow-private-and-local."
+      );
+    }
+    if (
+      options.transport !== undefined
+      && Object.hasOwn(options.transport, "networkSafety")
+    ) {
+      throw new TypeError(
+        "Configure address access with publicAddressPolicy, not transport.networkSafety."
+      );
+    }
+    this.#session = options.session;
+    this.#publicClient = new NodeHttpClient({
+      ...options.transport,
+      ...(options.publicAddressPolicy === "allow-private-and-local"
+        ? {
+          networkSafety: {
+            allowLocalhost: true,
+            allowPrivateNetworks: true
+          }
+        }
+        : {})
+    });
+    this.#localNavigationClient = new NodeHttpClient({
+      ...options.transport,
       networkSafety: {
-        enabled: false,
-        ...configuration.networkSafety
+        allowLocalhost: true,
+        allowPrivateNetworks: true
       }
     });
   }
@@ -921,7 +977,26 @@ export class PageNetworkClient {
     readLocalFileText: LocalFileReader = defaultReadLocalFileText
   ): Promise<FetchPageResult> {
     return fetchPageWithClient(
-      this.#client,
+      (url, options) => this.#publicClient.fetch(url, options),
+      this.#session,
+      requestUrl,
+      timeoutMs,
+      securityPolicy,
+      requestOptions,
+      readLocalFileText
+    );
+  }
+
+  public navigatePage(
+    requestUrl: string,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    securityPolicy: SecurityPolicyOptions = DEFAULT_SECURITY_POLICY,
+    requestOptions: PageRequestOptions = {},
+    readLocalFileText: LocalFileReader = defaultReadLocalFileText
+  ): Promise<FetchPageResult> {
+    return fetchPageWithClient(
+      (url, options) => this.#fetchNavigation(url, options),
+      this.#session,
       requestUrl,
       timeoutMs,
       securityPolicy,
@@ -941,7 +1016,8 @@ export class PageNetworkClient {
     readLocalFileText: LocalFileReader = defaultReadLocalFileText
   ): Promise<FetchStylesheetResult> {
     return fetchStylesheetWithClient(
-      this.#client,
+      (url, options) => this.#publicClient.fetch(url, options),
+      this.#session,
       requestUrl,
       timeoutMs,
       securityPolicy,
@@ -958,7 +1034,8 @@ export class PageNetworkClient {
     readLocalFileText: LocalFileReader = defaultReadLocalFileText
   ): Promise<FetchPageStreamResult> {
     return fetchPageStreamWithClient(
-      this.#client,
+      (url, options) => this.#publicClient.fetch(url, options),
+      this.#session,
       requestUrl,
       timeoutMs,
       securityPolicy,
@@ -967,12 +1044,51 @@ export class PageNetworkClient {
     );
   }
 
-  public close(): Promise<void> {
-    return this.#client.close();
+  public navigatePageStream(
+    requestUrl: string,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    securityPolicy: SecurityPolicyOptions = DEFAULT_SECURITY_POLICY,
+    requestOptions: PageRequestOptions = {},
+    readLocalFileText: LocalFileReader = defaultReadLocalFileText
+  ): Promise<FetchPageStreamResult> {
+    return fetchPageStreamWithClient(
+      (url, options) => this.#fetchNavigation(url, options),
+      this.#session,
+      requestUrl,
+      timeoutMs,
+      securityPolicy,
+      requestOptions,
+      readLocalFileText
+    );
   }
 
-  public destroy(reason?: Error): Promise<void> {
-    return this.#client.destroy(reason);
+  public async close(): Promise<void> {
+    await Promise.all([
+      this.#publicClient.close(),
+      this.#localNavigationClient.close()
+    ]);
+  }
+
+  public async destroy(reason?: Error): Promise<void> {
+    await Promise.all([
+      this.#publicClient.destroy(reason),
+      this.#localNavigationClient.destroy(reason)
+    ]);
+  }
+
+  async #fetchNavigation(
+    requestUrl: string,
+    options: HttpRequestOptions
+  ): Promise<StreamingHttpResult> {
+    const result = await this.#publicClient.fetch(requestUrl, options);
+    if (
+      result.kind !== "failure"
+      || result.error.code !== "NETWORK_SAFETY_REJECTED"
+      || result.redirects.length !== 0
+    ) {
+      return result;
+    }
+    return this.#localNavigationClient.fetch(requestUrl, options);
   }
 }
 

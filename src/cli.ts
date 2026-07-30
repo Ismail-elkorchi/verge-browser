@@ -4,6 +4,7 @@ import { BrowserStore } from "./app/storage.js";
 import { createNodeHost } from "./runtime/node-host.js";
 import { createNodeBrowserServices } from "./runtime/node-browser-services.js";
 import { renderBrowserOnce, runBrowserTui } from "./ui/run.js";
+import type { HttpSessionAdapter } from "@ismail-elkorchi/http-client";
 
 interface CliFlags {
   readonly initialTarget: string | null;
@@ -43,7 +44,8 @@ async function main(): Promise<void> {
   const browserOptions = {
     store,
     services,
-    createSession: () => new BrowserSession({
+    createSession: (httpSession: HttpSessionAdapter) => new BrowserSession({
+      httpSession,
       localFileReader: (path) => runtimeHost.readFileText(path)
     }),
     ...(searchUrlTemplate === undefined ? {} : { searchUrlTemplate }),

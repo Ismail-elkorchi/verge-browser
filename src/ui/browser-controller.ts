@@ -1,6 +1,7 @@
 import { dirname } from "node:path";
 
 import { outline as buildOutline, type Edit } from "@ismail-elkorchi/html-parser";
+import type { HttpSessionAdapter } from "@ismail-elkorchi/http-client";
 
 import {
   buildFormSubmissionRequest,
@@ -82,7 +83,7 @@ function diagnosticsLines(snapshot: PageSnapshot): readonly string[] {
 export interface BrowserControllerOptions {
   readonly store: BrowserStore;
   readonly services: BrowserServices;
-  readonly createSession: () => BrowserSession;
+  readonly createSession: (httpSession: HttpSessionAdapter) => BrowserSession;
   readonly searchUrlTemplate?: string;
   readonly downloadDirectory?: string;
   readonly downloadMaxBytes?: number;
@@ -98,7 +99,7 @@ export interface BrowserPickerEntry {
 export class BrowserController {
   readonly #store: BrowserStore;
   readonly #services: BrowserServices;
-  readonly #createSession: () => BrowserSession;
+  readonly #createSession: (httpSession: HttpSessionAdapter) => BrowserSession;
   readonly #searchUrlTemplate: string;
   readonly #downloadDirectory: string;
   readonly #downloadMaxBytes: number;
@@ -213,12 +214,12 @@ export class BrowserController {
     document: BrowserDocumentState,
     target: string,
     requestOptions: PageRequestOptions = {},
-    parseMode: "text" | "stream" = "text"
+    parseMode?: "text" | "stream"
   ): Promise<PageSnapshot> {
     const resolvedTarget = resolveInputUrl(target, document.snapshot.finalUrl);
     const snapshot = await this.#session(document.id).openWithRequest(
       resolvedTarget,
-      this.#withCookies(resolvedTarget, requestOptions),
+      requestOptions,
       parseMode
     );
     await this.#persist(snapshot);
@@ -246,7 +247,7 @@ export class BrowserController {
       : operation === "forward"
         ? await session.forward(signal)
         : await session.reload(signal);
-    await this.#persist(snapshot, operation === "reload");
+    await this.#persist(snapshot);
     return snapshot;
   }
 
@@ -334,7 +335,7 @@ export class BrowserController {
       : cookies.flatMap((cookie) => [
         `${cookie.name}=${cookie.value}`,
         `  scope: ${cookie.domain}${cookie.path}`,
-        `  expires: ${cookie.expiresAtIso ?? "session"}`
+        `  expires: ${cookie.expiresAt ?? "session"}`
       ]);
   }
 
@@ -383,12 +384,11 @@ export class BrowserController {
     };
     await this.#store.upsertDownload(initial);
     try {
-      const cookie = this.#store.cookieHeaderForUrl(url);
       const downloaded = await this.#services.downloadFile({
         url,
         directory: this.#downloadDirectory,
         maxBytes: this.#downloadMaxBytes,
-        ...(cookie === null ? {} : { headers: { cookie } }),
+        session: this.#store.httpSession,
         ...(signal === undefined ? {} : { signal })
       });
       const completed: DownloadRecord = {
@@ -437,7 +437,7 @@ export class BrowserController {
     scrollAnchor?: BrowserDocumentState["scrollAnchor"]
   ): Promise<BrowserDocumentState> {
     const id = this.#newDocumentId();
-    const session = this.#createSession();
+    const session = this.#createSession(this.#store.httpSession);
     this.#sessions.set(id, session);
     const snapshot = await this.#open(session, target, signal);
     return this.#document(id, snapshot, scrollAnchor);
@@ -445,28 +445,16 @@ export class BrowserController {
 
   async #open(session: BrowserSession, target: string, signal?: AbortSignal): Promise<PageSnapshot> {
     const resolvedTarget = resolveInputUrl(target);
-    const snapshot = await session.openWithRequest(
+    const snapshot = await session.open(
       resolvedTarget,
-      this.#withCookies(resolvedTarget, signal === undefined ? {} : { signal }),
-      "text"
+      signal
     );
     await this.#persist(snapshot);
     return snapshot;
   }
 
-  #withCookies(target: string, options: PageRequestOptions): PageRequestOptions {
-    const cookie = this.#store.cookieHeaderForUrl(target);
-    if (!cookie || Object.keys(options.headers ?? {}).some((name) => name.toLowerCase() === "cookie")) {
-      return options;
-    }
-    return { ...options, headers: { ...(options.headers ?? {}), cookie } };
-  }
-
-  async #persist(snapshot: PageSnapshot, applyResponseCookies = true): Promise<void> {
+  async #persist(snapshot: PageSnapshot): Promise<void> {
     if (snapshot.finalUrl.startsWith("about:")) return;
-    if (applyResponseCookies && snapshot.setCookieHeaders.length > 0) {
-      await this.#store.applySetCookieHeaders(snapshot.finalUrl, snapshot.setCookieHeaders);
-    }
     await this.#store.recordHistory(
       snapshot.finalUrl,
       snapshot.content.title,

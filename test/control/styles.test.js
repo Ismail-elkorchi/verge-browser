@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { TextEncoder } from "node:util";
 
+import { HttpFields } from "@ismail-elkorchi/http-client";
+
 import { parseHtml } from "../../dist/app/parse-html.js";
 import {
   buildPageContent,
@@ -21,6 +23,12 @@ function contentFor(html, options = {}) {
     fetchedAtIso: "2026-07-29T00:00:00.000Z",
     ...options
   });
+}
+
+function fields(contentType) {
+  return new HttpFields([
+    { name: "content-type", value: contentType }
+  ]);
 }
 
 function rowFor(layout, blockId) {
@@ -240,8 +248,7 @@ test("linked stylesheet media conditions are evaluated at the current layout wid
         <link rel="stylesheet" href="/narrow.css" media="screen and (max-width: 50rem)">
         <p>Responsive text</p>
       `,
-      responseHeaders: { "content-type": "text/html" },
-      setCookieHeaders: [],
+      responseFields: fields("text/html"),
       fetchedAtIso: "2026-07-29T00:00:00.000Z",
       networkOutcome: {
         finalUrl: requestUrl,
@@ -258,10 +265,11 @@ test("linked stylesheet media conditions are evaluated at the current layout wid
         requestUrl,
         finalUrl: requestUrl,
         contentType: "text/css",
-        responseHeaders: { "content-type": "text/css" },
+        responseFields: fields("text/css"),
         bytes: new TextEncoder().encode("p { color: #123456 }")
       };
-    }
+    },
+    defaultParseMode: "text"
   });
 
   const snapshot = await session.open("https://example.test/start");
@@ -308,8 +316,7 @@ test("BrowserSession loads external stylesheets in document order and records fa
         <style>p { color: blue }</style>
         <p>Styled</p>
       `,
-      responseHeaders: { "content-type": "text/html" },
-      setCookieHeaders: [],
+      responseFields: fields("text/html"),
       fetchedAtIso: "2026-07-29T00:00:00.000Z",
       networkOutcome: {
         finalUrl: requestUrl,
@@ -327,11 +334,12 @@ test("BrowserSession loads external stylesheets in document order and records fa
         requestUrl,
         finalUrl: requestUrl,
         contentType: "text/css; charset=utf-8",
-        responseHeaders: { "content-type": "text/css; charset=utf-8" },
+        responseFields: fields("text/css; charset=utf-8"),
         transportEncodingLabel: "utf-8",
         bytes: new TextEncoder().encode("p { color: red }")
       };
-    }
+    },
+    defaultParseMode: "text"
   });
 
   const snapshot = await session.open("https://example.test/start");
@@ -366,8 +374,7 @@ test("BrowserSession enforces stylesheet count and aggregate byte budgets", asyn
         <link rel="stylesheet" href="/three.css">
         <p>Budgeted</p>
       `,
-      responseHeaders: { "content-type": "text/html" },
-      setCookieHeaders: [],
+      responseFields: fields("text/html"),
       fetchedAtIso: "2026-07-29T00:00:00.000Z",
       networkOutcome: {
         finalUrl: requestUrl,
@@ -384,7 +391,7 @@ test("BrowserSession enforces stylesheet count and aggregate byte budgets", asyn
         requestUrl,
         finalUrl: requestUrl,
         contentType: "text/css",
-        responseHeaders: { "content-type": "text/css" },
+        responseFields: fields("text/css"),
         bytes: new TextEncoder().encode("p{}")
       };
     },
@@ -392,7 +399,8 @@ test("BrowserSession enforces stylesheet count and aggregate byte budgets", asyn
       maxStylesheets: 2,
       maxStylesheetBytes: 3,
       maxTotalStylesheetBytes: 4
-    }
+    },
+    defaultParseMode: "text"
   });
 
   const snapshot = await session.open("https://example.test/start");
@@ -407,7 +415,7 @@ test("BrowserSession enforces stylesheet count and aggregate byte budgets", asyn
   );
 });
 
-test("BrowserSession scopes stylesheet credentials and propagates cancellation", async () => {
+test("BrowserSession isolates stylesheet requests and propagates cancellation", async () => {
   const requests = [];
   const cancellation = Promise.withResolvers();
   let loadCount = 0;
@@ -424,8 +432,7 @@ test("BrowserSession scopes stylesheet credentials and propagates cancellation",
         <link rel="stylesheet" href="/pending.css">
         <p>Credentials</p>
       `,
-      responseHeaders: { "content-type": "text/html" },
-      setCookieHeaders: [],
+      responseFields: fields("text/html"),
       fetchedAtIso: "2026-07-29T00:00:00.000Z",
       networkOutcome: {
         finalUrl: requestUrl,
@@ -451,10 +458,11 @@ test("BrowserSession scopes stylesheet credentials and propagates cancellation",
         requestUrl,
         finalUrl: requestUrl,
         contentType: "text/css",
-        responseHeaders: { "content-type": "text/css" },
+        responseFields: fields("text/css"),
         bytes: new TextEncoder().encode("p{}")
       };
-    }
+    },
+    defaultParseMode: "text"
   });
   const controller = new globalThis.AbortController();
   const reason = new Error("navigation replaced");
@@ -470,11 +478,12 @@ test("BrowserSession scopes stylesheet credentials and propagates cancellation",
   controller.abort(reason);
   await assert.rejects(pending, (error) => error === reason);
 
-  assert.equal(requests[0]?.headers?.authorization, "Bearer secret");
-  assert.equal(requests[0]?.headers?.cookie, "session=secret");
+  assert.equal(requests[0]?.headers?.authorization, undefined);
+  assert.equal(requests[0]?.headers?.cookie, undefined);
+  assert.equal(requests[0]?.headers?.["x-browser-test"], undefined);
   assert.equal(requests[1]?.headers?.authorization, undefined);
   assert.equal(requests[1]?.headers?.cookie, undefined);
-  assert.equal(requests[1]?.headers?.["x-browser-test"], "retained");
+  assert.equal(requests[1]?.headers?.["x-browser-test"], undefined);
 });
 
 test("BrowserSession rejects invalid stylesheet budgets", () => {

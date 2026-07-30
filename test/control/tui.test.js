@@ -9,6 +9,7 @@ import { renderFramePlain } from "@ismail-elkorchi/terminal-ui/renderer";
 import { createTerminalHarness } from "@ismail-elkorchi/terminal-ui/testing";
 import { measureTextCells } from "@ismail-elkorchi/terminal-ui/text";
 import { createTuiRuntime, runTui } from "@ismail-elkorchi/terminal-ui/tui";
+import { HttpFields } from "@ismail-elkorchi/http-client";
 
 import { BrowserSession } from "../../dist/app/session.js";
 import { NetworkFetchError } from "../../dist/app/fetch-page.js";
@@ -16,7 +17,7 @@ import { BrowserStore } from "../../dist/app/storage.js";
 import { browserTuiFailureMessage, prepareBrowserTui } from "../../dist/ui/run.js";
 
 function createLoader(htmlMap) {
-  return async (requestUrl, requestOptions = {}) => {
+  return async (requestUrl) => {
     const currentUrl = new globalThis.URL(requestUrl);
     const lookupUrl = currentUrl.search ? requestUrl : currentUrl.toString();
     const html = htmlMap.get(lookupUrl);
@@ -28,8 +29,9 @@ function createLoader(htmlMap) {
       statusText: "OK",
       contentType: "text/html",
       html,
-      responseHeaders: { "content-type": "text/html" },
-      setCookieHeaders: requestOptions.method === "POST" ? ["sid=next; Path=/; HttpOnly"] : [],
+      responseFields: new HttpFields([
+        { name: "content-type", value: "text/html" }
+      ]),
       networkOutcome: {
         kind: "ok",
         finalUrl: lookupUrl,
@@ -95,7 +97,8 @@ async function fixture(options = {}) {
       }
     },
     createSession: () => new BrowserSession({
-      loader: options.loaderFactory?.(htmlMap) ?? createLoader(htmlMap)
+      loader: options.loaderFactory?.(htmlMap) ?? createLoader(htmlMap),
+      defaultParseMode: "text"
     }),
     downloadDirectory: stateDirectory,
     restoreWorkspace: options.restoreWorkspace === true

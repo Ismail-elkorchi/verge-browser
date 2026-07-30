@@ -10,6 +10,7 @@ conditions.
 
 ## Example
 ```ts
+import { HttpFields } from "@ismail-elkorchi/http-client";
 import { BrowserSession } from "@ismail-elkorchi/verge-browser";
 
 const session = new BrowserSession({
@@ -20,8 +21,9 @@ const session = new BrowserSession({
     statusText: "OK",
     contentType: "text/html; charset=utf-8",
     html: "<main><h1>Local Session</h1><p>Ready.</p></main>",
-    responseHeaders: {},
-    setCookieHeaders: [],
+    responseFields: new HttpFields([
+      { name: "content-type", value: "text/html; charset=utf-8" }
+    ]),
     fetchedAtIso: "2026-01-01T00:00:00.000Z",
     networkOutcome: {
       kind: "ok",
@@ -31,7 +33,8 @@ const session = new BrowserSession({
       detailCode: null,
       detailMessage: "local-loader"
     }
-  })
+  }),
+  defaultParseMode: "text"
 });
 
 const snapshot = await session.open("https://example.test/");

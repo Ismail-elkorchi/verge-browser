@@ -4,6 +4,7 @@ import { TextEncoder } from "node:util";
 import { ReadableStream } from "node:stream/web";
 
 import { findAllByTagName } from "@ismail-elkorchi/html-parser";
+import { HttpFields } from "@ismail-elkorchi/http-client";
 
 import { BrowserSession } from "../../dist/app/session.js";
 
@@ -28,6 +29,12 @@ function streamFromString(value) {
   });
 }
 
+function htmlFields() {
+  return new HttpFields([
+    { name: "content-type", value: "text/html" }
+  ]);
+}
+
 test("BrowserSession supports open, back, and forward", async () => {
   let loadCount = 0;
   const loader = async (requestUrl) => {
@@ -39,10 +46,7 @@ test("BrowserSession supports open, back, and forward", async () => {
       statusText: "OK",
       contentType: "text/html",
       html: htmlMap.get(requestUrl) ?? "<html><body>missing</body></html>",
-      responseHeaders: {
-        "content-type": "text/html"
-      },
-      setCookieHeaders: [],
+      responseFields: htmlFields(),
       networkOutcome: {
         kind: "ok",
         finalUrl: requestUrl,
@@ -55,7 +59,7 @@ test("BrowserSession supports open, back, and forward", async () => {
     };
   };
 
-  const session = new BrowserSession({ loader });
+  const session = new BrowserSession({ loader, defaultParseMode: "text" });
 
   await session.open("https://a.example/");
   await session.open("https://b.example/");
@@ -81,10 +85,7 @@ test("BrowserSession openStream parses from byte stream", async () => {
     statusText: "OK",
     contentType: "text/html",
     html: htmlMap.get(requestUrl) ?? "<html><body>missing</body></html>",
-    responseHeaders: {
-      "content-type": "text/html"
-    },
-    setCookieHeaders: [],
+    responseFields: htmlFields(),
     networkOutcome: {
       kind: "ok",
       finalUrl: requestUrl,
@@ -103,10 +104,7 @@ test("BrowserSession openStream parses from byte stream", async () => {
     statusText: "OK",
     contentType: "text/html",
     stream: streamFromString(htmlMap.get(requestUrl) ?? "<html><body>missing</body></html>"),
-    responseHeaders: {
-      "content-type": "text/html"
-    },
-    setCookieHeaders: [],
+    responseFields: htmlFields(),
     networkOutcome: {
       kind: "ok",
       finalUrl: requestUrl,
@@ -137,10 +135,7 @@ test("BrowserSession applyEdits mutates current snapshot deterministically", asy
     statusText: "OK",
     contentType: "text/html",
     html: "<html><head><title>T</title></head><body><p>Hello</p></body></html>",
-    responseHeaders: {
-      "content-type": "text/html"
-    },
-    setCookieHeaders: [],
+    responseFields: htmlFields(),
     networkOutcome: {
       kind: "ok",
       finalUrl: requestUrl,
@@ -152,7 +147,7 @@ test("BrowserSession applyEdits mutates current snapshot deterministically", asy
     fetchedAtIso: "2026-01-01T00:00:00.000Z"
   });
 
-  const session = new BrowserSession({ loader });
+  const session = new BrowserSession({ loader, defaultParseMode: "text" });
 
   await session.open("https://patch.example/");
   const currentTree = session.current?.document.tree;
@@ -175,7 +170,7 @@ test("BrowserSession applyEdits mutates current snapshot deterministically", asy
   assert.ok(patched.content.blocks.some((block) => block.text.includes("Updated")));
 });
 
-test("BrowserSession openWithRequest records method and cookie diagnostics", async () => {
+test("BrowserSession openWithRequest records the request method", async () => {
   let capturedRequestOptions = null;
   const loader = async (requestUrl, requestOptions) => {
     capturedRequestOptions = requestOptions ?? null;
@@ -186,10 +181,7 @@ test("BrowserSession openWithRequest records method and cookie diagnostics", asy
       statusText: "OK",
       contentType: "text/html",
       html: "<html><head><title>Submit</title></head><body><p>ok</p></body></html>",
-      responseHeaders: {
-        "content-type": "text/html"
-      },
-      setCookieHeaders: ["sid=next; Path=/; HttpOnly"],
+      responseFields: htmlFields(),
       networkOutcome: {
         kind: "ok",
         finalUrl: requestUrl,
@@ -202,23 +194,19 @@ test("BrowserSession openWithRequest records method and cookie diagnostics", asy
     };
   };
 
-  const session = new BrowserSession({ loader });
+  const session = new BrowserSession({ loader, defaultParseMode: "text" });
 
   const snapshot = await session.openWithRequest("https://submit.example/", {
     method: "POST",
     headers: {
-      cookie: "sid=seed",
       "content-type": "application/x-www-form-urlencoded"
     },
     bodyText: "q=alpha"
   });
 
   assert.equal(capturedRequestOptions?.method, "POST");
-  assert.equal(capturedRequestOptions?.headers?.cookie, "sid=seed");
   assert.equal(snapshot.diagnostics.requestMethod, "POST");
-  assert.equal(snapshot.diagnostics.usedCookies, true);
   assert.equal(snapshot.diagnostics.networkOutcome.kind, "ok");
   assert.ok(snapshot.diagnostics.triageIds.some((entry) => entry.startsWith("NET:OK:HTTP_200")));
   assert.ok(snapshot.diagnostics.triageIds.some((entry) => entry.startsWith("PARSE:")));
-  assert.equal(snapshot.setCookieHeaders[0], "sid=next; Path=/; HttpOnly");
 });

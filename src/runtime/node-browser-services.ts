@@ -123,6 +123,14 @@ async function downloadFile(
     throw new RangeError("Download maxBytes must be a positive safe integer.");
   }
   request.signal?.throwIfAborted();
+  if (
+    Object.keys(request.headers ?? {})
+      .some((name) => name.toLowerCase() === "cookie")
+  ) {
+    throw new TypeError(
+      "Cookie fields are managed by the browser HTTP session."
+    );
+  }
   await mkdir(request.directory, { recursive: true });
   const fields = mergeHttpFields(
     new HttpFields([
@@ -139,6 +147,7 @@ async function downloadFile(
   const response = await client.fetch(request.url, {
     method: "GET",
     fields: fields.lines(),
+    session: request.session,
     ...(request.signal === undefined ? {} : { signal: request.signal }),
     timeouts: {
       totalMs: null,
@@ -211,10 +220,25 @@ async function downloadFile(
   }
 }
 
-export function createNodeBrowserServices(): BrowserServices {
-  const client = new NodeHttpClient({
-    networkSafety: { enabled: false }
-  });
+export interface NodeBrowserServicesOptions {
+  readonly downloadAddressPolicy?:
+    | "public-only"
+    | "allow-private-and-local";
+}
+
+export function createNodeBrowserServices(
+  options: NodeBrowserServicesOptions = {}
+): BrowserServices {
+  const client = new NodeHttpClient(
+    options.downloadAddressPolicy === "allow-private-and-local"
+      ? {
+        networkSafety: {
+          allowLocalhost: true,
+          allowPrivateNetworks: true
+        }
+      }
+      : {}
+  );
   return {
     async writeTextFile(path: string, content: string): Promise<void> {
       await writeTextFile(path, content);

@@ -10,6 +10,14 @@ import { HttpClientError } from "@ismail-elkorchi/http-client";
 
 import { createNodeBrowserServices } from "../../dist/runtime/node-browser-services.js";
 
+const session = {
+  async prepareRequest() {
+    return undefined;
+  },
+  async acceptResponse() {
+  }
+};
+
 async function fixture() {
   const server = createServer((request, response) => {
     if (request.url === "/named") {
@@ -45,17 +53,21 @@ async function fixture() {
 
 test("Node downloads sanitize names and choose collision-free destinations", async () => {
   const current = await fixture();
-  const services = createNodeBrowserServices();
+  const services = createNodeBrowserServices({
+    downloadAddressPolicy: "allow-private-and-local"
+  });
   try {
     const first = await services.downloadFile({
       url: `${current.url}/named`,
       directory: current.directory,
-      maxBytes: 100
+      maxBytes: 100,
+      session
     });
     const second = await services.downloadFile({
       url: `${current.url}/named`,
       directory: current.directory,
-      maxBytes: 100
+      maxBytes: 100,
+      session
     });
 
     assert.equal(first.fileName, "report.txt");
@@ -69,13 +81,16 @@ test("Node downloads sanitize names and choose collision-free destinations", asy
 
 test("Node downloads remove partial files after size rejection and abort", async () => {
   const current = await fixture();
-  const services = createNodeBrowserServices();
+  const services = createNodeBrowserServices({
+    downloadAddressPolicy: "allow-private-and-local"
+  });
   try {
     await assert.rejects(
       services.downloadFile({
         url: `${current.url}/oversize`,
         directory: current.directory,
-        maxBytes: 4
+        maxBytes: 4,
+        session
       }),
       (error) => (
         error instanceof HttpClientError
@@ -88,6 +103,7 @@ test("Node downloads remove partial files after size rejection and abort", async
       url: `${current.url}/slow`,
       directory: current.directory,
       maxBytes: 100,
+      session,
       signal: controller.signal
     });
     await defer();
@@ -95,6 +111,28 @@ test("Node downloads remove partial files after size rejection and abort", async
     await assert.rejects(pending);
 
     assert.deepEqual(await readdir(current.directory), []);
+  } finally {
+    await services.close();
+    await current.close();
+  }
+});
+
+test("Node downloads reject private-network targets by default", async () => {
+  const current = await fixture();
+  const services = createNodeBrowserServices();
+  try {
+    await assert.rejects(
+      services.downloadFile({
+        url: `${current.url}/named`,
+        directory: current.directory,
+        maxBytes: 100,
+        session
+      }),
+      (error) => (
+        error instanceof HttpClientError
+        && error.code === "NETWORK_SAFETY_REJECTED"
+      )
+    );
   } finally {
     await services.close();
     await current.close();

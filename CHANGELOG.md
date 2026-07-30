@@ -21,6 +21,17 @@ All notable changes are documented in this file.
   the typed transport as `NetworkFetchError.networkOutcome`.
 - **Breaking:** Require `BrowserServices.close()` so terminal hosts can release
   owned network resources.
+- **Breaking:** Preserve response metadata as ordered `HttpFields` in
+  `FetchPageResult`, `FetchPageStreamResult`, `FetchStylesheetResult`, and
+  `PageSnapshot`.
+- **Breaking:** Remove the exported hand-written cookie parser and cookie-header
+  helpers. The browser now persists a public-suffix-aware cookie jar behind
+  `HttpSessionAdapter`, which applies response cookies before redirect and
+  stylesheet requests.
+- Stream HTML bytes through encoding detection by default and pass HTTP charset
+  evidence to the parser.
+- Keep page-initiated resources and downloads on the public-network policy by
+  default while allowing explicit direct navigation to local targets.
 
 ## [0.1.2] - 2026-03-07
 - Add the redesigned terminal UI with page-first navigation, help, and shell flows.

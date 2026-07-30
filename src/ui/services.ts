@@ -1,8 +1,11 @@
+import type { HttpSessionAdapter } from "@ismail-elkorchi/http-client";
+
 export interface DownloadRequest {
   readonly url: string;
   readonly directory: string;
   readonly maxBytes: number;
   readonly headers?: Readonly<Record<string, string>>;
+  readonly session: HttpSessionAdapter;
   readonly signal?: AbortSignal;
 }
 

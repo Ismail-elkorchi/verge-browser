@@ -2,7 +2,16 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test from "node:test";
 
-import { fetchPage, NetworkFetchError } from "../../dist/app/fetch-page.js";
+import {
+  NetworkFetchError,
+  PageNetworkClient
+} from "../../dist/app/fetch-page.js";
+
+function localClient() {
+  return new PageNetworkClient({
+    publicAddressPolicy: "allow-private-and-local"
+  });
+}
 
 test("fetchPage retries transient GET failures once by default", async () => {
   let attempts = 0;
@@ -20,8 +29,9 @@ test("fetchPage retries transient GET failures once by default", async () => {
   if (!address || typeof address === "string") {
     throw new Error("server address unavailable");
   }
+  const client = localClient();
   try {
-    const page = await fetchPage(
+    const page = await client.fetchPage(
       `http://127.0.0.1:${String(address.port)}/`,
       15_000,
       { maxRequestRetries: 1, retryDelayMs: 0 }
@@ -29,6 +39,7 @@ test("fetchPage retries transient GET failures once by default", async () => {
     assert.equal(page.networkOutcome.kind, "ok");
     assert.equal(attempts, 2);
   } finally {
+    await client.close();
     await new Promise((resolve) => server.close(resolve));
   }
 });
@@ -44,9 +55,10 @@ test("fetchPage does not retry transient POST failures", async () => {
   if (!address || typeof address === "string") {
     throw new Error("server address unavailable");
   }
+  const client = localClient();
   try {
     await assert.rejects(
-      fetchPage(`http://127.0.0.1:${String(address.port)}/`, 15_000, {
+      client.fetchPage(`http://127.0.0.1:${String(address.port)}/`, 15_000, {
         maxRequestRetries: 3,
         retryDelayMs: 0
       }, {
@@ -66,6 +78,7 @@ test("fetchPage does not retry transient POST failures", async () => {
     );
     assert.equal(attempts, 1);
   } finally {
+    await client.close();
     await new Promise((resolve) => server.close(resolve));
   }
 });

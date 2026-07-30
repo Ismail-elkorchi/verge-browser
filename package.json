@@ -60,8 +60,9 @@
   "dependencies": {
     "@ismail-elkorchi/css-parser": "0.2.0",
     "@ismail-elkorchi/html-parser": "0.2.1",
-    "@ismail-elkorchi/http-client": "file:canary/http-client-0.1.0-eb1e3d89e50611957ddde38ed3a3621444848f09.tgz",
-    "@ismail-elkorchi/terminal-ui": "git+https://github.com/Ismail-elkorchi/terminal-ui.git#2eeb11bb29c9b088cf4d5cdaadeb795f8a5a8bf2"
+    "@ismail-elkorchi/http-client": "file:canary/http-client-0.1.0-12d6ab909c578624274b388b8e4959a738a6a135.tgz",
+    "@ismail-elkorchi/terminal-ui": "git+https://github.com/Ismail-elkorchi/terminal-ui.git#2eeb11bb29c9b088cf4d5cdaadeb795f8a5a8bf2",
+    "tough-cookie": "6.0.2"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

@@ -2,11 +2,14 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
+import type { HttpSessionAdapter } from "@ismail-elkorchi/http-client";
+import type { SerializedCookieJar } from "tough-cookie";
+
 import {
-  cookieHeaderForUrl as cookieHeaderFromJar,
-  mergeSetCookieHeaders,
-  type CookieEntry
-} from "./cookies.js";
+  BrowserCookieSession,
+  serializedCookieJar,
+  type CookieSummary
+} from "./cookie-session.js";
 
 export interface BookmarkEntry {
   readonly url: string;
@@ -68,17 +71,15 @@ export interface BrowserWorkspace {
 }
 
 interface BrowserState {
-  readonly version: 2;
   readonly bookmarks: readonly BookmarkEntry[];
   readonly history: readonly HistoryEntry[];
-  readonly cookies: readonly CookieEntry[];
+  readonly cookieJar: SerializedCookieJar | null;
   readonly indexDocuments: readonly IndexDocument[];
   readonly downloads: readonly DownloadRecord[];
   readonly workspace: BrowserWorkspace | null;
 }
 
 const DEFAULT_HISTORY_LIMIT = 500;
-const STATE_FILE_VERSION = 2;
 
 function defaultStatePath(): string {
   const xdgStateHome = process.env["XDG_STATE_HOME"];
@@ -94,10 +95,9 @@ function nowIso(): string {
 
 function createEmptyState(): BrowserState {
   return {
-    version: STATE_FILE_VERSION,
     bookmarks: [],
     history: [],
-    cookies: [],
+    cookieJar: null,
     indexDocuments: [],
     downloads: [],
     workspace: null
@@ -122,22 +122,6 @@ function isHistoryEntry(value: unknown): value is HistoryEntry {
     typeof candidate["title"] === "string" &&
     typeof candidate["visitedAtIso"] === "string" &&
     (candidate["excerpt"] === undefined || typeof candidate["excerpt"] === "string")
-  );
-}
-
-function isCookieEntry(value: unknown): value is CookieEntry {
-  if (value === null || typeof value !== "object") return false;
-  const candidate = value as Record<string, unknown>;
-  return (
-    typeof candidate["name"] === "string" &&
-    typeof candidate["value"] === "string" &&
-    typeof candidate["domain"] === "string" &&
-    typeof candidate["path"] === "string" &&
-    typeof candidate["hostOnly"] === "boolean" &&
-    typeof candidate["secure"] === "boolean" &&
-    typeof candidate["httpOnly"] === "boolean" &&
-    (candidate["sameSite"] === null || candidate["sameSite"] === "Lax" || candidate["sameSite"] === "Strict" || candidate["sameSite"] === "None") &&
-    (candidate["expiresAtIso"] === null || typeof candidate["expiresAtIso"] === "string")
   );
 }
 
@@ -212,13 +196,11 @@ function normalizeState(value: unknown): BrowserState {
   const candidate = value as Record<string, unknown>;
   const bookmarksRaw = Array.isArray(candidate["bookmarks"]) ? candidate["bookmarks"] : [];
   const historyRaw = Array.isArray(candidate["history"]) ? candidate["history"] : [];
-  const cookiesRaw = Array.isArray(candidate["cookies"]) ? candidate["cookies"] : [];
   const indexDocumentsRaw = Array.isArray(candidate["indexDocuments"]) ? candidate["indexDocuments"] : [];
   const downloadsRaw = Array.isArray(candidate["downloads"]) ? candidate["downloads"] : [];
 
   const bookmarks = bookmarksRaw.filter((entry): entry is BookmarkEntry => isBookmarkEntry(entry));
   const history = historyRaw.filter((entry): entry is HistoryEntry => isHistoryEntry(entry));
-  const cookies = cookiesRaw.filter((entry): entry is CookieEntry => isCookieEntry(entry));
   const indexDocuments = indexDocumentsRaw.filter((entry): entry is IndexDocument => isIndexDocument(entry));
   const downloads = downloadsRaw
     .filter((entry): entry is DownloadRecord => isDownloadRecord(entry))
@@ -227,10 +209,9 @@ function normalizeState(value: unknown): BrowserState {
       : entry);
 
   return {
-    version: STATE_FILE_VERSION,
     bookmarks,
     history,
-    cookies,
+    cookieJar: serializedCookieJar(candidate["cookieJar"]),
     indexDocuments,
     downloads,
     workspace: normalizeWorkspace(candidate["workspace"])
@@ -266,6 +247,7 @@ export class BrowserStore {
   private readonly statePath: string;
   private readonly historyLimit: number;
   private readonly indexLimit: number;
+  private readonly cookieSession: BrowserCookieSession;
   private state: BrowserState;
   private saveTail: Promise<void> = Promise.resolve();
 
@@ -274,6 +256,13 @@ export class BrowserStore {
     this.historyLimit = historyLimit;
     this.indexLimit = indexLimit;
     this.state = state;
+    this.cookieSession = new BrowserCookieSession(
+      state.cookieJar,
+      async (cookieJar) => {
+        this.state = { ...this.state, cookieJar };
+        await this.save();
+      }
+    );
   }
 
   public static async open(options: {
@@ -308,29 +297,16 @@ export class BrowserStore {
     return this.state.bookmarks.some((bookmark) => bookmark.url === url);
   }
 
-  public listCookies(): readonly CookieEntry[] {
-    return this.state.cookies;
+  public get httpSession(): HttpSessionAdapter {
+    return this.cookieSession;
+  }
+
+  public listCookies(): readonly CookieSummary[] {
+    return this.cookieSession.list();
   }
 
   public async clearCookies(): Promise<void> {
-    this.state = {
-      ...this.state,
-      cookies: []
-    };
-    await this.save();
-  }
-
-  public async applySetCookieHeaders(requestUrl: string, setCookieHeaders: readonly string[]): Promise<void> {
-    const nextCookies = mergeSetCookieHeaders(this.state.cookies, setCookieHeaders, requestUrl);
-    this.state = {
-      ...this.state,
-      cookies: nextCookies
-    };
-    await this.save();
-  }
-
-  public cookieHeaderForUrl(requestUrl: string): string | null {
-    return cookieHeaderFromJar(this.state.cookies, requestUrl);
+    await this.cookieSession.clear();
   }
 
   public async addBookmark(url: string, name: string): Promise<BookmarkEntry> {

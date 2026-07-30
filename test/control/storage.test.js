@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { HttpFields } from "@ismail-elkorchi/http-client";
+
 import { BrowserStore } from "../../dist/app/storage.js";
 
 test("BrowserStore persists bookmarks and history", async () => {
@@ -21,7 +23,17 @@ test("BrowserStore persists bookmarks and history", async () => {
     await store.recordHistory("https://example.com/docs", "Docs");
     await store.recordHistory("https://example.com/about", "About");
     await store.recordHistory("https://example.com/blog", "Blog");
-    await store.applySetCookieHeaders("https://example.com/", ["sid=abc; Path=/; HttpOnly"]);
+    await store.httpSession.acceptResponse({
+      requestId: 1,
+      attemptIndex: 0,
+      url: "https://example.com/",
+      method: "GET",
+      statusCode: 200,
+      statusMessage: "OK",
+      fields: new HttpFields([
+        { name: "set-cookie", value: "sid=abc; Path=/; HttpOnly" }
+      ])
+    });
     await store.recordIndexDocument("https://example.com/docs", "Docs", "alpha beta gamma");
     await store.recordIndexDocument("https://example.com/about", "About", "beta delta");
 
@@ -36,18 +48,27 @@ test("BrowserStore persists bookmarks and history", async () => {
     ]);
 
     assert.equal(store.listCookies().length, 1);
-    assert.equal(store.cookieHeaderForUrl("https://example.com/path"), "sid=abc");
+    const prepared = await store.httpSession.prepareRequest({
+      requestId: 2,
+      attemptIndex: 0,
+      url: "https://example.com/path",
+      method: "GET",
+      fields: new HttpFields()
+    });
+    assert.deepEqual(prepared, [{ name: "cookie", value: "sid=abc" }]);
 
     const searchResults = store.searchIndex("beta");
     assert.equal(searchResults.length, 2);
     assert.equal(searchResults[0]?.title, "About");
 
     const statePayload = JSON.parse(await readFile(statePath, "utf8"));
-    assert.equal(statePayload.version, 2);
     assert.ok(Array.isArray(statePayload.bookmarks));
     assert.ok(Array.isArray(statePayload.history));
-    assert.ok(Array.isArray(statePayload.cookies));
+    assert.ok(Array.isArray(statePayload.cookieJar.cookies));
     assert.ok(Array.isArray(statePayload.indexDocuments));
+
+    const reopened = await BrowserStore.open({ statePath });
+    assert.equal(reopened.listCookies()[0]?.name, "sid");
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

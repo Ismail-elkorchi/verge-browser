@@ -2,6 +2,7 @@ import { createTerminalHost } from "@ismail-elkorchi/terminal-ui/host";
 import { renderElementFrame, renderFramePlain } from "@ismail-elkorchi/terminal-ui/renderer";
 import { runTui } from "@ismail-elkorchi/terminal-ui/tui";
 import type { DiagnosticOccurrence, TerminalDiagnosticValue } from "@ismail-elkorchi/terminal-ui";
+import type { HttpSessionAdapter } from "@ismail-elkorchi/http-client";
 
 import type { BrowserSession } from "../app/session.js";
 import type { BrowserStore } from "../app/storage.js";
@@ -14,7 +15,7 @@ import { browserView } from "./view.js";
 export interface BrowserTuiOptions {
   readonly store: BrowserStore;
   readonly services: BrowserServices;
-  readonly createSession: () => BrowserSession;
+  readonly createSession: (httpSession: HttpSessionAdapter) => BrowserSession;
   readonly searchUrlTemplate?: string;
   readonly downloadDirectory?: string;
   readonly downloadMaxBytes?: number;

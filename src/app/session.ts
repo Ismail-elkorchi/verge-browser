@@ -11,6 +11,7 @@ import {
   type ParseOptions,
   type ParsedDocument
 } from "@ismail-elkorchi/html-parser";
+import type { HttpSessionAdapter } from "@ismail-elkorchi/http-client";
 
 import {
   PageNetworkClient,
@@ -86,6 +87,7 @@ interface HistoryEntry {
 
 export interface BrowserSessionOptions {
   readonly networkClient?: PageNetworkClient;
+  readonly httpSession?: HttpSessionAdapter;
   readonly loader?: PageLoader;
   readonly streamLoader?: PageStreamLoader;
   readonly contentBuilder?: PageContentBuilder;
@@ -108,12 +110,6 @@ const DEFAULT_PARSE_OPTIONS: ParseOptions = Object.freeze({
     maxTimeMs: 20_000
   }
 });
-
-function hasCookieHeader(headers: Readonly<Record<string, string>> | undefined): boolean {
-  return Object.entries(headers ?? {}).some(
-    ([name, value]) => name.toLowerCase() === "cookie" && value.trim().length > 0
-  );
-}
 
 function normalizeTriageToken(value: string | null | undefined): string {
   if (!value || value.trim().length === 0) return "NONE";
@@ -158,7 +154,6 @@ function diagnosticsFromDocument(
   parseMode: ParseMode,
   requestMethod: "GET" | "POST",
   timings: NavigationTimings,
-  usedCookies: boolean,
   networkOutcome: PageDiagnostics["networkOutcome"] | undefined
 ): PageDiagnostics {
   const outcome = networkOutcome ?? unknownNetworkOutcome();
@@ -176,7 +171,6 @@ function diagnosticsFromDocument(
     stylesheetCount: content.stylesheetCount,
     styleIssueCount: content.styleIssues.length,
     totalDurationMs: timings.totalDurationMs,
-    usedCookies,
     networkOutcome: outcome,
     triageIds: buildTriageIds(document.tree, outcome)
   };
@@ -215,28 +209,6 @@ function linkedStylesheets(tree: DocumentTree): readonly {
   return links;
 }
 
-function stylesheetRequestHeaders(
-  documentUrl: string,
-  stylesheetUrl: string,
-  headers: Readonly<Record<string, string>> | undefined
-): Readonly<Record<string, string>> | undefined {
-  if (headers === undefined) return undefined;
-  let sameOrigin = false;
-  try {
-    sameOrigin = new URL(documentUrl).origin === new URL(stylesheetUrl).origin;
-  } catch {
-    return undefined;
-  }
-  const filtered = Object.fromEntries(Object.entries(headers).filter(([name]) => {
-    const normalized = name.toLowerCase();
-    if (normalized === "accept" || normalized === "content-type" || normalized === "content-length") {
-      return false;
-    }
-    return sameOrigin || normalized !== "cookie" && normalized !== "authorization";
-  }));
-  return Object.keys(filtered).length === 0 ? undefined : filtered;
-}
-
 interface LoadedStylesheets {
   readonly resources: readonly PageStylesheetResource[];
   readonly issues: readonly PageStyleIssue[];
@@ -257,6 +229,14 @@ export class BrowserSession {
   #current: PageSnapshot | null = null;
 
   public constructor(options: BrowserSessionOptions = {}) {
+    if (
+      options.networkClient !== undefined
+      && options.httpSession !== undefined
+    ) {
+      throw new TypeError(
+        "BrowserSession accepts either networkClient or httpSession, not both."
+      );
+    }
     const localFileReader = options.localFileReader;
     const needsNetworkClient = (
       options.loader === undefined
@@ -264,14 +244,22 @@ export class BrowserSession {
       || options.stylesheetLoader === undefined
     );
     this.#networkClient = options.networkClient
-      ?? (needsNetworkClient ? new PageNetworkClient() : null);
+      ?? (
+        needsNetworkClient
+          ? new PageNetworkClient({
+            ...(options.httpSession === undefined
+              ? {}
+              : { session: options.httpSession })
+          })
+          : null
+      );
     this.#ownsNetworkClient = (
       this.#networkClient !== null
       && options.networkClient === undefined
     );
     this.#loader = options.loader
       ?? ((requestUrl, requestOptions) =>
-        this.#requiredNetworkClient().fetchPage(
+        this.#requiredNetworkClient().navigatePage(
           requestUrl,
           undefined,
           undefined,
@@ -280,7 +268,7 @@ export class BrowserSession {
         ));
     this.#streamLoader = options.streamLoader
       ?? ((requestUrl, requestOptions) =>
-        this.#requiredNetworkClient().fetchPageStream(
+        this.#requiredNetworkClient().navigatePageStream(
           requestUrl,
           undefined,
           undefined,
@@ -326,7 +314,7 @@ export class BrowserSession {
         ...options.parseOptions?.budgets
       }
     };
-    this.#defaultParseMode = options.defaultParseMode ?? "text";
+    this.#defaultParseMode = options.defaultParseMode ?? "stream";
   }
 
   public async close(): Promise<void> {
@@ -465,14 +453,8 @@ export class BrowserSession {
       }
     }
     const fetchedStylesheets = await Promise.all(candidates.map(async (candidate) => {
-      const headers = stylesheetRequestHeaders(
-        finalUrl,
-        candidate.requestUrl,
-        requestOptions.headers
-      );
       try {
         const fetched = await this.#stylesheetLoader(candidate.requestUrl, {
-          ...(headers === undefined ? {} : { headers }),
           ...(requestOptions.signal === undefined ? {} : { signal: requestOptions.signal })
         });
         return { ...candidate, fetched } as const;
@@ -565,7 +547,6 @@ export class BrowserSession {
     const contentDurationMs = Date.now() - contentStartedAtMs;
     const snapshot: PageSnapshot = {
       ...current,
-      setCookieHeaders: [],
       document,
       content,
       diagnostics: diagnosticsFromDocument(
@@ -580,7 +561,6 @@ export class BrowserSession {
           stylesheetDurationMs,
           totalDurationMs: Date.now() - startedAtMs
         },
-        current.diagnostics.usedCookies,
         current.diagnostics.networkOutcome
       )
     };
@@ -605,7 +585,15 @@ export class BrowserSession {
     };
     if ("html" in fetchedPage) return parse(fetchedPage.html, parseOptions);
     if (parseMode === "text") throw new Error("Text parse mode requires an HTML payload");
-    return parseStream(fetchedPage.stream, parseOptions);
+    return parseStream(fetchedPage.stream, {
+      ...parseOptions,
+      ...(fetchedPage.transportEncodingLabel === undefined
+        ? {}
+        : {
+          transportEncodingLabel:
+            fetchedPage.transportEncodingLabel
+        })
+    });
   }
 
   #commitHistory(snapshot: PageSnapshot, mode: "push" | "replace", parseMode: ParseMode): void {
@@ -668,9 +656,8 @@ export class BrowserSession {
       status: fetchedPage.status,
       statusText: fetchedPage.statusText,
       contentType: fetchedPage.contentType,
-      responseHeaders: fetchedPage.responseHeaders,
+      responseFields: fetchedPage.responseFields,
       fetchedAtIso: fetchedPage.fetchedAtIso,
-      setCookieHeaders: fetchedPage.setCookieHeaders,
       document,
       content,
       diagnostics: diagnosticsFromDocument(
@@ -685,7 +672,6 @@ export class BrowserSession {
           stylesheetDurationMs,
           totalDurationMs: Date.now() - startedAtMs
         },
-        hasCookieHeader(requestOptions.headers),
         fetchedPage.networkOutcome
       )
     };
