@@ -14,6 +14,13 @@ All notable changes are documented in this file.
 - Require release qualification to start from a clean npm installation whose
   parser identity matches the manifest and lockfile, then install and exercise
   the packed Verge artifact in a clean consumer.
+- Replace the duplicated fetch transport with the shared, commit-pinned HTTP
+  client; reuse connections across a browser session; and release network
+  resources when sessions and the terminal application close.
+- **Breaking:** Remove `classifyNetworkFailure()`; fetch failures now come from
+  the typed transport as `NetworkFetchError.networkOutcome`.
+- **Breaking:** Require `BrowserServices.close()` so terminal hosts can release
+  owned network resources.
 
 ## [0.1.2] - 2026-03-07
 - Add the redesigned terminal UI with page-first navigation, help, and shell flows.

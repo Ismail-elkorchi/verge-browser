@@ -127,6 +127,7 @@ export class BrowserController {
   }
 
   public async saveWorkspace(state: BrowserTuiState): Promise<void> {
+    await this.#releaseDiscardedSessions(state);
     const workspace: BrowserWorkspace = {
       documents: state.documents.map((document) => ({
         url: document.snapshot.finalUrl,
@@ -136,6 +137,17 @@ export class BrowserController {
       sidePanel: state.sidePanel satisfies StoredSidePanel
     };
     await this.#store.saveWorkspace(workspace);
+  }
+
+  public async close(): Promise<void> {
+    const sessions = [...this.#sessions.values()];
+    this.#sessions.clear();
+    await Promise.all([
+      ...sessions.map(async (session) => {
+        await session.close();
+      }),
+      this.#services.close()
+    ]);
   }
 
   public async openInitial(
@@ -471,6 +483,23 @@ export class BrowserController {
     const session = this.#sessions.get(documentId);
     if (!session) throw new Error(`No browser session exists for ${documentId}.`);
     return session;
+  }
+
+  async #releaseDiscardedSessions(state: BrowserTuiState): Promise<void> {
+    const retainedIds = new Set([
+      ...state.documents.map((document) => document.id),
+      ...state.recentlyClosed.map((document) => document.id)
+    ]);
+    const discarded = [...this.#sessions.entries()]
+      .filter(([id]) => !retainedIds.has(id));
+    for (const [id] of discarded) {
+      this.#sessions.delete(id);
+    }
+    await Promise.all(
+      discarded.map(async ([, session]) => {
+        await session.close();
+      })
+    );
   }
 
   #newDocumentId(): string {

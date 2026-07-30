@@ -23,42 +23,51 @@ export interface BrowserTuiOptions {
 
 export async function prepareBrowserTui(initialTarget: string, options: BrowserTuiOptions) {
   const controller = new BrowserController(options);
-  const workspace = options.restoreWorkspace === true ? controller.workspace() : null;
-  const storedDocuments = workspace?.documents ?? [];
-  const documents = storedDocuments.length === 0
-    ? [await controller.openInitial(initialTarget)]
-    : await Promise.all(storedDocuments.map((document) =>
-      controller.openInitial(document.url, document.scrollAnchor)
-    ));
-  const state = createBrowserInitialState(
-    documents,
-    workspace?.activeDocumentIndex ?? 0,
-    controller,
-    workspace?.sidePanel ?? null
-  );
-  return {
-    controller,
-    state,
-    app: createBrowserApp(state, controller)
-  };
+  try {
+    const workspace = options.restoreWorkspace === true ? controller.workspace() : null;
+    const storedDocuments = workspace?.documents ?? [];
+    const documents = storedDocuments.length === 0
+      ? [await controller.openInitial(initialTarget)]
+      : await Promise.all(storedDocuments.map((document) =>
+        controller.openInitial(document.url, document.scrollAnchor)
+      ));
+    const state = createBrowserInitialState(
+      documents,
+      workspace?.activeDocumentIndex ?? 0,
+      controller,
+      workspace?.sidePanel ?? null
+    );
+    return {
+      controller,
+      state,
+      app: createBrowserApp(state, controller)
+    };
+  } catch (error) {
+    await controller.close();
+    throw error;
+  }
 }
 
 export async function runBrowserTui(initialTarget: string, options: BrowserTuiOptions): Promise<void> {
   const prepared = await prepareBrowserTui(initialTarget, options);
-  const exit = await runTui(
-    prepared.app,
-    createTerminalHost({ runtime: "node" }),
-    {
-      initialFocus: prepared.state.documents[prepared.state.activeDocumentIndex]?.snapshot.finalUrl === "about:newtab"
-        ? { kind: "element", elementId: "browser-omnibox" }
-        : {
-          kind: "element",
-          elementId: `browser-${prepared.state.documents[prepared.state.activeDocumentIndex]?.id ?? ""}`
-        }
+  try {
+    const exit = await runTui(
+      prepared.app,
+      createTerminalHost({ runtime: "node" }),
+      {
+        initialFocus: prepared.state.documents[prepared.state.activeDocumentIndex]?.snapshot.finalUrl === "about:newtab"
+          ? { kind: "element", elementId: "browser-omnibox" }
+          : {
+            kind: "element",
+            elementId: `browser-${prepared.state.documents[prepared.state.activeDocumentIndex]?.id ?? ""}`
+          }
+      }
+    );
+    if (exit.status === "error") {
+      throw new Error(browserTuiFailureMessage(exit.diagnostics));
     }
-  );
-  if (exit.status === "error") {
-    throw new Error(browserTuiFailureMessage(exit.diagnostics));
+  } finally {
+    await prepared.controller.close();
   }
 }
 
@@ -97,8 +106,12 @@ export async function renderBrowserOnce(
   terminalSize: TerminalSize
 ): Promise<string> {
   const prepared = await prepareBrowserTui(initialTarget, options);
-  return renderFramePlain(renderElementFrame(
-    browserView(prepared.state, { terminalSize }),
-    terminalSize
-  ));
+  try {
+    return renderFramePlain(renderElementFrame(
+      browserView(prepared.state, { terminalSize }),
+      terminalSize
+    ));
+  } finally {
+    await prepared.controller.close();
+  }
 }

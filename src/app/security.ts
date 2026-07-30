@@ -24,6 +24,47 @@ export const DEFAULT_SECURITY_POLICY: Required<SecurityPolicyOptions> = Object.f
   retryDelayMs: 75
 });
 
+export function resolveSecurityPolicy(
+  options: SecurityPolicyOptions
+): Required<SecurityPolicyOptions> {
+  const candidate: unknown = options;
+  if (
+    typeof candidate !== "object"
+    || candidate === null
+    || Array.isArray(candidate)
+  ) {
+    throw new TypeError("Security policy must be an object.");
+  }
+  const knownKeys = new Set([
+    "maxRedirects",
+    "maxContentBytes",
+    "maxRequestRetries",
+    "retryDelayMs"
+  ]);
+  const unknownKey = Object.keys(candidate).find((key) => !knownKeys.has(key));
+  if (unknownKey !== undefined) {
+    throw new TypeError(`Unknown security policy option: ${unknownKey}`);
+  }
+  const resolved = {
+    ...DEFAULT_SECURITY_POLICY,
+    ...candidate as SecurityPolicyOptions
+  };
+  assertNonNegativeSafeInteger(resolved.maxRedirects, "maxRedirects");
+  assertNonNegativeSafeInteger(resolved.maxContentBytes, "maxContentBytes");
+  assertNonNegativeSafeInteger(
+    resolved.maxRequestRetries,
+    "maxRequestRetries"
+  );
+  assertNonNegativeSafeInteger(resolved.retryDelayMs, "retryDelayMs");
+  return Object.freeze(resolved);
+}
+
+function assertNonNegativeSafeInteger(value: number, name: string): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError(`${name} must be a non-negative safe integer.`);
+  }
+}
+
 /**
  * Validates that a parsed URL uses one of the supported protocols.
  *

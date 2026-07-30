@@ -90,6 +90,8 @@ async function fixture(options = {}) {
       },
       async openPath(path) {
         writes.push({ kind: "openPath", path });
+      },
+      async close() {
       }
     },
     createSession: () => new BrowserSession({

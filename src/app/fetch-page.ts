@@ -1,5 +1,22 @@
+import {
+  HttpClientError,
+  HttpFields,
+  mergeHttpFields,
+  NodeHttpClient,
+  type HttpClientConfiguration,
+  type HttpErrorCode,
+  type HttpRequestOptions,
+  type StreamingHttpResponse
+} from "@ismail-elkorchi/http-client";
+
 import { formatHelpText } from "./commands.js";
-import { DEFAULT_SECURITY_POLICY, assertAllowedProtocol, isHtmlLikeContentType, type SecurityPolicyOptions } from "./security.js";
+import {
+  DEFAULT_SECURITY_POLICY,
+  assertAllowedProtocol,
+  isHtmlLikeContentType,
+  resolveSecurityPolicy,
+  type SecurityPolicyOptions
+} from "./security.js";
 import type {
   FetchPageResult,
   FetchPageStreamResult,
@@ -10,29 +27,12 @@ import type {
 } from "./types.js";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
-const DNS_ERROR_CODES = new Set([
-  "ENOTFOUND",
-  "EAI_AGAIN",
-  "ENODATA",
-  "EHOSTUNREACH"
+const TRANSIENT_HTTP_FAILURES: ReadonlySet<HttpErrorCode> = new Set([
+  "CONNECT_TIMEOUT",
+  "NETWORK_FAILURE",
+  "RESPONSE_BODY_TIMEOUT",
+  "RESPONSE_FIELDS_TIMEOUT"
 ]);
-const TIMEOUT_ERROR_CODES = new Set([
-  "ETIMEDOUT",
-  "UND_ERR_CONNECT_TIMEOUT",
-  "UND_ERR_HEADERS_TIMEOUT",
-  "UND_ERR_BODY_TIMEOUT",
-  "ABORT_ERR",
-  "TIMEOUT"
-]);
-const TRANSIENT_RETRY_CODES = new Set([
-  "ECONNRESET",
-  "EPIPE",
-  "ETIMEDOUT",
-  "UND_ERR_CONNECT_TIMEOUT",
-  "UND_ERR_SOCKET"
-]);
-const ERROR_CODE_PATTERN =
-  /\b(ENOTFOUND|EAI_AGAIN|ENODATA|EHOSTUNREACH|ETIMEDOUT|ECONNRESET|EPIPE|ERR_TLS_[A-Z_]+|ERR_SSL_[A-Z_]+|CERT_[A-Z_]+|SELF_SIGNED_CERT_IN_CHAIN|UNABLE_TO_VERIFY_LEAF_SIGNATURE|UND_ERR_[A-Z_]+)\b/gi;
 
 function escapeHtml(value: string): string {
   return value
@@ -111,83 +111,17 @@ function outcomeFromHttpStatus(finalUrl: string, status: number, statusText: str
   });
 }
 
-function tlsCodeLike(rawCode: string): boolean {
-  const normalized = rawCode.toUpperCase();
+function shouldRetryHttpFailure(
+  error: HttpClientError,
+  method: PageRequestOptions["method"],
+  attemptIndex: number,
+  maxRequestRetries: number
+): boolean {
   return (
-    normalized.includes("TLS") ||
-    normalized.includes("SSL") ||
-    normalized.includes("CERT") ||
-    normalized.includes("SELF_SIGNED") ||
-    normalized.includes("UNABLE_TO_VERIFY")
+    method === "GET"
+    && attemptIndex < maxRequestRetries
+    && TRANSIENT_HTTP_FAILURES.has(error.code)
   );
-}
-
-function collectErrorCodes(error: unknown): readonly string[] {
-  const codes = new Set<string>();
-  const queue: unknown[] = [error];
-  const visited = new Set<unknown>();
-
-  while (queue.length > 0) {
-    const current = queue.shift();
-    if (current === undefined || current === null || visited.has(current)) {
-      continue;
-    }
-    visited.add(current);
-
-    if (typeof current === "object" && "code" in current) {
-      const rawCode = (current as { readonly code: unknown }).code;
-      if (typeof rawCode === "string" && rawCode.trim().length > 0) {
-        codes.add(rawCode.toUpperCase());
-      }
-    }
-
-    if (current instanceof Error) {
-      for (const match of current.message.toUpperCase().matchAll(ERROR_CODE_PATTERN)) {
-        const code = match[1];
-        if (code) {
-          codes.add(code);
-        }
-      }
-      const cause = (current as { readonly cause?: unknown }).cause;
-      if (cause !== undefined) {
-        queue.push(cause);
-      }
-      continue;
-    }
-
-    if (typeof current === "string") {
-      for (const match of current.toUpperCase().matchAll(ERROR_CODE_PATTERN)) {
-        const code = match[1];
-        if (code) {
-          codes.add(code);
-        }
-      }
-      continue;
-    }
-
-    if (typeof current === "object" && "cause" in current) {
-      queue.push((current as { readonly cause?: unknown }).cause);
-    }
-  }
-
-  return [...codes];
-}
-
-function detailCodeFromError(error: unknown): string | null {
-  const codes = collectErrorCodes(error);
-  return codes[0] ?? null;
-}
-
-function shouldRetryNetworkError(error: unknown, method: string, attemptIndex: number, maxRequestRetries: number): boolean {
-  if (attemptIndex >= maxRequestRetries || method !== "GET") {
-    return false;
-  }
-  for (const code of collectErrorCodes(error)) {
-    if (TRANSIENT_RETRY_CODES.has(code)) {
-      return true;
-    }
-  }
-  return false;
 }
 
 async function sleep(delayMs: number, signal?: AbortSignal): Promise<void> {
@@ -206,10 +140,6 @@ async function sleep(delayMs: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === "AbortError";
-}
-
 /**
  * Error wrapper used when fetch helpers fail before a usable HTML response can be consumed.
  *
@@ -225,85 +155,77 @@ export class NetworkFetchError extends Error {
   }
 }
 
-/**
- * Maps an arbitrary thrown value into a stable `NetworkOutcome`.
- *
- * @param error Unknown thrown value from fetch, redirect, timeout, or size-limit handling.
- * @param finalUrl Best-known URL associated with the failed request.
- * @returns Structured outcome with a stable `kind`, `detailCode`, and `detailMessage`.
- */
-export function classifyNetworkFailure(error: unknown, finalUrl: string): NetworkOutcome {
-  if (error instanceof NetworkFetchError) {
-    return error.networkOutcome;
+function outcomeFromHttpClientError(
+  error: HttpClientError,
+  fallbackUrl: string
+): NetworkOutcome {
+  const finalUrl = error.url.length === 0 ? fallbackUrl : error.url;
+  switch (error.code) {
+    case "CONNECT_TIMEOUT":
+    case "RESPONSE_BODY_TIMEOUT":
+    case "RESPONSE_FIELDS_TIMEOUT":
+    case "TOTAL_TIMEOUT":
+      return createNetworkOutcome("timeout", {
+        finalUrl,
+        detailCode: error.code,
+        detailMessage: error.message
+      });
+    case "DNS_ERROR":
+      return createNetworkOutcome("dns", {
+        finalUrl,
+        detailCode: error.code,
+        detailMessage: error.message
+      });
+    case "TLS_ERROR":
+      return createNetworkOutcome("tls", {
+        finalUrl,
+        detailCode: error.code,
+        detailMessage: error.message
+      });
+    case "DECODED_RESPONSE_TOO_LARGE":
+    case "WIRE_RESPONSE_TOO_LARGE":
+      return createNetworkOutcome("size_limit", {
+        finalUrl,
+        detailCode: "MAX_CONTENT_BYTES",
+        detailMessage: "Response exceeded maxContentBytes."
+      });
+    case "REDIRECT_LOOP":
+    case "TOO_MANY_REDIRECTS":
+      return createNetworkOutcome("redirect_limit", {
+        finalUrl,
+        detailCode: "REDIRECT_LIMIT",
+        detailMessage: error.message
+      });
+    case "REDIRECT_TARGET_REJECTED":
+    case "UNSUPPORTED_PROTOCOL":
+      return createNetworkOutcome("unsupported_protocol", {
+        finalUrl,
+        detailCode: "UNSUPPORTED_PROTOCOL",
+        detailMessage: error.message
+      });
+    default:
+      return createNetworkOutcome("unknown", {
+        finalUrl,
+        detailCode: error.code,
+        detailMessage: error.message
+      });
   }
-
-  const message = error instanceof Error ? error.message : String(error);
-  const messageUpper = message.toUpperCase();
-  const detailCode = detailCodeFromError(error);
-
-  if (
-    isAbortError(error) ||
-    messageUpper.includes("TIMED OUT") ||
-    messageUpper.includes("FETCH TIMEOUT") ||
-    (detailCode !== null && TIMEOUT_ERROR_CODES.has(detailCode))
-  ) {
-    return createNetworkOutcome("timeout", {
-      finalUrl,
-      detailCode: detailCode ?? "TIMEOUT",
-      detailMessage: message
-    });
-  }
-  if (messageUpper.includes("BLOCKED UNSUPPORTED PROTOCOL")) {
-    return createNetworkOutcome("unsupported_protocol", {
-      finalUrl,
-      detailCode: detailCode ?? "UNSUPPORTED_PROTOCOL",
-      detailMessage: message
-    });
-  }
-  if (messageUpper.includes("REDIRECT LIMIT EXCEEDED")) {
-    return createNetworkOutcome("redirect_limit", {
-      finalUrl,
-      detailCode: detailCode ?? "REDIRECT_LIMIT",
-      detailMessage: message
-    });
-  }
-  if (messageUpper.includes("CONTENT-TYPE") && messageUpper.includes("BLOCKED NON-")) {
-    return createNetworkOutcome("content_type_block", {
-      finalUrl,
-      detailCode: detailCode ?? "CONTENT_TYPE_BLOCK",
-      detailMessage: message
-    });
-  }
-  if (messageUpper.includes("MAXCONTENTBYTES")) {
-    return createNetworkOutcome("size_limit", {
-      finalUrl,
-      detailCode: detailCode ?? "MAX_CONTENT_BYTES",
-      detailMessage: message
-    });
-  }
-  if (detailCode && DNS_ERROR_CODES.has(detailCode)) {
-    return createNetworkOutcome("dns", {
-      finalUrl,
-      detailCode,
-      detailMessage: message
-    });
-  }
-  if (detailCode && tlsCodeLike(detailCode)) {
-    return createNetworkOutcome("tls", {
-      finalUrl,
-      detailCode,
-      detailMessage: message
-    });
-  }
-  return createNetworkOutcome("unknown", {
-    finalUrl,
-    detailCode,
-    detailMessage: message
-  });
 }
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function assertTimeout(timeoutMs: number): void {
+  if (
+    !Number.isSafeInteger(timeoutMs)
+    || timeoutMs < 1
+    || timeoutMs > 2_147_483_647
+  ) {
+    throw new RangeError(
+      "timeoutMs must be a positive safe integer no greater than 2147483647."
+    );
+  }
 }
 
 async function fetchFileUrl(requestUrl: string, readLocalFileText: LocalFileReader): Promise<FetchPageResult> {
@@ -349,33 +271,6 @@ function streamFromUtf8(value: string): ReadableStream<Uint8Array> {
   });
 }
 
-function withByteLimit(source: ReadableStream<Uint8Array>, maxContentBytes: number): ReadableStream<Uint8Array> {
-  const reader = source.getReader();
-  let totalBytes = 0;
-
-  return new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      const next = await reader.read();
-      if (next.done) {
-        controller.close();
-        return;
-      }
-
-      totalBytes += next.value.byteLength;
-      if (totalBytes > maxContentBytes) {
-        await reader.cancel(`maxContentBytes exceeded: ${String(maxContentBytes)}`);
-        controller.error(new Error(`Response exceeded maxContentBytes=${String(maxContentBytes)}`));
-        return;
-      }
-
-      controller.enqueue(next.value);
-    },
-    async cancel(reason) {
-      await reader.cancel(reason);
-    }
-  });
-}
-
 /**
  * Reads a UTF-8 byte stream into a single string.
  *
@@ -399,21 +294,10 @@ export async function readByteStreamToText(stream: ReadableStream<Uint8Array>): 
   return html;
 }
 
-async function readResponseBodyWithLimit(stream: ReadableStream<Uint8Array> | null, maxContentBytes: number): Promise<string> {
-  if (!stream) {
-    return "";
-  }
-
-  const limitedStream = withByteLimit(stream, maxContentBytes);
-  return readByteStreamToText(limitedStream);
-}
-
-async function readResponseBytesWithLimit(
-  stream: ReadableStream<Uint8Array> | null,
-  maxContentBytes: number
+async function readByteStream(
+  stream: ReadableStream<Uint8Array>
 ): Promise<Uint8Array> {
-  if (!stream) return new Uint8Array();
-  const reader = withByteLimit(stream, maxContentBytes).getReader();
+  const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
   let length = 0;
   for (;;) {
@@ -431,10 +315,6 @@ async function readResponseBytesWithLimit(
   return bytes;
 }
 
-function isRedirectStatus(status: number): boolean {
-  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
-}
-
 interface NetworkFetchResult {
   readonly requestUrl: string;
   readonly finalUrl: string;
@@ -442,7 +322,7 @@ interface NetworkFetchResult {
   readonly statusText: string;
   readonly contentType: string | null;
   readonly responseHeaders: Readonly<Record<string, string>>;
-  readonly body: ReadableStream<Uint8Array> | null;
+  readonly body: ReadableStream<Uint8Array>;
   readonly setCookieHeaders: readonly string[];
   readonly fetchedAtIso: string;
 }
@@ -467,23 +347,9 @@ const CSS_RESOURCE_PROFILE: NetworkResourceProfile = {
   }
 };
 
-function readSetCookieHeaders(headers: Headers): readonly string[] {
-  const headersWithSetCookie = headers as Headers & {
-    readonly getSetCookie?: () => string[];
-  };
-  if (typeof headersWithSetCookie.getSetCookie === "function") {
-    return headersWithSetCookie.getSetCookie();
-  }
-  const singleHeader = headers.get("set-cookie");
-  if (!singleHeader) {
-    return [];
-  }
-  return [singleHeader];
-}
-
-function flattenHeaders(headers: Headers): Readonly<Record<string, string>> {
+function flattenFields(fields: HttpFields): Readonly<Record<string, string>> {
   const groupedValues = new Map<string, string[]>();
-  for (const [name, value] of headers.entries()) {
+  for (const { name, value } of fields) {
     const normalizedName = name.toLowerCase();
     const values = groupedValues.get(normalizedName) ?? [];
     values.push(value);
@@ -497,108 +363,223 @@ function flattenHeaders(headers: Headers): Readonly<Record<string, string>> {
   return flattened;
 }
 
+function requestFields(
+  resourceProfile: NetworkResourceProfile,
+  supplied: Readonly<Record<string, string>> | undefined
+): HttpFields {
+  const defaults = new HttpFields([
+    { name: "accept", value: resourceProfile.accept },
+    { name: "user-agent", value: "verge-browser/0.2.0" }
+  ]);
+  const caller = supplied === undefined
+    ? undefined
+    : new HttpFields(
+      Object.entries(supplied).map(([name, value]) => ({ name, value }))
+    );
+  return mergeHttpFields(defaults, caller);
+}
+
+function pageRequestMethod(options: PageRequestOptions): "GET" | "POST" {
+  const requestedMethod: unknown = options.method ?? "GET";
+  if (requestedMethod !== "GET" && requestedMethod !== "POST") {
+    throw new TypeError("Page request method must be GET or POST.");
+  }
+  if (requestedMethod === "GET" && options.bodyText !== undefined) {
+    throw new TypeError("GET requests cannot contain bodyText.");
+  }
+  return requestedMethod;
+}
+
+function operationFailure(
+  error: unknown,
+  finalUrl: string,
+  callerSignal: AbortSignal | undefined,
+  timeoutSignal: AbortSignal
+): unknown {
+  if (callerSignal?.aborted === true) return callerSignal.reason;
+  if (timeoutSignal.aborted) {
+    return new NetworkFetchError(
+      createNetworkOutcome("timeout", {
+        finalUrl,
+        detailCode: "TOTAL_TIMEOUT",
+        detailMessage: "Network request timed out."
+      })
+    );
+  }
+  return networkFailure(error, finalUrl);
+}
+
+function networkFailure(error: unknown, finalUrl: string): unknown {
+  if (error instanceof NetworkFetchError) return error;
+  if (error instanceof HttpClientError) {
+    return new NetworkFetchError(
+      outcomeFromHttpClientError(error, finalUrl)
+    );
+  }
+  return error;
+}
+
+function responseStream(
+  response: StreamingHttpResponse,
+  callerSignal: AbortSignal | undefined,
+  timeoutSignal: AbortSignal
+): ReadableStream<Uint8Array> {
+  const reader = response.body.getReader();
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const next = await reader.read();
+        if (!next.done) {
+          controller.enqueue(next.value);
+          return;
+        }
+        const completion = await response.completion;
+        if (completion.kind === "failure") {
+          throw completion.error;
+        }
+        if (completion.kind === "cancelled") {
+          throw new HttpClientError(
+            "REQUEST_ABORTED",
+            "The response body was cancelled.",
+            response.finalUrl
+          );
+        }
+        controller.close();
+      } catch (error) {
+        controller.error(
+          operationFailure(
+            error,
+            response.finalUrl,
+            callerSignal,
+            timeoutSignal
+          )
+        );
+      }
+    },
+    async cancel(reason) {
+      await reader.cancel(reason);
+      await response.completion;
+    }
+  }, { highWaterMark: 0 });
+}
+
+function buildHttpRequestOptions(
+  timeoutMs: number,
+  policy: Required<SecurityPolicyOptions>,
+  options: PageRequestOptions,
+  fields: HttpFields,
+  signal: AbortSignal
+): HttpRequestOptions {
+  const method = pageRequestMethod(options);
+  const common = {
+    fields: fields.lines(),
+    signal,
+    maxRedirects: policy.maxRedirects,
+    timeouts: {
+      totalMs: null,
+      responseFieldsMs: timeoutMs,
+      responseBodyProgressMs: timeoutMs
+    },
+    responseTransferLimits: {
+      maxWireBytes: policy.maxContentBytes,
+      maxDecodedBytes: policy.maxContentBytes
+    }
+  } as const;
+  if (method === "GET") {
+    return { ...common, method };
+  }
+  return {
+    ...common,
+    method,
+    body: { kind: "text", text: options.bodyText ?? "" }
+  };
+}
+
 async function fetchNetworkResponse(
+  client: NodeHttpClient,
   requestUrl: string,
   timeoutMs: number,
   securityPolicy: Required<SecurityPolicyOptions>,
   requestOptions: PageRequestOptions,
   resourceProfile: NetworkResourceProfile = HTML_RESOURCE_PROFILE
 ): Promise<NetworkFetchResult> {
-  let currentUrl = requestUrl;
-  let forwardedHeaders = requestOptions.headers;
-  for (let redirectCount = 0; redirectCount <= securityPolicy.maxRedirects; redirectCount += 1) {
-    const parsedCurrentUrl = new URL(currentUrl);
-    assertAllowedProtocol(parsedCurrentUrl);
-    const method = requestOptions.method ?? "GET";
-    const requestHeaders: Record<string, string> = {
-      accept: resourceProfile.accept,
-      "user-agent": "verge-browser/0.1 (+terminal; html-parser)",
-      ...(forwardedHeaders ?? {})
-    };
+  const parsedUrl = new URL(requestUrl);
+  assertAllowedProtocol(parsedUrl);
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const signal = requestOptions.signal === undefined
+    ? timeoutSignal
+    : AbortSignal.any([requestOptions.signal, timeoutSignal]);
+  const method = requestOptions.method ?? "GET";
+  const options = buildHttpRequestOptions(
+    timeoutMs,
+    securityPolicy,
+    requestOptions,
+    requestFields(resourceProfile, requestOptions.headers),
+    signal
+  );
 
-    for (let attemptIndex = 0; attemptIndex <= securityPolicy.maxRequestRetries; attemptIndex += 1) {
-      requestOptions.signal?.throwIfAborted();
-      const timeoutSignal = AbortSignal.timeout(timeoutMs);
-      const signal = requestOptions.signal === undefined
-        ? timeoutSignal
-        : AbortSignal.any([requestOptions.signal, timeoutSignal]);
-
-      try {
-        const response = await fetch(currentUrl, {
-          method,
-          redirect: "manual",
-          signal,
-          headers: requestHeaders,
-          ...(method === "POST" ? { body: requestOptions.bodyText ?? "" } : {})
-        });
-
-        if (isRedirectStatus(response.status)) {
-          if (redirectCount >= securityPolicy.maxRedirects) {
-            throw new Error(`Redirect limit exceeded (${String(securityPolicy.maxRedirects)})`);
-          }
-          const location = response.headers.get("location");
-          if (!location) {
-            throw new Error(`Redirect response missing location header: ${String(response.status)}`);
-          }
-          const nextUrl = new URL(location, currentUrl);
-          assertAllowedProtocol(nextUrl);
-          if (nextUrl.origin !== parsedCurrentUrl.origin && forwardedHeaders !== undefined) {
-            forwardedHeaders = Object.fromEntries(
-              Object.entries(forwardedHeaders).filter(([name]) => {
-                const normalized = name.toLowerCase();
-                return normalized !== "authorization" && normalized !== "cookie";
-              })
-            );
-          }
-          currentUrl = nextUrl.toString();
-          break;
-        }
-
-        const contentType = response.headers.get("content-type");
-        if (!resourceProfile.acceptsContentType(contentType)) {
-          throw new Error(`Blocked non-${resourceProfile.label} content-type: ${contentType ?? "unknown"}`);
-        }
-
-        return {
-          requestUrl,
-          finalUrl: response.url || currentUrl,
-          status: response.status,
-          statusText: response.statusText,
-          contentType,
-          responseHeaders: flattenHeaders(response.headers),
-          body: response.body,
-          setCookieHeaders: readSetCookieHeaders(response.headers),
-          fetchedAtIso: nowIso()
-        };
-      } catch (error) {
-        if (requestOptions.signal?.aborted === true) {
-          throw requestOptions.signal.reason;
-        }
-        if (timeoutSignal.aborted) {
-          throw new Error(`Network request timed out after ${String(timeoutMs)}ms`, { cause: error });
-        }
-        if (shouldRetryNetworkError(error, method, attemptIndex, securityPolicy.maxRequestRetries)) {
-          await sleep(securityPolicy.retryDelayMs, requestOptions.signal);
+  try {
+    for (
+      let attemptIndex = 0;
+      attemptIndex <= securityPolicy.maxRequestRetries;
+      attemptIndex += 1
+    ) {
+      signal.throwIfAborted();
+      const result = await client.fetch(requestUrl, options);
+      if (result.kind === "failure") {
+        if (
+          shouldRetryHttpFailure(
+            result.error,
+            method,
+            attemptIndex,
+            securityPolicy.maxRequestRetries
+          )
+        ) {
+          await sleep(securityPolicy.retryDelayMs, signal);
           continue;
         }
-        if (error instanceof Error) {
-          const cause = (error as { readonly cause?: unknown }).cause;
-          const causeMessage = cause instanceof Error
-            ? cause.message
-            : (
-              cause && typeof cause === "object" && "code" in cause
-                ? String(cause.code)
-                : null
-            );
-          const detail = causeMessage ? `${error.message} (${causeMessage})` : error.message;
-          throw new Error(`Network request failed for ${currentUrl}: ${detail}`, { cause: error });
-        }
-        throw new Error(`Network request failed for ${currentUrl}: ${String(error)}`);
+        throw result.error;
       }
-    }
-  }
 
-  throw new Error("Unreachable redirect state");
+      const contentType = result.fields.first("content-type");
+      if (!resourceProfile.acceptsContentType(contentType)) {
+        const error = new NetworkFetchError(
+          createNetworkOutcome("content_type_block", {
+            finalUrl: result.finalUrl,
+            status: result.statusCode,
+            statusText: result.statusMessage,
+            detailCode: "CONTENT_TYPE_BLOCK",
+            detailMessage:
+              `Blocked non-${resourceProfile.label} content-type: ${contentType ?? "unknown"}`
+          })
+        );
+        result.cancel(error);
+        await result.completion;
+        throw error;
+      }
+
+      return {
+        requestUrl,
+        finalUrl: result.finalUrl,
+        status: result.statusCode,
+        statusText: result.statusMessage ?? "",
+        contentType,
+        responseHeaders: flattenFields(result.fields),
+        body: responseStream(result, requestOptions.signal, timeoutSignal),
+        setCookieHeaders: result.fields.all("set-cookie"),
+        fetchedAtIso: nowIso()
+      };
+    }
+
+    throw new Error("Retry loop exhausted without a result.");
+  } catch (error) {
+    throw operationFailure(
+      error,
+      requestUrl,
+      requestOptions.signal,
+      timeoutSignal
+    );
+  }
 }
 
 /**
@@ -630,7 +611,8 @@ async function fetchNetworkResponse(
  * console.log(page.status, page.networkOutcome.kind);
  * ```
  */
-export async function fetchPage(
+async function fetchPageWithClient(
+  client: NodeHttpClient,
   requestUrl: string,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   securityPolicy: SecurityPolicyOptions = DEFAULT_SECURITY_POLICY,
@@ -638,10 +620,9 @@ export async function fetchPage(
   readLocalFileText: LocalFileReader = defaultReadLocalFileText
 ): Promise<FetchPageResult> {
   requestOptions.signal?.throwIfAborted();
-  const policy = {
-    ...DEFAULT_SECURITY_POLICY,
-    ...securityPolicy
-  };
+  pageRequestMethod(requestOptions);
+  assertTimeout(timeoutMs);
+  const policy = resolveSecurityPolicy(securityPolicy);
 
   const localAboutPage = aboutPage(requestUrl);
   if (localAboutPage !== null) {
@@ -675,18 +656,24 @@ export async function fetchPage(
 
   let networkResult: NetworkFetchResult;
   try {
-    networkResult = await fetchNetworkResponse(requestUrl, timeoutMs, policy, requestOptions);
+    networkResult = await fetchNetworkResponse(
+      client,
+      requestUrl,
+      timeoutMs,
+      policy,
+      requestOptions
+    );
   } catch (error) {
     if (requestOptions.signal?.aborted === true) throw requestOptions.signal.reason;
-    throw new NetworkFetchError(classifyNetworkFailure(error, requestUrl));
+    throw networkFailure(error, requestUrl);
   }
 
   let html = "";
   try {
-    html = await readResponseBodyWithLimit(networkResult.body, policy.maxContentBytes);
+    html = await readByteStreamToText(networkResult.body);
   } catch (error) {
     if (requestOptions.signal?.aborted === true) throw requestOptions.signal.reason;
-    throw new NetworkFetchError(classifyNetworkFailure(error, networkResult.finalUrl));
+    throw networkFailure(error, networkResult.finalUrl);
   }
 
   return {
@@ -709,7 +696,8 @@ function contentTypeEncoding(contentType: string | null): string | undefined {
 }
 
 /** Fetches one external stylesheet as bounded transport bytes. */
-export async function fetchStylesheet(
+async function fetchStylesheetWithClient(
+  client: NodeHttpClient,
   requestUrl: string,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   securityPolicy: SecurityPolicyOptions = {
@@ -720,21 +708,25 @@ export async function fetchStylesheet(
   readLocalFileText: LocalFileReader = defaultReadLocalFileText
 ): Promise<FetchStylesheetResult> {
   requestOptions.signal?.throwIfAborted();
-  const policy = {
-    ...DEFAULT_SECURITY_POLICY,
-    maxContentBytes: 512 * 1024,
-    ...securityPolicy
-  };
+  assertTimeout(timeoutMs);
+  const policy = resolveSecurityPolicy({
+    ...securityPolicy,
+    maxContentBytes: securityPolicy.maxContentBytes ?? 512 * 1024
+  });
   if (requestUrl.startsWith("file://")) {
     const fileUrl = new URL(requestUrl);
     assertAllowedProtocol(fileUrl);
     const css = await readLocalFileText(decodeURIComponent(fileUrl.pathname));
     const bytes = UTF8_ENCODER.encode(css);
     if (bytes.byteLength > policy.maxContentBytes) {
-      throw new NetworkFetchError(classifyNetworkFailure(
-        new Error(`Response exceeded maxContentBytes=${String(policy.maxContentBytes)}`),
-        requestUrl
-      ));
+      throw new NetworkFetchError(
+        createNetworkOutcome("size_limit", {
+          finalUrl: requestUrl,
+          detailCode: "MAX_CONTENT_BYTES",
+          detailMessage:
+            `Response exceeded maxContentBytes=${String(policy.maxContentBytes)}`
+        })
+      );
     }
     return {
       requestUrl,
@@ -748,6 +740,7 @@ export async function fetchStylesheet(
   let result: NetworkFetchResult;
   try {
     result = await fetchNetworkResponse(
+      client,
       requestUrl,
       timeoutMs,
       policy,
@@ -755,9 +748,18 @@ export async function fetchStylesheet(
       CSS_RESOURCE_PROFILE
     );
     if (result.status < 200 || result.status >= 300) {
-      throw new Error(`Stylesheet request failed with ${String(result.status)} ${result.statusText}`);
+      throw new NetworkFetchError(
+        createNetworkOutcome("http_error", {
+          finalUrl: result.finalUrl,
+          status: result.status,
+          statusText: result.statusText,
+          detailCode: `HTTP_${String(result.status)}`,
+          detailMessage:
+            `Stylesheet request failed with ${String(result.status)} ${result.statusText}`
+        })
+      );
     }
-    const bytes = await readResponseBytesWithLimit(result.body, policy.maxContentBytes);
+    const bytes = await readByteStream(result.body);
     const transportEncodingLabel = contentTypeEncoding(result.contentType);
     return {
       requestUrl: result.requestUrl,
@@ -769,7 +771,7 @@ export async function fetchStylesheet(
     };
   } catch (error) {
     if (requestOptions.signal?.aborted === true) throw requestOptions.signal.reason;
-    throw new NetworkFetchError(classifyNetworkFailure(error, requestUrl));
+    throw networkFailure(error, requestUrl);
   }
 }
 
@@ -792,7 +794,8 @@ export async function fetchStylesheet(
  * console.log(page.status, page.networkOutcome.kind);
  * ```
  */
-export async function fetchPageStream(
+async function fetchPageStreamWithClient(
+  client: NodeHttpClient,
   requestUrl: string,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   securityPolicy: SecurityPolicyOptions = DEFAULT_SECURITY_POLICY,
@@ -800,10 +803,9 @@ export async function fetchPageStream(
   readLocalFileText: LocalFileReader = defaultReadLocalFileText
 ): Promise<FetchPageStreamResult> {
   requestOptions.signal?.throwIfAborted();
-  const policy = {
-    ...DEFAULT_SECURITY_POLICY,
-    ...securityPolicy
-  };
+  pageRequestMethod(requestOptions);
+  assertTimeout(timeoutMs);
+  const policy = resolveSecurityPolicy(securityPolicy);
 
   const localAboutPage = aboutPage(requestUrl);
   if (localAboutPage !== null) {
@@ -868,23 +870,217 @@ export async function fetchPageStream(
 
   let networkResult: NetworkFetchResult;
   try {
-    networkResult = await fetchNetworkResponse(requestUrl, timeoutMs, policy, requestOptions);
+    networkResult = await fetchNetworkResponse(
+      client,
+      requestUrl,
+      timeoutMs,
+      policy,
+      requestOptions
+    );
   } catch (error) {
     if (requestOptions.signal?.aborted === true) throw requestOptions.signal.reason;
-    throw new NetworkFetchError(classifyNetworkFailure(error, requestUrl));
+    throw networkFailure(error, requestUrl);
   }
-  const stream = networkResult.body ?? streamFromUtf8("");
-
   return {
     requestUrl: networkResult.requestUrl,
     finalUrl: networkResult.finalUrl,
     status: networkResult.status,
     statusText: networkResult.statusText,
     contentType: networkResult.contentType,
-    stream: withByteLimit(stream, policy.maxContentBytes),
+    stream: networkResult.body,
     responseHeaders: networkResult.responseHeaders,
     setCookieHeaders: networkResult.setCookieHeaders,
     fetchedAtIso: networkResult.fetchedAtIso,
     networkOutcome: outcomeFromHttpStatus(networkResult.finalUrl, networkResult.status, networkResult.statusText)
   };
+}
+
+/**
+ * Reusable HTTP transport for page, stylesheet, and streaming navigation.
+ *
+ * Close the client when its browsing scope ends.
+ */
+export class PageNetworkClient {
+  readonly #client: NodeHttpClient;
+
+  public constructor(configuration: HttpClientConfiguration = {}) {
+    this.#client = new NodeHttpClient({
+      ...configuration,
+      networkSafety: {
+        enabled: false,
+        ...configuration.networkSafety
+      }
+    });
+  }
+
+  public fetchPage(
+    requestUrl: string,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    securityPolicy: SecurityPolicyOptions = DEFAULT_SECURITY_POLICY,
+    requestOptions: PageRequestOptions = {},
+    readLocalFileText: LocalFileReader = defaultReadLocalFileText
+  ): Promise<FetchPageResult> {
+    return fetchPageWithClient(
+      this.#client,
+      requestUrl,
+      timeoutMs,
+      securityPolicy,
+      requestOptions,
+      readLocalFileText
+    );
+  }
+
+  public fetchStylesheet(
+    requestUrl: string,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    securityPolicy: SecurityPolicyOptions = {
+      ...DEFAULT_SECURITY_POLICY,
+      maxContentBytes: 512 * 1024
+    },
+    requestOptions: Pick<PageRequestOptions, "headers" | "signal"> = {},
+    readLocalFileText: LocalFileReader = defaultReadLocalFileText
+  ): Promise<FetchStylesheetResult> {
+    return fetchStylesheetWithClient(
+      this.#client,
+      requestUrl,
+      timeoutMs,
+      securityPolicy,
+      requestOptions,
+      readLocalFileText
+    );
+  }
+
+  public fetchPageStream(
+    requestUrl: string,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    securityPolicy: SecurityPolicyOptions = DEFAULT_SECURITY_POLICY,
+    requestOptions: PageRequestOptions = {},
+    readLocalFileText: LocalFileReader = defaultReadLocalFileText
+  ): Promise<FetchPageStreamResult> {
+    return fetchPageStreamWithClient(
+      this.#client,
+      requestUrl,
+      timeoutMs,
+      securityPolicy,
+      requestOptions,
+      readLocalFileText
+    );
+  }
+
+  public close(): Promise<void> {
+    return this.#client.close();
+  }
+
+  public destroy(reason?: Error): Promise<void> {
+    return this.#client.destroy(reason);
+  }
+}
+
+/** Fetches and buffers one page with an operation-scoped HTTP client. */
+export async function fetchPage(
+  requestUrl: string,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  securityPolicy: SecurityPolicyOptions = DEFAULT_SECURITY_POLICY,
+  requestOptions: PageRequestOptions = {},
+  readLocalFileText: LocalFileReader = defaultReadLocalFileText
+): Promise<FetchPageResult> {
+  const client = new PageNetworkClient();
+  try {
+    return await client.fetchPage(
+      requestUrl,
+      timeoutMs,
+      securityPolicy,
+      requestOptions,
+      readLocalFileText
+    );
+  } finally {
+    await client.close();
+  }
+}
+
+/** Fetches one stylesheet with an operation-scoped HTTP client. */
+export async function fetchStylesheet(
+  requestUrl: string,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  securityPolicy: SecurityPolicyOptions = {
+    ...DEFAULT_SECURITY_POLICY,
+    maxContentBytes: 512 * 1024
+  },
+  requestOptions: Pick<PageRequestOptions, "headers" | "signal"> = {},
+  readLocalFileText: LocalFileReader = defaultReadLocalFileText
+): Promise<FetchStylesheetResult> {
+  const client = new PageNetworkClient();
+  try {
+    return await client.fetchStylesheet(
+      requestUrl,
+      timeoutMs,
+      securityPolicy,
+      requestOptions,
+      readLocalFileText
+    );
+  } finally {
+    await client.close();
+  }
+}
+
+/** Fetches one streaming page and closes its HTTP client with the stream. */
+export async function fetchPageStream(
+  requestUrl: string,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  securityPolicy: SecurityPolicyOptions = DEFAULT_SECURITY_POLICY,
+  requestOptions: PageRequestOptions = {},
+  readLocalFileText: LocalFileReader = defaultReadLocalFileText
+): Promise<FetchPageStreamResult> {
+  const client = new PageNetworkClient();
+  try {
+    const result = await client.fetchPageStream(
+      requestUrl,
+      timeoutMs,
+      securityPolicy,
+      requestOptions,
+      readLocalFileText
+    );
+    return {
+      ...result,
+      stream: closeClientWithStream(result.stream, client)
+    };
+  } catch (error) {
+    await client.destroy(toError(error));
+    throw error;
+  }
+}
+
+function closeClientWithStream(
+  stream: ReadableStream<Uint8Array>,
+  client: PageNetworkClient
+): ReadableStream<Uint8Array> {
+  const reader = stream.getReader();
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const next = await reader.read();
+        if (next.done) {
+          await client.close();
+          controller.close();
+          return;
+        }
+        controller.enqueue(next.value);
+      } catch (error) {
+        await client.destroy(toError(error));
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      await reader.cancel(reason);
+      await client.destroy(
+        reason instanceof Error
+          ? reason
+          : new Error("Page response stream was cancelled.")
+      );
+    }
+  }, { highWaterMark: 0 });
+}
+
+function toError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
 }

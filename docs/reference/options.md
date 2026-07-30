@@ -46,7 +46,16 @@
 - Accepts `text/css` responses and preserves a transport charset when supplied.
 - Uses the same redirect, timeout, cancellation, retry, protocol, and byte-limit behavior as page fetching.
 
+### `PageNetworkClient`
+- Reuses connection pools across page, stream, and stylesheet requests.
+- Provides `fetchPage()`, `fetchPageStream()`, and `fetchStylesheet()` with the
+  same arguments and results as the standalone functions.
+- Call `close()` after normal use or `destroy(error)` to cancel active work.
+- Standalone fetch functions create and release an operation-scoped client.
+
 ### `BrowserSessionOptions`
+- `networkClient` shares an existing `PageNetworkClient`; its owner remains
+  responsible for closing it.
 - `loader` and `streamLoader` replace the built-in page fetchers.
 - `contentBuilder` replaces semantic page-content construction.
 - `stylesheetLoader` replaces external CSS fetching.
@@ -54,11 +63,13 @@
 - `parseOptions` defaults to the package's bounded HTML parse profile.
 - `defaultParseMode` defaults to `"text"` and may be set to `"stream"`.
 - `localFileReader` overrides `file://` reads for tests or custom hosts.
+- A session that creates its own network client releases it through `close()`
+  or `destroy(error)`.
 
 ### `PageRequestOptions`
 - `method`: `"GET"` or `"POST"`.
 - `headers`: request headers merged into the deterministic defaults.
-- `bodyText`: UTF-8 request body for `POST`.
+- `bodyText`: UTF-8 request body for `POST`; supplying it with `GET` is rejected.
 - `signal`: aborts the request, retry wait, and session navigation.
 
 ### `PageSnapshot`

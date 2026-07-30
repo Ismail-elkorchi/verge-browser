@@ -18,4 +18,5 @@ export interface BrowserServices {
   downloadFile(request: DownloadRequest): Promise<DownloadResult>;
   openExternal(target: string): Promise<void>;
   openPath(path: string): Promise<void>;
+  close(): Promise<void>;
 }

@@ -2,6 +2,13 @@ import { spawn } from "node:child_process";
 import { link, mkdir, open, rm, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, parse } from "node:path";
 
+import {
+  HttpFields,
+  mergeHttpFields,
+  NodeHttpClient,
+  parseContentLength
+} from "@ismail-elkorchi/http-client";
+
 import type { BrowserServices, DownloadRequest, DownloadResult } from "../ui/services.js";
 
 async function writeTextFile(path: string, content: string): Promise<void> {
@@ -79,10 +86,13 @@ function decodePathSegment(value: string): string {
   }
 }
 
-function responseFileName(response: Response): string {
-  const disposition = contentDispositionFileName(response.headers.get("content-disposition"));
+function responseFileName(
+  finalUrl: string,
+  contentDisposition: string | null
+): string {
+  const disposition = contentDispositionFileName(contentDisposition);
   if (disposition) return safeFileName(disposition);
-  const lastSegment = new URL(response.url).pathname.split("/").filter(Boolean).at(-1);
+  const lastSegment = new URL(finalUrl).pathname.split("/").filter(Boolean).at(-1);
   return safeFileName(lastSegment ? decodePathSegment(lastSegment) : "download");
 }
 
@@ -105,26 +115,63 @@ async function claimDestination(tempPath: string, directory: string, fileName: s
   throw new Error(`Could not choose a free destination for ${fileName}.`);
 }
 
-async function downloadFile(request: DownloadRequest): Promise<DownloadResult> {
+async function downloadFile(
+  client: NodeHttpClient,
+  request: DownloadRequest
+): Promise<DownloadResult> {
   if (!Number.isSafeInteger(request.maxBytes) || request.maxBytes < 1) {
     throw new RangeError("Download maxBytes must be a positive safe integer.");
   }
   request.signal?.throwIfAborted();
   await mkdir(request.directory, { recursive: true });
-  const response = await fetch(request.url, {
-    redirect: "follow",
-    ...(request.headers === undefined ? {} : { headers: request.headers }),
-    ...(request.signal === undefined ? {} : { signal: request.signal })
+  const fields = mergeHttpFields(
+    new HttpFields([
+      { name: "accept", value: "*/*" },
+      { name: "user-agent", value: "verge-browser/0.2.0" }
+    ]),
+    request.headers === undefined
+      ? undefined
+      : Object.entries(request.headers).map(([name, value]) => ({
+        name,
+        value
+      }))
+  );
+  const response = await client.fetch(request.url, {
+    method: "GET",
+    fields: fields.lines(),
+    ...(request.signal === undefined ? {} : { signal: request.signal }),
+    timeouts: {
+      totalMs: null,
+      responseBodyProgressMs: null
+    },
+    responseContentDecoding: "preserve",
+    responseTransferLimits: {
+      maxWireBytes: request.maxBytes,
+      maxDecodedBytes: request.maxBytes
+    }
   });
-  if (!response.ok || !response.body) {
-    throw new Error(`Download failed: ${String(response.status)} ${response.statusText}`);
+  if (response.kind === "failure") {
+    throw response.error;
   }
-  const contentLength = Number(response.headers.get("content-length"));
-  const totalBytes = Number.isSafeInteger(contentLength) && contentLength >= 0 ? contentLength : null;
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    response.cancel();
+    await response.completion;
+    throw new Error(
+      `Download failed: ${String(response.statusCode)} ${response.statusMessage ?? ""}`
+    );
+  }
+  const totalBytes = parseContentLength(
+    response.fields.first("content-length")
+  );
   if (totalBytes !== null && totalBytes > request.maxBytes) {
+    response.cancel();
+    await response.completion;
     throw new Error(`Download exceeds the ${String(request.maxBytes)} byte limit.`);
   }
-  const fileName = responseFileName(response);
+  const fileName = responseFileName(
+    response.finalUrl,
+    response.fields.first("content-disposition")
+  );
   const tempPath = join(
     request.directory,
     `.${fileName}.part-${String(process.pid)}-${crypto.randomUUID()}`
@@ -139,20 +186,25 @@ async function downloadFile(request: DownloadRequest): Promise<DownloadResult> {
         const next = await reader.read();
         if (next.done) break;
         receivedBytes += next.value.byteLength;
-        if (receivedBytes > request.maxBytes) {
-          await reader.cancel("Download size limit exceeded.");
-          throw new Error(`Download exceeds the ${String(request.maxBytes)} byte limit.`);
-        }
         await handle.write(next.value);
       }
     } finally {
       reader.releaseLock();
+    }
+    const completion = await response.completion;
+    if (completion.kind === "failure") {
+      throw completion.error;
+    }
+    if (completion.kind === "cancelled") {
+      throw new Error("Download was cancelled.");
     }
     await handle.sync();
     await handle.close();
     const path = await claimDestination(tempPath, request.directory, fileName);
     return { path, fileName: basename(path), receivedBytes, totalBytes };
   } catch (error) {
+    response.cancel(error instanceof Error ? error : undefined);
+    await response.completion;
     await handle.close().catch(() => undefined);
     await rm(tempPath, { force: true });
     throw error;
@@ -160,11 +212,16 @@ async function downloadFile(request: DownloadRequest): Promise<DownloadResult> {
 }
 
 export function createNodeBrowserServices(): BrowserServices {
+  const client = new NodeHttpClient({
+    networkSafety: { enabled: false }
+  });
   return {
     async writeTextFile(path: string, content: string): Promise<void> {
       await writeTextFile(path, content);
     },
-    downloadFile,
+    async downloadFile(request): Promise<DownloadResult> {
+      return downloadFile(client, request);
+    },
     async openExternal(target: string): Promise<void> {
       const command = externalOpenCommand(target);
       await runCommand(command.command, command.args);
@@ -173,5 +230,8 @@ export function createNodeBrowserServices(): BrowserServices {
       const command = externalOpenCommand(path);
       await runCommand(command.command, command.args);
     },
+    async close(): Promise<void> {
+      await client.close();
+    }
   };
 }

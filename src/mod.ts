@@ -37,8 +37,8 @@ export {
   fetchPageStream,
   fetchStylesheet,
   readByteStreamToText,
-  classifyNetworkFailure,
   NetworkFetchError,
+  PageNetworkClient,
   type LocalFileReader
 } from "./app/fetch-page.js";
 export {

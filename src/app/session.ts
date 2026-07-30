@@ -13,9 +13,7 @@ import {
 } from "@ismail-elkorchi/html-parser";
 
 import {
-  fetchPage,
-  fetchPageStream,
-  fetchStylesheet,
+  PageNetworkClient,
   type LocalFileReader
 } from "./fetch-page.js";
 import { buildPageContent, documentBaseUrl } from "./render.js";
@@ -87,6 +85,7 @@ interface HistoryEntry {
 }
 
 export interface BrowserSessionOptions {
+  readonly networkClient?: PageNetworkClient;
   readonly loader?: PageLoader;
   readonly streamLoader?: PageStreamLoader;
   readonly contentBuilder?: PageContentBuilder;
@@ -244,6 +243,8 @@ interface LoadedStylesheets {
 }
 
 export class BrowserSession {
+  readonly #networkClient: PageNetworkClient | null;
+  readonly #ownsNetworkClient: boolean;
   readonly #loader: PageLoader;
   readonly #streamLoader: PageStreamLoader;
   readonly #contentBuilder: PageContentBuilder;
@@ -257,16 +258,39 @@ export class BrowserSession {
 
   public constructor(options: BrowserSessionOptions = {}) {
     const localFileReader = options.localFileReader;
+    const needsNetworkClient = (
+      options.loader === undefined
+      || options.streamLoader === undefined
+      || options.stylesheetLoader === undefined
+    );
+    this.#networkClient = options.networkClient
+      ?? (needsNetworkClient ? new PageNetworkClient() : null);
+    this.#ownsNetworkClient = (
+      this.#networkClient !== null
+      && options.networkClient === undefined
+    );
     this.#loader = options.loader
       ?? ((requestUrl, requestOptions) =>
-        fetchPage(requestUrl, undefined, undefined, requestOptions, localFileReader));
+        this.#requiredNetworkClient().fetchPage(
+          requestUrl,
+          undefined,
+          undefined,
+          requestOptions,
+          localFileReader
+        ));
     this.#streamLoader = options.streamLoader
       ?? ((requestUrl, requestOptions) =>
-        fetchPageStream(requestUrl, undefined, undefined, requestOptions, localFileReader));
+        this.#requiredNetworkClient().fetchPageStream(
+          requestUrl,
+          undefined,
+          undefined,
+          requestOptions,
+          localFileReader
+        ));
     this.#contentBuilder = options.contentBuilder ?? buildPageContent;
     this.#stylesheetLoader = options.stylesheetLoader
       ?? ((requestUrl, requestOptions) =>
-        fetchStylesheet(
+        this.#requiredNetworkClient().fetchStylesheet(
           requestUrl,
           undefined,
           options.stylesheetPolicy?.maxStylesheetBytes === undefined
@@ -303,6 +327,25 @@ export class BrowserSession {
       }
     };
     this.#defaultParseMode = options.defaultParseMode ?? "text";
+  }
+
+  public async close(): Promise<void> {
+    if (this.#ownsNetworkClient) {
+      await this.#networkClient?.close();
+    }
+  }
+
+  public async destroy(reason?: Error): Promise<void> {
+    if (this.#ownsNetworkClient) {
+      await this.#networkClient?.destroy(reason);
+    }
+  }
+
+  #requiredNetworkClient(): PageNetworkClient {
+    if (this.#networkClient === null) {
+      throw new Error("The browser session has no default network client.");
+    }
+    return this.#networkClient;
   }
 
   public get current(): PageSnapshot | null {

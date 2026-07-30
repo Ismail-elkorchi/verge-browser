@@ -6,6 +6,8 @@ import { join } from "node:path";
 import test from "node:test";
 import { setImmediate as defer } from "node:timers/promises";
 
+import { HttpClientError } from "@ismail-elkorchi/http-client";
+
 import { createNodeBrowserServices } from "../../dist/runtime/node-browser-services.js";
 
 async function fixture() {
@@ -43,8 +45,8 @@ async function fixture() {
 
 test("Node downloads sanitize names and choose collision-free destinations", async () => {
   const current = await fixture();
+  const services = createNodeBrowserServices();
   try {
-    const services = createNodeBrowserServices();
     const first = await services.downloadFile({
       url: `${current.url}/named`,
       directory: current.directory,
@@ -60,21 +62,25 @@ test("Node downloads sanitize names and choose collision-free destinations", asy
     assert.equal(second.fileName, "report (1).txt");
     assert.equal(await readFile(first.path, "utf8"), "report");
   } finally {
+    await services.close();
     await current.close();
   }
 });
 
 test("Node downloads remove partial files after size rejection and abort", async () => {
   const current = await fixture();
+  const services = createNodeBrowserServices();
   try {
-    const services = createNodeBrowserServices();
     await assert.rejects(
       services.downloadFile({
         url: `${current.url}/oversize`,
         directory: current.directory,
         maxBytes: 4
       }),
-      /byte limit/u
+      (error) => (
+        error instanceof HttpClientError
+        && error.code === "WIRE_RESPONSE_TOO_LARGE"
+      )
     );
 
     const controller = new globalThis.AbortController();
@@ -90,6 +96,7 @@ test("Node downloads remove partial files after size rejection and abort", async
 
     assert.deepEqual(await readdir(current.directory), []);
   } finally {
+    await services.close();
     await current.close();
   }
 });

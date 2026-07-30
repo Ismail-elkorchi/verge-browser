@@ -9,6 +9,8 @@ import {
   validateParserPackageContract
 } from "./parser-package-contract.mjs";
 
+const HTTP_CLIENT_PACKAGE_NAME = "@ismail-elkorchi/http-client";
+
 function run(command, args, { cwd, capture = false } = {}) {
   const result = spawnSync(command, args, {
     cwd,
@@ -43,6 +45,8 @@ function verifyPackedFiles(packEntry) {
     "dist/cli.js",
     "dist/mod.d.ts",
     "dist/mod.js",
+    "node_modules/@ismail-elkorchi/http-client/dist/index.js",
+    "node_modules/@ismail-elkorchi/http-client/package.json",
     "package.json"
   ];
   const missingPaths = requiredPaths.filter((path) => !paths.includes(path));
@@ -52,6 +56,8 @@ function verifyPackedFiles(packEntry) {
       && path !== "README.md"
       && path !== "package.json"
       && !path.startsWith("dist/")
+      && !path.startsWith("node_modules/@ismail-elkorchi/http-client/")
+      && !path.startsWith("node_modules/undici/")
   );
 
   if (missingPaths.length > 0 || unexpectedPaths.length > 0) {
@@ -97,9 +103,15 @@ try {
   );
   await writeFile(
     join(consumerRoot, "smoke.mjs"),
-    `import { parseHtml, renderDocumentToTerminal } from "@ismail-elkorchi/verge-browser";
+    `import {
+  PageNetworkClient,
+  parseHtml,
+  renderDocumentToTerminal
+} from "@ismail-elkorchi/verge-browser";
 
 const document = parseHtml("<main><h1>Packed consumer</h1><p>Public parser.</p></main>");
+const networkClient = new PageNetworkClient();
+await networkClient.close();
 if (
   document.tree.kind !== "document" ||
   document.metadata.inputKind !== "text" ||
@@ -164,11 +176,33 @@ if (!rendered.lines.join("\\n").includes("Packed consumer")) {
     lockEntry: consumerLock.packages?.[`node_modules/${HTML_PARSER_PACKAGE_NAME}`],
     installedManifest: installedParser
   });
+  const installedHttpClient = await readJson(
+    join(
+      consumerRoot,
+      "node_modules",
+      "@ismail-elkorchi",
+      "verge-browser",
+      "node_modules",
+      "@ismail-elkorchi",
+      "http-client",
+      "package.json"
+    )
+  );
+  if (
+    installedHttpClient.name !== HTTP_CLIENT_PACKAGE_NAME
+    || installedHttpClient.version !== "0.1.0"
+    || !/^file:canary\/http-client-0\.1\.0-[a-f0-9]{40}\.tgz$/u.test(
+      installedVerge.dependencies?.[HTTP_CLIENT_PACKAGE_NAME] ?? ""
+    )
+  ) {
+    throw new Error("packed Verge does not contain its pinned http-client");
+  }
 
   run(process.execPath, ["smoke.mjs"], { cwd: consumerRoot });
   process.stdout.write(
     `packed consumer verified: ${workspaceManifest.name}@${workspaceManifest.version} (${String(packedFileCount)} files) -> ` +
-      `${parserEvidence.name}@${parserEvidence.version} ${parserEvidence.integrity}\n`
+      `${parserEvidence.name}@${parserEvidence.version} ${parserEvidence.integrity}; `
+      + `${installedHttpClient.name}@${installedHttpClient.version}\n`
   );
 } finally {
   await rm(temporaryRoot, { recursive: true, force: true });

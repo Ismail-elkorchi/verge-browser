@@ -8,7 +8,7 @@ import { TextDecoder } from "node:util";
 
 import {
   NetworkFetchError,
-  classifyNetworkFailure,
+  PageNetworkClient,
   fetchPage,
   fetchPageStream,
   fetchStylesheet,
@@ -49,6 +49,28 @@ test("fetchPageStream supports about:help without network", async () => {
   const html = await readByteStreamToText(page.stream);
   assert.equal(page.status, 200);
   assert.ok(html.includes("verge-browser"));
+});
+
+test("fetch helpers reject invalid runtime configuration before network activity", async () => {
+  await assert.rejects(
+    fetchPage("about:help", 0),
+    /timeoutMs must be a positive safe integer/u
+  );
+  await assert.rejects(
+    fetchPage("about:help", 15_000, { maxRequestRetries: -1 }),
+    /maxRequestRetries must be a non-negative safe integer/u
+  );
+  await assert.rejects(
+    fetchPage("about:help", 15_000, { unexpected: true }),
+    /Unknown security policy option: unexpected/u
+  );
+  await assert.rejects(
+    fetchPage("about:help", 15_000, undefined, {
+      method: "GET",
+      bodyText: "not permitted"
+    }),
+    /GET requests cannot contain bodyText/u
+  );
 });
 
 test("fetchPage blocks unsupported redirect protocols", async () => {
@@ -295,20 +317,31 @@ test("fetchPage marks HTTP failures as http_error while returning body", async (
   }
 });
 
-test("classifyNetworkFailure maps DNS and TLS failure codes", () => {
-  const dnsOutcome = classifyNetworkFailure(
-    new Error("fetch failed", { cause: { code: "ENOTFOUND" } }),
-    "https://missing.example/"
-  );
-  assert.equal(dnsOutcome.kind, "dns");
-  assert.equal(dnsOutcome.detailCode, "ENOTFOUND");
-
-  const tlsOutcome = classifyNetworkFailure(
-    new Error("fetch failed", { cause: { code: "CERT_HAS_EXPIRED" } }),
-    "https://expired.example/"
-  );
-  assert.equal(tlsOutcome.kind, "tls");
-  assert.equal(tlsOutcome.detailCode, "CERT_HAS_EXPIRED");
+test("PageNetworkClient reuses connections across requests", async () => {
+  let connectionCount = 0;
+  const server = createServer((_, response) => {
+    response.setHeader("content-type", "text/html");
+    response.end("<p>reused</p>");
+  });
+  server.on("connection", () => {
+    connectionCount += 1;
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("server address unavailable");
+  }
+  const client = new PageNetworkClient();
+  const url = `http://127.0.0.1:${String(address.port)}/`;
+  try {
+    for (let index = 0; index < 8; index += 1) {
+      await client.fetchPage(url);
+    }
+    assert.equal(connectionCount <= 4, true);
+  } finally {
+    await client.close();
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test("fetchPage forwards request options and captures set-cookie headers", async () => {
@@ -316,7 +349,10 @@ test("fetchPage forwards request options and captures set-cookie headers", async
     if (request.method === "POST") {
       response.statusCode = 200;
       response.setHeader("content-type", "text/html; charset=utf-8");
-      response.setHeader("set-cookie", "sid=abc; Path=/; HttpOnly");
+      response.setHeader("set-cookie", [
+        "sid=abc; Path=/; HttpOnly",
+        "theme=dark; Path=/"
+      ]);
       response.end("<html><body><h1>posted</h1></body></html>");
       return;
     }
@@ -345,7 +381,10 @@ test("fetchPage forwards request options and captures set-cookie headers", async
     assert.equal(page.status, 200);
     assert.equal(page.networkOutcome.kind, "ok");
     assert.ok(page.html.includes("posted"));
-    assert.deepEqual(page.setCookieHeaders, ["sid=abc; Path=/; HttpOnly"]);
+    assert.deepEqual(page.setCookieHeaders, [
+      "sid=abc; Path=/; HttpOnly",
+      "theme=dark; Path=/"
+    ]);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
