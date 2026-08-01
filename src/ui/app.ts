@@ -258,6 +258,7 @@ function openPicker(
   query = ""
 ): BrowserTuiState {
   const entries = controller.pickerEntries(picker, state.documents, state.activeDocumentIndex, query);
+  const selectedId = entries[0]?.id;
   return {
     ...state,
     overlay: {
@@ -265,7 +266,10 @@ function openPicker(
       pickerKind: picker,
       title: picker === "recall" ? `Search visited pages: ${query}` : `${picker[0]?.toUpperCase() ?? ""}${picker.slice(1)}`,
       index: prepareSearchPickerIndex(entries),
-      state: { query: "", selectedIndex: 0 }
+      state: {
+        query: "",
+        ...(selectedId === undefined ? {} : { selectedId })
+      }
     }
   };
 }
@@ -909,6 +913,13 @@ export function updateBrowser(
     case "pickerAction":
       return state.overlay?.kind !== "picker"
         ? result(state)
+        : message.action.kind === "activate"
+          ? updateBrowser(
+            controller,
+            state,
+            { kind: "pickerSelect", value: message.action.entry.value },
+            context
+          )
         : result({
           ...state,
           overlay: {

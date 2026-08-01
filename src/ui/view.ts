@@ -35,13 +35,18 @@ import {
   type RadioGroupAction
 } from "@ismail-elkorchi/terminal-ui/components";
 import {
-  customComposite,
+  custom,
   type CustomCompositeRenderer,
   type Element
 } from "@ismail-elkorchi/terminal-ui/component";
 import { column, overlay, row, splitPane, surface, viewport } from "@ismail-elkorchi/terminal-ui/layout";
 import type { RoutedPointerEvent } from "@ismail-elkorchi/terminal-ui/input";
-import type { RenderSpan, TerminalStyle } from "@ismail-elkorchi/terminal-ui/renderer";
+import type {
+  Measurement,
+  Rect,
+  RenderSpan,
+  TerminalStyle
+} from "@ismail-elkorchi/terminal-ui/renderer";
 import type { TuiContext } from "@ismail-elkorchi/terminal-ui/tui";
 
 import { extractForms, type FormControl, type FormEntry } from "../app/forms.js";
@@ -298,35 +303,59 @@ function inlineFormControl(
             ...(control.step === undefined ? {} : { step: control.step })
           })
         };
-      return field([numberInput({
+      const numberOptions = {
         id: control.id,
         presentation: numberInputPresentation(numberEditor),
         ...(control.placeholder === undefined ? {} : { placeholder: control.placeholder }),
-        required: control.required,
-        disabled: control.disabled || control.readOnly,
-        onAction: (action): BrowserTuiMessage => ({ kind: "formNumber", controlId: control.id, action })
-      })], { id: `${control.id}:field`, label: control.label, required: control.required });
+        required: control.required
+      };
+      const input = control.disabled || control.readOnly
+        ? numberInput({ ...numberOptions, disabled: true })
+        : numberInput({
+          ...numberOptions,
+          onAction: (action): BrowserTuiMessage => ({
+            kind: "formNumber",
+            controlId: control.id,
+            action
+          })
+        });
+      return field([input], {
+        id: `${control.id}:field`,
+        label: control.label,
+        required: control.required
+      });
     }
     const presentation = editor?.kind === "text"
       ? textInputPresentation(editor.state)
       : { value, cursor: value.length };
+    const inputOptions = {
+      id: control.id,
+      presentation,
+      ...(control.placeholder === undefined ? {} : { placeholder: control.placeholder }),
+      required: control.required
+    };
+    const disabled = control.disabled || control.readOnly;
     const input = control.inputType === "password"
-      ? passwordInput<never, BrowserTuiMessage>({
-        id: control.id,
-        presentation,
-        ...(control.placeholder === undefined ? {} : { placeholder: control.placeholder }),
-        required: control.required,
-        disabled: control.disabled || control.readOnly,
-        onAction: (action): BrowserTuiMessage => ({ kind: "formText", controlId: control.id, action })
-      })
-      : textInput<never, BrowserTuiMessage>({
-        id: control.id,
-        presentation,
-        ...(control.placeholder === undefined ? {} : { placeholder: control.placeholder }),
-        required: control.required,
-        disabled: control.disabled || control.readOnly,
-        onAction: (action): BrowserTuiMessage => ({ kind: "formText", controlId: control.id, action })
-      });
+      ? disabled
+        ? passwordInput({ ...inputOptions, disabled: true })
+        : passwordInput<never, BrowserTuiMessage>({
+          ...inputOptions,
+          onAction: (action): BrowserTuiMessage => ({
+            kind: "formText",
+            controlId: control.id,
+            action
+          })
+        })
+      : disabled
+        ? textInput({ ...inputOptions, disabled: true })
+        : textInput<never, BrowserTuiMessage>({
+          ...inputOptions,
+          onAction: (action): BrowserTuiMessage => ({
+            kind: "formText",
+            controlId: control.id,
+            action
+          })
+        });
     return field([input], { id: `${control.id}:field`, label: control.label, required: control.required });
   }
   if (control.kind === "textarea") {
@@ -346,22 +375,26 @@ function inlineFormControl(
     })], { id: `${control.id}:field`, label: control.label, required: control.required });
   }
   if (control.kind === "checkbox") {
-    return checkbox({
+    const checkboxOptions = {
       id: control.id,
       label: control.label,
       checked: values.includes(control.value),
-      disabled: control.disabled,
-      required: control.required,
-      onChange: (checked): BrowserTuiMessage => ({
-        kind: "formValues",
-        controlId: control.id,
-        values: checked ? [control.value] : []
-      })
-    });
+      required: control.required
+    };
+    return control.disabled
+      ? checkbox({ ...checkboxOptions, disabled: true })
+      : checkbox({
+        ...checkboxOptions,
+        onChange: (checked): BrowserTuiMessage => ({
+          kind: "formValues",
+          controlId: control.id,
+          values: checked ? [control.value] : []
+        })
+      });
   }
   if (control.kind === "select") {
     if (control.multiple) {
-      return checkboxGroup({
+      const groupOptions = {
         id: control.id,
         label: control.label,
         options: control.options.map((option, index) => ({
@@ -373,14 +406,22 @@ function inlineFormControl(
         selected: control.options.flatMap((option, index) =>
           values.includes(option.value) ? [`${control.id}:${String(index)}`] : []
         ),
-        disabled: control.disabled,
-        required: control.required,
-        onAction: (action): BrowserTuiMessage => multiChoiceAction(control, values, action)
-      });
+        required: control.required
+      };
+      return control.disabled
+        ? checkboxGroup({ ...groupOptions, disabled: true })
+        : checkboxGroup({
+          ...groupOptions,
+          onAction: (action): BrowserTuiMessage => multiChoiceAction(control, values, action)
+        });
     }
     const selectedIndex = control.options.findIndex((option) => values.includes(option.value));
     const editor = document.formEditors[control.id];
-    return select({
+    const closedPresentation = {
+      kind: "closed" as const,
+      ...(selectedIndex < 0 ? {} : { selected: `${control.id}:${String(selectedIndex)}` })
+    };
+    const selectOptions = {
       id: control.id,
       label: control.label,
       options: control.options.map((option, index) => ({
@@ -389,40 +430,55 @@ function inlineFormControl(
         value: option.value,
         disabled: option.disabled
       })),
-      presentation: editor?.kind === "select"
-        ? editor.state
-        : {
-          kind: "closed",
-          ...(selectedIndex < 0 ? {} : { selected: `${control.id}:${String(selectedIndex)}` })
-        },
-      disabled: control.disabled,
-      required: control.required,
-      onAction: (action): BrowserTuiMessage => ({ kind: "formSelect", controlId: control.id, action })
-    });
+      required: control.required
+    };
+    return control.disabled
+      ? select({
+        ...selectOptions,
+        presentation: closedPresentation,
+        disabled: true
+      })
+      : select({
+        ...selectOptions,
+        presentation: editor?.kind === "select" ? editor.state : closedPresentation,
+        onAction: (action): BrowserTuiMessage => ({
+          kind: "formSelect",
+          controlId: control.id,
+          action
+        })
+      });
   }
   if (control.kind === "submit") {
-    return button({
+    const buttonOptions = {
       id: control.id,
       label: control.label || control.value || "Submit",
-      tone: "primary",
-      disabled: control.disabled,
-      onPress: (): BrowserTuiMessage => ({
-        kind: "submitForm",
-        formId,
-        submitterId: control.id
-      })
-    });
+      tone: "primary" as const
+    };
+    return control.disabled
+      ? button({ ...buttonOptions, disabled: true })
+      : button({
+        ...buttonOptions,
+        onPress: (): BrowserTuiMessage => ({
+          kind: "submitForm",
+          formId,
+          submitterId: control.id
+        })
+      });
   }
   if (control.kind === "reset") {
-    return button({
+    const buttonOptions = {
       id: control.id,
-      label: control.label || "Reset",
-      disabled: control.disabled,
-      onPress: (): BrowserTuiMessage => ({
-        kind: "resetForm",
-        formId
-      })
-    });
+      label: control.label || "Reset"
+    };
+    return control.disabled
+      ? button({ ...buttonOptions, disabled: true })
+      : button({
+        ...buttonOptions,
+        onPress: (): BrowserTuiMessage => ({
+          kind: "resetForm",
+          formId
+        })
+      });
   }
   return null;
 }
@@ -475,33 +531,64 @@ function inlineForm(document: BrowserDocumentState, entry: FormEntry): Element<B
   });
 }
 
+function browserDocumentChildBounds(
+  state: BrowserDocumentState,
+  bounds: Rect,
+  childCount: number,
+  measureChild: (index: number) => Measurement
+): readonly Rect[] {
+  const layout = documentLayout(state, bounds.width);
+  const contentBounds = documentContentBounds(bounds);
+  const entries = forms(state);
+  return Array.from({ length: childCount }, (_, index) => {
+    const entry = entries[index];
+    if (!entry) {
+      return { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 };
+    }
+    const first = layout.rows.findIndex((candidate) =>
+      candidate.fragments.some((fragment) => fragment.blockId === entry.id)
+    );
+    if (first < 0) {
+      return { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 };
+    }
+    const reservedRows = layout.rows.filter((candidate) =>
+      candidate.fragments.some((fragment) => fragment.blockId === entry.id)
+    ).length;
+    return {
+      row: contentBounds.row + first,
+      column: contentBounds.column,
+      width: contentBounds.width,
+      height: Math.max(reservedRows, measureChild(index).preferredHeight)
+    };
+  });
+}
+
 const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, BrowserTuiMessage> = {
-  layout({ state, bounds, childCount, measureChild }) {
+  kind: "composite",
+  name: "browserDocument",
+  parts: [],
+  measure({ state, bounds, childCount, measureChild }) {
     const layout = documentLayout(state, bounds.width);
-    const contentBounds = documentContentBounds(bounds);
-    const entries = forms(state);
-    return Array.from({ length: childCount }, (_, index) => {
-      const entry = entries[index];
-      if (!entry) return { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 };
-      const first = layout.rows.findIndex((candidate) =>
-        candidate.fragments.some((fragment) => fragment.blockId === entry.id)
-      );
-      const count = layout.rows.filter((candidate) =>
-        candidate.fragments.some((fragment) => fragment.blockId === entry.id)
-      ).length;
-      if (first < 0) {
-        return { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 };
-      }
-      const childHeight = Math.max(count, measureChild(index).preferredHeight);
-      return {
-        row: contentBounds.row + first,
-        column: contentBounds.column,
-        width: contentBounds.width,
-        height: childHeight
-      };
-    });
+    const childBounds = browserDocumentChildBounds(
+      state,
+      bounds,
+      childCount,
+      measureChild
+    );
+    return {
+      minWidth: 0,
+      minHeight: 0,
+      preferredWidth: bounds.width,
+      preferredHeight: Math.max(
+        layout.rows.length,
+        ...childBounds.map((child) => child.row - bounds.row + child.height)
+      )
+    };
   },
-  render({ state, bounds, viewport: visibleBounds, target, focusedTargetId }) {
+  layout({ state, bounds, childCount, measureChild }) {
+    return browserDocumentChildBounds(state, bounds, childCount, measureChild);
+  },
+  renderBeforeChildren({ state, bounds, viewport: visibleBounds, target, focusedTargetId }) {
     if (bounds.width <= 0 || bounds.height <= 0) return;
     const layout = documentLayout(state, bounds.width);
     const focusedAction = actionForId(state, focusedTargetId);
@@ -668,7 +755,7 @@ function browserDocument(
   const layout = documentLayout(document, contentColumns);
   const scrollRow = documentScrollRow(document, layout);
   const children = forms(document).map((entry) => inlineForm(document, entry));
-  const content = customComposite({
+  const content = custom({
     id: `browser-${document.id}`,
     renderer: browserDocumentRenderer,
     state: document,
@@ -676,10 +763,7 @@ function browserDocument(
   });
   return surface(viewport(content, {
     id: `browser-viewport-${document.id}`,
-    scrollRow,
-    scrollColumn: 0,
-    contentRows: layout.rows.length,
-    contentColumns,
+    offset: { row: scrollRow },
     scrollbar: { axis: "vertical", visible: "auto" },
     scrollPolicy: { wheel: { unit: "line", rows: 3 } },
     onScroll: (event): BrowserTuiMessage => ({
@@ -834,10 +918,7 @@ function sidePanel(state: BrowserTuiState): Element<BrowserTuiMessage> {
     header,
     viewport(column(panelContent), {
       id: "browser-side-panel-scroll",
-      scrollRow: state.sidePanelScroll.offsetRow,
-      scrollColumn: 0,
-      contentRows: panelContent.length,
-      contentColumns: 38,
+      offset: { row: state.sidePanelScroll.offsetRow },
       scrollbar: { axis: "vertical", visible: "auto" },
       onScroll: (event): BrowserTuiMessage => ({ kind: "sidePanelScroll", event })
     })
@@ -871,9 +952,39 @@ function toolbar(
     keys: { escape: (): BrowserTuiMessage => ({ kind: "cancelOmnibox" }) }
   });
   const showLibrary = columns >= 96;
+  const back = document.canGoBack
+    ? button({
+      id: "browser-back",
+      label: "←",
+      density: "compact",
+      tone: "ghost",
+      onPress: (): BrowserTuiMessage => ({ kind: "navigate", operation: "back" })
+    })
+    : button({
+      id: "browser-back",
+      label: "←",
+      density: "compact",
+      tone: "ghost",
+      disabled: true
+    });
+  const forward = document.canGoForward
+    ? button({
+      id: "browser-forward",
+      label: "→",
+      density: "compact",
+      tone: "ghost",
+      onPress: (): BrowserTuiMessage => ({ kind: "navigate", operation: "forward" })
+    })
+    : button({
+      id: "browser-forward",
+      label: "→",
+      density: "compact",
+      tone: "ghost",
+      disabled: true
+    });
   return surface(row([
-    button({ id: "browser-back", label: "←", density: "compact", tone: "ghost", disabled: !document.canGoBack, onPress: (): BrowserTuiMessage => ({ kind: "navigate", operation: "back" }) }),
-    button({ id: "browser-forward", label: "→", density: "compact", tone: "ghost", disabled: !document.canGoForward, onPress: (): BrowserTuiMessage => ({ kind: "navigate", operation: "forward" }) }),
+    back,
+    forward,
     button({
       id: "browser-reload",
       label: document.loading ? "■" : "↻",
@@ -1057,9 +1168,8 @@ function pickerView(picker: PickerOverlay): Element<BrowserTuiMessage> {
     id: "browser-picker-list",
     searchPickerIndex: picker.index,
     query: picker.state.query,
-    selectedIndex: picker.state.selectedIndex,
+    ...(picker.state.selectedId === undefined ? {} : { selectedId: picker.state.selectedId }),
     onAction: (action): BrowserTuiMessage => ({ kind: "pickerAction", action }),
-    onSelect: (entry): BrowserTuiMessage => ({ kind: "pickerSelect", value: entry.value }),
     keys: {
       enter: (): BrowserTuiMessage => {
         const value = selectedSearchPickerEntry({ searchPickerIndex: picker.index, state: picker.state })?.value;

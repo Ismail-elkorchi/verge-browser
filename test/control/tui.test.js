@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import {
+  createDiagnosticOccurrenceReporter,
+  diagnostic
+} from "@ismail-elkorchi/terminal-ui";
 import { validateAccessibleSnapshot } from "@ismail-elkorchi/terminal-ui/accessibility";
+import { selectedSearchPickerEntry } from "@ismail-elkorchi/terminal-ui/behavior";
 import { renderFramePlain } from "@ismail-elkorchi/terminal-ui/renderer";
 import { createTerminalHarness } from "@ismail-elkorchi/terminal-ui/testing";
 import { measureTextCells } from "@ismail-elkorchi/terminal-ui/text";
@@ -192,6 +197,8 @@ test("Verge renders a browser shell and preserves navigation, focus, scrolling, 
   assert.equal(runtime.state().documents[0].snapshot.content.title, "Index");
   assert.equal(findRole(runtime.frame().accessibility.root, "document")?.label, "Index");
   assert.equal(findRole(runtime.frame().accessibility.root, "toolbar")?.label, "Browser navigation");
+  assert.equal(findRoleWithLabel(runtime.frame().accessibility.root, "button", "←")?.disabled, true);
+  assert.equal(runtime.frame().hitTargets?.some((target) => target.id === "browser-back:control"), false);
   assert.equal(validateAccessibleSnapshot(runtime.frame().accessibility).ok, true);
 
   const focusedActionId = runtime.state().documents[0].snapshot.content.actions[0].id;
@@ -236,7 +243,9 @@ test("Verge renders a browser shell and preserves navigation, focus, scrolling, 
     track.bounds.column
   ));
   assert.notDeepEqual(runtime.state().documents[0].scrollAnchor, anchorAfterWheel);
-  assert.equal(runtime.diagnostics().some((item) => item.severity === "error" || item.severity === "fatal"), false);
+  assert.equal(runtime.diagnostics().some((item) =>
+    item.diagnostic.severity === "error" || item.diagnostic.severity === "fatal"
+  ), false);
 
   await runtime.handleInput(textEvent("q"));
   assert.equal(runtime.exit().status, "completed");
@@ -447,16 +456,42 @@ test("browser and link actions use anchored menus instead of modal button grids"
   assert.equal(runtime.state().overlay, null);
 });
 
+test("browser pickers retain stable selection identity and activate generic values", async () => {
+  const { runtime } = await fixture();
+
+  await runtime.dispatch({ kind: "openPicker", picker: "links" });
+  const overlay = runtime.state().overlay;
+  assert.equal(overlay?.kind, "picker");
+  const selected = selectedSearchPickerEntry({
+    searchPickerIndex: overlay.index,
+    state: overlay.state
+  });
+  assert.ok(selected);
+  assert.equal(overlay.state.selectedId, selected.id);
+
+  await runtime.dispatch({
+    kind: "pickerAction",
+    action: { kind: "activate", entry: selected }
+  });
+  await waitUntil(
+    runtime,
+    () => runtime.state().documents[0].snapshot.finalUrl === "https://example.test/next"
+  );
+});
+
 test("browser runtime errors retain the terminal diagnostic cause", () => {
-  const message = browserTuiFailureMessage([{
-    severity: "error",
-    message: "TUI run failed before completion.",
-    cause: {
-      name: "RangeError",
-      message: "Custom composite child 0 returned bounds outside its parent."
-    },
-    hint: "Inspect the renderer extension bounds."
-  }]);
+  const occurrence = createDiagnosticOccurrenceReporter("browser-test").report(diagnostic(
+    "TUI_RUN_FAILED",
+    "TUI run failed before completion.",
+    {
+      cause: {
+        name: "RangeError",
+        message: "Custom composite child 0 returned bounds outside its parent."
+      },
+      hint: "Inspect the renderer extension bounds."
+    }
+  ));
+  const message = browserTuiFailureMessage([occurrence]);
 
   assert.equal(
     message,
@@ -679,11 +714,10 @@ test("non-HTML navigation offers a download instead of replacing the page", asyn
 });
 
 test("runTui owns the terminal lifecycle and exits through the app binding", async () => {
-  const { runtime } = await fixture();
-  const app = runtime.app;
+  const { runtime, prepared } = await fixture();
   await runtime.dispose();
   const harness = createTerminalHarness({ terminalSize: { columns: 100, rows: 24 } });
-  const running = runTui(app, harness.host);
+  const running = runTui(prepared.app, harness.host);
   await harness.input("q");
   const exit = await running;
 

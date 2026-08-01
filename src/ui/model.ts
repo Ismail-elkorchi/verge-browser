@@ -211,7 +211,7 @@ export type BrowserTuiMessage =
   | { readonly kind: "tabs"; readonly action: TabAction }
   | { readonly kind: "actionPaletteAction"; readonly action: CommandInputAction }
   | { readonly kind: "actionPaletteSubmit"; readonly value: string }
-  | { readonly kind: "pickerAction"; readonly action: SearchPickerAction }
+  | { readonly kind: "pickerAction"; readonly action: SearchPickerAction<PickerValue> }
   | { readonly kind: "pickerSelect"; readonly value?: PickerValue }
   | { readonly kind: "openFind" }
   | { readonly kind: "findAction"; readonly action: TextInputAction }

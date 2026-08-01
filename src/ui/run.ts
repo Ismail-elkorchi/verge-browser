@@ -76,14 +76,14 @@ export function browserTuiFailureMessage(diagnostics: readonly DiagnosticOccurre
   let failure: DiagnosticOccurrence | undefined;
   for (let index = diagnostics.length - 1; index >= 0; index -= 1) {
     const item = diagnostics[index];
-    if (item?.severity === "fatal" || item?.severity === "error") {
+    if (item?.diagnostic.severity === "fatal" || item?.diagnostic.severity === "error") {
       failure = item;
       break;
     }
   }
   if (failure === undefined) return "The terminal UI stopped because of a runtime error.";
-  const cause = diagnosticCauseMessage(failure.cause);
-  return [failure.message, cause, failure.hint]
+  const cause = diagnosticCauseMessage(failure.diagnostic.cause);
+  return [failure.diagnostic.message, cause, failure.diagnostic.hint]
     .filter((part, index, parts): part is string =>
       part !== undefined
       && part.length > 0
