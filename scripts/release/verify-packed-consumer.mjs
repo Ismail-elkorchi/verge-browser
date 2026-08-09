@@ -45,8 +45,6 @@ function verifyPackedFiles(packEntry) {
     "dist/cli.js",
     "dist/mod.d.ts",
     "dist/mod.js",
-    "node_modules/@ismail-elkorchi/http-client/dist/index.js",
-    "node_modules/@ismail-elkorchi/http-client/package.json",
     "package.json"
   ];
   const missingPaths = requiredPaths.filter((path) => !paths.includes(path));
@@ -56,8 +54,6 @@ function verifyPackedFiles(packEntry) {
       && path !== "README.md"
       && path !== "package.json"
       && !path.startsWith("dist/")
-      && !path.startsWith("node_modules/@ismail-elkorchi/http-client/")
-      && !path.startsWith("node_modules/undici/")
   );
 
   if (missingPaths.length > 0 || unexpectedPaths.length > 0) {
@@ -181,21 +177,18 @@ if (!rendered.lines.join("\\n").includes("Packed consumer")) {
       consumerRoot,
       "node_modules",
       "@ismail-elkorchi",
-      "verge-browser",
-      "node_modules",
-      "@ismail-elkorchi",
       "http-client",
       "package.json"
     )
   );
   if (
     installedHttpClient.name !== HTTP_CLIENT_PACKAGE_NAME
-    || installedHttpClient.version !== "0.1.0"
-    || !/^file:canary\/http-client-0\.1\.0-[a-f0-9]{40}\.tgz$/u.test(
-      installedVerge.dependencies?.[HTTP_CLIENT_PACKAGE_NAME] ?? ""
-    )
+    || installedVerge.dependencies?.[HTTP_CLIENT_PACKAGE_NAME]
+      !== workspaceManifest.dependencies?.[HTTP_CLIENT_PACKAGE_NAME]
+    || consumerLock.packages?.[`node_modules/${HTTP_CLIENT_PACKAGE_NAME}`]?.version
+      !== installedHttpClient.version
   ) {
-    throw new Error("packed Verge does not contain its pinned http-client");
+    throw new Error("packed Verge does not install its declared http-client release");
   }
 
   run(process.execPath, ["smoke.mjs"], { cwd: consumerRoot });

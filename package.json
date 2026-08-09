@@ -32,9 +32,6 @@
     "README.md",
     "LICENSE"
   ],
-  "bundledDependencies": [
-    "@ismail-elkorchi/http-client"
-  ],
   "scripts": {
     "build": "node scripts/build/clean-dist.mjs && tsc -p tsconfig.build.json",
     "check": "npm run check:core && npm run smoke:node && npm run test:fuzz",
@@ -60,7 +57,7 @@
   "dependencies": {
     "@ismail-elkorchi/css-parser": "0.2.0",
     "@ismail-elkorchi/html-parser": "0.2.1",
-    "@ismail-elkorchi/http-client": "file:canary/http-client-0.1.0-12d6ab909c578624274b388b8e4959a738a6a135.tgz",
+    "@ismail-elkorchi/http-client": "^0.1.0",
     "@ismail-elkorchi/terminal-ui": "git+https://github.com/Ismail-elkorchi/terminal-ui.git#f77ada46261cc8582d756cfe0dcc0d7a3b4d8a9b",
     "tough-cookie": "6.0.2"
   },
