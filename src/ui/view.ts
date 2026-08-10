@@ -7,7 +7,6 @@ import {
   dropdownMenuPresentation,
   numberInputPresentation,
   scrollReducer,
-  selectedSearchPickerEntry,
   textInputPresentation
 } from "@ismail-elkorchi/terminal-ui/behavior";
 import {
@@ -31,13 +30,15 @@ import {
   text,
   textArea,
   textInput,
+  type ButtonAction,
   type CheckboxGroupAction,
   type RadioGroupAction
 } from "@ismail-elkorchi/terminal-ui/components";
 import {
-  custom,
-  type CustomCompositeRenderer,
-  type Element
+  defineComponent,
+  ignoreMessage,
+  type Element,
+  type MessageResolution
 } from "@ismail-elkorchi/terminal-ui/component";
 import { column, overlay, row, splitPane, surface, viewport } from "@ismail-elkorchi/terminal-ui/layout";
 import type { RoutedPointerEvent } from "@ismail-elkorchi/terminal-ui/input";
@@ -53,11 +54,11 @@ import { extractForms, type FormControl, type FormEntry } from "../app/forms.js"
 import type {
   PageAction,
   PageBlock,
+  PageLayout,
   PageLayoutRow,
   PageTextStyle
 } from "../app/types.js";
 import {
-  activeSearchMatch,
   documentContentBounds,
   documentLayout,
   documentScrollRow
@@ -74,10 +75,34 @@ import type {
 } from "./model.js";
 import { browserMenuItems, linkMenuItems } from "./model.js";
 
-function actionForId(document: BrowserDocumentState, id: string | undefined): PageAction | undefined {
+interface BrowserDocumentViewModel {
+  readonly id: string;
+  readonly content: BrowserDocumentState["snapshot"]["content"];
+  readonly layout: PageLayout;
+  readonly finalUrl: string;
+  readonly search: BrowserDocumentState["search"];
+  readonly forms: readonly FormEntry[];
+  readonly formValues: BrowserDocumentState["formValues"];
+  readonly formEditors: BrowserDocumentState["formEditors"];
+}
+
+interface BrowserDocumentComponentOptions {
+  readonly document: BrowserDocumentViewModel;
+}
+
+interface BrowserDocumentComponentModel {
+  readonly document: BrowserDocumentViewModel;
+}
+
+type BrowserDocumentAction = Extract<
+  BrowserTuiMessage,
+  { readonly kind: "activateActionAt" | "openLinkMenu" }
+>;
+
+function actionForId(document: BrowserDocumentViewModel, id: string | undefined): PageAction | undefined {
   return id === undefined
     ? undefined
-    : document.snapshot.content.actions.find((action) => action.id === id);
+    : document.content.actions.find((action) => action.id === id);
 }
 
 function accessibleBlock(block: PageBlock) {
@@ -128,14 +153,14 @@ function terminalStyle(style: PageTextStyle | undefined): TerminalStyle {
 }
 
 function rowSegments(
-  document: BrowserDocumentState,
+  document: BrowserDocumentViewModel,
   layoutRow: PageLayoutRow,
   rowIndex: number,
   focusedActionId: string | undefined
 ): readonly RenderSpan[] {
   const rowText = layoutRow.text;
-  const blocksById = new Map(document.snapshot.content.blocks.map((block) => [block.id, block]));
-  const links = document.snapshot.content.links.flatMap((link) => {
+  const blocksById = new Map(document.content.blocks.map((block) => [block.id, block]));
+  const links = document.content.links.flatMap((link) => {
     return layoutRow.fragments.flatMap((fragment) => {
       if (link.blockId !== fragment.blockId) return [];
       const start = Math.max(link.textOffset, fragment.blockStartCodeUnitIndex);
@@ -152,7 +177,7 @@ function rowSegments(
         }];
     });
   });
-  const active = activeSearchMatch(document);
+  const active = document.search?.matches[document.search.activeMatchIndex];
   const searchRanges: { readonly start: number; readonly end: number; readonly active: boolean }[] = [];
   for (const match of document.search?.matches ?? []) {
     if (match.rowIndex !== rowIndex) continue;
@@ -221,17 +246,17 @@ function rowSegments(
     spans.push({
       text: rowText.slice(start, end),
       style,
-      ...(link === undefined ? {} : { link: { href: link.resolvedHref, id: link.id } })
+      ...(link === undefined ? {} : { link: { href: link.resolvedHref } })
     });
   }
   return spans;
 }
 
-function forms(document: BrowserDocumentState): readonly FormEntry[] {
-  return extractForms(document.snapshot.document.tree, document.snapshot.finalUrl);
+function forms(document: BrowserDocumentViewModel): readonly FormEntry[] {
+  return document.forms;
 }
 
-function formControlValues(document: BrowserDocumentState, control: FormControl): readonly string[] {
+function formControlValues(document: BrowserDocumentViewModel, control: FormControl): readonly string[] {
   const explicit = document.formValues[control.id];
   if (explicit !== undefined) return explicit;
   if (control.kind === "hidden" || control.kind === "text" || control.kind === "textarea") return [control.value];
@@ -280,14 +305,14 @@ function multiChoiceAction(
 }
 
 function inlineFormControl(
-  document: BrowserDocumentState,
+  document: BrowserDocumentViewModel,
   control: FormControl,
   formId: string
 ): Element<BrowserTuiMessage> | null {
   const values = formControlValues(document, control);
   if (control.kind === "hidden") return null;
   if (control.kind === "unsupported") {
-    return text(`${control.label}: ${control.reason}`, { id: `${control.id}:unsupported` });
+    return text({ content: `${control.label}: ${control.reason}`, id: `${control.id}:unsupported` });
   }
   if (control.kind === "text") {
     const editor = document.formEditors[control.id];
@@ -309,20 +334,21 @@ function inlineFormControl(
         ...(control.placeholder === undefined ? {} : { placeholder: control.placeholder }),
         required: control.required
       };
-      const input = control.disabled || control.readOnly
+      const input = control.disabled
         ? numberInput({ ...numberOptions, disabled: true })
         : numberInput({
           ...numberOptions,
+          readOnly: control.readOnly,
           onAction: (action): BrowserTuiMessage => ({
             kind: "formNumber",
             controlId: control.id,
             action
           })
         });
-      return field([input], {
+      return field({
         id: `${control.id}:field`,
         label: control.label,
-        required: control.required
+        slots: { content: [input] }
       });
     }
     const presentation = editor?.kind === "text"
@@ -334,29 +360,34 @@ function inlineFormControl(
       ...(control.placeholder === undefined ? {} : { placeholder: control.placeholder }),
       required: control.required
     };
-    const disabled = control.disabled || control.readOnly;
     const input = control.inputType === "password"
-      ? disabled
+      ? control.disabled
         ? passwordInput({ ...inputOptions, disabled: true })
-        : passwordInput<never, BrowserTuiMessage>({
+        : passwordInput({
           ...inputOptions,
+          readOnly: control.readOnly,
           onAction: (action): BrowserTuiMessage => ({
             kind: "formText",
             controlId: control.id,
             action
           })
         })
-      : disabled
+      : control.disabled
         ? textInput({ ...inputOptions, disabled: true })
-        : textInput<never, BrowserTuiMessage>({
+        : textInput({
           ...inputOptions,
+          readOnly: control.readOnly,
           onAction: (action): BrowserTuiMessage => ({
             kind: "formText",
             controlId: control.id,
             action
           })
         });
-    return field([input], { id: `${control.id}:field`, label: control.label, required: control.required });
+    return field({
+      id: `${control.id}:field`,
+      label: control.label,
+      slots: { content: [input] }
+    });
   }
   if (control.kind === "textarea") {
     const editor = document.formEditors[control.id];
@@ -366,13 +397,25 @@ function inlineFormControl(
         value: values[0] ?? "",
         scroll: createScrollState({ contentRows: 1, viewportRows: 2 })
       });
-    return field([textArea({
+    const areaOptions = {
       id: control.id,
       presentation,
-      wrap: true,
-      disabled: control.disabled || control.readOnly,
-      onAction: (action): BrowserTuiMessage => ({ kind: "formArea", controlId: control.id, action })
-    })], { id: `${control.id}:field`, label: control.label, required: control.required });
+      wrap: true
+    };
+    const area = control.disabled
+      ? textArea({ ...areaOptions, disabled: true })
+      : textArea({
+        ...areaOptions,
+        readOnly: control.readOnly,
+        onAction: (
+          action: Extract<BrowserTuiMessage, { readonly kind: "formArea" }>["action"]
+        ): BrowserTuiMessage => ({ kind: "formArea", controlId: control.id, action })
+      });
+    return field({
+      id: `${control.id}:field`,
+      label: control.label,
+      slots: { content: [area] }
+    });
   }
   if (control.kind === "checkbox") {
     const checkboxOptions = {
@@ -385,11 +428,14 @@ function inlineFormControl(
       ? checkbox({ ...checkboxOptions, disabled: true })
       : checkbox({
         ...checkboxOptions,
-        onChange: (checked): BrowserTuiMessage => ({
-          kind: "formValues",
-          controlId: control.id,
-          values: checked ? [control.value] : []
-        })
+        onAction: (action): MessageResolution<BrowserTuiMessage> =>
+          action.kind === "change"
+            ? {
+              kind: "formValues",
+              controlId: control.id,
+              values: action.checked ? [control.value] : []
+            }
+            : ignoreMessage()
       });
   }
   if (control.kind === "select") {
@@ -458,7 +504,7 @@ function inlineFormControl(
       ? button({ ...buttonOptions, disabled: true })
       : button({
         ...buttonOptions,
-        onPress: (): BrowserTuiMessage => ({
+        onAction: buttonAction({
           kind: "submitForm",
           formId,
           submitterId: control.id
@@ -474,7 +520,7 @@ function inlineFormControl(
       ? button({ ...buttonOptions, disabled: true })
       : button({
         ...buttonOptions,
-        onPress: (): BrowserTuiMessage => ({
+        onAction: buttonAction({
           kind: "resetForm",
           formId
         })
@@ -483,7 +529,7 @@ function inlineFormControl(
   return null;
 }
 
-function inlineForm(document: BrowserDocumentState, entry: FormEntry): Element<BrowserTuiMessage> {
+function inlineForm(document: BrowserDocumentViewModel, entry: FormEntry): Element<BrowserTuiMessage> {
   const radioNames = new Set<string>();
   const controls: Element<BrowserTuiMessage>[] = [];
   for (const control of entry.controls) {
@@ -521,25 +567,26 @@ function inlineForm(document: BrowserDocumentState, entry: FormEntry): Element<B
       id: `${entry.id}:submit`,
       label: "Submit",
       tone: "primary",
-      onPress: (): BrowserTuiMessage => ({ kind: "submitForm", formId: entry.id })
+      onAction: buttonAction({ kind: "submitForm", formId: entry.id })
     }));
   }
-  return form(controls, {
+  return form({
     id: entry.id,
     title: entry.label,
-    gap: 0
+    gap: 0,
+    slots: { content: controls }
   });
 }
 
 function browserDocumentChildBounds(
-  state: BrowserDocumentState,
+  document: BrowserDocumentViewModel,
   bounds: Rect,
   childCount: number,
   measureChild: (index: number) => Measurement
 ): readonly Rect[] {
-  const layout = documentLayout(state, bounds.width);
+  const layout = document.layout;
   const contentBounds = documentContentBounds(bounds);
-  const entries = forms(state);
+  const entries = forms(document);
   return Array.from({ length: childCount }, (_, index) => {
     const entry = entries[index];
     if (!entry) {
@@ -563,17 +610,46 @@ function browserDocumentChildBounds(
   });
 }
 
-const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, BrowserTuiMessage> = {
-  kind: "composite",
-  name: "browserDocument",
-  parts: [],
-  measure({ state, bounds, childCount, measureChild }) {
-    const layout = documentLayout(state, bounds.width);
+const browserDocumentSlots = {
+  forms: { cardinality: "many", owner: "caller", messages: "bubble" }
+} as const;
+
+const browserDocumentComponent = defineComponent<
+  BrowserDocumentComponentOptions,
+  BrowserDocumentComponentModel,
+  BrowserDocumentAction,
+  never,
+  readonly [],
+  "required",
+  readonly [],
+  typeof browserDocumentSlots
+>({
+  name: "verge-browser/components/document",
+  identity: "required",
+  structure: "composite",
+  semantics: "semantic",
+  slots: browserDocumentSlots,
+  optionFields: { document: null },
+  prepare(value) {
+    if (!isBrowserDocumentComponentOptions(value)) {
+      throw new TypeError("browser document options require a prepared document view model.");
+    }
+    return { document: value.document };
+  },
+  measure({ model, constraints, slots }) {
+    const bounds = {
+      row: 0,
+      column: 0,
+      width: constraints.width,
+      height: constraints.height
+    };
+    const layout = model.document.layout;
+    const childCount = slots.count("forms");
     const childBounds = browserDocumentChildBounds(
-      state,
+      model.document,
       bounds,
       childCount,
-      measureChild
+      (index) => slots.measure("forms", index)
     );
     return {
       minWidth: 0,
@@ -585,15 +661,23 @@ const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, Bro
       )
     };
   },
-  layout({ state, bounds, childCount, measureChild }) {
-    return browserDocumentChildBounds(state, bounds, childCount, measureChild);
+  layout({ model, bounds, slots }) {
+    return {
+      forms: browserDocumentChildBounds(
+        model.document,
+        bounds,
+        slots.count("forms"),
+        (index) => slots.measure("forms", index)
+      )
+    };
   },
-  renderBeforeChildren({ state, bounds, viewport: visibleBounds, target, focusedTargetId }) {
+  renderBeforeChildren({ model, bounds, viewport: visibleBounds, target, focusedTargetId }) {
     if (bounds.width <= 0 || bounds.height <= 0) return;
-    const layout = documentLayout(state, bounds.width);
-    const focusedAction = actionForId(state, focusedTargetId);
+    const document = model.document;
+    const layout = document.layout;
+    const focusedAction = actionForId(document, focusedTargetId);
     const contentBounds = documentContentBounds(bounds);
-    const formIds = new Set(forms(state).map((entry) => entry.id));
+    const formIds = new Set(forms(document).map((entry) => entry.id));
     const startIndex = Math.max(0, visibleBounds.row - contentBounds.row);
     const endIndexExclusive = Math.min(
       layout.rows.length,
@@ -616,12 +700,13 @@ const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, Bro
       target.write(
         contentBounds.row + rowIndex,
         contentBounds.column,
-        rowSegments(state, layoutRow, rowIndex, focusedAction?.id)
+        rowSegments(document, layoutRow, rowIndex, focusedAction?.id)
       );
     }
   },
-  accessibility({ id, state, bounds, viewport: visibleBounds, focusedTargetId, children }) {
-    const layout = documentLayout(state, bounds.width);
+  accessibility({ id, model, bounds, viewport: visibleBounds, focusedTargetId, slots }) {
+    const document = model.document;
+    const layout = document.layout;
     const contentBounds = documentContentBounds(bounds);
     const startIndex = Math.min(
       Math.max(0, visibleBounds.row - contentBounds.row),
@@ -636,8 +721,8 @@ const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, Bro
         .slice(startIndex, endIndexExclusive)
         .flatMap((row) => row.fragments.map((fragment) => fragment.blockId))
     );
-    const focusedAction = actionForId(state, focusedTargetId);
-    const visibleActions = state.snapshot.content.actions.filter((action) =>
+    const focusedAction = actionForId(document, focusedTargetId);
+    const visibleActions = document.content.actions.filter((action) =>
       layout.actionPlacements.some((placement) =>
         placement.actionId === action.id
         && placement.rowIndex >= startIndex
@@ -647,8 +732,8 @@ const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, Bro
     return {
       id,
       role: "document",
-      label: state.snapshot.content.title,
-      description: state.snapshot.finalUrl,
+      label: document.content.title,
+      description: document.finalUrl,
       window: {
         startIndex,
         endIndexExclusive,
@@ -657,7 +742,7 @@ const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, Bro
         omittedAfter: layout.rows.length - endIndexExclusive
       },
       children: [
-        ...state.snapshot.content.blocks
+        ...document.content.blocks
           .filter((block) => visibleBlockIds.has(block.id) && block.kind !== "form")
           .map(accessibleBlock),
         ...visibleActions.filter((action) => action.kind === "link").map((action) => ({
@@ -666,22 +751,23 @@ const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, Bro
           label: action.label,
           ...(focusedAction?.id === action.id ? { focused: true } : {}),
           position: {
-            positionInSet: state.snapshot.content.links.indexOf(action) + 1,
-            setSize: state.snapshot.content.links.length
+            positionInSet: document.content.links.indexOf(action) + 1,
+            setSize: document.content.links.length
           }
         })),
-        ...children
+        ...slots.forms
       ]
     };
   },
-  focusTargets({ state, bounds, viewport: visibleBounds }) {
+  focusTargets({ model, bounds, viewport: visibleBounds }) {
     if (bounds.width <= 0 || bounds.height <= 0) return [];
-    const layout = documentLayout(state, bounds.width);
+    const document = model.document;
+    const layout = document.layout;
     const contentBounds = documentContentBounds(bounds);
     const seen = new Set<string>();
     return layout.actionPlacements
       .flatMap((placement) => {
-        const action = actionForId(state, placement.actionId);
+        const action = actionForId(document, placement.actionId);
         if (action?.kind !== "link"
           || seen.has(placement.actionId)
           || contentBounds.row + placement.rowIndex < visibleBounds.row
@@ -701,13 +787,14 @@ const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, Bro
         }];
       });
   },
-  hitTargets({ state, bounds, viewport: visibleBounds }) {
+  hitTargets({ model, bounds, viewport: visibleBounds }) {
     if (bounds.width <= 0 || bounds.height <= 0) return [];
-    const layout = documentLayout(state, bounds.width);
+    const document = model.document;
+    const layout = document.layout;
     const contentBounds = documentContentBounds(bounds);
     return layout.actionPlacements
       .filter((placement) => {
-        const action = actionForId(state, placement.actionId);
+        const action = actionForId(document, placement.actionId);
         return action?.kind === "link"
           && contentBounds.row + placement.rowIndex >= visibleBounds.row
           && contentBounds.row + placement.rowIndex < visibleBounds.row + visibleBounds.height;
@@ -725,7 +812,7 @@ const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, Bro
           accepts: ["click" as const, "contextMenu" as const],
           cursor: "pointer" as const,
           focus: { kind: "target" as const, targetId: placement.actionId },
-          message: (event: RoutedPointerEvent): BrowserTuiMessage =>
+          message: (event: RoutedPointerEvent): BrowserDocumentAction =>
             event.kind === "contextMenu" || event.button === "right"
               ? {
                 kind: "openLinkMenu",
@@ -745,7 +832,7 @@ const browserDocumentRenderer: CustomCompositeRenderer<BrowserDocumentState, Bro
         };
       });
   }
-};
+});
 
 function browserDocument(
   document: BrowserDocumentState,
@@ -754,12 +841,13 @@ function browserDocument(
   const contentColumns = Math.max(1, Math.floor(availableColumns) - 1);
   const layout = documentLayout(document, contentColumns);
   const scrollRow = documentScrollRow(document, layout);
-  const children = forms(document).map((entry) => inlineForm(document, entry));
-  const content = custom({
+  const model = browserDocumentViewModel(document, layout);
+  const children = forms(model).map((entry) => inlineForm(model, entry));
+  const content = browserDocumentComponent({
     id: `browser-${document.id}`,
-    renderer: browserDocumentRenderer,
-    state: document,
-    children
+    document: model,
+    slots: { forms: children },
+    onAction: (action): BrowserTuiMessage => action
   });
   return surface(viewport(content, {
     id: `browser-viewport-${document.id}`,
@@ -776,24 +864,72 @@ function browserDocument(
   });
 }
 
+function browserDocumentViewModel(
+  document: BrowserDocumentState,
+  layout: PageLayout
+): BrowserDocumentViewModel {
+  return {
+    id: document.id,
+    content: document.snapshot.content,
+    layout,
+    finalUrl: document.snapshot.finalUrl,
+    search: document.search,
+    forms: extractForms(document.snapshot.document.tree, document.snapshot.finalUrl),
+    formValues: document.formValues,
+    formEditors: document.formEditors
+  };
+}
+
+function isBrowserDocumentComponentOptions(value: unknown): value is BrowserDocumentComponentOptions {
+  if (!isPlainRecord(value)) return false;
+  const document = value["document"];
+  if (!isPlainRecord(document)) return false;
+  const content = document["content"];
+  return typeof document["id"] === "string"
+    && typeof document["finalUrl"] === "string"
+    && (document["search"] === null || isPlainRecord(document["search"]))
+    && Array.isArray(document["forms"])
+    && isPlainRecord(document["formValues"])
+    && isPlainRecord(document["formEditors"])
+    && isPlainRecord(content)
+    && isPlainRecord(document["layout"])
+    && Array.isArray(document["layout"]["rows"])
+    && Array.isArray(document["layout"]["actionPlacements"])
+    && typeof content["title"] === "string"
+    && Array.isArray(content["blocks"])
+    && Array.isArray(content["links"])
+    && Array.isArray(content["actions"]);
+}
+
+function isPlainRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value) as unknown;
+  return prototype === Object.prototype || prototype === null;
+}
+
+function buttonAction(message: BrowserTuiMessage) {
+  return (action: ButtonAction): MessageResolution<BrowserTuiMessage> =>
+    action.kind === "press" ? message : ignoreMessage();
+}
+
 function newTabDashboard(state: BrowserTuiState): Element<BrowserTuiMessage> {
   const recent = state.history.slice(0, 5).map((entry, index) => button({
     id: `new-tab-recent-${String(index)}`,
     label: entry.title,
     tone: "ghost",
-    onPress: (): BrowserTuiMessage => ({ kind: "omniboxSubmit", value: entry.url })
+    onAction: buttonAction({ kind: "omniboxSubmit", value: entry.url })
   }));
   const bookmarks = state.bookmarks.slice(0, 5).map((entry, index) => button({
     id: `new-tab-bookmark-${String(index)}`,
     label: `★ ${entry.name}`,
     tone: "ghost",
-    onPress: (): BrowserTuiMessage => ({ kind: "omniboxSubmit", value: entry.url })
+    onAction: buttonAction({ kind: "omniboxSubmit", value: entry.url })
   }));
   return surface(column([
-    text("New Tab", { id: "new-tab-title", textRole: "title" }),
-    text("Type a URL or search in the address bar.", { id: "new-tab-hint" }),
-    ...(bookmarks.length > 0 ? [text("Bookmarks", { textRole: "heading" }), ...bookmarks] : []),
-    ...(recent.length > 0 ? [text("Recent", { textRole: "heading" }), ...recent] : [])
+    text({ content: "New Tab", id: "new-tab-title", textRole: "title" }),
+    text({ content: "Type a URL or search in the address bar.", id: "new-tab-hint" }),
+    ...(bookmarks.length > 0 ? [text({ content: "Bookmarks", textRole: "heading" }), ...bookmarks] : []),
+    ...(recent.length > 0 ? [text({ content: "Recent", textRole: "heading" }), ...recent] : [])
   ], { gap: 1 }), {
     id: "new-tab-dashboard",
     padding: 1,
@@ -808,7 +944,7 @@ function panelEntryButton(id: string, label: string, target: string): Element<Br
     id,
     label,
     tone: "ghost",
-    onPress: (): BrowserTuiMessage => ({ kind: "omniboxSubmit", value: target })
+    onAction: buttonAction({ kind: "omniboxSubmit", value: target })
   });
 }
 
@@ -860,25 +996,25 @@ function sidePanel(state: BrowserTuiState): Element<BrowserTuiMessage> {
         ? [button({
           id: `download-cancel-${String(index)}`,
           label: "Cancel",
-          onPress: (): BrowserTuiMessage => ({ kind: "cancelDownload", id: download.id })
+          onAction: buttonAction({ kind: "cancelDownload", id: download.id })
         })]
         : download.status === "completed"
           ? [
             button({
               id: `download-open-${String(index)}`,
               label: "Open",
-              onPress: (): BrowserTuiMessage => ({ kind: "openDownload", id: download.id, location: "file" })
+              onAction: buttonAction({ kind: "openDownload", id: download.id, location: "file" })
             }),
             button({
               id: `download-folder-${String(index)}`,
               label: "Folder",
-              onPress: (): BrowserTuiMessage => ({ kind: "openDownload", id: download.id, location: "directory" })
+              onAction: buttonAction({ kind: "openDownload", id: download.id, location: "directory" })
             })
           ]
           : [button({
             id: `download-retry-${String(index)}`,
             label: "Retry",
-            onPress: (): BrowserTuiMessage => ({ kind: "retryDownload", id: download.id })
+            onAction: buttonAction({ kind: "retryDownload", id: download.id })
           })];
       return [
         progress,
@@ -887,7 +1023,7 @@ function sidePanel(state: BrowserTuiState): Element<BrowserTuiMessage> {
           button({
             id: `download-remove-${String(index)}`,
             label: "Remove",
-            onPress: (): BrowserTuiMessage => ({ kind: "removeDownload", id: download.id })
+            onAction: buttonAction({ kind: "removeDownload", id: download.id })
           })
         ], { gap: 1 })
       ];
@@ -898,22 +1034,22 @@ function sidePanel(state: BrowserTuiState): Element<BrowserTuiMessage> {
         id: "panel-history",
         label: "History",
         tone: panel === "history" ? "primary" : "ghost",
-        onPress: (): BrowserTuiMessage => ({ kind: "toggleSidePanel", panel: "history" })
+        onAction: buttonAction({ kind: "toggleSidePanel", panel: "history" })
       }),
       button({
         id: "panel-bookmarks",
         label: "Bookmarks",
         tone: panel === "bookmarks" ? "primary" : "ghost",
-        onPress: (): BrowserTuiMessage => ({ kind: "toggleSidePanel", panel: "bookmarks" })
+        onAction: buttonAction({ kind: "toggleSidePanel", panel: "bookmarks" })
       }),
       button({
         id: "panel-downloads",
         label: "Downloads",
         tone: panel === "downloads" ? "primary" : "ghost",
-        onPress: (): BrowserTuiMessage => ({ kind: "toggleSidePanel", panel: "downloads" })
+        onAction: buttonAction({ kind: "toggleSidePanel", panel: "downloads" })
       })
     ], { gap: 1 });
-  const panelContent = content.length === 0 ? [text(`No ${panel}.`)] : content;
+  const panelContent = content.length === 0 ? [text({ content: `No ${panel}.` })] : content;
   return surface(column([
     header,
     viewport(column(panelContent), {
@@ -947,9 +1083,9 @@ function toolbar(
     display: "popup",
     placement: "below",
     maxVisibleSuggestions: 8,
-    onAction: (action): BrowserTuiMessage => ({ kind: "omniboxAction", action }),
-    onSubmit: (value): BrowserTuiMessage => ({ kind: "omniboxSubmit", value }),
-    keys: { escape: (): BrowserTuiMessage => ({ kind: "cancelOmnibox" }) }
+    onAction: (action): BrowserTuiMessage => action.kind === "submit"
+      ? { kind: "omniboxSubmit", value: action.value }
+      : { kind: "omniboxAction", action }
   });
   const showLibrary = columns >= 96;
   const back = document.canGoBack
@@ -958,7 +1094,7 @@ function toolbar(
       label: "←",
       density: "compact",
       tone: "ghost",
-      onPress: (): BrowserTuiMessage => ({ kind: "navigate", operation: "back" })
+      onAction: buttonAction({ kind: "navigate", operation: "back" })
     })
     : button({
       id: "browser-back",
@@ -973,7 +1109,7 @@ function toolbar(
       label: "→",
       density: "compact",
       tone: "ghost",
-      onPress: (): BrowserTuiMessage => ({ kind: "navigate", operation: "forward" })
+      onAction: buttonAction({ kind: "navigate", operation: "forward" })
     })
     : button({
       id: "browser-forward",
@@ -990,18 +1126,18 @@ function toolbar(
       label: document.loading ? "■" : "↻",
       density: "compact",
       tone: "ghost",
-      onPress: (): BrowserTuiMessage => ({ kind: "navigate", operation: document.loading ? "stop" : "reload" })
+      onAction: buttonAction({ kind: "navigate", operation: document.loading ? "stop" : "reload" })
     }),
-    button({ id: "browser-new-tab", label: "+", density: "compact", tone: "ghost", onPress: (): BrowserTuiMessage => ({ kind: "newDocument" }) }),
+    button({ id: "browser-new-tab", label: "+", density: "compact", tone: "ghost", onAction: buttonAction({ kind: "newDocument" }) }),
     omnibox,
-    button({ id: "browser-bookmark", label: bookmarked ? "★" : "☆", density: "compact", tone: "ghost", onPress: (): BrowserTuiMessage => ({ kind: "toggleBookmark" }) }),
+    button({ id: "browser-bookmark", label: bookmarked ? "★" : "☆", density: "compact", tone: "ghost", onAction: buttonAction({ kind: "toggleBookmark" }) }),
     ...(showLibrary
       ? [button({
           id: "browser-library",
           label: "Library",
           density: "compact",
           tone: state.sidePanel === null ? "ghost" : "primary",
-          onPress: (): BrowserTuiMessage => ({ kind: "toggleSidePanel", panel: "history" })
+          onAction: buttonAction({ kind: "toggleSidePanel", panel: "history" })
         })]
       : []),
     dropdownMenu({
@@ -1047,15 +1183,18 @@ function findBar(state: BrowserTuiState): Element<BrowserTuiMessage> | null {
       id: "browser-find-input",
       presentation: textInputPresentation(state.findBar.input),
       placeholder: "Find in page",
-      onAction: (action): BrowserTuiMessage => ({ kind: "findAction", action }),
-      onSubmit: (): BrowserTuiMessage => ({ kind: "findSubmit" })
+      onAction: (action): BrowserTuiMessage => action.kind === "submit"
+        ? { kind: "findSubmit" }
+        : { kind: "findAction", action }
     }),
-    text(search === null || search === undefined || search.matches.length === 0
-      ? "0/0"
-      : `${String(search.activeMatchIndex + 1)}/${String(search.matches.length)}`),
-    button({ id: "find-previous", label: "↑", tone: "ghost", onPress: (): BrowserTuiMessage => ({ kind: "moveSearch", direction: "prev" }) }),
-    button({ id: "find-next", label: "↓", tone: "ghost", onPress: (): BrowserTuiMessage => ({ kind: "moveSearch", direction: "next" }) }),
-    button({ id: "find-close", label: "×", tone: "ghost", onPress: (): BrowserTuiMessage => ({ kind: "closeFind" }) })
+    text({
+      content: search === null || search === undefined || search.matches.length === 0
+        ? "0/0"
+        : `${String(search.activeMatchIndex + 1)}/${String(search.matches.length)}`
+    }),
+    button({ id: "find-previous", label: "↑", tone: "ghost", onAction: buttonAction({ kind: "moveSearch", direction: "prev" }) }),
+    button({ id: "find-next", label: "↓", tone: "ghost", onAction: buttonAction({ kind: "moveSearch", direction: "next" }) }),
+    button({ id: "find-close", label: "×", tone: "ghost", onAction: buttonAction({ kind: "closeFind" }) })
   ], {
     id: "browser-find",
     gap: 1,
@@ -1110,9 +1249,10 @@ function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMe
         id: document.id,
         label: `${document.loading ? "◌ " : ""}${document.snapshot.content.title}`,
         closable: true,
-        panel: document.id === selected.id ? selectedPanel : text("")
+        panel: document.id === selected.id ? selectedPanel : text({ content: "" })
       })),
-      onAction: (action): BrowserTuiMessage => ({ kind: "tabs", action })
+      onAction: (action): MessageResolution<BrowserTuiMessage> =>
+        action.kind === "pointer" ? ignoreMessage() : { kind: "tabs", action }
     }),
     statusBar({
       id: "browser-status",
@@ -1142,21 +1282,24 @@ function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMe
 }
 
 function actionPaletteView(palette: ActionPaletteOverlay): Element<BrowserTuiMessage> {
-  return dialog(commandInput({
-    id: "browser-action-input",
-    prompt: ": ",
-    placeholder: "Run browser action",
-    presentation: commandInputPresentation(palette.state),
-    ...(palette.validation === undefined ? {} : { validation: { level: "error" as const, message: palette.validation } }),
-    display: "expanded",
-    onAction: (action): BrowserTuiMessage => ({ kind: "actionPaletteAction", action }),
-    onSubmit: (value): BrowserTuiMessage => ({ kind: "actionPaletteSubmit", value }),
-    keys: { escape: (): BrowserTuiMessage => ({ kind: "dismiss" }) }
-  }), {
+  return dialog({
     id: "browser-action-palette",
     title: "Browser actions",
     modal: true,
     focusPolicy: { initialFocus: { kind: "element", elementId: "browser-action-input" }, returnFocus: "restore" },
+    slots: {
+      content: commandInput({
+        id: "browser-action-input",
+        prompt: ": ",
+        placeholder: "Run browser action",
+        presentation: commandInputPresentation(palette.state),
+        ...(palette.validation === undefined ? {} : { validation: { level: "error" as const, message: palette.validation } }),
+        display: "expanded",
+        onAction: (action): BrowserTuiMessage => action.kind === "submit"
+          ? { kind: "actionPaletteSubmit", value: action.value }
+          : { kind: "actionPaletteAction", action }
+      })
+    },
     width: 72,
     maxHeight: 12,
     padding: { left: 1, right: 1 }
@@ -1164,24 +1307,20 @@ function actionPaletteView(palette: ActionPaletteOverlay): Element<BrowserTuiMes
 }
 
 function pickerView(picker: PickerOverlay): Element<BrowserTuiMessage> {
-  return dialog(searchPicker({
-    id: "browser-picker-list",
-    searchPickerIndex: picker.index,
-    query: picker.state.query,
-    ...(picker.state.selectedId === undefined ? {} : { selectedId: picker.state.selectedId }),
-    onAction: (action): BrowserTuiMessage => ({ kind: "pickerAction", action }),
-    keys: {
-      enter: (): BrowserTuiMessage => {
-        const value = selectedSearchPickerEntry({ searchPickerIndex: picker.index, state: picker.state })?.value;
-        return value === undefined ? { kind: "pickerSelect" } : { kind: "pickerSelect", value };
-      },
-      escape: (): BrowserTuiMessage => ({ kind: "dismiss" })
-    }
-  }), {
+  return dialog({
     id: "browser-picker",
     title: picker.title,
     modal: true,
     focusPolicy: { initialFocus: { kind: "element", elementId: "browser-picker-list" }, returnFocus: "restore" },
+    slots: {
+      content: searchPicker({
+        id: "browser-picker-list",
+        searchPickerIndex: picker.index,
+        query: picker.state.query,
+        ...(picker.state.selectedId === undefined ? {} : { selectedId: picker.state.selectedId }),
+        onAction: (action): BrowserTuiMessage => ({ kind: "pickerAction", action })
+      })
+    },
     width: 76,
     maxHeight: 18,
     padding: { left: 1, right: 1 }
@@ -1189,14 +1328,17 @@ function pickerView(picker: PickerOverlay): Element<BrowserTuiMessage> {
 }
 
 function detailView(detail: DetailOverlay): Element<BrowserTuiMessage> {
-  return dialog(column(detail.lines.slice(detail.scrollRow).map((line, index) => text(line, {
-    id: `detail-line-${String(index)}`
-  }))), {
+  return dialog({
     id: "browser-detail",
     title: detail.title,
     modal: true,
     focusPolicy: { returnFocus: "restore" },
-    keys: { escape: (): BrowserTuiMessage => ({ kind: "dismiss" }) },
+    slots: {
+      content: column(detail.lines.slice(detail.scrollRow).map((line, index) => text({
+        id: `detail-line-${String(index)}`,
+        content: line
+      })))
+    },
     width: 82,
     maxHeight: 22,
     padding: { left: 1, right: 1 }
@@ -1214,10 +1356,7 @@ function linkMenuView(menu: LinkMenuOverlay): Element<BrowserTuiMessage> {
 }
 
 function downloadPromptView(prompt: DownloadPromptOverlay): Element<BrowserTuiMessage> {
-  return dialog(column([
-    text("This resource is not an HTML page."),
-    text(prompt.target)
-  ], { gap: 1 }), {
+  return dialog({
     id: "download-prompt",
     title: "Download resource?",
     modal: true,
@@ -1225,16 +1364,21 @@ function downloadPromptView(prompt: DownloadPromptOverlay): Element<BrowserTuiMe
       initialFocus: { kind: "element", elementId: "download-prompt-confirm" },
       returnFocus: "restore"
     },
-    actions: row([
-      button({
-        id: "download-prompt-confirm",
-        label: "Download",
-        tone: "primary",
-        onPress: (): BrowserTuiMessage => ({ kind: "download", target: prompt.target })
-      }),
-      button({ id: "download-prompt-cancel", label: "Cancel", onPress: (): BrowserTuiMessage => ({ kind: "dismiss" }) })
-    ], { gap: 1 }),
-    keys: { escape: (): BrowserTuiMessage => ({ kind: "dismiss" }) },
+    slots: {
+      content: column([
+        text({ content: "This resource is not an HTML page." }),
+        text({ content: prompt.target })
+      ], { gap: 1 }),
+      actions: row([
+        button({
+          id: "download-prompt-confirm",
+          label: "Download",
+          tone: "primary",
+          onAction: buttonAction({ kind: "download", target: prompt.target })
+        }),
+        button({ id: "download-prompt-cancel", label: "Cancel", onAction: buttonAction({ kind: "dismiss" }) })
+      ], { gap: 1 })
+    },
     width: 64,
     maxHeight: 9,
     padding: { left: 1, right: 1 }

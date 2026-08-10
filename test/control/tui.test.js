@@ -698,7 +698,7 @@ test("non-HTML navigation offers a download instead of replacing the page", asyn
   assert.equal(runtime.state().documents[0].snapshot.content.title, "Index");
   assert.match(renderFramePlain(runtime.frame()), /Download resource\?/u);
   const dialogRows = new Set(runtime.frame().cells
-    .filter((cell) => cell.source?.elementId === "download-prompt")
+    .filter((cell) => cell.source?.elementId === "download-prompt:surface")
     .map((cell) => cell.row));
   const backdropCell = runtime.frame().cells.find((cell) =>
     cell.source?.elementId?.startsWith("browser-page-surface-")

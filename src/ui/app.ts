@@ -1348,6 +1348,14 @@ export function createBrowserApp(
       { id: "scroll-top", triggers: [{ kind: "key", key: "home" }], enabled: ({ state }) => state.overlay === null, message: { kind: "scrollTop" } },
       { id: "scroll-bottom", triggers: [{ kind: "key", key: "end" }], enabled: ({ state }) => state.overlay === null, message: { kind: "scrollBottom" } },
       { id: "dismiss", triggers: [{ kind: "key", key: "escape" }], enabled: ({ state }) => state.overlay !== null, message: { kind: "dismiss" } },
+      {
+        id: "cancel-omnibox",
+        phase: "afterFocus",
+        triggers: [{ kind: "key", key: "escape" }],
+        enabled: ({ state, focusPath }) =>
+          state.overlay === null && focusPath?.includes("browser-omnibox") === true,
+        message: { kind: "cancelOmnibox" }
+      },
       { id: "close-find", triggers: [{ kind: "key", key: "escape" }], enabled: ({ state }) => state.overlay === null && state.findBar !== null, message: { kind: "closeFind" } }
     ],
     nonTty: { mode: "last_frame" }

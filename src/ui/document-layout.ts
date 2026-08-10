@@ -1,11 +1,15 @@
 import type { Rect } from "@ismail-elkorchi/terminal-ui/renderer";
 
 import { documentContentColumns, layoutPageContent } from "../app/render.js";
-import type { PageAction, PageLayout } from "../app/types.js";
+import type { PageAction, PageContent, PageLayout } from "../app/types.js";
 import type { BrowserDocumentState } from "./model.js";
 
 export function documentLayout(document: BrowserDocumentState, columns: number): PageLayout {
-  return layoutPageContent(document.snapshot.content, documentContentColumns(columns));
+  return pageContentLayout(document.snapshot.content, columns);
+}
+
+export function pageContentLayout(content: PageContent, columns: number): PageLayout {
+  return layoutPageContent(content, documentContentColumns(columns));
 }
 
 export function documentContentBounds(bounds: Rect): Rect {

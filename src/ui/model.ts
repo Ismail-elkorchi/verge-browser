@@ -208,7 +208,10 @@ export type BrowserTuiMessage =
   | { readonly kind: "closeDocument" }
   | { readonly kind: "reopenDocument" }
   | { readonly kind: "selectDocument"; readonly index: number }
-  | { readonly kind: "tabs"; readonly action: TabAction }
+  | {
+      readonly kind: "tabs";
+      readonly action: Exclude<TabAction, { readonly kind: "pointer" }>;
+    }
   | { readonly kind: "actionPaletteAction"; readonly action: CommandInputAction }
   | { readonly kind: "actionPaletteSubmit"; readonly value: string }
   | { readonly kind: "pickerAction"; readonly action: SearchPickerAction<PickerValue> }
