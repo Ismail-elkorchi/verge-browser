@@ -70,7 +70,7 @@ import type {
   LinkMenuOverlay,
   PickerOverlay
 } from "./model.js";
-import { browserMenuItems, linkMenuItems } from "./model.js";
+import { browserMenuItems, formComboboxPageSize, linkMenuItems } from "./model.js";
 
 interface BrowserDocumentViewModel {
   readonly id: string;
@@ -477,7 +477,8 @@ function inlineFormControl(
         value: option.value,
         disabled: option.disabled
       })),
-      required: control.required
+      required: control.required,
+      maxVisibleOptions: formComboboxPageSize
     };
     return control.disabled
       ? combobox({
@@ -862,7 +863,7 @@ function browserDocument(
     scrollPolicy: { wheel: { unit: "line", rows: 3 } },
     onScroll: (event): BrowserTuiMessage => ({
       kind: "scrollTo",
-      row: event.state.offsetRow
+      row: event.nextState.offsetRow
     })
   }), {
     id: `browser-page-surface-${document.id}`,

@@ -1,5 +1,7 @@
 import {
+  applyScrollEvent,
   checkboxGroupReducer,
+  commitCombobox,
   comboboxReducer,
   commandInputReducer,
   contextMenuReducer,
@@ -10,7 +12,7 @@ import {
   prepareSearchPickerIndex,
   numberInputReducer,
   searchPickerReducer,
-  searchPickerWindow,
+  searchPickerEntryById,
   tabsReducer,
   textAreaReducer,
   textInputReducer
@@ -46,7 +48,7 @@ import type {
   PickerKind,
   StatusMessage
 } from "./model.js";
-import { browserMenuItems, linkMenuItems } from "./model.js";
+import { browserMenuItems, formComboboxPageSize, linkMenuItems } from "./model.js";
 import { browserView } from "./view.js";
 
 const ACTION_SUGGESTIONS = [
@@ -814,7 +816,7 @@ export function updateBrowser(
     case "sidePanelScroll":
       return result({
         ...state,
-        sidePanelScroll: message.event.state
+        sidePanelScroll: applyScrollEvent(state.sidePanelScroll, message.event)
       });
     case "toggleBookmark":
       return result(state, { effects: [effect("bookmark", async () => ({
@@ -940,10 +942,7 @@ export function updateBrowser(
         });
     case "pickerAccept": {
       if (state.overlay?.kind !== "picker") return result(state);
-      const entry = searchPickerWindow({
-        searchPickerIndex: state.overlay.index,
-        query: state.overlay.state.query
-      }).entries.find((candidate) => candidate.id === message.event.id);
+      const entry = searchPickerEntryById(state.overlay.index, message.event.id);
       return updateBrowser(
         controller,
         state,
@@ -1070,7 +1069,8 @@ export function updateBrowser(
           }
         };
       const next = comboboxReducer(editor, message.transition, {
-        enabledIds: options.filter((option) => !option.disabled).map((option) => option.id)
+        enabledIds: options.filter((option) => !option.disabled).map((option) => option.id),
+        pageSize: formComboboxPageSize
       });
       return result(updateFormControl(
         state,
@@ -1087,13 +1087,14 @@ export function updateBrowser(
         (_, index) => `${control.id}:${String(index)}` === message.event.id
       );
       if (option === undefined || option.disabled) return result(state);
-      const next = {
-        open: false,
-        interaction: {
-          activeId: message.event.id,
-          selection: { mode: "single" as const, selectedId: message.event.id }
-        }
-      };
+      const current = document.formEditors[control.id];
+      if (current?.kind !== "combobox") return result(state);
+      const next = commitCombobox(current.state, message.event, {
+        enabledIds: control.options.flatMap((candidate, index) =>
+          candidate.disabled ? [] : [`${control.id}:${String(index)}`]
+        ),
+        pageSize: formComboboxPageSize
+      });
       return result(updateFormControl(
         state,
         document,

@@ -1,8 +1,8 @@
 import type {
   CheckboxGroupAction,
   ComboboxCommitEvent,
-  ComboboxPresentation,
-  ComboboxTransition,
+  ComboboxControlTransition,
+  UnscrolledComboboxPresentation,
   CommandInputTransition,
   ContextMenuTransition,
   MenuItem,
@@ -11,7 +11,7 @@ import type {
   NumberInputControlAction,
   SearchPickerAcceptEvent,
   SearchPickerControlTransition,
-  SearchPickerPresentation,
+  UnscrolledSearchPickerPresentation,
   TabCloseEvent,
   TabsTransition,
   TextAreaAction,
@@ -38,6 +38,8 @@ import type { PageSnapshot } from "../app/types.js";
 export type PickerKind = "links" | "outline" | "recall";
 export type DetailKind = "help" | "diagnostics" | "reader" | "cookies";
 export type SidePanelKind = "history" | "bookmarks" | "downloads";
+
+export const formComboboxPageSize = 8;
 
 export const browserMenuItems = [
   { kind: "action", id: "history", label: "History" },
@@ -90,7 +92,7 @@ export interface BrowserDocumentState {
     | { readonly kind: "text"; readonly state: TextEditBuffer }
     | { readonly kind: "number"; readonly state: NumberInputState }
     | { readonly kind: "textarea"; readonly state: TextAreaState }
-    | { readonly kind: "combobox"; readonly state: ComboboxPresentation }
+    | { readonly kind: "combobox"; readonly state: UnscrolledComboboxPresentation }
     | { readonly kind: "checkboxGroup"; readonly state: CollectionInteractionState }
   >>;
   readonly savedViews: Readonly<Record<string, {
@@ -116,7 +118,7 @@ export interface PickerOverlay {
   readonly pickerKind: PickerKind;
   readonly title: string;
   readonly index: SearchPickerIndex<PickerValue>;
-  readonly state: Omit<SearchPickerPresentation, "scroll"> & { readonly scroll?: never };
+  readonly state: UnscrolledSearchPickerPresentation;
 }
 
 export interface ActionPaletteOverlay {
@@ -233,7 +235,7 @@ export type BrowserTuiMessage =
   | { readonly kind: "formText"; readonly controlId: string; readonly action: TextInputAction }
   | { readonly kind: "formNumber"; readonly controlId: string; readonly action: NumberInputControlAction }
   | { readonly kind: "formArea"; readonly controlId: string; readonly action: TextAreaAction }
-  | { readonly kind: "formComboboxTransition"; readonly controlId: string; readonly transition: ComboboxTransition }
+  | { readonly kind: "formComboboxTransition"; readonly controlId: string; readonly transition: ComboboxControlTransition }
   | { readonly kind: "formComboboxCommit"; readonly controlId: string; readonly event: ComboboxCommitEvent }
   | { readonly kind: "formCheckboxGroup"; readonly controlId: string; readonly action: CheckboxGroupAction }
   | { readonly kind: "formValues"; readonly controlId: string; readonly values: readonly string[] }
