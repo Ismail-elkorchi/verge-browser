@@ -166,7 +166,12 @@ export class BrowserController {
     value: string,
     document: BrowserDocumentState,
     limit = 8
-  ): readonly { readonly value: string; readonly label: string; readonly description?: string }[] {
+  ): readonly {
+    readonly id: string;
+    readonly value: string;
+    readonly label: string;
+    readonly description?: string;
+  }[] {
     const query = value.trim().toLowerCase();
     const candidates = [
       ...document.snapshot.content.links.map((link) => ({
@@ -199,6 +204,7 @@ export class BrowserController {
           || entry.value.toLowerCase().includes(query)
           || entry.label.toLowerCase().includes(query);
       })
+      .map((entry) => ({ ...entry, id: entry.value }))
       .slice(0, limit);
   }
 

@@ -4,41 +4,38 @@ import {
   createNumberInputConfiguration,
   createScrollState,
   createTextAreaState,
-  dropdownMenuPresentation,
+  menuTriggerPresentation,
   numberInputPresentation,
-  scrollReducer,
+  radioGroupReducer,
   textInputPresentation
 } from "@ismail-elkorchi/terminal-ui/behavior";
 import {
   button,
   checkbox,
   checkboxGroup,
+  combobox,
   commandInput,
   contextMenu,
   dialog,
-  dropdownMenu,
   field,
   form,
+  menuTrigger,
   numberInput,
   passwordInput,
   progressBar,
   radioGroup,
   searchPicker,
-  select,
   statusBar,
   tabs,
   text,
   textArea,
   textInput,
-  type ButtonAction,
   type CheckboxGroupAction,
   type RadioGroupAction
 } from "@ismail-elkorchi/terminal-ui/components";
 import {
   defineComponent,
-  ignoreMessage,
-  type Element,
-  type MessageResolution
+  type Element
 } from "@ismail-elkorchi/terminal-ui/component";
 import { column, overlay, row, splitPane, surface, viewport } from "@ismail-elkorchi/terminal-ui/layout";
 import type { RoutedPointerEvent } from "@ismail-elkorchi/terminal-ui/input";
@@ -87,10 +84,6 @@ interface BrowserDocumentViewModel {
 }
 
 interface BrowserDocumentComponentOptions {
-  readonly document: BrowserDocumentViewModel;
-}
-
-interface BrowserDocumentComponentModel {
   readonly document: BrowserDocumentViewModel;
 }
 
@@ -270,38 +263,35 @@ function radioAction(
   selectedId: string | undefined,
   action: RadioGroupAction
 ): BrowserTuiMessage {
-  const selectedIndex = Math.max(0, controls.findIndex((control) => control.id === selectedId));
-  const nextId = action.kind === "select"
-    ? action.id
-    : action.kind === "first"
-      ? controls[0]?.id
-      : action.kind === "last"
-        ? controls.at(-1)?.id
-        : action.kind === "move"
-          ? controls[(selectedIndex + action.delta + controls.length) % controls.length]?.id
-          : action.id;
-  const control = controls.find((entry) => entry.id === nextId) ?? controls[selectedIndex];
+  const options = controls.map((control) => ({
+    id: control.id,
+    label: control.label,
+    value: control.value,
+    disabled: control.disabled
+  }));
+  const initial = {
+    ...(selectedId === undefined ? {} : { activeId: selectedId }),
+    selection: {
+      mode: "single" as const,
+      ...(selectedId === undefined ? {} : { selectedId })
+    }
+  };
+  const next = radioGroupReducer(initial, action, options);
+  const nextId = next.selection.mode === "single" ? next.selection.selectedId : undefined;
+  const control = controls.find((entry) => entry.id === nextId) ?? controls[0];
   if (!control) throw new Error("A radio group must contain at least one control.");
-  return { kind: "formValues", controlId: control.id, values: [control.value] };
+  return {
+    kind: "formValues",
+    controlId: control.id,
+    values: nextId === undefined ? [] : [control.value]
+  };
 }
 
 function multiChoiceAction(
   control: Extract<FormControl, { readonly kind: "select" }>,
-  selected: readonly string[],
   action: CheckboxGroupAction
 ): BrowserTuiMessage {
-  if (action.kind !== "toggle") {
-    return { kind: "formValues", controlId: control.id, values: selected };
-  }
-  const option = control.options.find((_, index) => `${control.id}:${String(index)}` === action.id);
-  if (!option) return { kind: "formValues", controlId: control.id, values: selected };
-  return {
-    kind: "formValues",
-    controlId: control.id,
-    values: selected.includes(option.value)
-      ? selected.filter((value) => value !== option.value)
-      : [...selected, option.value]
-  };
+  return { kind: "formCheckboxGroup", controlId: control.id, action };
 }
 
 function inlineFormControl(
@@ -348,7 +338,7 @@ function inlineFormControl(
       return field({
         id: `${control.id}:field`,
         label: control.label,
-        slots: { content: [input] }
+        control: input
       });
     }
     const presentation = editor?.kind === "text"
@@ -386,7 +376,7 @@ function inlineFormControl(
     return field({
       id: `${control.id}:field`,
       label: control.label,
-      slots: { content: [input] }
+      control: input
     });
   }
   if (control.kind === "textarea") {
@@ -395,7 +385,7 @@ function inlineFormControl(
       ? editor.state
       : createTextAreaState({
         value: values[0] ?? "",
-        scroll: createScrollState({ contentRows: 1, viewportRows: 2 })
+        scroll: createScrollState()
       });
     const areaOptions = {
       id: control.id,
@@ -414,7 +404,7 @@ function inlineFormControl(
     return field({
       id: `${control.id}:field`,
       label: control.label,
-      slots: { content: [area] }
+      control: area
     });
   }
   if (control.kind === "checkbox") {
@@ -428,18 +418,19 @@ function inlineFormControl(
       ? checkbox({ ...checkboxOptions, disabled: true })
       : checkbox({
         ...checkboxOptions,
-        onAction: (action): MessageResolution<BrowserTuiMessage> =>
-          action.kind === "change"
-            ? {
-              kind: "formValues",
-              controlId: control.id,
-              values: action.checked ? [control.value] : []
-            }
-            : ignoreMessage()
+        onAction: (action): BrowserTuiMessage => ({
+          kind: "formValues",
+          controlId: control.id,
+          values: action.checked ? [control.value] : []
+        })
       });
   }
   if (control.kind === "select") {
     if (control.multiple) {
+      const selectedIds = control.options.flatMap((option, index) =>
+        values.includes(option.value) ? [`${control.id}:${String(index)}`] : []
+      );
+      const editor = document.formEditors[control.id];
       const groupOptions = {
         id: control.id,
         label: control.label,
@@ -449,23 +440,33 @@ function inlineFormControl(
           value: option.value,
           disabled: option.disabled
         })),
-        selected: control.options.flatMap((option, index) =>
-          values.includes(option.value) ? [`${control.id}:${String(index)}`] : []
-        ),
+        presentation: editor?.kind === "checkboxGroup"
+          ? editor.state
+          : {
+            ...(selectedIds[0] === undefined ? {} : { activeId: selectedIds[0] }),
+            selection: { mode: "multiple" as const, selectedIds }
+          },
         required: control.required
       };
       return control.disabled
         ? checkboxGroup({ ...groupOptions, disabled: true })
         : checkboxGroup({
           ...groupOptions,
-          onAction: (action): BrowserTuiMessage => multiChoiceAction(control, values, action)
+          onAction: (action): BrowserTuiMessage => multiChoiceAction(control, action)
         });
     }
     const selectedIndex = control.options.findIndex((option) => values.includes(option.value));
     const editor = document.formEditors[control.id];
+    const selectedId = selectedIndex < 0 ? undefined : `${control.id}:${String(selectedIndex)}`;
     const closedPresentation = {
-      kind: "closed" as const,
-      ...(selectedIndex < 0 ? {} : { selected: `${control.id}:${String(selectedIndex)}` })
+      open: false as const,
+      interaction: {
+        ...(selectedId === undefined ? {} : { activeId: selectedId }),
+        selection: {
+          mode: "single" as const,
+          ...(selectedId === undefined ? {} : { selectedId })
+        }
+      }
     };
     const selectOptions = {
       id: control.id,
@@ -479,18 +480,23 @@ function inlineFormControl(
       required: control.required
     };
     return control.disabled
-      ? select({
+      ? combobox({
         ...selectOptions,
         presentation: closedPresentation,
         disabled: true
       })
-      : select({
+      : combobox({
         ...selectOptions,
-        presentation: editor?.kind === "select" ? editor.state : closedPresentation,
-        onAction: (action): BrowserTuiMessage => ({
-          kind: "formSelect",
+        presentation: editor?.kind === "combobox" ? editor.state : closedPresentation,
+        onTransition: (transition): BrowserTuiMessage => ({
+          kind: "formComboboxTransition",
           controlId: control.id,
-          action
+          transition
+        }),
+        onCommit: (event): BrowserTuiMessage => ({
+          kind: "formComboboxCommit",
+          controlId: control.id,
+          event
         })
       });
   }
@@ -552,7 +558,13 @@ function inlineForm(document: BrowserDocumentViewModel, entry: FormEntry): Eleme
           value: candidate.value,
           disabled: candidate.disabled
         })),
-        ...(selected === undefined ? {} : { selected: selected.id }),
+        presentation: {
+          ...(selected === undefined ? {} : { activeId: selected.id }),
+          selection: {
+            mode: "single",
+            ...(selected === undefined ? {} : { selectedId: selected.id })
+          }
+        },
         required: group.some((candidate) => candidate.required),
         onAction: (action): BrowserTuiMessage => radioAction(group, selected?.id, action)
       }));
@@ -616,7 +628,7 @@ const browserDocumentSlots = {
 
 const browserDocumentComponent = defineComponent<
   BrowserDocumentComponentOptions,
-  BrowserDocumentComponentModel,
+  BrowserDocumentComponentOptions,
   BrowserDocumentAction,
   never,
   readonly [],
@@ -628,14 +640,8 @@ const browserDocumentComponent = defineComponent<
   identity: "required",
   structure: "composite",
   semantics: "semantic",
+  accessibleRole: "document",
   slots: browserDocumentSlots,
-  optionFields: { document: null },
-  prepare(value) {
-    if (!isBrowserDocumentComponentOptions(value)) {
-      throw new TypeError("browser document options require a prepared document view model.");
-    }
-    return { document: value.document };
-  },
   measure({ model, constraints, slots }) {
     const bounds = {
       row: 0,
@@ -856,7 +862,7 @@ function browserDocument(
     scrollPolicy: { wheel: { unit: "line", rows: 3 } },
     onScroll: (event): BrowserTuiMessage => ({
       kind: "scrollTo",
-      row: scrollReducer(event.scroll, event.action).offsetRow
+      row: event.state.offsetRow
     })
   }), {
     id: `browser-page-surface-${document.id}`,
@@ -880,36 +886,8 @@ function browserDocumentViewModel(
   };
 }
 
-function isBrowserDocumentComponentOptions(value: unknown): value is BrowserDocumentComponentOptions {
-  if (!isPlainRecord(value)) return false;
-  const document = value["document"];
-  if (!isPlainRecord(document)) return false;
-  const content = document["content"];
-  return typeof document["id"] === "string"
-    && typeof document["finalUrl"] === "string"
-    && (document["search"] === null || isPlainRecord(document["search"]))
-    && Array.isArray(document["forms"])
-    && isPlainRecord(document["formValues"])
-    && isPlainRecord(document["formEditors"])
-    && isPlainRecord(content)
-    && isPlainRecord(document["layout"])
-    && Array.isArray(document["layout"]["rows"])
-    && Array.isArray(document["layout"]["actionPlacements"])
-    && typeof content["title"] === "string"
-    && Array.isArray(content["blocks"])
-    && Array.isArray(content["links"])
-    && Array.isArray(content["actions"]);
-}
-
-function isPlainRecord(value: unknown): value is Readonly<Record<string, unknown>> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value) as unknown;
-  return prototype === Object.prototype || prototype === null;
-}
-
 function buttonAction(message: BrowserTuiMessage) {
-  return (action: ButtonAction): MessageResolution<BrowserTuiMessage> =>
-    action.kind === "press" ? message : ignoreMessage();
+  return (): BrowserTuiMessage => message;
 }
 
 function newTabDashboard(state: BrowserTuiState): Element<BrowserTuiMessage> {
@@ -1083,9 +1061,11 @@ function toolbar(
     display: "popup",
     placement: "below",
     maxVisibleSuggestions: 8,
-    onAction: (action): BrowserTuiMessage => action.kind === "submit"
-      ? { kind: "omniboxSubmit", value: action.value }
-      : { kind: "omniboxAction", action }
+    onTransition: (transition): BrowserTuiMessage => ({
+      kind: "omniboxTransition",
+      transition
+    }),
+    onSubmit: (event): BrowserTuiMessage => ({ kind: "omniboxSubmit", value: event.value })
   });
   const showLibrary = columns >= 96;
   const back = document.canGoBack
@@ -1140,17 +1120,21 @@ function toolbar(
           onAction: buttonAction({ kind: "toggleSidePanel", panel: "history" })
         })]
       : []),
-    dropdownMenu({
+    menuTrigger({
       id: "browser-menu",
       items: browserMenuItems,
-      presentation: dropdownMenuPresentation(
+      presentation: menuTriggerPresentation(
         browserMenuItems,
         state.overlay?.kind === "browserMenu" ? state.overlay.state : { kind: "closed" }
       ),
       placeholder: "☰",
       density: "compact",
       placement: "below",
-      onAction: (action): BrowserTuiMessage => ({ kind: "browserMenuAction", action })
+      onTransition: (transition): BrowserTuiMessage => ({
+        kind: "browserMenuTransition",
+        transition
+      }),
+      onActivate: (event): BrowserTuiMessage => ({ kind: "browserMenuActivate", event })
     })
   ], {
     id: "browser-toolbar",
@@ -1243,7 +1227,7 @@ function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMe
   return column([
     tabs({
       id: "browser-tabs",
-      selected: selected.id,
+      presentation: { activeId: selected.id, selectedId: selected.id },
       maxTabWidth: 36,
       tabs: state.documents.map((document) => ({
         id: document.id,
@@ -1251,8 +1235,11 @@ function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMe
         closable: true,
         panel: document.id === selected.id ? selectedPanel : text({ content: "" })
       })),
-      onAction: (action): MessageResolution<BrowserTuiMessage> =>
-        action.kind === "pointer" ? ignoreMessage() : { kind: "tabs", action }
+      onTransition: (transition): BrowserTuiMessage => ({
+        kind: "tabsTransition",
+        transition
+      }),
+      onClose: (event): BrowserTuiMessage => ({ kind: "tabsClose", event })
     }),
     statusBar({
       id: "browser-status",
@@ -1295,9 +1282,14 @@ function actionPaletteView(palette: ActionPaletteOverlay): Element<BrowserTuiMes
         presentation: commandInputPresentation(palette.state),
         ...(palette.validation === undefined ? {} : { validation: { level: "error" as const, message: palette.validation } }),
         display: "expanded",
-        onAction: (action): BrowserTuiMessage => action.kind === "submit"
-          ? { kind: "actionPaletteSubmit", value: action.value }
-          : { kind: "actionPaletteAction", action }
+        onTransition: (transition): BrowserTuiMessage => ({
+          kind: "actionPaletteTransition",
+          transition
+        }),
+        onSubmit: (event): BrowserTuiMessage => ({
+          kind: "actionPaletteSubmit",
+          value: event.value
+        })
       })
     },
     width: 72,
@@ -1316,9 +1308,12 @@ function pickerView(picker: PickerOverlay): Element<BrowserTuiMessage> {
       content: searchPicker({
         id: "browser-picker-list",
         searchPickerIndex: picker.index,
-        query: picker.state.query,
-        ...(picker.state.selectedId === undefined ? {} : { selectedId: picker.state.selectedId }),
-        onAction: (action): BrowserTuiMessage => ({ kind: "pickerAction", action })
+        presentation: picker.state,
+        onTransition: (transition): BrowserTuiMessage => ({
+          kind: "pickerTransition",
+          transition
+        }),
+        onAccept: (event): BrowserTuiMessage => ({ kind: "pickerAccept", event })
       })
     },
     width: 76,
@@ -1351,7 +1346,11 @@ function linkMenuView(menu: LinkMenuOverlay): Element<BrowserTuiMessage> {
     title: "Link",
     presentation: contextMenuPresentation(linkMenuItems, menu.state),
     placement: "cursor",
-    onAction: (action): BrowserTuiMessage => ({ kind: "linkMenuAction", action })
+    onTransition: (transition): BrowserTuiMessage => ({
+      kind: "linkMenuTransition",
+      transition
+    }),
+    onActivate: (event): BrowserTuiMessage => ({ kind: "linkMenuActivate", event })
   });
 }
 

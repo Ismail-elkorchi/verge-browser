@@ -1,26 +1,34 @@
 import type {
-  CommandInputAction,
-  ContextMenuAction,
-  DropdownMenuAction,
+  CheckboxGroupAction,
+  ComboboxCommitEvent,
+  ComboboxPresentation,
+  ComboboxTransition,
+  CommandInputTransition,
+  ContextMenuTransition,
   MenuItem,
+  MenuActivateEvent,
+  MenuTriggerTransition,
   NumberInputControlAction,
-  SearchPickerAction,
-  SelectAction,
-  TabAction,
+  SearchPickerAcceptEvent,
+  SearchPickerControlTransition,
+  SearchPickerPresentation,
+  TabCloseEvent,
+  TabsTransition,
   TextAreaAction,
   TextInputAction
 } from "@ismail-elkorchi/terminal-ui/components";
 import type {
   CommandInputState,
   ContextMenuState,
-  DropdownMenuState,
+  MenuTriggerState,
   NumberInputState,
-  SearchPickerState,
-  SelectPresentation,
   ScrollState,
   TextAreaState
 } from "@ismail-elkorchi/terminal-ui/behavior";
-import type { ScrollEvent } from "@ismail-elkorchi/terminal-ui/interaction";
+import type {
+  CollectionInteractionState,
+  ScrollEvent
+} from "@ismail-elkorchi/terminal-ui/interaction";
 import type { SearchPickerIndex } from "@ismail-elkorchi/terminal-ui/behavior";
 import type { TextEditBuffer } from "@ismail-elkorchi/terminal-ui/text";
 
@@ -82,7 +90,8 @@ export interface BrowserDocumentState {
     | { readonly kind: "text"; readonly state: TextEditBuffer }
     | { readonly kind: "number"; readonly state: NumberInputState }
     | { readonly kind: "textarea"; readonly state: TextAreaState }
-    | { readonly kind: "select"; readonly state: SelectPresentation }
+    | { readonly kind: "combobox"; readonly state: ComboboxPresentation }
+    | { readonly kind: "checkboxGroup"; readonly state: CollectionInteractionState }
   >>;
   readonly savedViews: Readonly<Record<string, {
     readonly scrollAnchor: BrowserDocumentState["scrollAnchor"];
@@ -107,7 +116,7 @@ export interface PickerOverlay {
   readonly pickerKind: PickerKind;
   readonly title: string;
   readonly index: SearchPickerIndex<PickerValue>;
-  readonly state: SearchPickerState;
+  readonly state: Omit<SearchPickerPresentation, "scroll"> & { readonly scroll?: never };
 }
 
 export interface ActionPaletteOverlay {
@@ -132,7 +141,7 @@ export interface LinkMenuOverlay {
 
 export interface BrowserMenuOverlay {
   readonly kind: "browserMenu";
-  readonly state: DropdownMenuState;
+  readonly state: MenuTriggerState;
 }
 
 export interface DownloadPromptOverlay {
@@ -190,14 +199,16 @@ export type BrowserTuiMessage =
       readonly row: number;
       readonly column: number;
     }
-  | { readonly kind: "linkMenuAction"; readonly action: ContextMenuAction }
+  | { readonly kind: "linkMenuTransition"; readonly transition: ContextMenuTransition }
+  | { readonly kind: "linkMenuActivate"; readonly event: MenuActivateEvent }
   | { readonly kind: "navigate"; readonly operation: "back" | "forward" | "reload" | "stop" }
-  | { readonly kind: "omniboxAction"; readonly action: CommandInputAction }
+  | { readonly kind: "omniboxTransition"; readonly transition: CommandInputTransition }
   | { readonly kind: "omniboxSubmit"; readonly value: string }
   | { readonly kind: "focusOmnibox" }
   | { readonly kind: "cancelOmnibox" }
   | { readonly kind: "openActionPalette" }
-  | { readonly kind: "browserMenuAction"; readonly action: DropdownMenuAction }
+  | { readonly kind: "browserMenuTransition"; readonly transition: MenuTriggerTransition }
+  | { readonly kind: "browserMenuActivate"; readonly event: MenuActivateEvent }
   | { readonly kind: "openPicker"; readonly picker: PickerKind; readonly query?: string }
   | { readonly kind: "openDetail"; readonly detail: DetailKind }
   | { readonly kind: "toggleSidePanel"; readonly panel: SidePanelKind }
@@ -208,13 +219,12 @@ export type BrowserTuiMessage =
   | { readonly kind: "closeDocument" }
   | { readonly kind: "reopenDocument" }
   | { readonly kind: "selectDocument"; readonly index: number }
-  | {
-      readonly kind: "tabs";
-      readonly action: Exclude<TabAction, { readonly kind: "pointer" }>;
-    }
-  | { readonly kind: "actionPaletteAction"; readonly action: CommandInputAction }
+  | { readonly kind: "tabsTransition"; readonly transition: TabsTransition }
+  | { readonly kind: "tabsClose"; readonly event: TabCloseEvent }
+  | { readonly kind: "actionPaletteTransition"; readonly transition: CommandInputTransition }
   | { readonly kind: "actionPaletteSubmit"; readonly value: string }
-  | { readonly kind: "pickerAction"; readonly action: SearchPickerAction<PickerValue> }
+  | { readonly kind: "pickerTransition"; readonly transition: SearchPickerControlTransition }
+  | { readonly kind: "pickerAccept"; readonly event: SearchPickerAcceptEvent }
   | { readonly kind: "pickerSelect"; readonly value?: PickerValue }
   | { readonly kind: "openFind" }
   | { readonly kind: "findAction"; readonly action: TextInputAction }
@@ -223,7 +233,9 @@ export type BrowserTuiMessage =
   | { readonly kind: "formText"; readonly controlId: string; readonly action: TextInputAction }
   | { readonly kind: "formNumber"; readonly controlId: string; readonly action: NumberInputControlAction }
   | { readonly kind: "formArea"; readonly controlId: string; readonly action: TextAreaAction }
-  | { readonly kind: "formSelect"; readonly controlId: string; readonly action: SelectAction }
+  | { readonly kind: "formComboboxTransition"; readonly controlId: string; readonly transition: ComboboxTransition }
+  | { readonly kind: "formComboboxCommit"; readonly controlId: string; readonly event: ComboboxCommitEvent }
+  | { readonly kind: "formCheckboxGroup"; readonly controlId: string; readonly action: CheckboxGroupAction }
   | { readonly kind: "formValues"; readonly controlId: string; readonly values: readonly string[] }
   | { readonly kind: "resetForm"; readonly formId: string }
   | { readonly kind: "submitForm"; readonly formId: string; readonly submitterId?: string }

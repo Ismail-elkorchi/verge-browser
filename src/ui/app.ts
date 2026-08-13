@@ -1,15 +1,17 @@
 import {
+  checkboxGroupReducer,
+  comboboxReducer,
   commandInputReducer,
   contextMenuReducer,
   createNumberInputConfiguration,
   createScrollState,
   createTextAreaState,
-  dropdownMenuReducer,
+  menuTriggerReducer,
   prepareSearchPickerIndex,
   numberInputReducer,
   searchPickerReducer,
-  selectReducer,
-  scrollReducer,
+  searchPickerWindow,
+  tabsReducer,
   textAreaReducer,
   textInputReducer
 } from "@ismail-elkorchi/terminal-ui/behavior";
@@ -61,7 +63,7 @@ const ACTION_SUGGESTIONS = [
   "open-external",
   "cookies",
   "help"
-].map((value) => ({ value }));
+].map((value) => ({ id: value, value }));
 
 function activeDocument(state: BrowserTuiState): BrowserDocumentState {
   const document = state.documents[state.activeDocumentIndex];
@@ -258,7 +260,7 @@ function openPicker(
   query = ""
 ): BrowserTuiState {
   const entries = controller.pickerEntries(picker, state.documents, state.activeDocumentIndex, query);
-  const selectedId = entries[0]?.id;
+  const activeId = entries[0]?.id;
   return {
     ...state,
     overlay: {
@@ -267,8 +269,8 @@ function openPicker(
       title: picker === "recall" ? `Search visited pages: ${query}` : `${picker[0]?.toUpperCase() ?? ""}${picker.slice(1)}`,
       index: prepareSearchPickerIndex(entries),
       state: {
-        query: "",
-        ...(selectedId === undefined ? {} : { selectedId })
+        query: { text: "" },
+        ...(activeId === undefined ? {} : { activeId })
       }
     }
   };
@@ -656,36 +658,37 @@ export function updateBrowser(
         overlay: { kind: "linkMenu", actionId: action.id, state: menu }
       });
     }
-    case "linkMenuAction": {
+    case "linkMenuTransition": {
       if (state.overlay?.kind !== "linkMenu") return result(state);
-      const menu = contextMenuReducer(state.overlay.state, message.action, linkMenuItems);
-      if (message.action.kind === "menu" && message.action.action.kind === "activate") {
-        const link = actionById(document, state.overlay.actionId);
-        if (link?.kind !== "link") {
-          return result({ ...state, overlay: null, status: status("The selected link is no longer available.", "error") });
-        }
-        const id = message.action.action.id;
-        const next: BrowserTuiMessage | undefined = id === "open"
-          ? { kind: "activateActionAt", actionId: link.id, disposition: "current" }
-          : id === "newForeground"
-            ? { kind: "activateActionAt", actionId: link.id, disposition: "newForeground" }
-            : id === "newBackground"
-              ? { kind: "activateActionAt", actionId: link.id, disposition: "newBackground" }
-              : id === "download"
-                ? { kind: "download", target: link.resolvedHref }
-                : id === "external"
-                  ? { kind: "openExternal", target: link.resolvedHref }
-                  : undefined;
-        return next === undefined
-          ? result({ ...state, overlay: null })
-          : updateBrowser(controller, { ...state, overlay: null }, next, context);
-      }
+      const menu = contextMenuReducer(state.overlay.state, message.transition, linkMenuItems);
       return result({
         ...state,
         overlay: menu.kind === "closed"
           ? null
           : { ...state.overlay, state: menu }
       });
+    }
+    case "linkMenuActivate": {
+      if (state.overlay?.kind !== "linkMenu") return result(state);
+      const link = actionById(document, state.overlay.actionId);
+      if (link?.kind !== "link") {
+        return result({ ...state, overlay: null, status: status("The selected link is no longer available.", "error") });
+      }
+      const id = message.event.id;
+      const next: BrowserTuiMessage | undefined = id === "open"
+        ? { kind: "activateActionAt", actionId: link.id, disposition: "current" }
+        : id === "newForeground"
+          ? { kind: "activateActionAt", actionId: link.id, disposition: "newForeground" }
+          : id === "newBackground"
+            ? { kind: "activateActionAt", actionId: link.id, disposition: "newBackground" }
+            : id === "download"
+              ? { kind: "download", target: link.resolvedHref }
+              : id === "external"
+                ? { kind: "openExternal", target: link.resolvedHref }
+                : undefined;
+      return next === undefined
+        ? result({ ...state, overlay: null })
+        : updateBrowser(controller, { ...state, overlay: null }, next, context);
     }
     case "navigate":
       if (message.operation === "stop") {
@@ -703,13 +706,13 @@ export function updateBrowser(
         message.operation,
         navigationEffect(controller, document, message.operation)
       );
-    case "omniboxAction": {
-      const omnibox = commandInputReducer(state.omnibox, message.action);
+    case "omniboxTransition": {
+      const omnibox = commandInputReducer(state.omnibox, message.transition);
       return result({
         ...state,
         omnibox: {
           ...omnibox,
-          suggestions: message.action.kind === "acceptSuggestion"
+          suggestions: message.transition.kind === "acceptSuggestion"
             ? []
             : controller.omniboxSuggestions(omnibox.input.text, document)
         },
@@ -756,34 +759,34 @@ export function updateBrowser(
           state: { input: { text: "", cursor: 0 }, history: [], suggestions: ACTION_SUGGESTIONS }
         }
       }, { focus: { kind: "element", elementId: "browser-action-input" } });
-    case "browserMenuAction": {
+    case "browserMenuTransition": {
       const current = state.overlay?.kind === "browserMenu"
         ? state.overlay.state
         : { kind: "closed" as const };
-      const menu = dropdownMenuReducer(current, message.action, browserMenuItems);
-      if (message.action.kind === "menu" && message.action.action.kind === "activate") {
-        const id = message.action.action.id;
-        const next: BrowserTuiMessage | undefined = id === "history"
-          ? { kind: "toggleSidePanel", panel: "history" }
-          : id === "bookmarks"
-            ? { kind: "toggleSidePanel", panel: "bookmarks" }
-            : id === "downloads"
-              ? { kind: "toggleSidePanel", panel: "downloads" }
-              : id === "reader" || id === "diagnostics" || id === "cookies" || id === "help"
-                ? { kind: "openDetail", detail: id }
-                : id === "download"
-                  ? { kind: "download" }
-                  : id === "external"
-                    ? { kind: "openExternal" }
-                    : undefined;
-        return next === undefined
-          ? result({ ...state, overlay: null })
-          : updateBrowser(controller, { ...state, overlay: null }, next, context);
-      }
+      const menu = menuTriggerReducer(current, message.transition, browserMenuItems);
       return result({
         ...state,
         overlay: menu.kind === "closed" ? null : { kind: "browserMenu", state: menu }
       });
+    }
+    case "browserMenuActivate": {
+      const id = message.event.id;
+      const next: BrowserTuiMessage | undefined = id === "history"
+        ? { kind: "toggleSidePanel", panel: "history" }
+        : id === "bookmarks"
+          ? { kind: "toggleSidePanel", panel: "bookmarks" }
+          : id === "downloads"
+            ? { kind: "toggleSidePanel", panel: "downloads" }
+            : id === "reader" || id === "diagnostics" || id === "cookies" || id === "help"
+              ? { kind: "openDetail", detail: id }
+              : id === "download"
+                ? { kind: "download" }
+                : id === "external"
+                  ? { kind: "openExternal" }
+                  : undefined;
+      return next === undefined
+        ? result({ ...state, overlay: null })
+        : updateBrowser(controller, { ...state, overlay: null }, next, context);
     }
     case "openPicker":
       return result(openPicker(controller, state, message.picker, message.query));
@@ -811,7 +814,7 @@ export function updateBrowser(
     case "sidePanelScroll":
       return result({
         ...state,
-        sidePanelScroll: scrollReducer(message.event.scroll, message.event.action)
+        sidePanelScroll: message.event.state
       });
     case "toggleBookmark":
       return result(state, { effects: [effect("bookmark", async () => ({
@@ -884,49 +887,73 @@ export function updateBrowser(
       };
       return result(next, { effects: [persistEffect(controller, next)] });
     }
-    case "tabs": {
-      const action = message.action;
-      if (action.kind === "select" || action.kind === "close") {
-        const index = state.documents.findIndex((entry) => entry.id === action.id);
-        if (index < 0) return result(state);
-        return action.kind === "select"
-          ? updateBrowser(controller, state, { kind: "selectDocument", index }, context)
-          : updateBrowser(controller, { ...state, activeDocumentIndex: index }, { kind: "closeDocument" }, context);
-      }
-      const nextIndex = action.kind === "first"
-        ? 0
-        : action.kind === "last"
-          ? state.documents.length - 1
-          : (state.activeDocumentIndex + action.delta + state.documents.length) % state.documents.length;
-      return updateBrowser(controller, state, { kind: "selectDocument", index: nextIndex }, context);
+    case "tabsTransition": {
+      const selected = state.documents[state.activeDocumentIndex];
+      if (!selected) return result(state);
+      const presentation = tabsReducer(
+        { activeId: selected.id, selectedId: selected.id },
+        message.transition,
+        { tabs: state.documents, activation: "automatic" }
+      );
+      const nextIndex = state.documents.findIndex((entry) => entry.id === presentation.selectedId);
+      return nextIndex < 0
+        ? result(state)
+        : updateBrowser(controller, state, { kind: "selectDocument", index: nextIndex }, context);
     }
-    case "actionPaletteAction":
+    case "tabsClose": {
+      const index = state.documents.findIndex((entry) => entry.id === message.event.id);
+      return index < 0
+        ? result(state)
+        : updateBrowser(
+          controller,
+          { ...state, activeDocumentIndex: index },
+          { kind: "closeDocument" },
+          context
+        );
+    }
+    case "actionPaletteTransition":
       if (state.overlay?.kind !== "actionPalette") return result(state);
       return result({
         ...state,
-        overlay: { ...state.overlay, state: commandInputReducer(state.overlay.state, message.action) }
+        overlay: {
+          ...state.overlay,
+          state: commandInputReducer(state.overlay.state, message.transition)
+        }
       });
     case "actionPaletteSubmit":
       return state.overlay?.kind !== "actionPalette"
         ? result(state)
         : runCommand(controller, state, parseCommand(message.value), columns);
-    case "pickerAction":
+    case "pickerTransition":
       return state.overlay?.kind !== "picker"
         ? result(state)
-        : message.action.kind === "activate"
-          ? updateBrowser(
-            controller,
-            state,
-            { kind: "pickerSelect", value: message.action.entry.value },
-            context
-          )
         : result({
           ...state,
           overlay: {
             ...state.overlay,
-            state: searchPickerReducer(state.overlay.state, message.action, { searchPickerIndex: state.overlay.index })
+            state: searchPickerReducer(
+              state.overlay.state,
+              message.transition,
+              { searchPickerIndex: state.overlay.index }
+            )
           }
         });
+    case "pickerAccept": {
+      if (state.overlay?.kind !== "picker") return result(state);
+      const entry = searchPickerWindow({
+        searchPickerIndex: state.overlay.index,
+        query: state.overlay.state.query
+      }).entries.find((candidate) => candidate.id === message.event.id);
+      return updateBrowser(
+        controller,
+        state,
+        {
+          kind: "pickerSelect",
+          ...(entry === undefined ? {} : { value: entry.value })
+        },
+        context
+      );
+    }
     case "pickerSelect": {
       const value = message.value;
       if (!value) return result({ ...state, status: status("No item is selected.", "error") });
@@ -1006,7 +1033,7 @@ export function updateBrowser(
         ? current.state
         : createTextAreaState({
           value: controlValues(document, control)[0] ?? "",
-          scroll: createScrollState({ contentRows: 1, viewportRows: 2 })
+          scroll: createScrollState()
         });
       const next = textAreaReducer(editor, message.action);
       return result(updateFormControl(
@@ -1017,7 +1044,7 @@ export function updateBrowser(
         { kind: "textarea", state: next }
       ));
     }
-    case "formSelect": {
+    case "formComboboxTransition": {
       const control = controlById(controller, document, message.controlId);
       if (!control || control.kind !== "select" || control.multiple) return result(state);
       const options = control.options.map((option, index) => ({
@@ -1029,28 +1056,91 @@ export function updateBrowser(
       const values = controlValues(document, control);
       const selectedIndex = control.options.findIndex((option) => values.includes(option.value));
       const current = document.formEditors[control.id];
-      const editor = current?.kind === "select"
+      const selectedId = selectedIndex < 0 ? undefined : `${control.id}:${String(selectedIndex)}`;
+      const editor = current?.kind === "combobox"
         ? current.state
         : {
-          kind: "closed" as const,
-          ...(selectedIndex < 0 ? {} : { selected: `${control.id}:${String(selectedIndex)}` })
+          open: false,
+          interaction: {
+            ...(selectedId === undefined ? {} : { activeId: selectedId }),
+            selection: {
+              mode: "single" as const,
+              ...(selectedId === undefined ? {} : { selectedId })
+            }
+          }
         };
-      const next = selectReducer(editor, message.action, options);
-      const selected = next.selected === undefined
-        ? undefined
-        : control.options[Number(next.selected.slice(next.selected.lastIndexOf(":") + 1))];
+      const next = comboboxReducer(editor, message.transition, {
+        enabledIds: options.filter((option) => !option.disabled).map((option) => option.id)
+      });
       return result(updateFormControl(
         state,
         document,
         control,
-        selected === undefined ? values : [selected.value],
-        { kind: "select", state: next }
+        values,
+        { kind: "combobox", state: next }
+      ));
+    }
+    case "formComboboxCommit": {
+      const control = controlById(controller, document, message.controlId);
+      if (!control || control.kind !== "select" || control.multiple) return result(state);
+      const option = control.options.find(
+        (_, index) => `${control.id}:${String(index)}` === message.event.id
+      );
+      if (option === undefined || option.disabled) return result(state);
+      const next = {
+        open: false,
+        interaction: {
+          activeId: message.event.id,
+          selection: { mode: "single" as const, selectedId: message.event.id }
+        }
+      };
+      return result(updateFormControl(
+        state,
+        document,
+        control,
+        [option.value],
+        { kind: "combobox", state: next }
+      ));
+    }
+    case "formCheckboxGroup": {
+      const control = controlById(controller, document, message.controlId);
+      if (!control || control.kind !== "select" || !control.multiple) return result(state);
+      const options = control.options.map((option, index) => ({
+        id: `${control.id}:${String(index)}`,
+        label: option.label,
+        value: option.value,
+        disabled: option.disabled
+      }));
+      const selectedIds = control.options.flatMap((option, index) =>
+        controlValues(document, control).includes(option.value)
+          ? [`${control.id}:${String(index)}`]
+          : []
+      );
+      const current = document.formEditors[control.id];
+      const interaction = current?.kind === "checkboxGroup"
+        ? current.state
+        : {
+          ...(selectedIds[0] === undefined ? {} : { activeId: selectedIds[0] }),
+          selection: { mode: "multiple" as const, selectedIds }
+        };
+      const next = checkboxGroupReducer(interaction, message.action, options);
+      const nextIds = next.selection.mode === "multiple" ? next.selection.selectedIds : [];
+      const nextValues = nextIds.flatMap((id) => {
+        const option = options.find((candidate) => candidate.id === id);
+        return option === undefined ? [] : [option.value];
+      });
+      return result(updateFormControl(
+        state,
+        document,
+        control,
+        nextValues,
+        { kind: "checkboxGroup", state: next }
       ));
     }
     case "formValues": {
       const control = controlById(controller, document, message.controlId);
       if (control === undefined) return result(state);
-      if (control.kind === "radio" && message.values.length > 0) {
+      if (control.kind === "radio") {
         const containingForm = controller.forms(document).find(
           (entry) => entry.controls.some((candidate) => candidate.id === control.id)
         );
@@ -1065,9 +1155,8 @@ export function updateBrowser(
         return result(updateDocument(state, document.id, (current) => ({
           ...current,
           formValues: {
-            ...Object.fromEntries(
-              Object.entries(current.formValues).filter(([id]) => !groupIds.has(id))
-            ),
+            ...current.formValues,
+            ...Object.fromEntries([...groupIds].map((id) => [id, []])),
             [control.id]: message.values
           }
         })));
@@ -1313,8 +1402,8 @@ export function createBrowserApp(
       { id: "new-tab", phase: "beforeFocus", triggers: [{ kind: "key", key: "t", modifiers: { ctrl: true } }], message: { kind: "newDocument" } },
       { id: "close-tab", phase: "beforeFocus", triggers: [{ kind: "key", key: "w", modifiers: { ctrl: true } }], message: { kind: "closeDocument" } },
       { id: "reopen-tab", phase: "beforeFocus", triggers: [{ kind: "key", key: "t", modifiers: { ctrl: true, shift: true } }], message: { kind: "reopenDocument" } },
-      { id: "next-tab", phase: "beforeFocus", triggers: [{ kind: "key", key: "tab", modifiers: { ctrl: true } }], message: { kind: "tabs", action: { kind: "move", delta: 1 } } },
-      { id: "previous-tab", phase: "beforeFocus", triggers: [{ kind: "key", key: "tab", modifiers: { ctrl: true, shift: true } }], message: { kind: "tabs", action: { kind: "move", delta: -1 } } },
+      { id: "next-tab", phase: "beforeFocus", triggers: [{ kind: "key", key: "tab", modifiers: { ctrl: true } }], message: { kind: "tabsTransition", transition: { kind: "moveActive", delta: 1 } } },
+      { id: "previous-tab", phase: "beforeFocus", triggers: [{ kind: "key", key: "tab", modifiers: { ctrl: true, shift: true } }], message: { kind: "tabsTransition", transition: { kind: "moveActive", delta: -1 } } },
       { id: "back", phase: "beforeFocus", triggers: [{ kind: "key", key: "arrowLeft", modifiers: { alt: true } }], message: { kind: "navigate", operation: "back" } },
       { id: "forward", phase: "beforeFocus", triggers: [{ kind: "key", key: "arrowRight", modifiers: { alt: true } }], message: { kind: "navigate", operation: "forward" } },
       { id: "reload", phase: "beforeFocus", triggers: [{ kind: "key", key: "r", modifiers: { ctrl: true } }], message: { kind: "navigate", operation: "reload" } },

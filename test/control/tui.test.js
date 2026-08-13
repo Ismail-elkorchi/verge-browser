@@ -9,7 +9,8 @@ import {
   diagnostic
 } from "@ismail-elkorchi/terminal-ui";
 import { validateAccessibleSnapshot } from "@ismail-elkorchi/terminal-ui/accessibility";
-import { selectedSearchPickerEntry } from "@ismail-elkorchi/terminal-ui/behavior";
+import { activeSearchPickerEntry } from "@ismail-elkorchi/terminal-ui/behavior";
+import { createMemoryTerminalHost } from "@ismail-elkorchi/terminal-ui/host";
 import { renderFramePlain } from "@ismail-elkorchi/terminal-ui/renderer";
 import { createTerminalHarness } from "@ismail-elkorchi/terminal-ui/testing";
 import { measureTextCells } from "@ismail-elkorchi/terminal-ui/text";
@@ -108,12 +109,12 @@ async function fixture(options = {}) {
     downloadDirectory: stateDirectory,
     restoreWorkspace: options.restoreWorkspace === true
   });
-  const harness = createTerminalHarness({
+  const host = createMemoryTerminalHost({
     terminalSize: options.terminalSize ?? { columns: 120, rows: 30 }
   });
-  const runtime = createTuiRuntime({ app: prepared.app, host: harness.host });
+  const runtime = createTuiRuntime({ app: prepared.app, host });
   await runtime.start();
-  return { runtime, harness, writes, prepared };
+  return { runtime, writes, prepared };
 }
 
 async function waitUntil(runtime, predicate) {
@@ -414,14 +415,14 @@ test("browser chrome and document geometry remain readable from narrow to wide t
 test("browser and link actions use anchored menus instead of modal button grids", async () => {
   const { runtime, writes } = await fixture();
 
-  await runtime.dispatch({ kind: "browserMenuAction", action: { kind: "open" } });
+  await runtime.dispatch({ kind: "browserMenuTransition", transition: { kind: "open" } });
   assert.equal(runtime.state().overlay?.kind, "browserMenu");
   assert.match(renderFramePlain(runtime.frame()), /History/u);
   assert.equal(findRoleWithLabel(runtime.frame().accessibility.root, "dialog", "Browser menu"), undefined);
 
   await runtime.dispatch({
-    kind: "browserMenuAction",
-    action: { kind: "menu", action: { kind: "activate", id: "history" } }
+    kind: "browserMenuActivate",
+    event: { kind: "activate", id: "history" }
   });
   assert.equal(runtime.state().overlay, null);
   assert.equal(runtime.state().sidePanel, "history");
@@ -447,8 +448,8 @@ test("browser and link actions use anchored menus instead of modal button grids"
   assert.equal(findRoleWithLabel(runtime.frame().accessibility.root, "dialog", "Link"), undefined);
 
   await runtime.dispatch({
-    kind: "linkMenuAction",
-    action: { kind: "menu", action: { kind: "activate", id: "external" } }
+    kind: "linkMenuActivate",
+    event: { kind: "activate", id: "external" }
   });
   await waitUntil(runtime, () => writes.some((entry) =>
     entry.kind === "openExternal" && entry.target === link.resolvedHref
@@ -462,16 +463,16 @@ test("browser pickers retain stable selection identity and activate generic valu
   await runtime.dispatch({ kind: "openPicker", picker: "links" });
   const overlay = runtime.state().overlay;
   assert.equal(overlay?.kind, "picker");
-  const selected = selectedSearchPickerEntry({
+  const active = activeSearchPickerEntry({
     searchPickerIndex: overlay.index,
-    state: overlay.state
+    presentation: overlay.state
   });
-  assert.ok(selected);
-  assert.equal(overlay.state.selectedId, selected.id);
+  assert.ok(active);
+  assert.equal(overlay.state.activeId, active.id);
 
   await runtime.dispatch({
-    kind: "pickerAction",
-    action: { kind: "activate", entry: selected }
+    kind: "pickerAccept",
+    event: { kind: "accept", id: active.id }
   });
   await waitUntil(
     runtime,
@@ -547,8 +548,8 @@ test("Verge supports exact find, adaptive library panels, and inline semantic fo
   await runtime.dispatch({ kind: "focusOmnibox" });
   assert.equal(runtime.state().omnibox.input.text, "https://example.test/");
   await runtime.dispatch({
-    kind: "omniboxAction",
-    action: { kind: "setValue", value: "Next" }
+    kind: "omniboxTransition",
+    transition: { kind: "setValue", value: "Next" }
   });
   assert.ok(runtime.state().omnibox.suggestions.some((entry) => entry.value === "https://example.test/next"));
   await runtime.dispatch({ kind: "cancelOmnibox" });
@@ -590,14 +591,14 @@ test("Verge supports exact find, adaptive library panels, and inline semantic fo
     action: { kind: "edit", operation: { kind: "insert", text: "Z" } }
   });
   await runtime.dispatch({
-    kind: "formSelect",
+    kind: "formComboboxTransition",
     controlId: language.id,
-    action: { kind: "open" }
+    transition: { kind: "open" }
   });
   await runtime.dispatch({
-    kind: "formSelect",
+    kind: "formComboboxCommit",
     controlId: language.id,
-    action: { kind: "commit", id: `${language.id}:1` }
+    event: { kind: "commit", id: `${language.id}:1` }
   });
   await runtime.dispatch({
     kind: "formNumber",
@@ -609,7 +610,9 @@ test("Verge supports exact find, adaptive library panels, and inline semantic fo
   assert.deepEqual(runtime.state().documents[0].formValues[count.id], ["3"]);
   assert.doesNotMatch(renderFramePlain(runtime.frame()), /hidden/u);
   await runtime.dispatch({ kind: "scrollBottom" });
-  assert.ok(findRoleWithLabel(runtime.frame().accessibility.root, "combobox", "Language *"));
+  const languageNode = findRoleWithLabel(runtime.frame().accessibility.root, "combobox", "Language");
+  assert.ok(languageNode);
+  assert.equal(languageNode.required, true);
   assert.ok(findRoleWithLabel(runtime.frame().accessibility.root, "spinbutton", count.id));
   await runtime.dispatch({ kind: "submitForm", formId: form.id, submitterId: form.controls.find((control) => control.kind === "submit").id });
   await waitUntil(runtime, () => runtime.state().documents[0].snapshot.finalUrl.includes("/search?"));
