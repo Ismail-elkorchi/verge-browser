@@ -187,12 +187,12 @@ export class BrowserController {
       readonly description?: string;
     }): boolean => {
       if (seen.has(entry.value)) return false;
-      seen.add(entry.value);
       if (
         query.length > 0
         && !entry.value.toLowerCase().includes(query)
         && !entry.label.toLowerCase().includes(query)
       ) return false;
+      seen.add(entry.value);
       suggestions.push({ ...entry, id: entry.value });
       return suggestions.length >= limit;
     };

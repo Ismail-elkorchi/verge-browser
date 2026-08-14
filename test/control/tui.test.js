@@ -114,7 +114,7 @@ async function fixture(options = {}) {
   });
   const runtime = createTuiRuntime({ app: prepared.app, host });
   await runtime.start();
-  return { runtime, writes, prepared };
+  return { runtime, writes, prepared, store };
 }
 
 async function waitUntil(runtime, predicate) {
@@ -198,6 +198,10 @@ test("Verge renders a browser shell and preserves navigation, focus, scrolling, 
   assert.equal(runtime.state().documents[0].snapshot.content.title, "Index");
   assert.equal(findRole(runtime.frame().accessibility.root, "document")?.label, "Index");
   assert.equal(findRole(runtime.frame().accessibility.root, "toolbar")?.label, "Browser navigation");
+  assert.equal(
+    findRoleWithLabel(runtime.frame().accessibility.root, "button", "Bookmark current page")?.pressed,
+    false
+  );
   assert.equal(findRoleWithLabel(runtime.frame().accessibility.root, "button", "←")?.disabled, true);
   assert.equal(runtime.frame().hitTargets?.some((target) => target.id === "browser-back:control"), false);
   assert.equal(decodeAccessibleSnapshot(runtime.frame().accessibility).ok, true);
@@ -250,6 +254,78 @@ test("Verge renders a browser shell and preserves navigation, focus, scrolling, 
 
   await runtime.handleInput(textEvent("q"));
   assert.equal(runtime.exit().status, "completed");
+});
+
+test("Tab traversal reveals links beyond the document viewport", async () => {
+  const target = "https://many-links.test/";
+  const links = Array.from(
+    { length: 18 },
+    (_value, index) => `<p><a href="/link-${String(index + 1)}">Link ${String(index + 1)}</a></p>`
+  ).join("");
+  const pages = new Map([[
+    target,
+    `<html><head><title>Many links</title></head><body>${links}</body></html>`
+  ]]);
+  const { runtime } = await fixture({
+    initialUrl: target,
+    terminalSize: { columns: 50, rows: 8 },
+    loaderFactory: () => createLoader(pages)
+  });
+  const document = runtime.state().documents[0];
+  const lastLink = document.snapshot.content.links.at(-1);
+  assert.ok(lastLink);
+  const initialAnchor = document.scrollAnchor;
+
+  for (let attempt = 0; attempt < 40 && !runtime.frame().focusPath?.includes(lastLink.id); attempt += 1) {
+    await runtime.handleInput(keyEvent("tab"));
+  }
+
+  assert.equal(runtime.frame().focusPath?.includes(lastLink.id), true);
+  assert.notDeepEqual(runtime.state().documents[0].scrollAnchor, initialAnchor);
+  assert.equal(
+    findRoleWithLabel(runtime.frame().accessibility.root, "link", "Link 18")?.focused,
+    true
+  );
+});
+
+test("omnibox deduplication keeps a matching representation of a shared URL", async () => {
+  const { runtime, prepared, store } = await fixture();
+  await store.addBookmark("https://example.test/next", "Needle destination");
+
+  const suggestions = prepared.controller.omniboxSuggestions(
+    "needle",
+    runtime.state().documents[0]
+  );
+
+  assert.equal(suggestions.length, 1);
+  assert.equal(suggestions[0].value, "https://example.test/next");
+  assert.equal(suggestions[0].label, "Needle destination");
+});
+
+test("inline forms use their CSS block placement instead of page-wide bounds", async () => {
+  const target = "https://form-layout.test/";
+  const pages = new Map([[
+    target,
+    `<html><head><title>Placed form</title><style>
+      .grid { display: grid; grid-template-columns: 1fr 1fr; column-gap: 2ch; }
+      form { width: 20ch; margin-inline: auto; }
+    </style></head><body><div class="grid"><article><p>Article</p></article>
+      <form><label for="query">Query</label><input id="query" name="q"></form>
+    </div></body></html>`
+  ]]);
+  const { runtime, prepared } = await fixture({
+    initialUrl: target,
+    terminalSize: { columns: 100, rows: 12 },
+    loaderFactory: () => createLoader(pages)
+  });
+  const document = runtime.state().documents[0];
+  const control = prepared.controller.forms(document)[0]?.controls.find((candidate) => candidate.name === "q");
+  assert.ok(control);
+  const targetBounds = runtime.frame().hitTargets?.find((candidate) => candidate.id === `${control.id}:text`)?.bounds;
+
+  assert.ok(targetBounds);
+  assert.ok(targetBounds.column > 50);
+  assert.equal(targetBounds.width, 20);
 });
 
 test("browser chrome and document geometry remain readable from narrow to wide terminals", async () => {

@@ -260,11 +260,21 @@ export interface PageActionPlacement {
   readonly width: number;
 }
 
+/** Width-specific rectangle allocated to one semantic page block. */
+export interface PageBlockPlacement {
+  readonly blockId: string;
+  readonly rowIndex: number;
+  readonly columnIndex: number;
+  readonly width: number;
+  readonly height: number;
+}
+
 /** Width-specific layout derived from `PageContent`. */
 export interface PageLayout {
   readonly columns: number;
   readonly rows: readonly PageLayoutRow[];
   readonly actionPlacements: readonly PageActionPlacement[];
+  readonly blockPlacements: readonly PageBlockPlacement[];
   readonly canvasStyle: PageTextStyle;
   readonly styleIssues: readonly PageStyleIssue[];
 }

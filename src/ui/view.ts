@@ -30,6 +30,8 @@ import {
   text,
   textArea,
   textInput,
+  toggleButton,
+  toolbar as toolbarComponent,
   type CheckboxGroupAction,
   type RadioGroupAction
 } from "@ismail-elkorchi/terminal-ui/components";
@@ -40,7 +42,6 @@ import {
 import { column, overlay, row, splitPane, surface, viewport } from "@ismail-elkorchi/terminal-ui/layout";
 import type { RoutedPointerEvent } from "@ismail-elkorchi/terminal-ui/input";
 import type {
-  Measurement,
   Rect,
   RenderSpan,
   TerminalStyle
@@ -52,6 +53,7 @@ import type {
   PageAction,
   PageBlock,
   PageLayout,
+  PageLinkAction,
   PageLayoutRow,
   PageTextStyle
 } from "../app/types.js";
@@ -75,6 +77,10 @@ import { browserMenuItems, formComboboxPageSize, linkMenuItems } from "./model.j
 interface BrowserDocumentViewModel {
   readonly id: string;
   readonly content: BrowserDocumentState["snapshot"]["content"];
+  readonly actionsById: ReadonlyMap<string, PageAction>;
+  readonly blocksById: ReadonlyMap<string, PageBlock>;
+  readonly linksByBlockId: ReadonlyMap<string, readonly PageLinkAction[]>;
+  readonly linkPositionsById: ReadonlyMap<string, number>;
   readonly layout: PageLayout;
   readonly finalUrl: string;
   readonly search: BrowserDocumentState["search"];
@@ -93,9 +99,7 @@ type BrowserDocumentAction = Extract<
 >;
 
 function actionForId(document: BrowserDocumentViewModel, id: string | undefined): PageAction | undefined {
-  return id === undefined
-    ? undefined
-    : document.content.actions.find((action) => action.id === id);
+  return id === undefined ? undefined : document.actionsById.get(id);
 }
 
 function accessibleBlock(block: PageBlock) {
@@ -152,10 +156,8 @@ function rowSegments(
   focusedActionId: string | undefined
 ): readonly RenderSpan[] {
   const rowText = layoutRow.text;
-  const blocksById = new Map(document.content.blocks.map((block) => [block.id, block]));
-  const links = document.content.links.flatMap((link) => {
-    return layoutRow.fragments.flatMap((fragment) => {
-      if (link.blockId !== fragment.blockId) return [];
+  const links = layoutRow.fragments.flatMap((fragment) =>
+    (document.linksByBlockId.get(fragment.blockId) ?? []).flatMap((link) => {
       const start = Math.max(link.textOffset, fragment.blockStartCodeUnitIndex);
       const end = Math.min(
         link.textOffset + link.label.length,
@@ -168,8 +170,8 @@ function rowSegments(
           start: fragment.rowStartCodeUnitIndex + start - fragment.blockStartCodeUnitIndex,
           end: fragment.rowStartCodeUnitIndex + end - fragment.blockStartCodeUnitIndex
         }];
-    });
-  });
+    })
+  );
   const active = document.search?.matches[document.search.activeMatchIndex];
   const searchRanges: { readonly start: number; readonly end: number; readonly active: boolean }[] = [];
   for (const match of document.search?.matches ?? []) {
@@ -211,7 +213,7 @@ function rowSegments(
       candidate.rowStartCodeUnitIndex <= start
       && candidate.rowEndCodeUnitIndexExclusive >= end
     );
-    const block = fragment === undefined ? undefined : blocksById.get(fragment.blockId);
+    const block = fragment === undefined ? undefined : document.blocksById.get(fragment.blockId);
     const authored = Object.assign(
       {},
       ...layoutRow.styleRuns
@@ -594,31 +596,29 @@ function inlineForm(document: BrowserDocumentViewModel, entry: FormEntry): Eleme
 function browserDocumentChildBounds(
   document: BrowserDocumentViewModel,
   bounds: Rect,
-  childCount: number,
-  measureChild: (index: number) => Measurement
+  childCount: number
 ): readonly Rect[] {
   const layout = document.layout;
   const contentBounds = documentContentBounds(bounds);
   const entries = forms(document);
+  const placements = new Map(layout.blockPlacements.map((placement) => [
+    placement.blockId,
+    placement
+  ]));
   return Array.from({ length: childCount }, (_, index) => {
     const entry = entries[index];
     if (!entry) {
       return { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 };
     }
-    const first = layout.rows.findIndex((candidate) =>
-      candidate.fragments.some((fragment) => fragment.blockId === entry.id)
-    );
-    if (first < 0) {
+    const placement = placements.get(entry.id);
+    if (placement === undefined) {
       return { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 };
     }
-    const reservedRows = layout.rows.filter((candidate) =>
-      candidate.fragments.some((fragment) => fragment.blockId === entry.id)
-    ).length;
     return {
-      row: contentBounds.row + first,
-      column: contentBounds.column,
-      width: contentBounds.width,
-      height: Math.max(reservedRows, measureChild(index).preferredHeight)
+      row: contentBounds.row + placement.rowIndex,
+      column: contentBounds.column + placement.columnIndex,
+      width: placement.width,
+      height: placement.height
     };
   });
 }
@@ -655,8 +655,7 @@ const browserDocumentComponent = defineComponent<
     const childBounds = browserDocumentChildBounds(
       model.document,
       bounds,
-      childCount,
-      (index) => slots.measure("forms", index)
+      childCount
     );
     return {
       minWidth: 0,
@@ -673,8 +672,7 @@ const browserDocumentComponent = defineComponent<
       forms: browserDocumentChildBounds(
         model.document,
         bounds,
-        slots.count("forms"),
-        (index) => slots.measure("forms", index)
+        slots.count("forms")
       )
     };
   },
@@ -729,12 +727,14 @@ const browserDocumentComponent = defineComponent<
         .flatMap((row) => row.fragments.map((fragment) => fragment.blockId))
     );
     const focusedAction = actionForId(document, focusedTargetId);
-    const visibleActions = document.content.actions.filter((action) =>
-      layout.actionPlacements.some((placement) =>
-        placement.actionId === action.id
-        && placement.rowIndex >= startIndex
+    const visibleActionIds = new Set(layout.actionPlacements
+      .filter((placement) =>
+        placement.rowIndex >= startIndex
         && placement.rowIndex < endIndexExclusive
       )
+      .map((placement) => placement.actionId));
+    const visibleActions = document.content.actions.filter((action) =>
+      visibleActionIds.has(action.id)
     );
     return {
       id,
@@ -749,16 +749,17 @@ const browserDocumentComponent = defineComponent<
         omittedAfter: layout.rows.length - endIndexExclusive
       },
       children: [
-        ...document.content.blocks
-          .filter((block) => visibleBlockIds.has(block.id) && block.kind !== "form")
-          .map(accessibleBlock),
+        ...[...visibleBlockIds].flatMap((blockId) => {
+          const block = document.blocksById.get(blockId);
+          return block === undefined || block.kind === "form" ? [] : [accessibleBlock(block)];
+        }),
         ...visibleActions.filter((action) => action.kind === "link").map((action) => ({
           id: action.id,
           role: "link" as const,
           label: action.label,
           ...(focusedAction?.id === action.id ? { focused: true } : {}),
           position: {
-            positionInSet: document.content.links.indexOf(action) + 1,
+            positionInSet: document.linkPositionsById.get(action.id) ?? 1,
             setSize: document.content.links.length
           }
         })),
@@ -766,7 +767,7 @@ const browserDocumentComponent = defineComponent<
       ]
     };
   },
-  focusTargets({ model, bounds, viewport: visibleBounds }) {
+  focusTargets({ model, bounds }) {
     if (bounds.width <= 0 || bounds.height <= 0) return [];
     const document = model.document;
     const layout = document.layout;
@@ -776,9 +777,7 @@ const browserDocumentComponent = defineComponent<
       .flatMap((placement) => {
         const action = actionForId(document, placement.actionId);
         if (action?.kind !== "link"
-          || seen.has(placement.actionId)
-          || contentBounds.row + placement.rowIndex < visibleBounds.row
-          || contentBounds.row + placement.rowIndex >= visibleBounds.row + visibleBounds.height) {
+          || seen.has(placement.actionId)) {
           return [];
         }
         seen.add(placement.actionId);
@@ -875,9 +874,20 @@ function browserDocumentViewModel(
   document: BrowserDocumentState,
   layout: PageLayout
 ): BrowserDocumentViewModel {
+  const content = document.snapshot.content;
+  const linksByBlockId = new Map<string, PageLinkAction[]>();
+  for (const link of content.links) {
+    const links = linksByBlockId.get(link.blockId) ?? [];
+    links.push(link);
+    linksByBlockId.set(link.blockId, links);
+  }
   return {
     id: document.id,
-    content: document.snapshot.content,
+    content,
+    actionsById: new Map(content.actions.map((action) => [action.id, action])),
+    blocksById: new Map(content.blocks.map((block) => [block.id, block])),
+    linksByBlockId,
+    linkPositionsById: new Map(content.links.map((link, index) => [link.id, index + 1])),
     layout,
     finalUrl: document.snapshot.finalUrl,
     search: document.search,
@@ -1048,7 +1058,7 @@ function sidePanel(state: BrowserTuiState): Element<BrowserTuiMessage> {
   });
 }
 
-function toolbar(
+function browserToolbar(
   state: BrowserTuiState,
   document: BrowserDocumentState,
   columns: number
@@ -1099,7 +1109,7 @@ function toolbar(
       tone: "ghost",
       disabled: true
     });
-  return surface(row([
+  return surface(toolbarComponent(row([
     back,
     forward,
     button({
@@ -1111,7 +1121,15 @@ function toolbar(
     }),
     button({ id: "browser-new-tab", label: "+", density: "compact", tone: "ghost", onAction: buttonAction({ kind: "newDocument" }) }),
     omnibox,
-    button({ id: "browser-bookmark", label: bookmarked ? "★" : "☆", density: "compact", tone: "ghost", onAction: buttonAction({ kind: "toggleBookmark" }) }),
+    toggleButton({
+      id: "browser-bookmark",
+      label: bookmarked ? "★" : "☆",
+      accessibleName: "Bookmark current page",
+      pressed: bookmarked,
+      density: "compact",
+      tone: "ghost",
+      onTransition: () => ({ kind: "toggleBookmark" })
+    }),
     ...(showLibrary
       ? [button({
           id: "browser-library",
@@ -1138,7 +1156,7 @@ function toolbar(
       onActivate: (event): BrowserTuiMessage => ({ kind: "browserMenuActivate", event })
     })
   ], {
-    id: "browser-toolbar",
+    id: "browser-toolbar-layout",
     gap: 1,
     align: "center",
     sizes: [
@@ -1150,8 +1168,10 @@ function toolbar(
       { kind: "content" },
       ...(showLibrary ? [{ kind: "content" as const }] : []),
       { kind: "content" }
-    ],
-    meta: { accessibility: { role: "toolbar", label: "Browser navigation" } }
+    ]
+  }), {
+    id: "browser-toolbar",
+    label: "Browser navigation"
   }), {
     id: "browser-toolbar-surface",
     appearance: "bar",
@@ -1214,7 +1234,7 @@ function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMe
   const layout = documentLayout(selected, Math.max(1, pageColumns - 1));
   const find = findBar(state);
   const selectedPanel = column([
-    toolbar(state, selected, columns),
+    browserToolbar(state, selected, columns),
     ...(find === null ? [] : [find]),
     body
   ], {

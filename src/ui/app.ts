@@ -19,6 +19,7 @@ import {
   textInputReducer
 } from "@ismail-elkorchi/terminal-ui/behavior";
 import { textDocumentText } from "@ismail-elkorchi/terminal-ui/text";
+import { prepareCollectionInteractionIndex } from "@ismail-elkorchi/terminal-ui/interaction";
 import {
   defineTui,
   type TuiContext,
@@ -1071,8 +1072,13 @@ export function updateBrowser(
             }
           }
         };
+      const index = current?.kind === "combobox"
+        ? current.index
+        : prepareCollectionInteractionIndex(
+          options.filter((option) => !option.disabled).map((option) => option.id)
+        );
       const next = comboboxReducer(editor, message.transition, {
-        enabledIds: options.filter((option) => !option.disabled).map((option) => option.id),
+        index,
         pageSize: formComboboxPageSize
       });
       return result(updateFormControl(
@@ -1080,7 +1086,7 @@ export function updateBrowser(
         document,
         control,
         values,
-        { kind: "combobox", state: next }
+        { kind: "combobox", state: next, index }
       ));
     }
     case "formComboboxCommit": {
@@ -1093,9 +1099,7 @@ export function updateBrowser(
       const current = document.formEditors[control.id];
       if (current?.kind !== "combobox") return result(state);
       const next = commitCombobox(current.state, message.event, {
-        enabledIds: control.options.flatMap((candidate, index) =>
-          candidate.disabled ? [] : [`${control.id}:${String(index)}`]
-        ),
+        index: current.index,
         pageSize: formComboboxPageSize
       });
       return result(updateFormControl(
@@ -1103,7 +1107,7 @@ export function updateBrowser(
         document,
         control,
         [option.value],
-        { kind: "combobox", state: next }
+        { kind: "combobox", state: next, index: current.index }
       ));
     }
     case "formCheckboxGroup": {

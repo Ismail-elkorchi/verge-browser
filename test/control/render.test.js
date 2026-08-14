@@ -412,6 +412,41 @@ test("renderDocumentToTerminal exposes forms as stable visible actions", () => {
   });
 });
 
+test("page layout retains CSS geometry for replaced semantic blocks", () => {
+  const document = parse(`
+    <html>
+      <head>
+        <style>
+          .grid { display: grid; grid-template-columns: 1fr 1fr; column-gap: 2ch; }
+          form { width: 20ch; margin-inline: auto; }
+        </style>
+      </head>
+      <body>
+        <div class="grid">
+          <article><p>Article content</p></article>
+          <form action="/search"><input name="q"></form>
+        </div>
+      </body>
+    </html>
+  `);
+  const content = buildPageContent({
+    tree: document.tree,
+    requestUrl: "https://example.com/",
+    finalUrl: "https://example.com/",
+    status: 200,
+    statusText: "OK",
+    fetchedAtIso: "2026-01-01T00:00:00.000Z"
+  });
+  const layout = layoutPageContent(content, 80);
+  const formBlock = content.blocks.find((block) => block.kind === "form");
+  const placement = layout.blockPlacements.find((candidate) => candidate.blockId === formBlock?.id);
+
+  assert.ok(placement);
+  assert.equal(placement.width, 20);
+  assert.ok(placement.columnIndex >= 49);
+  assert.equal(placement.height, 4);
+});
+
 test("semantic content follows HTML visibility, landmarks, and disclosure state", () => {
   const document = parse(`
     <html><body>

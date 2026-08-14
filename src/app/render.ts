@@ -620,9 +620,13 @@ function collectForm(
     else if (control.kind === "select" && control.multiple) controlRows.push(control.options.length + 1);
     else controlRows.push(1);
   }
+  const titleRows = form.label.length === 0 ? 0 : 1;
+  const implicitSubmitRows = visibleControls.some((control) => control.kind === "submit") ? 0 : 1;
   const rowCount = Math.max(
-    2,
-    controlRows.reduce((sum, rows) => sum + rows, 0) + Math.max(0, controlRows.length - 1)
+    1,
+    titleRows
+      + controlRows.reduce((sum, rows) => sum + rows, 0)
+      + implicitSubmitRows
   );
   const text = Array.from(
     { length: rowCount },
@@ -1048,9 +1052,18 @@ interface RelativeActionPlacement {
   readonly width: number;
 }
 
+interface RelativeBlockPlacement {
+  readonly blockId: string;
+  readonly rowIndex: number;
+  readonly columnIndex: number;
+  readonly width: number;
+  readonly height: number;
+}
+
 interface LayoutBox {
   readonly rows: readonly PageLayoutRow[];
   readonly actions: readonly RelativeActionPlacement[];
+  readonly blocks: readonly RelativeBlockPlacement[];
   readonly width: number;
   readonly centered: boolean;
 }
@@ -1203,8 +1216,9 @@ function leafBox(
   styleByElementId: ReadonlyMap<number, ComputedElementStyle>
 ): LayoutBox {
   if (style?.display === "none" || style?.box.visuallyHidden) {
-    return { rows: [], actions: [], width: 0, centered: false };
+    return { rows: [], actions: [], blocks: [], width: 0, centered: false };
   }
+  const targetColumns = constrainedWidth(style, columns);
   const textRuns = baseTextRuns.map((run): PageTextRun => {
     const currentStyle = run.sourceElementId === undefined
       ? undefined
@@ -1238,11 +1252,11 @@ function leafBox(
     rows.push(emptyLayoutRow());
   }
   for (let index = 0; index < styledBlock.style.paddingTopRows; index += 1) {
-    rows.push(emptyLayoutRow(columns, style?.text.background === undefined
+    rows.push(emptyLayoutRow(targetColumns, style?.text.background === undefined
       ? {}
       : { background: style.text.background }));
   }
-  for (const wrapped of wrapBlock(styledBlock, columns)) {
+  for (const wrapped of wrapBlock(styledBlock, targetColumns)) {
     const semanticStart = wrapped.contentStartCodeUnitIndex;
     const semanticEnd = semanticStart + wrapped.endOffsetExclusive - wrapped.startOffset;
     const rowIndex = rows.length;
@@ -1294,7 +1308,7 @@ function leafBox(
     }
   }
   for (let index = 0; index < styledBlock.style.paddingBottomRows; index += 1) {
-    rows.push(emptyLayoutRow(columns, style?.text.background === undefined
+    rows.push(emptyLayoutRow(targetColumns, style?.text.background === undefined
       ? {}
       : { background: style.text.background }));
   }
@@ -1304,7 +1318,14 @@ function leafBox(
   return {
     rows,
     actions: placements,
-    width: Math.min(columns, Math.max(1, ...rows.map((row) => measureTextCells(row.text).cells))),
+    blocks: [{
+      blockId: block.id,
+      rowIndex: styledBlock.style.marginTopRows,
+      columnIndex: styledBlock.style.marginLeftCells,
+      width: Math.max(1, targetColumns - styledBlock.style.marginLeftCells - styledBlock.style.marginRightCells),
+      height: Math.max(0, rows.length - styledBlock.style.marginTopRows - styledBlock.style.marginBottomRows)
+    }],
+    width: targetColumns,
     centered: style?.box.marginInlineAuto ?? false
   };
 }
@@ -1376,6 +1397,7 @@ function mergeRows(parts: readonly {
   const height = Math.max(0, ...parts.map((part) => part.rowOffset + part.box.rows.length));
   const rows: PageLayoutRow[] = [];
   const actions: RelativeActionPlacement[] = [];
+  const blocks: RelativeBlockPlacement[] = [];
   for (let rowIndex = 0; rowIndex < height; rowIndex += 1) {
     let text = "";
     const fragments: PageLayoutFragment[] = [];
@@ -1407,13 +1429,19 @@ function mergeRows(parts: readonly {
       rowIndex: action.rowIndex + part.rowOffset,
       columnIndex: action.columnIndex + part.columnOffset
     })));
+    blocks.push(...part.box.blocks.map((block) => ({
+      ...block,
+      rowIndex: block.rowIndex + part.rowOffset,
+      columnIndex: block.columnIndex + part.columnOffset
+    })));
   }
-  return { rows, actions, width: totalWidth, centered: false };
+  return { rows, actions, blocks, width: totalWidth, centered: false };
 }
 
 function verticalBoxes(boxes: readonly LayoutBox[], width: number, gap: number): LayoutBox {
   const rows: PageLayoutRow[] = [];
   const actions: RelativeActionPlacement[] = [];
+  const blocks: RelativeBlockPlacement[] = [];
   const visible = boxes.filter((box) => box.rows.length > 0);
   for (const [index, box] of visible.entries()) {
     if (index > 0) {
@@ -1427,8 +1455,13 @@ function verticalBoxes(boxes: readonly LayoutBox[], width: number, gap: number):
       rowIndex: action.rowIndex + rowOffset,
       columnIndex: action.columnIndex + columnOffset
     })));
+    blocks.push(...box.blocks.map((block) => ({
+      ...block,
+      rowIndex: block.rowIndex + rowOffset,
+      columnIndex: block.columnIndex + columnOffset
+    })));
   }
-  return { rows, actions, width, centered: false };
+  return { rows, actions, blocks, width, centered: false };
 }
 
 function containerStyle(
@@ -1465,6 +1498,7 @@ function containerStyle(
   };
   const rows: PageLayoutRow[] = [];
   const actions: RelativeActionPlacement[] = [];
+  const blocks: RelativeBlockPlacement[] = [];
   for (let index = 0; index < block.marginTopRows; index += 1) rows.push(emptyLayoutRow());
   if (border) {
     rows.push(overlayRowStyle({
@@ -1491,6 +1525,11 @@ function containerStyle(
     rowIndex: action.rowIndex + contentRowOffset,
     columnIndex: action.columnIndex + block.paddingLeftCells + (border ? 1 : 0)
   })));
+  blocks.push(...box.blocks.map((placement) => ({
+    ...placement,
+    rowIndex: placement.rowIndex + contentRowOffset,
+    columnIndex: placement.columnIndex + block.paddingLeftCells + (border ? 1 : 0)
+  })));
   for (let index = 0; index < block.paddingBottomRows; index += 1) {
     rows.push(overlayRowStyle(emptyLayoutRow(width - block.marginLeftCells - block.marginRightCells), backgroundStyle));
   }
@@ -1508,6 +1547,10 @@ function containerStyle(
     actions: actions.map((action) => ({
       ...action,
       columnIndex: action.columnIndex + block.marginLeftCells
+    })),
+    blocks: blocks.map((placement) => ({
+      ...placement,
+      columnIndex: placement.columnIndex + block.marginLeftCells
     })),
     width,
     centered: style.box.marginInlineAuto
@@ -1550,7 +1593,7 @@ function layoutFlow(
   }
   const style = node.element === undefined ? undefined : styles.byElement.get(node.element);
   if (style?.display === "none" || style?.box.visuallyHidden) {
-    return { rows: [], actions: [], width: 0, centered: false };
+    return { rows: [], actions: [], blocks: [], width: 0, centered: false };
   }
   const targetWidth = constrainedWidth(style, width);
   const horizontalOverhead = (style?.block.paddingLeftCells ?? 0)
@@ -1588,13 +1631,14 @@ function layoutFlow(
       const maxHeight = Math.max(0, ...boxes.map((box) => box.rows.length));
       gridRows.push(mergeRows(boxes.map((box, index) => ({
         box,
-        width: columnWidth,
+        width: box.centered ? box.width : columnWidth,
         rowOffset: style.box.alignItems === "center"
           ? Math.floor((maxHeight - box.rows.length) / 2)
           : style.box.alignItems === "end"
             ? maxHeight - box.rows.length
             : 0,
         columnOffset: index * (columnWidth + gap)
+          + (box.centered ? Math.max(0, Math.floor((columnWidth - box.width) / 2)) : 0)
       })), innerWidth));
     }
     body = verticalBoxes(gridRows, innerWidth, style.box.rowGapRows);
@@ -1633,15 +1677,18 @@ function layoutFlow(
       let column = leading;
       const parts = boxes.map((box, index) => {
         const widthForPart = preferred[index] ?? 1;
+        const centeredOffset = box.centered
+          ? Math.max(0, Math.floor((widthForPart - box.width) / 2))
+          : 0;
         const part = {
           box,
-          width: widthForPart,
+          width: box.centered ? box.width : widthForPart,
           rowOffset: style.box.alignItems === "center"
             ? Math.floor((maxHeight - box.rows.length) / 2)
             : style.box.alignItems === "end"
               ? maxHeight - box.rows.length
               : 0,
-          columnOffset: column
+          columnOffset: column + centeredOffset
         };
         column += widthForPart + between;
         return part;
@@ -1678,7 +1725,8 @@ function layoutFlow(
         ...body.rows,
         ...Array.from({ length: after }, () => emptyLayoutRow(innerWidth))
       ],
-      actions: body.actions.map((action) => ({ ...action, rowIndex: action.rowIndex + before }))
+      actions: body.actions.map((action) => ({ ...action, rowIndex: action.rowIndex + before })),
+      blocks: body.blocks.map((block) => ({ ...block, rowIndex: block.rowIndex + before }))
     };
   }
   return containerStyle(body, style, targetWidth);
@@ -1715,6 +1763,7 @@ function layoutUnpreparedContent(content: PageContent, columns: number): PageLay
     columns,
     rows: box.rows,
     actionPlacements: box.actions,
+    blockPlacements: box.blocks,
     canvasStyle: {},
     styleIssues: content.styleIssues
   };
@@ -1761,6 +1810,7 @@ export function layoutPageContent(content: PageContent, columns: number): PageLa
       ...action,
       rowIndex: action.rowIndex
     })),
+    blockPlacements: box.blocks,
     canvasStyle: bodyStyle?.text ?? {},
     styleIssues: styles.issues
   };

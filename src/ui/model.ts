@@ -26,6 +26,7 @@ import type {
   TextAreaState
 } from "@ismail-elkorchi/terminal-ui/behavior";
 import type {
+  CollectionInteractionIndex,
   CollectionInteractionState,
   ScrollEvent
 } from "@ismail-elkorchi/terminal-ui/interaction";
@@ -92,7 +93,11 @@ export interface BrowserDocumentState {
     | { readonly kind: "text"; readonly state: TextEditBuffer }
     | { readonly kind: "number"; readonly state: NumberInputState }
     | { readonly kind: "textarea"; readonly state: TextAreaState }
-    | { readonly kind: "combobox"; readonly state: UnscrolledComboboxPresentation }
+    | {
+        readonly kind: "combobox";
+        readonly state: UnscrolledComboboxPresentation;
+        readonly index: CollectionInteractionIndex;
+      }
     | { readonly kind: "checkboxGroup"; readonly state: CollectionInteractionState }
   >>;
   readonly savedViews: Readonly<Record<string, {
