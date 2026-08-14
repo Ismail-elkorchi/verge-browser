@@ -9,6 +9,7 @@ import {
   createScrollState,
   createTextAreaState,
   menuTriggerReducer,
+  prepareCommandSuggestions,
   prepareSearchPickerIndex,
   numberInputReducer,
   searchPickerReducer,
@@ -51,7 +52,9 @@ import type {
 import { browserMenuItems, formComboboxPageSize, linkMenuItems } from "./model.js";
 import { browserView } from "./view.js";
 
-const ACTION_SUGGESTIONS = [
+const EMPTY_COMMAND_SUGGESTIONS = prepareCommandSuggestions([]);
+
+const ACTION_SUGGESTIONS = prepareCommandSuggestions([
   "links",
   "outline",
   "reader",
@@ -65,7 +68,7 @@ const ACTION_SUGGESTIONS = [
   "open-external",
   "cookies",
   "help"
-].map((value) => ({ id: value, value }));
+].map((value) => ({ id: value, value })));
 
 function activeDocument(state: BrowserTuiState): BrowserDocumentState {
   const document = state.documents[state.activeDocumentIndex];
@@ -715,8 +718,8 @@ export function updateBrowser(
         omnibox: {
           ...omnibox,
           suggestions: message.transition.kind === "acceptSuggestion"
-            ? []
-            : controller.omniboxSuggestions(omnibox.input.text, document)
+            ? EMPTY_COMMAND_SUGGESTIONS
+            : prepareCommandSuggestions(controller.omniboxSuggestions(omnibox.input.text, document))
         },
         omniboxDirty: true
       });
@@ -727,7 +730,7 @@ export function updateBrowser(
         omnibox: {
           input: { text: document.snapshot.finalUrl, cursor: document.snapshot.finalUrl.length },
           history: state.omnibox.history,
-          suggestions: controller.omniboxSuggestions("", document)
+          suggestions: prepareCommandSuggestions(controller.omniboxSuggestions("", document))
         },
         omniboxDirty: false
       }, { focus: { kind: "element", elementId: "browser-omnibox" } });
@@ -737,7 +740,7 @@ export function updateBrowser(
         omnibox: {
           input: { text: document.snapshot.finalUrl, cursor: document.snapshot.finalUrl.length },
           history: state.omnibox.history,
-          suggestions: []
+          suggestions: EMPTY_COMMAND_SUGGESTIONS
         },
         omniboxDirty: false
       });
@@ -748,7 +751,7 @@ export function updateBrowser(
         omnibox: {
           input: { text: target, cursor: target.length },
           history: [message.value, ...state.omnibox.history.filter((entry) => entry !== message.value)].slice(0, 50),
-          suggestions: []
+          suggestions: EMPTY_COMMAND_SUGGESTIONS
         },
         omniboxDirty: false
       }, document, target, loadEffect(controller, document, target));
@@ -852,7 +855,7 @@ export function updateBrowser(
           omnibox: {
             input: { text: selected?.snapshot.finalUrl ?? "", cursor: selected?.snapshot.finalUrl.length ?? 0 },
             history: state.omnibox.history,
-            suggestions: []
+            suggestions: EMPTY_COMMAND_SUGGESTIONS
           },
           status: status(`Closed ${document.snapshot.content.title}.`, "success")
         };
@@ -869,7 +872,7 @@ export function updateBrowser(
         omnibox: {
           input: { text: closed.snapshot.finalUrl, cursor: closed.snapshot.finalUrl.length },
           history: state.omnibox.history,
-          suggestions: []
+          suggestions: EMPTY_COMMAND_SUGGESTIONS
         },
         status: status(`Reopened ${closed.snapshot.content.title}.`, "success")
       };
@@ -884,7 +887,7 @@ export function updateBrowser(
         omnibox: {
           input: { text: selected.snapshot.finalUrl, cursor: selected.snapshot.finalUrl.length },
           history: state.omnibox.history,
-          suggestions: []
+          suggestions: EMPTY_COMMAND_SUGGESTIONS
         }
       };
       return result(next, { effects: [persistEffect(controller, next)] });
@@ -1222,7 +1225,7 @@ export function updateBrowser(
             omnibox: {
               input: { text: message.snapshot.finalUrl, cursor: message.snapshot.finalUrl.length },
               history: state.omnibox.history,
-              suggestions: []
+              suggestions: EMPTY_COMMAND_SUGGESTIONS
             },
             omniboxDirty: false
           }
@@ -1252,7 +1255,7 @@ export function updateBrowser(
             omnibox: {
               input: { text: message.document.snapshot.finalUrl, cursor: message.document.snapshot.finalUrl.length },
               history: state.omnibox.history,
-              suggestions: []
+              suggestions: EMPTY_COMMAND_SUGGESTIONS
             }
           }),
         status: status(`Opened ${message.document.snapshot.finalUrl}`, "success")
@@ -1468,7 +1471,7 @@ export function createBrowserInitialState(
     omnibox: {
       input: { text: active.snapshot.finalUrl, cursor: active.snapshot.finalUrl.length },
       history: [],
-      suggestions: []
+      suggestions: EMPTY_COMMAND_SUGGESTIONS
     },
     omniboxDirty: false,
     findBar: null,

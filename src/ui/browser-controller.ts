@@ -173,39 +173,60 @@ export class BrowserController {
     readonly description?: string;
   }[] {
     const query = value.trim().toLowerCase();
-    const candidates = [
-      ...document.snapshot.content.links.map((link) => ({
+    const suggestions: {
+      readonly id: string;
+      readonly value: string;
+      readonly label: string;
+      readonly description?: string;
+    }[] = [];
+    if (limit <= 0) return suggestions;
+    const seen = new Set<string>();
+    const add = (entry: {
+      readonly value: string;
+      readonly label: string;
+      readonly description?: string;
+    }): boolean => {
+      if (seen.has(entry.value)) return false;
+      seen.add(entry.value);
+      if (
+        query.length > 0
+        && !entry.value.toLowerCase().includes(query)
+        && !entry.label.toLowerCase().includes(query)
+      ) return false;
+      suggestions.push({ ...entry, id: entry.value });
+      return suggestions.length >= limit;
+    };
+    const addUntilFull = <T>(
+      entries: readonly T[],
+      project: (entry: T) => { readonly value: string; readonly label: string; readonly description?: string }
+    ): boolean => {
+      for (const entry of entries) {
+        if (add(project(entry))) return true;
+      }
+      return false;
+    };
+
+    if (addUntilFull(document.snapshot.content.links, (link) => ({
         value: link.resolvedHref,
         label: link.label,
         description: "Current page"
-      })),
-      ...this.#store.listBookmarks().map((entry) => ({
+      }))) return suggestions;
+    if (addUntilFull(this.#store.listBookmarks(), (entry) => ({
         value: entry.url,
         label: entry.name,
         description: "Bookmark"
-      })),
-      ...this.#store.listHistory().map((entry) => ({
+      }))) return suggestions;
+    if (addUntilFull(this.#store.listHistory(), (entry) => ({
         value: entry.url,
         label: entry.title,
         description: "History"
-      })),
-      ...this.#store.searchIndex(value, limit).map((entry) => ({
+      }))) return suggestions;
+    addUntilFull(this.#store.searchIndex(value, limit), (entry) => ({
         value: entry.url,
         label: entry.title,
         description: "Page text"
-      }))
-    ];
-    const seen = new Set<string>();
-    return candidates
-      .filter((entry) => {
-        if (seen.has(entry.value)) return false;
-        seen.add(entry.value);
-        return query.length === 0
-          || entry.value.toLowerCase().includes(query)
-          || entry.label.toLowerCase().includes(query);
-      })
-      .map((entry) => ({ ...entry, id: entry.value }))
-      .slice(0, limit);
+      }));
+    return suggestions;
   }
 
   public navigationAvailability(document: BrowserDocumentState): {

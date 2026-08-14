@@ -8,7 +8,7 @@ import {
   createDiagnosticOccurrenceReporter,
   diagnostic
 } from "@ismail-elkorchi/terminal-ui";
-import { validateAccessibleSnapshot } from "@ismail-elkorchi/terminal-ui/accessibility";
+import { decodeAccessibleSnapshot } from "@ismail-elkorchi/terminal-ui/accessibility";
 import { activeSearchPickerEntry } from "@ismail-elkorchi/terminal-ui/behavior";
 import { createMemoryTerminalHost } from "@ismail-elkorchi/terminal-ui/host";
 import { renderFramePlain } from "@ismail-elkorchi/terminal-ui/renderer";
@@ -200,7 +200,7 @@ test("Verge renders a browser shell and preserves navigation, focus, scrolling, 
   assert.equal(findRole(runtime.frame().accessibility.root, "toolbar")?.label, "Browser navigation");
   assert.equal(findRoleWithLabel(runtime.frame().accessibility.root, "button", "←")?.disabled, true);
   assert.equal(runtime.frame().hitTargets?.some((target) => target.id === "browser-back:control"), false);
-  assert.equal(validateAccessibleSnapshot(runtime.frame().accessibility).ok, true);
+  assert.equal(decodeAccessibleSnapshot(runtime.frame().accessibility).ok, true);
 
   const focusedActionId = runtime.state().documents[0].snapshot.content.actions[0].id;
   for (let attempt = 0; attempt < 20 && !runtime.frame().focusPath?.includes(focusedActionId); attempt += 1) {
@@ -403,7 +403,7 @@ test("browser chrome and document geometry remain readable from narrow to wide t
   for (const columns of [40, 80, 120, 240]) {
     await runtime.resize({ columns, rows: 40 });
     const frame = runtime.frame();
-    assert.equal(validateAccessibleSnapshot(frame.accessibility).ok, true);
+    assert.equal(decodeAccessibleSnapshot(frame.accessibility).ok, true);
     assert.ok(frame.cells.every((cell) => cell.column + cell.width - 1 <= columns));
     assert.ok(renderFramePlain(frame).split("\n").every((line) => measureTextCells(line).cells <= columns));
     if (columns < 96) {
@@ -551,7 +551,7 @@ test("Verge supports exact find, adaptive library panels, and inline semantic fo
     kind: "omniboxTransition",
     transition: { kind: "setValue", value: "Next" }
   });
-  assert.ok(runtime.state().omnibox.suggestions.some((entry) => entry.value === "https://example.test/next"));
+  assert.ok(runtime.state().omnibox.suggestions.records.some((entry) => entry.value === "https://example.test/next"));
   await runtime.dispatch({ kind: "cancelOmnibox" });
 
   await runtime.dispatch({ kind: "openFind" });
