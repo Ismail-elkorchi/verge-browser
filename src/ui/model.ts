@@ -11,7 +11,6 @@ import type {
   NumberInputControlAction,
   SearchPickerAcceptEvent,
   SearchPickerControlTransition,
-  UnscrolledSearchPickerPresentation,
   TabCloseEvent,
   TabsTransition,
   TextAreaAction,
@@ -23,7 +22,8 @@ import type {
   MenuTriggerState,
   NumberInputState,
   ScrollState,
-  TextAreaState
+  TextAreaState,
+  UnscrolledSearchPickerState
 } from "@ismail-elkorchi/terminal-ui/behavior";
 import type {
   CollectionInteractionIndex,
@@ -123,7 +123,7 @@ export interface PickerOverlay {
   readonly pickerKind: PickerKind;
   readonly title: string;
   readonly index: SearchPickerIndex<PickerValue>;
-  readonly state: UnscrolledSearchPickerPresentation;
+  readonly state: UnscrolledSearchPickerState;
 }
 
 export interface ActionPaletteOverlay {

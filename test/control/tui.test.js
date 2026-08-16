@@ -9,7 +9,11 @@ import {
   diagnostic
 } from "@ismail-elkorchi/terminal-ui";
 import { decodeAccessibleSnapshot } from "@ismail-elkorchi/terminal-ui/accessibility";
-import { activeSearchPickerEntry } from "@ismail-elkorchi/terminal-ui/behavior";
+import {
+  activeSearchPickerEntry,
+  commandInputPresentation,
+  searchPickerPresentation
+} from "@ismail-elkorchi/terminal-ui/behavior";
 import { createMemoryTerminalHost } from "@ismail-elkorchi/terminal-ui/host";
 import { renderFramePlain } from "@ismail-elkorchi/terminal-ui/renderer";
 import { createTerminalHarness } from "@ismail-elkorchi/terminal-ui/testing";
@@ -539,12 +543,13 @@ test("browser pickers retain stable selection identity and activate generic valu
   await runtime.dispatch({ kind: "openPicker", picker: "links" });
   const overlay = runtime.state().overlay;
   assert.equal(overlay?.kind, "picker");
+  const presentation = searchPickerPresentation(overlay.state);
   const active = activeSearchPickerEntry({
     searchPickerIndex: overlay.index,
-    presentation: overlay.state
+    presentation
   });
   assert.ok(active);
-  assert.equal(overlay.state.activeId, active.id);
+  assert.equal(presentation.activeId, active.id);
 
   await runtime.dispatch({
     kind: "pickerAccept",
@@ -622,12 +627,27 @@ test("Verge supports exact find, adaptive library panels, and inline semantic fo
   const { runtime, prepared } = await fixture();
 
   await runtime.dispatch({ kind: "focusOmnibox" });
-  assert.equal(runtime.state().omnibox.input.text, "https://example.test/");
+  assert.equal(commandInputPresentation(runtime.state().omnibox).value, "https://example.test/");
   await runtime.dispatch({
     kind: "omniboxTransition",
     transition: { kind: "setValue", value: "Next" }
   });
-  assert.ok(runtime.state().omnibox.suggestions.records.some((entry) => entry.value === "https://example.test/next"));
+  const nextSuggestion = runtime.state().omnibox.suggestions.records.find(
+    (entry) => entry.value.text === "https://example.test/next"
+  );
+  assert.ok(nextSuggestion);
+  await runtime.dispatch({
+    kind: "omniboxTransition",
+    transition: { kind: "setActiveSuggestion", id: nextSuggestion.id }
+  });
+  await runtime.dispatch({
+    kind: "omniboxTransition",
+    transition: { kind: "acceptSuggestion" }
+  });
+  assert.equal(
+    commandInputPresentation(runtime.state().omnibox).value,
+    "https://example.test/next"
+  );
   await runtime.dispatch({ kind: "cancelOmnibox" });
 
   await runtime.dispatch({ kind: "openFind" });

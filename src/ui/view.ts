@@ -7,6 +7,7 @@ import {
   menuTriggerPresentation,
   numberInputPresentation,
   radioGroupReducer,
+  searchPickerPresentation,
   textInputPresentation
 } from "@ismail-elkorchi/terminal-ui/behavior";
 import {
@@ -461,6 +462,7 @@ function inlineFormControl(
     const editor = document.formEditors[control.id];
     const selectedId = selectedIndex < 0 ? undefined : `${control.id}:${String(selectedIndex)}`;
     const closedPresentation = {
+      kind: "select" as const,
       open: false as const,
       interaction: {
         ...(selectedId === undefined ? {} : { activeId: selectedId }),
@@ -1329,7 +1331,7 @@ function pickerView(picker: PickerOverlay): Element<BrowserTuiMessage> {
       content: searchPicker({
         id: "browser-picker-list",
         searchPickerIndex: picker.index,
-        presentation: picker.state,
+        presentation: searchPickerPresentation(picker.state),
         onTransition: (transition): BrowserTuiMessage => ({
           kind: "pickerTransition",
           transition

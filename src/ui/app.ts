@@ -5,8 +5,10 @@ import {
   comboboxReducer,
   commandInputReducer,
   contextMenuReducer,
+  createCommandInputState,
   createNumberInputConfiguration,
   createScrollState,
+  createSearchPickerState,
   createTextAreaState,
   menuTriggerReducer,
   prepareCommandSuggestions,
@@ -55,7 +57,7 @@ import { browserView } from "./view.js";
 
 const EMPTY_COMMAND_SUGGESTIONS = prepareCommandSuggestions([]);
 
-const ACTION_SUGGESTIONS = prepareCommandSuggestions([
+const ACTION_SUGGESTIONS = [
   "links",
   "outline",
   "reader",
@@ -69,7 +71,57 @@ const ACTION_SUGGESTIONS = prepareCommandSuggestions([
   "open-external",
   "cookies",
   "help"
-].map((value) => ({ id: value, value })));
+].map((value) => ({ id: value, value }));
+
+interface ReplacementCommandSuggestion {
+  readonly id: string;
+  readonly value: string;
+  readonly label?: string;
+  readonly description?: string;
+}
+
+function replacementCommandSuggestions(
+  input: string,
+  suggestions: readonly ReplacementCommandSuggestion[]
+) {
+  return prepareCommandSuggestions(suggestions.map((suggestion) => ({
+    id: suggestion.id,
+    completion: {
+      range: { startOffset: 0, endOffsetExclusive: input.length },
+      text: suggestion.value
+    },
+    ...(suggestion.label === undefined ? {} : { label: suggestion.label }),
+    ...(suggestion.description === undefined ? {} : { description: suggestion.description })
+  })));
+}
+
+function resetCommandInput(
+  current: BrowserTuiState["omnibox"],
+  value: string,
+  suggestions = EMPTY_COMMAND_SUGGESTIONS
+): BrowserTuiState["omnibox"] {
+  return createCommandInputState({
+    value,
+    cursor: value.length,
+    submissions: current.submissions,
+    submissionLimit: current.submissionLimit,
+    suggestions,
+    editHistoryPolicy: current.editor.editHistory.policy
+  });
+}
+
+function submittedCommandInput(
+  current: BrowserTuiState["omnibox"],
+  submission: string,
+  value: string
+): BrowserTuiState["omnibox"] {
+  const recorded = commandInputReducer(current, { kind: "recordSubmission", value: submission });
+  const updated = commandInputReducer(recorded, { kind: "setValue", value });
+  return commandInputReducer(updated, {
+    kind: "setSuggestions",
+    suggestions: EMPTY_COMMAND_SUGGESTIONS
+  });
+}
 
 function activeDocument(state: BrowserTuiState): BrowserDocumentState {
   const document = state.documents[state.activeDocumentIndex];
@@ -266,18 +318,15 @@ function openPicker(
   query = ""
 ): BrowserTuiState {
   const entries = controller.pickerEntries(picker, state.documents, state.activeDocumentIndex, query);
-  const activeId = entries[0]?.id;
+  const index = prepareSearchPickerIndex(entries);
   return {
     ...state,
     overlay: {
       kind: "picker",
       pickerKind: picker,
       title: picker === "recall" ? `Search visited pages: ${query}` : `${picker[0]?.toUpperCase() ?? ""}${picker.slice(1)}`,
-      index: prepareSearchPickerIndex(entries),
-      state: {
-        query: { text: "" },
-        ...(activeId === undefined ? {} : { activeId })
-      }
+      index,
+      state: createSearchPickerState({ query: { text: "", mode: "fuzzy" } }, index)
     }
   };
 }
@@ -713,47 +762,47 @@ export function updateBrowser(
         navigationEffect(controller, document, message.operation)
       );
     case "omniboxTransition": {
-      const omnibox = commandInputReducer(state.omnibox, message.transition);
+      let omnibox = commandInputReducer(state.omnibox, message.transition);
+      const value = omnibox.editor.input.text;
+      omnibox = commandInputReducer(omnibox, {
+        kind: "setSuggestions",
+        suggestions: message.transition.kind === "acceptSuggestion"
+          ? EMPTY_COMMAND_SUGGESTIONS
+          : replacementCommandSuggestions(
+              value,
+              controller.omniboxSuggestions(value, document)
+            )
+      });
       return result({
         ...state,
-        omnibox: {
-          ...omnibox,
-          suggestions: message.transition.kind === "acceptSuggestion"
-            ? EMPTY_COMMAND_SUGGESTIONS
-            : prepareCommandSuggestions(controller.omniboxSuggestions(omnibox.input.text, document))
-        },
+        omnibox,
         omniboxDirty: true
       });
     }
     case "focusOmnibox":
       return result({
         ...state,
-        omnibox: {
-          input: { text: document.snapshot.finalUrl, cursor: document.snapshot.finalUrl.length },
-          history: state.omnibox.history,
-          suggestions: prepareCommandSuggestions(controller.omniboxSuggestions("", document))
-        },
+        omnibox: resetCommandInput(
+          state.omnibox,
+          document.snapshot.finalUrl,
+          replacementCommandSuggestions(
+            document.snapshot.finalUrl,
+            controller.omniboxSuggestions("", document)
+          )
+        ),
         omniboxDirty: false
       }, { focus: { kind: "element", elementId: "browser-omnibox" } });
     case "cancelOmnibox":
       return result({
         ...state,
-        omnibox: {
-          input: { text: document.snapshot.finalUrl, cursor: document.snapshot.finalUrl.length },
-          history: state.omnibox.history,
-          suggestions: EMPTY_COMMAND_SUGGESTIONS
-        },
+        omnibox: resetCommandInput(state.omnibox, document.snapshot.finalUrl),
         omniboxDirty: false
       });
     case "omniboxSubmit": {
       const target = controller.resolveOmnibox(message.value, document.snapshot.finalUrl);
       return beginNavigation({
         ...state,
-        omnibox: {
-          input: { text: target, cursor: target.length },
-          history: [message.value, ...state.omnibox.history.filter((entry) => entry !== message.value)].slice(0, 50),
-          suggestions: EMPTY_COMMAND_SUGGESTIONS
-        },
+        omnibox: submittedCommandInput(state.omnibox, message.value, target),
         omniboxDirty: false
       }, document, target, loadEffect(controller, document, target));
     }
@@ -762,7 +811,9 @@ export function updateBrowser(
         ...state,
         overlay: {
           kind: "actionPalette",
-          state: { input: { text: "", cursor: 0 }, history: [], suggestions: ACTION_SUGGESTIONS }
+          state: createCommandInputState({
+            suggestions: replacementCommandSuggestions("", ACTION_SUGGESTIONS)
+          })
         }
       }, { focus: { kind: "element", elementId: "browser-action-input" } });
     case "browserMenuTransition": {
@@ -853,11 +904,7 @@ export function updateBrowser(
           activeDocumentIndex: nextIndex,
           recentlyClosed: [document, ...state.recentlyClosed].slice(0, 10),
           overlay: null,
-          omnibox: {
-            input: { text: selected?.snapshot.finalUrl ?? "", cursor: selected?.snapshot.finalUrl.length ?? 0 },
-            history: state.omnibox.history,
-            suggestions: EMPTY_COMMAND_SUGGESTIONS
-          },
+          omnibox: resetCommandInput(state.omnibox, selected?.snapshot.finalUrl ?? ""),
           status: status(`Closed ${document.snapshot.content.title}.`, "success")
         };
         return result(next, { effects: [persistEffect(controller, next)] });
@@ -870,11 +917,7 @@ export function updateBrowser(
         documents: [...state.documents, closed],
         activeDocumentIndex: state.documents.length,
         recentlyClosed: state.recentlyClosed.slice(1),
-        omnibox: {
-          input: { text: closed.snapshot.finalUrl, cursor: closed.snapshot.finalUrl.length },
-          history: state.omnibox.history,
-          suggestions: EMPTY_COMMAND_SUGGESTIONS
-        },
+        omnibox: resetCommandInput(state.omnibox, closed.snapshot.finalUrl),
         status: status(`Reopened ${closed.snapshot.content.title}.`, "success")
       };
       return result(next, { effects: [persistEffect(controller, next)] });
@@ -885,11 +928,7 @@ export function updateBrowser(
       const next = {
         ...state,
         activeDocumentIndex: message.index,
-        omnibox: {
-          input: { text: selected.snapshot.finalUrl, cursor: selected.snapshot.finalUrl.length },
-          history: state.omnibox.history,
-          suggestions: EMPTY_COMMAND_SUGGESTIONS
-        }
+        omnibox: resetCommandInput(state.omnibox, selected.snapshot.finalUrl)
       };
       return result(next, { effects: [persistEffect(controller, next)] });
     }
@@ -917,15 +956,26 @@ export function updateBrowser(
           context
         );
     }
-    case "actionPaletteTransition":
+    case "actionPaletteTransition": {
       if (state.overlay?.kind !== "actionPalette") return result(state);
+      let palette = commandInputReducer(state.overlay.state, message.transition);
+      if (message.transition.kind !== "acceptSuggestion") {
+        palette = commandInputReducer(palette, {
+          kind: "setSuggestions",
+          suggestions: replacementCommandSuggestions(
+            palette.editor.input.text,
+            ACTION_SUGGESTIONS
+          )
+        });
+      }
       return result({
         ...state,
         overlay: {
           ...state.overlay,
-          state: commandInputReducer(state.overlay.state, message.transition)
+          state: palette
         }
       });
+    }
     case "actionPaletteSubmit":
       return state.overlay?.kind !== "actionPalette"
         ? result(state)
@@ -1063,6 +1113,7 @@ export function updateBrowser(
       const editor = current?.kind === "combobox"
         ? current.state
         : {
+          kind: "select" as const,
           open: false,
           interaction: {
             ...(selectedId === undefined ? {} : { activeId: selectedId }),
@@ -1226,11 +1277,7 @@ export function updateBrowser(
         overlay: null,
         ...(loadedIndex === state.activeDocumentIndex
           ? {
-            omnibox: {
-              input: { text: message.snapshot.finalUrl, cursor: message.snapshot.finalUrl.length },
-              history: state.omnibox.history,
-              suggestions: EMPTY_COMMAND_SUGGESTIONS
-            },
+            omnibox: resetCommandInput(state.omnibox, message.snapshot.finalUrl),
             omniboxDirty: false
           }
           : {}),
@@ -1256,11 +1303,7 @@ export function updateBrowser(
         ...(message.background
           ? {}
           : {
-            omnibox: {
-              input: { text: message.document.snapshot.finalUrl, cursor: message.document.snapshot.finalUrl.length },
-              history: state.omnibox.history,
-              suggestions: EMPTY_COMMAND_SUGGESTIONS
-            }
+            omnibox: resetCommandInput(state.omnibox, message.document.snapshot.finalUrl)
           }),
         status: status(`Opened ${message.document.snapshot.finalUrl}`, "success")
       };
@@ -1472,11 +1515,13 @@ export function createBrowserInitialState(
     documents,
     activeDocumentIndex: activeIndex,
     recentlyClosed: [],
-    omnibox: {
-      input: { text: active.snapshot.finalUrl, cursor: active.snapshot.finalUrl.length },
-      history: [],
+    omnibox: createCommandInputState({
+      value: active.snapshot.finalUrl,
+      cursor: active.snapshot.finalUrl.length,
+      submissions: [],
+      submissionLimit: 50,
       suggestions: EMPTY_COMMAND_SUGGESTIONS
-    },
+    }),
     omniboxDirty: false,
     findBar: null,
     sidePanel,
