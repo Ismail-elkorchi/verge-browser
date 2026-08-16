@@ -208,7 +208,7 @@ test("Verge renders a browser shell and preserves navigation, focus, scrolling, 
   );
   assert.equal(findRoleWithLabel(runtime.frame().accessibility.root, "button", "←")?.disabled, true);
   assert.equal(runtime.frame().hitTargets?.some((target) => target.id === "browser-back:control"), false);
-  assert.equal(decodeAccessibleSnapshot(runtime.frame().accessibility).ok, true);
+  assert.equal(decodeAccessibleSnapshot(runtime.frame().accessibility).status, "success");
 
   const focusedActionId = runtime.state().documents[0].snapshot.content.actions[0].id;
   for (let attempt = 0; attempt < 20 && !runtime.frame().focusPath?.includes(focusedActionId); attempt += 1) {
@@ -483,7 +483,7 @@ test("browser chrome and document geometry remain readable from narrow to wide t
   for (const columns of [40, 80, 120, 240]) {
     await runtime.resize({ columns, rows: 40 });
     const frame = runtime.frame();
-    assert.equal(decodeAccessibleSnapshot(frame.accessibility).ok, true);
+    assert.equal(decodeAccessibleSnapshot(frame.accessibility).status, "success");
     assert.ok(frame.cells.every((cell) => cell.column + cell.width - 1 <= columns));
     assert.ok(renderFramePlain(frame).split("\n").every((line) => measureTextCells(line).cells <= columns));
     if (columns < 96) {
