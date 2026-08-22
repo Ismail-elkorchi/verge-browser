@@ -1,6 +1,5 @@
-import { createTerminalHost } from "@ismail-elkorchi/terminal-ui/host";
 import { renderElementFrame, renderFramePlain } from "@ismail-elkorchi/terminal-ui/renderer";
-import { runTui } from "@ismail-elkorchi/terminal-ui/tui";
+import { runTui, TuiRunError } from "@ismail-elkorchi/terminal-ui/tui";
 import type { DiagnosticOccurrence, TerminalDiagnosticValue } from "@ismail-elkorchi/terminal-ui";
 import type { HttpSessionAdapter } from "@ismail-elkorchi/http-client";
 
@@ -52,21 +51,19 @@ export async function prepareBrowserTui(initialTarget: string, options: BrowserT
 export async function runBrowserTui(initialTarget: string, options: BrowserTuiOptions): Promise<void> {
   const prepared = await prepareBrowserTui(initialTarget, options);
   try {
-    const exit = await runTui(
-      prepared.app,
-      createTerminalHost({ runtime: "node" }),
-      {
-        initialFocus: prepared.state.documents[prepared.state.activeDocumentIndex]?.snapshot.finalUrl === "about:newtab"
-          ? { kind: "element", elementId: "browser-omnibox" }
-          : {
-            kind: "element",
-            elementId: `browser-${prepared.state.documents[prepared.state.activeDocumentIndex]?.id ?? ""}`
-          }
-      }
-    );
-    if (exit.status === "error") {
-      throw new Error(browserTuiFailureMessage(exit.diagnostics));
+    await runTui(prepared.app, {
+      initialFocus: prepared.state.documents[prepared.state.activeDocumentIndex]?.snapshot.finalUrl === "about:newtab"
+        ? { kind: "element", elementId: "browser-omnibox" }
+        : {
+          kind: "element",
+          elementId: `browser-${prepared.state.documents[prepared.state.activeDocumentIndex]?.id ?? ""}`
+        }
+    });
+  } catch (error) {
+    if (error instanceof TuiRunError) {
+      throw new Error(browserTuiFailureMessage(error.exit.diagnostics), { cause: error });
     }
+    throw error;
   } finally {
     await prepared.controller.close();
   }

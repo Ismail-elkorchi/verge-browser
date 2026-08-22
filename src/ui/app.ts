@@ -1445,7 +1445,7 @@ export function createBrowserApp(
   }));
   return defineTui<BrowserTuiState, BrowserTuiMessage>({
     id: "verge-browser",
-    init: () => initialState,
+    init: () => ({ state: initialState }),
     update: (state, message, context) => updateBrowser(controller, state, message, context),
     view: browserView,
     inputBindings: [

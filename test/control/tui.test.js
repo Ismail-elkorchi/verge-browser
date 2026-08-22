@@ -196,6 +196,15 @@ function findRoleWithLabel(node, role, label) {
   return undefined;
 }
 
+function findNode(node, id) {
+  if (node.id === id) return node;
+  for (const child of node.children ?? []) {
+    const found = findNode(child, id);
+    if (found) return found;
+  }
+  return undefined;
+}
+
 test("Verge renders a browser shell and preserves navigation, focus, scrolling, and quit", async () => {
   const { runtime } = await fixture();
 
@@ -206,7 +215,11 @@ test("Verge renders a browser shell and preserves navigation, focus, scrolling, 
     findRoleWithLabel(runtime.frame().accessibility.root, "button", "Bookmark current page")?.pressed,
     false
   );
-  assert.equal(findRoleWithLabel(runtime.frame().accessibility.root, "button", "←")?.disabled, true);
+  assert.equal(findRoleWithLabel(runtime.frame().accessibility.root, "button", "Back")?.disabled, true);
+  assert.ok(findRoleWithLabel(runtime.frame().accessibility.root, "button", "Reload"));
+  assert.ok(findRoleWithLabel(runtime.frame().accessibility.root, "button", "New tab"));
+  assert.ok(findRoleWithLabel(runtime.frame().accessibility.root, "button", "Browser menu"));
+  assert.ok(findRoleWithLabel(runtime.frame().accessibility.root, "tablist", "Browser tabs"));
   assert.equal(runtime.frame().hitTargets?.some((target) => target.id === "browser-back:control"), false);
   assert.equal(decodeAccessibleSnapshot(runtime.frame().accessibility).status, "success");
 
@@ -512,6 +525,22 @@ test("browser and link actions use anchored menus instead of modal button grids"
     target.id.startsWith(`activate:${link.id}:`)
   );
   assert.ok(linkTarget);
+  const activeDocumentId = runtime.state().documents[runtime.state().activeDocumentIndex].id;
+  await runtime.handleInput({
+    kind: "mouse",
+    sequence: "",
+    encoding: "sgr",
+    action: "press",
+    button: "middle",
+    row: linkTarget.bounds.row,
+    column: linkTarget.bounds.column,
+    rawCode: 1,
+    modifiers: { shift: false, alt: false, ctrl: false }
+  });
+  await waitUntil(runtime, () => runtime.state().documents.length === 2);
+  assert.equal(runtime.state().documents[runtime.state().activeDocumentIndex].id, activeDocumentId);
+  assert.equal(runtime.state().documents[1].snapshot.finalUrl, link.resolvedHref);
+
   await runtime.handleInput({
     kind: "mouse",
     sequence: "",
@@ -627,7 +656,7 @@ test("Verge supports exact find, adaptive library panels, and inline semantic fo
   const { runtime, prepared } = await fixture();
 
   await runtime.dispatch({ kind: "focusOmnibox" });
-  assert.equal(commandInputPresentation(runtime.state().omnibox).value, "https://example.test/");
+  assert.equal(commandInputPresentation(runtime.state().omnibox).input.text, "https://example.test/");
   await runtime.dispatch({
     kind: "omniboxTransition",
     transition: { kind: "setValue", value: "Next" }
@@ -645,7 +674,7 @@ test("Verge supports exact find, adaptive library panels, and inline semantic fo
     transition: { kind: "acceptSuggestion" }
   });
   assert.equal(
-    commandInputPresentation(runtime.state().omnibox).value,
+    commandInputPresentation(runtime.state().omnibox).input.text,
     "https://example.test/next"
   );
   await runtime.dispatch({ kind: "cancelOmnibox" });
@@ -709,7 +738,10 @@ test("Verge supports exact find, adaptive library panels, and inline semantic fo
   const languageNode = findRoleWithLabel(runtime.frame().accessibility.root, "combobox", "Language");
   assert.ok(languageNode);
   assert.equal(languageNode.required, true);
-  assert.ok(findRoleWithLabel(runtime.frame().accessibility.root, "spinbutton", count.id));
+  const countNode = findNode(runtime.frame().accessibility.root, count.id);
+  assert.equal(countNode?.role, "spinbutton");
+  assert.equal(countNode?.labelledBy, `${count.id}:field:label`);
+  assert.equal(findNode(runtime.frame().accessibility.root, countNode.labelledBy)?.value, "Count");
   await runtime.dispatch({ kind: "submitForm", formId: form.id, submitterId: form.controls.find((control) => control.kind === "submit").id });
   await waitUntil(runtime, () => runtime.state().documents[0].snapshot.finalUrl.includes("/search?"));
   assert.equal(runtime.state().documents[0].snapshot.content.title, "Results");
@@ -816,7 +848,7 @@ test("runTui owns the terminal lifecycle and exits through the app binding", asy
   const { runtime, prepared } = await fixture();
   await runtime.dispose();
   const harness = createTerminalHarness({ terminalSize: { columns: 100, rows: 24 } });
-  const running = runTui(prepared.app, harness.host);
+  const running = runTui(prepared.app, { host: harness.host });
   await harness.input("q");
   const exit = await running;
 

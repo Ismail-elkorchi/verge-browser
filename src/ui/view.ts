@@ -38,6 +38,7 @@ import {
 } from "@ismail-elkorchi/terminal-ui/components";
 import {
   defineComponent,
+  ignoreMessage,
   type Element
 } from "@ismail-elkorchi/terminal-ui/component";
 import { column, overlay, row, splitPane, surface, viewport } from "@ismail-elkorchi/terminal-ui/layout";
@@ -48,6 +49,7 @@ import type {
   TerminalStyle
 } from "@ismail-elkorchi/terminal-ui/renderer";
 import type { TuiContext } from "@ismail-elkorchi/terminal-ui/tui";
+import { themeColor } from "@ismail-elkorchi/terminal-ui/theme";
 
 import { extractForms, type FormControl, type FormEntry } from "../app/forms.js";
 import type {
@@ -118,20 +120,19 @@ function accessibleBlock(block: PageBlock) {
 function blockStyle(block: PageBlock): TerminalStyle {
   if (block.kind === "heading" || block.kind === "definitionTerm") {
     return {
-      fg: {
-        kind: "theme",
-        token: block.kind === "heading" && block.level === 1 ? "accent.primary" : "text.strong"
-      },
+      fg: themeColor(
+        block.kind === "heading" && block.level === 1 ? "accent.primary" : "text.strong"
+      ),
       bold: true
     };
   }
   if (block.kind === "quote") {
-    return { fg: { kind: "theme", token: "text.muted" }, italic: true };
+    return { fg: themeColor("text.muted"), italic: true };
   }
   if (block.kind === "notice") {
-    return { fg: { kind: "theme", token: "status.warning" } };
+    return { fg: themeColor("status.warning") };
   }
-  return { fg: { kind: "theme", token: "text.default" } };
+  return { fg: themeColor("text.default") };
 }
 
 function terminalStyle(style: PageTextStyle | undefined): TerminalStyle {
@@ -228,7 +229,7 @@ function rowSegments(
       ...(link === undefined
         ? {}
         : {
-          fg: { kind: "theme" as const, token: "link.foreground" as const },
+          fg: themeColor("link.foreground"),
           underline: true
         }),
       ...authored,
@@ -817,26 +818,28 @@ const browserDocumentComponent = defineComponent<
             width: Math.max(1, Math.min(placement.width, contentBounds.width - columnIndex)),
             height: 1
           },
-          accepts: ["click" as const, "contextMenu" as const],
+          accepts: ["click" as const, "contextMenu" as const, "pointerDown" as const],
           cursor: "pointer" as const,
           focus: { kind: "target" as const, targetId: placement.actionId },
-          message: (event: RoutedPointerEvent): BrowserDocumentAction =>
-            event.kind === "contextMenu" || event.button === "right"
-              ? {
-                kind: "openLinkMenu",
-                actionId: placement.actionId,
-                row: event.row,
-                column: event.column
-              }
-              : {
-                kind: "activateActionAt",
-                actionId: placement.actionId,
-                disposition: event.button === "middle"
-                  ? "newBackground"
-                  : event.modifiers.ctrl
-                    ? "newForeground"
-                    : "current"
-              }
+          message: (event: RoutedPointerEvent) =>
+            event.kind === "pointerDown" && event.button !== "middle"
+              ? ignoreMessage()
+              : event.kind === "contextMenu"
+                ? {
+                  kind: "openLinkMenu",
+                  actionId: placement.actionId,
+                  row: event.row,
+                  column: event.column
+                }
+                : {
+                  kind: "activateActionAt",
+                  actionId: placement.actionId,
+                  disposition: event.button === "middle"
+                    ? "newBackground"
+                    : event.modifiers.ctrl
+                      ? "newForeground"
+                      : "current"
+                }
         };
       });
   }
@@ -1078,13 +1081,15 @@ function browserToolbar(
       kind: "omniboxTransition",
       transition
     }),
-    onSubmit: (event): BrowserTuiMessage => ({ kind: "omniboxSubmit", value: event.value })
+    onSubmit: (event): BrowserTuiMessage => ({ kind: "omniboxSubmit", value: event.value }),
+    meta: { accessibleName: "Address and search" }
   });
   const showLibrary = columns >= 96;
   const back = document.canGoBack
     ? button({
       id: "browser-back",
       label: "←",
+      accessibleName: "Back",
       density: "compact",
       tone: "ghost",
       onAction: buttonAction({ kind: "navigate", operation: "back" })
@@ -1092,6 +1097,7 @@ function browserToolbar(
     : button({
       id: "browser-back",
       label: "←",
+      accessibleName: "Back",
       density: "compact",
       tone: "ghost",
       disabled: true
@@ -1100,6 +1106,7 @@ function browserToolbar(
     ? button({
       id: "browser-forward",
       label: "→",
+      accessibleName: "Forward",
       density: "compact",
       tone: "ghost",
       onAction: buttonAction({ kind: "navigate", operation: "forward" })
@@ -1107,6 +1114,7 @@ function browserToolbar(
     : button({
       id: "browser-forward",
       label: "→",
+      accessibleName: "Forward",
       density: "compact",
       tone: "ghost",
       disabled: true
@@ -1117,11 +1125,19 @@ function browserToolbar(
     button({
       id: "browser-reload",
       label: document.loading ? "■" : "↻",
+      accessibleName: document.loading ? "Stop loading" : "Reload",
       density: "compact",
       tone: "ghost",
       onAction: buttonAction({ kind: "navigate", operation: document.loading ? "stop" : "reload" })
     }),
-    button({ id: "browser-new-tab", label: "+", density: "compact", tone: "ghost", onAction: buttonAction({ kind: "newDocument" }) }),
+    button({
+      id: "browser-new-tab",
+      label: "+",
+      accessibleName: "New tab",
+      density: "compact",
+      tone: "ghost",
+      onAction: buttonAction({ kind: "newDocument" })
+    }),
     omnibox,
     toggleButton({
       id: "browser-bookmark",
@@ -1155,7 +1171,8 @@ function browserToolbar(
         kind: "browserMenuTransition",
         transition
       }),
-      onActivate: (event): BrowserTuiMessage => ({ kind: "browserMenuActivate", event })
+      onActivate: (event): BrowserTuiMessage => ({ kind: "browserMenuActivate", event }),
+      meta: { accessibleName: "Browser menu" }
     })
   ], {
     id: "browser-toolbar-layout",
@@ -1192,16 +1209,17 @@ function findBar(state: BrowserTuiState): Element<BrowserTuiMessage> | null {
       placeholder: "Find in page",
       onAction: (action): BrowserTuiMessage => action.kind === "submit"
         ? { kind: "findSubmit" }
-        : { kind: "findAction", action }
+        : { kind: "findAction", action },
+      meta: { accessibleName: "Find in page" }
     }),
     text({
       content: search === null || search === undefined || search.matches.length === 0
         ? "0/0"
         : `${String(search.activeMatchIndex + 1)}/${String(search.matches.length)}`
     }),
-    button({ id: "find-previous", label: "↑", tone: "ghost", onAction: buttonAction({ kind: "moveSearch", direction: "prev" }) }),
-    button({ id: "find-next", label: "↓", tone: "ghost", onAction: buttonAction({ kind: "moveSearch", direction: "next" }) }),
-    button({ id: "find-close", label: "×", tone: "ghost", onAction: buttonAction({ kind: "closeFind" }) })
+    button({ id: "find-previous", label: "↑", accessibleName: "Previous match", tone: "ghost", onAction: buttonAction({ kind: "moveSearch", direction: "prev" }) }),
+    button({ id: "find-next", label: "↓", accessibleName: "Next match", tone: "ghost", onAction: buttonAction({ kind: "moveSearch", direction: "next" }) }),
+    button({ id: "find-close", label: "×", accessibleName: "Close find", tone: "ghost", onAction: buttonAction({ kind: "closeFind" }) })
   ], {
     id: "browser-find",
     gap: 1,
@@ -1262,7 +1280,8 @@ function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMe
         kind: "tabsTransition",
         transition
       }),
-      onClose: (event): BrowserTuiMessage => ({ kind: "tabsClose", event })
+      onClose: (event): BrowserTuiMessage => ({ kind: "tabsClose", event }),
+      meta: { accessibleName: "Browser tabs" }
     }),
     statusBar({
       id: "browser-status",
@@ -1312,7 +1331,8 @@ function actionPaletteView(palette: ActionPaletteOverlay): Element<BrowserTuiMes
         onSubmit: (event): BrowserTuiMessage => ({
           kind: "actionPaletteSubmit",
           value: event.value
-        })
+        }),
+        meta: { accessibleName: "Browser action" }
       })
     },
     width: 72,
@@ -1336,7 +1356,8 @@ function pickerView(picker: PickerOverlay): Element<BrowserTuiMessage> {
           kind: "pickerTransition",
           transition
         }),
-        onAccept: (event): BrowserTuiMessage => ({ kind: "pickerAccept", event })
+        onAccept: (event): BrowserTuiMessage => ({ kind: "pickerAccept", event }),
+        meta: { accessibleName: picker.title }
       })
     },
     width: 76,
