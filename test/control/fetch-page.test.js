@@ -4,17 +4,23 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { ReadableStream } from "node:stream/web";
 import test from "node:test";
 import { TextDecoder } from "node:util";
 
 import {
   NetworkFetchError,
   PageNetworkClient,
+  closeClientWithStream,
   fetchPage,
   fetchPageStream,
   readByteStreamToText
 } from "../../dist/app/fetch-page.js";
-import { BrowserSession } from "../../dist/app/session.js";
+import {
+  BrowserSession,
+  openPageInitiatedNavigation
+} from "../../dist/app/session.js";
 
 function localClient() {
   return new PageNetworkClient({
@@ -38,7 +44,7 @@ test("fetchPage supports file URLs", async () => {
     const htmlPath = join(tempDir, "sample.html");
     await writeFile(htmlPath, "<html><body><h1>Local file</h1></body></html>", "utf8");
 
-    const fileUrl = `file://${htmlPath}`;
+    const fileUrl = pathToFileURL(htmlPath).href;
     const page = await fetchPage(fileUrl);
 
     assert.equal(page.status, 200);
@@ -50,12 +56,45 @@ test("fetchPage supports file URLs", async () => {
   }
 });
 
+test("local file navigation enforces the transport budget before returning content", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "verge-browser-file-limit-"));
+  const htmlPath = join(tempDir, "large.html");
+  await writeFile(htmlPath, "x".repeat(4096), "utf8");
+
+  try {
+    await assert.rejects(
+      fetchPage(pathToFileURL(htmlPath).href, 15_000, { maxContentBytes: 32 }),
+      (error) => error instanceof NetworkFetchError
+        && error.networkOutcome.kind === "size_limit"
+    );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("fetchPageStream supports about:help without network", async () => {
   const page = await fetchPageStream("about:help");
   assert.equal(page.networkOutcome.kind, "ok");
   const html = await readByteStreamToText(page.stream);
   assert.equal(page.status, 200);
   assert.ok(html.includes("verge-browser"));
+});
+
+test("a failed stream cancellation still destroys its operation-scoped client", async () => {
+  let destroyCalls = 0;
+  const stream = closeClientWithStream(new ReadableStream({
+    cancel() {
+      throw new Error("underlying cancellation failed");
+    }
+  }), {
+    async close() {},
+    async destroy() {
+      destroyCalls += 1;
+    }
+  });
+
+  await assert.rejects(stream.cancel("stop"), /underlying cancellation failed/u);
+  assert.equal(destroyCalls, 1);
 });
 
 test("network clients allow direct local navigation but block local subresources", async () => {
@@ -89,6 +128,86 @@ test("network clients allow direct local navigation but block local subresources
   }
 });
 
+test("BrowserSession does not grant private-network access to links or forms", async () => {
+  let privateRequests = 0;
+  const privateServer = createServer((_, response) => {
+    privateRequests += 1;
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end("<p>private service</p>");
+  });
+  await new Promise((resolve) => privateServer.listen(0, "127.0.0.1", resolve));
+  const privateAddress = privateServer.address();
+  assert.ok(privateAddress && typeof privateAddress === "object");
+  const privateUrl = `http://127.0.0.1:${String(privateAddress.port)}/private`;
+
+  const sourceServer = createServer((_, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<a href="${privateUrl}">Private</a>`);
+  });
+  await new Promise((resolve) => sourceServer.listen(0, "127.0.0.1", resolve));
+  const sourceAddress = sourceServer.address();
+  assert.ok(sourceAddress && typeof sourceAddress === "object");
+  const sourceUrl = `http://127.0.0.1:${String(sourceAddress.port)}/`;
+  const session = new BrowserSession();
+
+  try {
+    await session.open(sourceUrl);
+    await assert.rejects(
+      session.openLink(1),
+      (error) => error instanceof NetworkFetchError
+        && error.networkOutcome.kind === "network_block"
+    );
+    await assert.rejects(
+      openPageInitiatedNavigation(session, sourceUrl, privateUrl, {
+        method: "POST",
+        bodyText: "action=delete"
+      }),
+      (error) => error instanceof NetworkFetchError
+        && error.networkOutcome.kind === "network_block"
+    );
+    assert.equal(privateRequests, 0);
+
+    const explicit = await session.open(privateUrl);
+    assert.match(explicit.rendered.lines.join("\n"), /private service/u);
+    assert.equal(privateRequests, 1);
+  } finally {
+    await session.destroy();
+    await new Promise((resolve) => sourceServer.close(resolve));
+    await new Promise((resolve) => privateServer.close(resolve));
+  }
+});
+
+test("stylesheet HTTP errors cancel their response bodies before client shutdown", async () => {
+  const server = createServer((_, response) => {
+    response.statusCode = 404;
+    response.setHeader("content-type", "text/css");
+    response.write("body { color: red }");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const client = localClient();
+
+  try {
+    await assert.rejects(
+      client.fetchStylesheet(`http://127.0.0.1:${String(address.port)}/missing.css`),
+      (error) => error instanceof NetworkFetchError
+        && error.networkOutcome.kind === "http_error"
+    );
+    await Promise.race([
+      client.close(),
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error("HTTP client retained the rejected stylesheet body")),
+        1_000
+      ))
+    ]);
+  } finally {
+    await client.destroy();
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test("BrowserSession streams transport bytes through HTML encoding detection", async () => {
   const server = createServer((_, response) => {
     response.setHeader(
@@ -111,7 +230,7 @@ test("BrowserSession streams transport bytes through HTML encoding detection", a
     const snapshot = await session.open(
       `http://127.0.0.1:${String(address.port)}/`
     );
-    assert.equal(snapshot.content.title, "€");
+    assert.equal(snapshot.rendered.title, "€");
     assert.deepEqual(snapshot.document.metadata.encoding, {
       name: "windows-1252",
       source: "transport"

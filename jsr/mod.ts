@@ -98,22 +98,24 @@ export function assertAllowedUrl(rawUrl: string): URL {
  * Determines whether an HTTP content-type should be treated as HTML-like.
  *
  * @param contentType Raw `Content-Type` header value, or `null` when absent.
- * @returns `true` for HTML/XHTML-compatible values, XML-family values, and for missing content-type headers.
+ * @returns `true` for exact HTML, XHTML, and XML media types, and for missing content-type headers.
  *
  * @example Usage
  * ```ts
- * console.log(isHtmlLikeContentType("text/html; charset=utf-8"));
- * console.log(isHtmlLikeContentType("application/json"));
+ * if (!isHtmlLikeContentType("text/html; charset=utf-8")) throw new Error("HTML was rejected");
+ * if (!isHtmlLikeContentType("text/xml")) throw new Error("XML was rejected");
+ * if (isHtmlLikeContentType("application/not-text/html")) throw new Error("Invalid MIME was accepted");
  * ```
  */
 export function isHtmlLikeContentType(contentType: string | null): boolean {
   if (!contentType) {
     return true;
   }
-  const normalized = contentType.toLowerCase();
-  return normalized.includes("text/html")
-    || normalized.includes("application/xhtml+xml")
-    || normalized.includes("application/xml");
+  const essence = contentType.split(";", 1)[0]?.trim().toLowerCase();
+  return essence === "text/html"
+    || essence === "application/xhtml+xml"
+    || essence === "application/xml"
+    || essence === "text/xml";
 }
 
 /**

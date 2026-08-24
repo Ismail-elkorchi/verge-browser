@@ -37,8 +37,8 @@ function validateHttpClientInstall({
 }) {
   const name = "@ismail-elkorchi/http-client";
   const dependency = manifest.dependencies?.[name];
-  if (dependency !== "^0.1.0") {
-    throw new Error("http-client must use the published ^0.1.0 release");
+  if (dependency !== "0.1.0") {
+    throw new Error("http-client must use the exact published 0.1.0 release");
   }
   const rootLock = lockfile.packages?.[""];
   const lockEntry = lockfile.packages?.[`node_modules/${name}`];
@@ -47,6 +47,7 @@ function validateHttpClientInstall({
   }
   if (
     typeof lockEntry?.version !== "string"
+    || lockEntry.version !== dependency
     || lockEntry.resolved !== `https://registry.npmjs.org/@ismail-elkorchi/http-client/-/http-client-${lockEntry.version}.tgz`
     || typeof lockEntry?.integrity !== "string"
     || !/^sha512-[A-Za-z0-9+/]+={0,2}$/u.test(lockEntry.integrity)

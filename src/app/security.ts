@@ -94,6 +94,18 @@ export function assertAllowedUrl(rawUrl: string): URL {
   return parsed;
 }
 
+export function assertPageInitiatedNavigation(sourceUrl: string, targetUrl: string): void {
+  const source = new URL(sourceUrl);
+  const target = new URL(targetUrl);
+  assertAllowedProtocol(target);
+  if (
+    target.protocol === "file:"
+    && source.protocol !== "file:"
+  ) {
+    throw new Error("Blocked a page-initiated local-file navigation.");
+  }
+}
+
 /**
  * Determines whether a response content type should be treated as HTML-like input.
  *
@@ -104,6 +116,9 @@ export function assertAllowedUrl(rawUrl: string): URL {
  */
 export function isHtmlLikeContentType(contentType: string | null): boolean {
   if (!contentType) return true;
-  const normalized = contentType.toLowerCase();
-  return normalized.includes("text/html") || normalized.includes("application/xhtml+xml") || normalized.includes("application/xml");
+  const essence = contentType.split(";", 1)[0]?.trim().toLowerCase();
+  return essence === "text/html"
+    || essence === "application/xhtml+xml"
+    || essence === "application/xml"
+    || essence === "text/xml";
 }

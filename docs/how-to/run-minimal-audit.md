@@ -36,19 +36,23 @@ const session = new BrowserSession({
   defaultParseMode: "text"
 });
 
-const snapshot = await session.open("https://example.test/");
+try {
+  const snapshot = await session.open("https://example.test/");
 
-const audit = {
-  status: snapshot.status,
-  parseErrorCount: snapshot.diagnostics.parseErrorCount,
-  linkCount: snapshot.content.links.length,
-  triageIds: snapshot.diagnostics.triageIds
-};
+  const audit = {
+    status: snapshot.status,
+    parseErrorCount: snapshot.diagnostics.parseErrorCount,
+    linkCount: snapshot.rendered.links.length,
+    triageIds: snapshot.diagnostics.triageIds
+  };
 
-console.log(audit.status);
-console.log(audit.parseErrorCount);
-console.log(audit.linkCount);
-console.log(audit.triageIds.length > 0);
+  console.log(audit.status);
+  console.log(audit.parseErrorCount);
+  console.log(audit.linkCount);
+  console.log(audit.triageIds.length > 0);
+} finally {
+  await session.close();
+}
 ```
 
 ## Expected output

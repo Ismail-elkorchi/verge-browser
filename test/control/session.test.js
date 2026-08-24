@@ -123,7 +123,7 @@ test("BrowserSession openStream parses from byte stream", async () => {
   assert.equal(snapshot.diagnostics.networkOutcome.kind, "ok");
   assert.ok(snapshot.diagnostics.triageIds.some((entry) => entry.startsWith("NET:OK:HTTP_200")));
   assert.ok(snapshot.diagnostics.triageIds.some((entry) => entry.startsWith("PARSE:")));
-  assert.equal(snapshot.content.title, "A");
+  assert.equal(snapshot.rendered.title, "A");
   assert.ok(snapshot.document.sourceText?.includes("<title>A</title>"));
 });
 
@@ -167,7 +167,7 @@ test("BrowserSession applyEdits mutates current snapshot deterministically", asy
   ]);
 
   assert.ok(patched.document.sourceText?.includes("Updated"));
-  assert.ok(patched.content.blocks.some((block) => block.text.includes("Updated")));
+  assert.ok(patched.rendered.lines.some((line) => line.includes("Updated")));
 });
 
 test("BrowserSession openWithRequest records the request method", async () => {
@@ -209,4 +209,78 @@ test("BrowserSession openWithRequest records the request method", async () => {
   assert.equal(snapshot.diagnostics.networkOutcome.kind, "ok");
   assert.ok(snapshot.diagnostics.triageIds.some((entry) => entry.startsWith("NET:OK:HTTP_200")));
   assert.ok(snapshot.diagnostics.triageIds.some((entry) => entry.startsWith("PARSE:")));
+});
+
+test("BrowserSession cancels a loaded stream when navigation aborts before parsing", async () => {
+  const abortController = new globalThis.AbortController();
+  let cancelReason;
+  const stream = new ReadableStream({
+    cancel(reason) {
+      cancelReason = reason;
+    }
+  });
+  const streamLoader = async (requestUrl) => {
+    abortController.abort(new Error("navigation stopped"));
+    return {
+      requestUrl,
+      finalUrl: requestUrl,
+      status: 200,
+      statusText: "OK",
+      contentType: "text/html",
+      stream,
+      responseFields: htmlFields(),
+      networkOutcome: {
+        kind: "ok",
+        finalUrl: requestUrl,
+        status: 200,
+        statusText: "OK",
+        detailCode: "HTTP_200",
+        detailMessage: "200 OK"
+      },
+      fetchedAtIso: "2026-01-01T00:00:00.000Z"
+    };
+  };
+  const session = new BrowserSession({
+    loader: async () => assert.fail("text loader should not run"),
+    streamLoader,
+    stylesheetLoader: async () => assert.fail("stylesheet loader should not run")
+  });
+
+  await assert.rejects(
+    session.open("https://stream.example/", abortController.signal),
+    /navigation stopped/u
+  );
+  assert.match(String(cancelReason), /navigation stopped/u);
+});
+
+test("remote pages cannot turn a file base URL into a local link navigation", async () => {
+  let loadCount = 0;
+  const session = new BrowserSession({
+    defaultParseMode: "text",
+    loader: async (requestUrl) => {
+      loadCount += 1;
+      return {
+        requestUrl,
+        finalUrl: requestUrl,
+        status: 200,
+        statusText: "OK",
+        contentType: "text/html",
+        html: '<base href="file:///private/"><a href="secret.txt">Open report</a>',
+        responseFields: htmlFields(),
+        networkOutcome: {
+          kind: "ok",
+          finalUrl: requestUrl,
+          status: 200,
+          statusText: "OK",
+          detailCode: "HTTP_200",
+          detailMessage: "200 OK"
+        },
+        fetchedAtIso: "2026-01-01T00:00:00.000Z"
+      };
+    }
+  });
+  await session.open("https://remote.example/");
+
+  await assert.rejects(session.openLink(1), /page-initiated local-file/u);
+  assert.equal(loadCount, 1);
 });

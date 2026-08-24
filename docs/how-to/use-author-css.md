@@ -6,21 +6,25 @@ stylesheets alongside the parsed HTML:
 ```ts
 import { BrowserSession } from "@ismail-elkorchi/verge-browser";
 
-const snapshot = await new BrowserSession().open("https://example.com/");
-
-console.log(snapshot.content.stylesheetCount);
-console.log(snapshot.content.styleIssues);
+const session = new BrowserSession();
+try {
+  const snapshot = await session.open("https://example.com/");
+  console.log(snapshot.diagnostics.stylesheetCount);
+  console.log(snapshot.diagnostics.styleIssueCount);
+} finally {
+  await session.close();
+}
 ```
 
-External stylesheets use the same protocol, redirect, timeout, cancellation,
-content-type, and byte-limit rules as page navigation. Use
-`stylesheetLoader` for fixtures or another transport and `stylesheetPolicy`
-to lower the resource limits.
+External stylesheets use the public HTTP/HTTPS network boundary, including
+across redirects. A remote document cannot trigger a `file:` read through a
+link or document base URL. Use `stylesheetLoader` for trusted fixtures or
+another transport and `stylesheetPolicy` to lower the resource limits.
 
-`PageContent` retains the page's semantic blocks and stable actions.
-`layoutPageContent(content, columns)` evaluates responsive styles at the
-current terminal width and returns rows, action geometry, page colors, and
-style runs.
+The browser evaluates responsive styles at the current terminal width while
+retaining stable semantic actions across resize. The current flatten-first
+content and layout structures are implementation details rather than root API
+contracts.
 
 Verge supports a terminal CSS profile rather than pixel rendering:
 
@@ -32,8 +36,8 @@ Verge supports a terminal CSS profile rather than pixel rendering:
 - bounded widths, gaps, borders, and the common visually-hidden pattern.
 
 HTML meaning remains available when a rule cannot be represented. Unsupported
-selectors, properties, and values are ignored and aggregated in
-`styleIssues`; the `occurrences` field records repeats.
+selectors, properties, and values are ignored and aggregated in the browser's
+diagnostics view; the snapshot exposes their aggregate count.
 
 Reader view ignores author styles. Browser chrome and keyboard-focus
 indication are never styled by the page.

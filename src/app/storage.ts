@@ -1,5 +1,6 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { homedir } from "node:os";
 
 import type { HttpSessionAdapter } from "@ismail-elkorchi/http-client";
@@ -80,13 +81,45 @@ interface BrowserState {
 }
 
 const DEFAULT_HISTORY_LIMIT = 500;
+const DEFAULT_INDEX_LIMIT = 250;
+const MAX_HISTORY_LIMIT = 2000;
+const MAX_INDEX_LIMIT = 250;
+const MAX_INDEX_TEXT_CODE_UNITS = 16 * 1024;
+const MAX_STATE_BYTES = 80 * 1024 * 1024;
+const MAX_WORKSPACE_DOCUMENTS = 50;
+const MAX_SCROLL_BLOCK_ID_CODE_UNITS = 512;
+const MAX_SCROLL_ROW_OFFSET = 10_000_000;
+const MAX_SEARCH_QUERY_TOKENS = 16;
+const MAX_SEARCH_TOKEN_CODE_UNITS = 128;
+const MAX_SEARCH_QUERY_CODE_UNITS = 2048;
+const MAX_BOOKMARKS = 1000;
+const MAX_DOWNLOADS = 200;
+const MAX_URL_CODE_UNITS = 8 * 1024;
+const MAX_TITLE_CODE_UNITS = 512;
+const MAX_PATH_CODE_UNITS = 16 * 1024;
+const MAX_ERROR_CODE_UNITS = 2048;
+const MAX_ID_CODE_UNITS = 256;
+const MAX_TIMESTAMP_CODE_UNITS = 64;
+const PRIVATE_DIRECTORY_MODE = 0o700;
+const PRIVATE_FILE_MODE = 0o600;
 
 function defaultStatePath(): string {
   const xdgStateHome = process.env["XDG_STATE_HOME"];
   const stateRoot = xdgStateHome && xdgStateHome.length > 0
     ? xdgStateHome
-    : join(homedir(), ".local", "state");
+    : process.platform === "win32"
+      ? process.env["LOCALAPPDATA"] || join(homedir(), "AppData", "Local")
+      : process.platform === "darwin"
+        ? join(homedir(), "Library", "Application Support")
+        : join(homedir(), ".local", "state");
   return join(stateRoot, "verge-browser", "state.json");
+}
+
+function boundedInteger(value: number | undefined, fallback: number, minimum: number, maximum: number): number {
+  const candidate = value ?? fallback;
+  return Number.isFinite(candidate)
+    ? Math.max(minimum, Math.min(maximum, Math.floor(candidate)))
+    : fallback;
 }
 
 function nowIso(): string {
@@ -145,10 +178,29 @@ function isDownloadRecord(value: unknown): value is DownloadRecord {
     && (candidate["destinationPath"] === null || typeof candidate["destinationPath"] === "string")
     && ["queued", "downloading", "completed", "failed", "interrupted"].includes(String(candidate["status"]))
     && Number.isSafeInteger(candidate["receivedBytes"])
-    && (candidate["totalBytes"] === null || Number.isSafeInteger(candidate["totalBytes"]))
+    && Number(candidate["receivedBytes"]) >= 0
+    && (candidate["totalBytes"] === null || (
+      Number.isSafeInteger(candidate["totalBytes"])
+      && Number(candidate["totalBytes"]) >= 0
+    ))
     && (candidate["error"] === null || typeof candidate["error"] === "string")
     && typeof candidate["startedAtIso"] === "string"
     && typeof candidate["updatedAtIso"] === "string";
+}
+
+function normalizeDownload(entry: DownloadRecord): DownloadRecord {
+  return {
+    id: entry.id.slice(0, MAX_ID_CODE_UNITS),
+    url: entry.url.slice(0, MAX_URL_CODE_UNITS),
+    fileName: entry.fileName.slice(0, MAX_TITLE_CODE_UNITS),
+    destinationPath: entry.destinationPath?.slice(0, MAX_PATH_CODE_UNITS) ?? null,
+    status: entry.status,
+    receivedBytes: entry.receivedBytes,
+    totalBytes: entry.totalBytes,
+    error: entry.error?.slice(0, MAX_ERROR_CODE_UNITS) ?? null,
+    startedAtIso: entry.startedAtIso.slice(0, MAX_TIMESTAMP_CODE_UNITS),
+    updatedAtIso: entry.updatedAtIso.slice(0, MAX_TIMESTAMP_CODE_UNITS)
+  };
 }
 
 function normalizeWorkspace(value: unknown): BrowserWorkspace | null {
@@ -159,7 +211,12 @@ function normalizeWorkspace(value: unknown): BrowserWorkspace | null {
     if (entry === null || typeof entry !== "object") return [];
     const document = entry as Record<string, unknown>;
     const anchor = document["scrollAnchor"];
-    if (typeof document["url"] !== "string" || anchor === null || typeof anchor !== "object") return [];
+    if (
+      typeof document["url"] !== "string"
+      || document["url"].length > MAX_URL_CODE_UNITS
+      || anchor === null
+      || typeof anchor !== "object"
+    ) return [];
     const anchorRecord = anchor as Record<string, unknown>;
     if (
       typeof anchorRecord["blockId"] !== "string"
@@ -169,11 +226,11 @@ function normalizeWorkspace(value: unknown): BrowserWorkspace | null {
     return [{
       url: document["url"],
       scrollAnchor: {
-        blockId: anchorRecord["blockId"],
-        rowOffset: Number(anchorRecord["rowOffset"])
+        blockId: anchorRecord["blockId"].slice(0, MAX_SCROLL_BLOCK_ID_CODE_UNITS),
+        rowOffset: Math.min(Number(anchorRecord["rowOffset"]), MAX_SCROLL_ROW_OFFSET)
       }
     }];
-  });
+  }).slice(0, MAX_WORKSPACE_DOCUMENTS);
   if (documents.length === 0) return null;
   const rawActiveIndex = Number.isSafeInteger(candidate["activeDocumentIndex"])
     ? Number(candidate["activeDocumentIndex"])
@@ -199,11 +256,36 @@ function normalizeState(value: unknown): BrowserState {
   const indexDocumentsRaw = Array.isArray(candidate["indexDocuments"]) ? candidate["indexDocuments"] : [];
   const downloadsRaw = Array.isArray(candidate["downloads"]) ? candidate["downloads"] : [];
 
-  const bookmarks = bookmarksRaw.filter((entry): entry is BookmarkEntry => isBookmarkEntry(entry));
-  const history = historyRaw.filter((entry): entry is HistoryEntry => isHistoryEntry(entry));
-  const indexDocuments = indexDocumentsRaw.filter((entry): entry is IndexDocument => isIndexDocument(entry));
+  const bookmarks = bookmarksRaw
+    .filter((entry): entry is BookmarkEntry => isBookmarkEntry(entry))
+    .slice(0, MAX_BOOKMARKS)
+    .map((entry) => ({
+      url: entry.url.slice(0, MAX_URL_CODE_UNITS),
+      name: entry.name.slice(0, MAX_TITLE_CODE_UNITS),
+      addedAtIso: entry.addedAtIso.slice(0, MAX_TIMESTAMP_CODE_UNITS)
+    }));
+  const history = historyRaw
+    .filter((entry): entry is HistoryEntry => isHistoryEntry(entry))
+    .slice(0, MAX_HISTORY_LIMIT)
+    .map((entry) => ({
+      url: entry.url.slice(0, MAX_URL_CODE_UNITS),
+      title: entry.title.slice(0, MAX_TITLE_CODE_UNITS),
+      visitedAtIso: entry.visitedAtIso.slice(0, MAX_TIMESTAMP_CODE_UNITS),
+      ...(entry.excerpt === undefined ? {} : { excerpt: entry.excerpt.slice(0, 220) })
+    }));
+  const indexDocuments = indexDocumentsRaw
+    .filter((entry): entry is IndexDocument => isIndexDocument(entry))
+    .slice(0, MAX_INDEX_LIMIT)
+    .map((entry) => ({
+      url: entry.url.slice(0, MAX_URL_CODE_UNITS),
+      title: entry.title.slice(0, MAX_TITLE_CODE_UNITS),
+      text: entry.text.slice(0, MAX_INDEX_TEXT_CODE_UNITS),
+      indexedAtIso: entry.indexedAtIso.slice(0, MAX_TIMESTAMP_CODE_UNITS)
+    }));
   const downloads = downloadsRaw
     .filter((entry): entry is DownloadRecord => isDownloadRecord(entry))
+    .slice(0, MAX_DOWNLOADS)
+    .map(normalizeDownload)
     .map((entry) => entry.status === "downloading"
       ? { ...entry, status: "interrupted" as const, error: "Download interrupted when the browser stopped." }
       : entry);
@@ -220,6 +302,14 @@ function normalizeState(value: unknown): BrowserState {
 
 async function loadStateFromPath(statePath: string): Promise<BrowserState> {
   try {
+    const file = await lstat(statePath);
+    if (!file.isFile() || file.isSymbolicLink()) {
+      throw new Error(`Browser state path must be a regular file: ${statePath}`);
+    }
+    if (file.size > MAX_STATE_BYTES) {
+      throw new Error(`Browser state exceeds the ${String(MAX_STATE_BYTES)}-byte safety limit: ${statePath}`);
+    }
+    await restrictPermissions(statePath, PRIVATE_FILE_MODE);
     const rawText = await readFile(statePath, "utf8");
     try {
       const parsed = JSON.parse(rawText) as unknown;
@@ -235,12 +325,51 @@ async function loadStateFromPath(statePath: string): Promise<BrowserState> {
   }
 }
 
+async function restrictPermissions(path: string, mode: number): Promise<void> {
+  if (process.platform === "win32") return;
+  try {
+    await chmod(path, mode);
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+}
+
+async function prepareStateDirectory(statePath: string): Promise<void> {
+  const directory = dirname(statePath);
+  const created = await mkdir(directory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+  const directoryEntry = await lstat(directory);
+  if (!directoryEntry.isDirectory() || directoryEntry.isSymbolicLink()) {
+    throw new Error(`Browser state directory must be a real directory: ${directory}`);
+  }
+  if (created !== undefined || basename(directory) === "verge-browser") {
+    await restrictPermissions(directory, PRIVATE_DIRECTORY_MODE);
+  }
+}
+
 async function saveStateToPath(statePath: string, state: BrowserState): Promise<void> {
-  await mkdir(dirname(statePath), { recursive: true });
-  const tempPath = `${statePath}.tmp-${String(process.pid)}`;
-  const payload = `${JSON.stringify(state, null, 2)}\n`;
-  await writeFile(tempPath, payload, "utf8");
-  await rename(tempPath, statePath);
+  await prepareStateDirectory(statePath);
+  const tempPath = `${statePath}.tmp-${String(process.pid)}-${randomUUID()}`;
+  const payload = `${JSON.stringify(normalizeState(state), null, 2)}\n`;
+  if (Buffer.byteLength(payload, "utf8") > MAX_STATE_BYTES) {
+    throw new Error(
+      `Browser state exceeds the ${String(MAX_STATE_BYTES)}-byte safety limit.`
+    );
+  }
+  try {
+    await writeFile(tempPath, payload, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: PRIVATE_FILE_MODE
+    });
+    await restrictPermissions(tempPath, PRIVATE_FILE_MODE);
+    await rename(tempPath, statePath);
+    await restrictPermissions(statePath, PRIVATE_FILE_MODE);
+  } finally {
+    await rm(tempPath, { force: true });
+  }
 }
 
 export class BrowserStore {
@@ -271,8 +400,9 @@ export class BrowserStore {
     readonly indexLimit?: number;
   } = {}): Promise<BrowserStore> {
     const statePath = options.statePath ?? defaultStatePath();
-    const historyLimit = Math.max(1, Math.floor(options.historyLimit ?? DEFAULT_HISTORY_LIMIT));
-    const indexLimit = Math.max(50, Math.floor(options.indexLimit ?? 1000));
+    const historyLimit = boundedInteger(options.historyLimit, DEFAULT_HISTORY_LIMIT, 1, MAX_HISTORY_LIMIT);
+    const indexLimit = boundedInteger(options.indexLimit, DEFAULT_INDEX_LIMIT, 50, MAX_INDEX_LIMIT);
+    await prepareStateDirectory(statePath);
     const state = await loadStateFromPath(statePath);
     return new BrowserStore(statePath, historyLimit, indexLimit, state);
   }
@@ -294,7 +424,8 @@ export class BrowserStore {
   }
 
   public isBookmarked(url: string): boolean {
-    return this.state.bookmarks.some((bookmark) => bookmark.url === url);
+    const normalizedUrl = url.slice(0, MAX_URL_CODE_UNITS);
+    return this.state.bookmarks.some((bookmark) => bookmark.url === normalizedUrl);
   }
 
   public get httpSession(): HttpSessionAdapter {
@@ -312,15 +443,15 @@ export class BrowserStore {
   public async addBookmark(url: string, name: string): Promise<BookmarkEntry> {
     const trimmedName = name.trim();
     const entry: BookmarkEntry = {
-      url,
-      name: trimmedName.length > 0 ? trimmedName : url,
+      url: url.slice(0, MAX_URL_CODE_UNITS),
+      name: (trimmedName.length > 0 ? trimmedName : url).slice(0, MAX_TITLE_CODE_UNITS),
       addedAtIso: nowIso()
     };
 
-    const filteredBookmarks = this.state.bookmarks.filter((bookmark) => bookmark.url !== url);
+    const filteredBookmarks = this.state.bookmarks.filter((bookmark) => bookmark.url !== entry.url);
     this.state = {
       ...this.state,
-      bookmarks: [entry, ...filteredBookmarks]
+      bookmarks: [entry, ...filteredBookmarks].slice(0, MAX_BOOKMARKS)
     };
 
     await this.save();
@@ -331,7 +462,9 @@ export class BrowserStore {
     if (this.isBookmarked(url)) {
       this.state = {
         ...this.state,
-        bookmarks: this.state.bookmarks.filter((bookmark) => bookmark.url !== url)
+        bookmarks: this.state.bookmarks.filter(
+          (bookmark) => bookmark.url !== url.slice(0, MAX_URL_CODE_UNITS)
+        )
       };
       await this.save();
       return false;
@@ -341,17 +474,18 @@ export class BrowserStore {
   }
 
   public async saveWorkspace(workspace: BrowserWorkspace): Promise<void> {
-    this.state = { ...this.state, workspace };
+    this.state = { ...this.state, workspace: normalizeWorkspace(workspace) };
     await this.save();
   }
 
   public async upsertDownload(download: DownloadRecord): Promise<void> {
+    const normalized = normalizeDownload(download);
     this.state = {
       ...this.state,
       downloads: [
-        download,
-        ...this.state.downloads.filter((entry) => entry.id !== download.id)
-      ].slice(0, 200)
+        normalized,
+        ...this.state.downloads.filter((entry) => entry.id !== normalized.id)
+      ].slice(0, MAX_DOWNLOADS)
     };
     await this.save();
   }
@@ -366,13 +500,13 @@ export class BrowserStore {
 
   public async recordHistory(url: string, title: string, excerpt?: string): Promise<HistoryEntry> {
     const entry: HistoryEntry = {
-      url,
-      title: title.trim().length > 0 ? title : url,
+      url: url.slice(0, MAX_URL_CODE_UNITS),
+      title: (title.trim().length > 0 ? title : url).slice(0, MAX_TITLE_CODE_UNITS),
       visitedAtIso: nowIso(),
-      ...(excerpt && excerpt.trim().length > 0 ? { excerpt: excerpt.trim() } : {})
+      ...(excerpt && excerpt.trim().length > 0 ? { excerpt: excerpt.trim().slice(0, 220) } : {})
     };
 
-    const deduplicatedHistory = this.state.history.filter((historyItem) => historyItem.url !== url);
+    const deduplicatedHistory = this.state.history.filter((historyItem) => historyItem.url !== entry.url);
     const nextHistory = [entry, ...deduplicatedHistory].slice(0, this.historyLimit);
 
     this.state = {
@@ -385,19 +519,19 @@ export class BrowserStore {
   }
 
   public async recordIndexDocument(url: string, title: string, text: string): Promise<void> {
-    const normalizedText = text.trim();
+    const normalizedText = text.trim().slice(0, MAX_INDEX_TEXT_CODE_UNITS);
     if (normalizedText.length === 0) {
       return;
     }
 
     const nextDocument: IndexDocument = {
-      url,
-      title: title.trim().length > 0 ? title : url,
+      url: url.slice(0, MAX_URL_CODE_UNITS),
+      title: (title.trim().length > 0 ? title : url).slice(0, MAX_TITLE_CODE_UNITS),
       text: normalizedText,
       indexedAtIso: nowIso()
     };
 
-    const deduplicated = this.state.indexDocuments.filter((document) => document.url !== url);
+    const deduplicated = this.state.indexDocuments.filter((document) => document.url !== nextDocument.url);
     const nextIndexDocuments = [nextDocument, ...deduplicated].slice(0, this.indexLimit);
 
     this.state = {
@@ -407,12 +541,51 @@ export class BrowserStore {
     await this.save();
   }
 
+  public async recordPage(
+    url: string,
+    title: string,
+    excerpt: string,
+    text: string
+  ): Promise<void> {
+    const normalizedUrl = url.slice(0, MAX_URL_CODE_UNITS);
+    const normalizedTitle = (title.trim().length > 0 ? title : url).slice(0, MAX_TITLE_CODE_UNITS);
+    const historyEntry: HistoryEntry = {
+      url: normalizedUrl,
+      title: normalizedTitle,
+      visitedAtIso: nowIso(),
+      ...(excerpt.trim().length === 0 ? {} : { excerpt: excerpt.trim().slice(0, 220) })
+    };
+    const normalizedText = text.trim().slice(0, MAX_INDEX_TEXT_CODE_UNITS);
+    const history = [
+      historyEntry,
+      ...this.state.history.filter((entry) => entry.url !== normalizedUrl)
+    ].slice(0, this.historyLimit);
+    const indexDocuments = normalizedText.length === 0
+      ? this.state.indexDocuments
+      : [{
+        url: normalizedUrl,
+        title: normalizedTitle,
+        text: normalizedText,
+        indexedAtIso: nowIso()
+      }, ...this.state.indexDocuments.filter((entry) => entry.url !== normalizedUrl)]
+        .slice(0, this.indexLimit);
+    this.state = { ...this.state, history, indexDocuments };
+    await this.save();
+  }
+
   public searchIndex(query: string, limit = 10): readonly IndexSearchResult[] {
-    const normalizedQuery = query.trim().toLowerCase();
+    const normalizedQuery = query
+      .slice(0, MAX_SEARCH_QUERY_CODE_UNITS)
+      .trim()
+      .toLowerCase();
     if (normalizedQuery.length === 0) {
       return [];
     }
-    const queryTokens = normalizedQuery.split(/\s+/).filter((token) => token.length > 0);
+    const queryTokens = [...new Set(normalizedQuery
+      .split(/\s+/)
+      .filter((token) => token.length > 0)
+      .slice(0, MAX_SEARCH_QUERY_TOKENS)
+      .map((token) => token.slice(0, MAX_SEARCH_TOKEN_CODE_UNITS)))];
     if (queryTokens.length === 0) {
       return [];
     }
@@ -422,9 +595,13 @@ export class BrowserStore {
         const haystack = `${document.title}\n${document.text}`.toLowerCase();
         let score = 0;
         for (const queryToken of queryTokens) {
-          const escapedToken = queryToken.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-          const matches = haystack.match(new RegExp(escapedToken, "g"));
-          score += matches ? matches.length : 0;
+          let offset = 0;
+          while (offset < haystack.length) {
+            const match = haystack.indexOf(queryToken, offset);
+            if (match < 0) break;
+            score += 1;
+            offset = match + Math.max(1, queryToken.length);
+          }
         }
         if (score === 0) {
           return null;
@@ -445,7 +622,12 @@ export class BrowserStore {
         return right.indexedAtIso.localeCompare(left.indexedAtIso);
       });
 
-    return ranked.slice(0, Math.max(1, Math.floor(limit)));
+    return ranked.slice(0, boundedInteger(limit, 10, 1, 100));
+  }
+
+  public async flush(): Promise<void> {
+    await this.cookieSession.flush();
+    await this.saveTail;
   }
 
   private save(): Promise<void> {

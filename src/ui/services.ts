@@ -2,6 +2,7 @@ import type { HttpSessionAdapter } from "@ismail-elkorchi/http-client";
 
 export interface DownloadRequest {
   readonly url: string;
+  readonly sourceUrl?: string;
   readonly directory: string;
   readonly maxBytes: number;
   readonly headers?: Readonly<Record<string, string>>;

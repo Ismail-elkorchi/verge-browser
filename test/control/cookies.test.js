@@ -8,7 +8,10 @@ import test from "node:test";
 import { HttpFields } from "@ismail-elkorchi/http-client";
 
 import { PageNetworkClient } from "../../dist/app/fetch-page.js";
-import { BrowserSession } from "../../dist/app/session.js";
+import {
+  BrowserSession,
+  openPageInitiatedNavigation
+} from "../../dist/app/session.js";
 import { BrowserStore } from "../../dist/app/storage.js";
 
 function responseContext(url, setCookies) {
@@ -71,6 +74,25 @@ test("browser cookies reject public-suffix domains and persist valid cookies", a
     assert.equal(
       await cookieValue(reopened.httpSession, "https://evil.com/next"),
       "host=1"
+    );
+  } finally {
+    await rm(current.directory, { recursive: true, force: true });
+  }
+});
+
+test("insecure responses cannot seed cookies for a later secure origin", async () => {
+  const current = await storeFixture("verge-cookie-secure-origin-");
+  try {
+    await current.store.httpSession.acceptResponse(
+      responseContext("http://example.test/", [
+        "secureInjected=secret; Path=/; Secure",
+        "plain=accepted; Path=/"
+      ])
+    );
+
+    assert.equal(
+      await cookieValue(current.store.httpSession, "https://example.test/"),
+      "plain=accepted"
     );
   } finally {
     await rm(current.directory, { recursive: true, force: true });
@@ -170,6 +192,153 @@ test("redirect hops recalculate cookies and page cookies reach stylesheets immed
     await new Promise((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
     });
+    await rm(current.directory, { recursive: true, force: true });
+  }
+});
+
+test("cross-origin stylesheet redirects neither receive nor mutate browser cookies", async () => {
+  const observed = { initial: "", redirected: "" };
+  const server = createServer((request, response) => {
+    const port = (request.headers.host ?? "").split(":").at(-1) ?? "";
+    if (request.url === "/page") {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      response.setHeader("set-cookie", "page=same-origin; Path=/");
+      response.end('<link rel="stylesheet" href="/style-start"><p>Page</p>');
+      return;
+    }
+    if (request.url === "/style-start") {
+      observed.initial = request.headers.cookie ?? "";
+      response.statusCode = 302;
+      response.setHeader("location", `http://127.0.0.1:${port}/cross.css`);
+      response.end();
+      return;
+    }
+    if (request.url === "/cross.css") {
+      observed.redirected = request.headers.cookie ?? "";
+      response.setHeader("content-type", "text/css");
+      response.setHeader("set-cookie", "thirdparty=blocked; Path=/");
+      response.end("p { color: green }");
+      return;
+    }
+    response.statusCode = 404;
+    response.end();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const current = await storeFixture("verge-cookie-cross-origin-");
+  const crossOrigin = `http://127.0.0.1:${String(address.port)}`;
+  const documentOrigin = `http://localhost:${String(address.port)}`;
+  await current.store.httpSession.acceptResponse(
+    responseContext(`${crossOrigin}/seed`, ["destination=private; Path=/"])
+  );
+  const client = new PageNetworkClient({
+    session: current.store.httpSession,
+    publicAddressPolicy: "allow-private-and-local"
+  });
+  const session = new BrowserSession({ networkClient: client });
+
+  try {
+    await session.open(`${documentOrigin}/page`);
+    assert.match(observed.initial, /(?:^|; )page=same-origin(?:;|$)/u);
+    assert.equal(observed.redirected, "");
+    const crossCookies = await cookieValue(current.store.httpSession, `${crossOrigin}/after`);
+    assert.match(crossCookies, /(?:^|; )destination=private(?:;|$)/u);
+    assert.doesNotMatch(crossCookies, /thirdparty/u);
+  } finally {
+    await session.close();
+    await client.close();
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+    await rm(current.directory, { recursive: true, force: true });
+  }
+});
+
+test("page-initiated requests enforce SameSite cookies while direct navigation remains explicit", async () => {
+  const observed = [];
+  let targetUrl = "";
+  const server = createServer((request, response) => {
+    if (request.url === "/source") {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      response.end(`<a href="${targetUrl}">Cross-site target</a>`);
+      return;
+    }
+    if (request.url === "/target") {
+      observed.push({
+        method: request.method,
+        cookie: request.headers.cookie ?? ""
+      });
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      response.end("<p>Target</p>");
+      return;
+    }
+    response.statusCode = 404;
+    response.end();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  targetUrl = `http://127.0.0.1:${String(address.port)}/target`;
+  const sourceUrl = `http://localhost:${String(address.port)}/source`;
+  const current = await storeFixture("verge-cookie-samesite-");
+  await current.store.httpSession.acceptResponse(
+    responseContext(targetUrl, [
+      "strictCookie=one; Path=/; SameSite=Strict",
+      "laxCookie=two; Path=/; SameSite=Lax",
+      "defaultCookie=three; Path=/",
+      "insecureNone=four; Path=/; SameSite=None"
+    ])
+  );
+  const client = new PageNetworkClient({
+    session: current.store.httpSession,
+    publicAddressPolicy: "allow-private-and-local"
+  });
+  const session = new BrowserSession({ networkClient: client });
+
+  try {
+    await session.open(sourceUrl);
+    await session.openLink(1);
+    assert.match(observed[0]?.cookie ?? "", /(?:^|; )laxCookie=two(?:;|$)/u);
+    assert.match(observed[0]?.cookie ?? "", /(?:^|; )defaultCookie=three(?:;|$)/u);
+    assert.doesNotMatch(observed[0]?.cookie ?? "", /strictCookie/u);
+
+    await openPageInitiatedNavigation(session, sourceUrl, targetUrl, {
+      method: "POST",
+      bodyText: "action=submit"
+    });
+    assert.equal(observed[1]?.method, "POST");
+    assert.doesNotMatch(
+      observed[1]?.cookie ?? "",
+      /strictCookie|laxCookie|defaultCookie|insecureNone/u
+    );
+
+    await session.open(targetUrl);
+    assert.match(observed[2]?.cookie ?? "", /(?:^|; )strictCookie=one(?:;|$)/u);
+    assert.match(observed[2]?.cookie ?? "", /(?:^|; )laxCookie=two(?:;|$)/u);
+    assert.match(observed[2]?.cookie ?? "", /(?:^|; )defaultCookie=three(?:;|$)/u);
+    assert.doesNotMatch(observed[2]?.cookie ?? "", /insecureNone/u);
+  } finally {
+    await session.close();
+    await client.close();
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+    await rm(current.directory, { recursive: true, force: true });
+  }
+});
+
+test("browser cookie persistence evicts old entries before the profile can grow without bound", async () => {
+  const current = await storeFixture("verge-cookie-limit-");
+  try {
+    await current.store.httpSession.acceptResponse(
+      responseContext("https://cookies.example/", Array.from(
+        { length: 1005 },
+        (_, index) => `cookie${String(index)}=value; Path=/`
+      ))
+    );
+    assert.equal(current.store.listCookies().length, 1000);
+    assert.equal(current.store.listCookies().some((cookie) => cookie.name === "cookie0"), false);
+    assert.equal(current.store.listCookies().some((cookie) => cookie.name === "cookie1004"), true);
+  } finally {
     await rm(current.directory, { recursive: true, force: true });
   }
 });

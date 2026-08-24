@@ -52,9 +52,11 @@ import type { TuiContext } from "@ismail-elkorchi/terminal-ui/tui";
 import { themeColor } from "@ismail-elkorchi/terminal-ui/theme";
 
 import { extractForms, type FormControl, type FormEntry } from "../app/forms.js";
+import { pageContent } from "../app/page-content.js";
 import type {
   PageAction,
   PageBlock,
+  PageContent,
   PageLayout,
   PageLinkAction,
   PageLayoutRow,
@@ -79,7 +81,7 @@ import { browserMenuItems, formComboboxPageSize, linkMenuItems } from "./model.j
 
 interface BrowserDocumentViewModel {
   readonly id: string;
-  readonly content: BrowserDocumentState["snapshot"]["content"];
+  readonly content: PageContent;
   readonly actionsById: ReadonlyMap<string, PageAction>;
   readonly blocksById: ReadonlyMap<string, PageBlock>;
   readonly linksByBlockId: ReadonlyMap<string, readonly PageLinkAction[]>;
@@ -542,6 +544,14 @@ function inlineFormControl(
 }
 
 function inlineForm(document: BrowserDocumentViewModel, entry: FormEntry): Element<BrowserTuiMessage> {
+  const radioGroups = new Map<string, Extract<FormControl, { readonly kind: "radio" }>[]>();
+  for (const control of entry.controls) {
+    if (control.kind !== "radio") continue;
+    const groupName = control.name.length === 0 ? control.id : control.name;
+    const group = radioGroups.get(groupName) ?? [];
+    group.push(control);
+    radioGroups.set(groupName, group);
+  }
   const radioNames = new Set<string>();
   const controls: Element<BrowserTuiMessage>[] = [];
   for (const control of entry.controls) {
@@ -549,11 +559,7 @@ function inlineForm(document: BrowserDocumentViewModel, entry: FormEntry): Eleme
       const groupName = control.name.length === 0 ? control.id : control.name;
       if (radioNames.has(groupName)) continue;
       radioNames.add(groupName);
-      const group = entry.controls.filter(
-        (candidate): candidate is Extract<FormControl, { readonly kind: "radio" }> =>
-          candidate.kind === "radio"
-          && (control.name.length === 0 ? candidate.id === control.id : candidate.name === control.name)
-      );
+      const group = radioGroups.get(groupName) ?? [control];
       const selected = group.find((candidate) => formControlValues(document, candidate).length > 0);
       controls.push(radioGroup({
         id: `${entry.id}:radio:${groupName}`,
@@ -879,7 +885,7 @@ function browserDocumentViewModel(
   document: BrowserDocumentState,
   layout: PageLayout
 ): BrowserDocumentViewModel {
-  const content = document.snapshot.content;
+  const content = pageContent(document.snapshot);
   const linksByBlockId = new Map<string, PageLinkAction[]>();
   for (const link of content.links) {
     const links = linksByBlockId.get(link.blockId) ?? [];
@@ -1215,7 +1221,7 @@ function findBar(state: BrowserTuiState): Element<BrowserTuiMessage> | null {
     text({
       content: search === null || search === undefined || search.matches.length === 0
         ? "0/0"
-        : `${String(search.activeMatchIndex + 1)}/${String(search.matches.length)}`
+        : `${String(search.activeMatchIndex + 1)}/${String(search.matches.length)}${search.truncated ? "+" : ""}`
     }),
     button({ id: "find-previous", label: "↑", accessibleName: "Previous match", tone: "ghost", onAction: buttonAction({ kind: "moveSearch", direction: "prev" }) }),
     button({ id: "find-next", label: "↓", accessibleName: "Next match", tone: "ghost", onAction: buttonAction({ kind: "moveSearch", direction: "next" }) }),
@@ -1272,7 +1278,7 @@ function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMe
       maxTabWidth: 36,
       tabs: state.documents.map((document) => ({
         id: document.id,
-        label: `${document.loading ? "◌ " : ""}${document.snapshot.content.title}`,
+        label: `${document.loading ? "◌ " : ""}${pageContent(document.snapshot).title}`,
         closable: true,
         panel: document.id === selected.id ? selectedPanel : text({ content: "" })
       })),

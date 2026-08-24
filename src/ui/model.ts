@@ -78,6 +78,7 @@ export interface BrowserDocumentSearch {
   readonly query: string;
   readonly matches: readonly DocumentSearchMatch[];
   readonly activeMatchIndex: number;
+  readonly truncated: boolean;
 }
 
 export interface BrowserDocumentState {
@@ -268,6 +269,7 @@ export type BrowserTuiMessage =
   | { readonly kind: "removeDownload"; readonly id: string }
   | { readonly kind: "openDownload"; readonly id: string; readonly location: "file" | "directory" }
   | { readonly kind: "downloadsChanged"; readonly downloads: readonly DownloadRecord[]; readonly status: string }
+  | { readonly kind: "libraryChanged" }
   | { readonly kind: "operationComplete"; readonly status: string }
   | {
       readonly kind: "operationFailed";

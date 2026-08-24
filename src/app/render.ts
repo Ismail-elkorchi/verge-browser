@@ -85,6 +85,15 @@ interface PreparedPageContent {
 }
 
 const PREPARED_PAGE_CONTENT = new WeakMap<PageContent, PreparedPageContent>();
+const MAX_LAYOUT_CACHE_ENTRIES = 32;
+
+function cachePageValue<T>(cache: Map<number, T>, key: number, value: T): void {
+  cache.delete(key);
+  cache.set(key, value);
+  if (cache.size <= MAX_LAYOUT_CACHE_ENTRIES) return;
+  const oldestKey = cache.keys().next().value;
+  if (oldestKey !== undefined) cache.delete(oldestKey);
+}
 
 interface InlineResult {
   readonly text: string;
@@ -601,6 +610,12 @@ function collectForm(
   const form = collector.formsById.get(`form:${String(node.id)}`);
   if (!form) return;
   const visibleControls = form.controls.filter((control) => control.kind !== "hidden");
+  const radioOptionCounts = new Map<string, number>();
+  for (const control of visibleControls) {
+    if (control.kind !== "radio") continue;
+    const groupName = control.name.length === 0 ? control.id : control.name;
+    radioOptionCounts.set(groupName, (radioOptionCounts.get(groupName) ?? 0) + 1);
+  }
   const radioGroups = new Set<string>();
   const controlRows: number[] = [];
   for (const control of visibleControls) {
@@ -608,10 +623,7 @@ function collectForm(
       const groupName = control.name.length === 0 ? control.id : control.name;
       if (radioGroups.has(groupName)) continue;
       radioGroups.add(groupName);
-      const optionCount = visibleControls.filter((candidate) =>
-        candidate.kind === "radio"
-        && (control.name.length === 0 ? candidate.id === control.id : candidate.name === control.name)
-      ).length;
+      const optionCount = radioOptionCounts.get(groupName) ?? 1;
       controlRows.push(optionCount + 1);
       continue;
     }
@@ -792,12 +804,27 @@ function collectNode(
 /** Builds terminal-independent semantic page content from a parsed document. */
 export function buildPageContent(input: PageContentInput): PageContent {
   const baseUrl = documentBaseUrl(input.tree, input.finalUrl);
-  const styles = resolvePageStyles(
+  let effectiveAuthorStyles = input.authorStyles ?? "apply";
+  let styles = resolvePageStyles(
     input.tree,
     input.stylesheets ?? [],
     input.stylesheetIssues ?? [],
-    { authorStyles: input.authorStyles ?? "apply" }
+    { authorStyles: effectiveAuthorStyles }
   );
+  if (
+    effectiveAuthorStyles === "apply"
+    && styles.issues.some((issue) =>
+      issue.code === "stylesheet-limit"
+      && issue.message === "Author selector evaluation exceeded the page work budget."
+    )
+  ) {
+    const stylesheetCount = styles.stylesheetCount;
+    styles = {
+      ...resolvePageStyles(input.tree, [], styles.issues, { authorStyles: "ignore" }),
+      stylesheetCount
+    };
+    effectiveAuthorStyles = "ignore";
+  }
   const forms = extractForms(input.tree, baseUrl);
   const collector: ContentCollector = {
     baseUrl,
@@ -861,7 +888,7 @@ export function buildPageContent(input: PageContentInput): PageContent {
     tree: input.tree,
     stylesheets: input.stylesheets ?? [],
     stylesheetIssues: input.stylesheetIssues ?? [],
-    authorStyles: input.authorStyles ?? "apply",
+    authorStyles: effectiveAuthorStyles,
     sourceNodeByBlockId: collector.sourceNodeByBlockId,
     blockStyleById: collector.blockStyleById,
     textRunsByBlockId: collector.textRunsByBlockId,
@@ -1784,7 +1811,7 @@ export function layoutPageContent(content: PageContent, columns: number): PageLa
       prepared.stylesheetIssues,
       { authorStyles: prepared.authorStyles, columns: normalizedColumns }
     );
-    prepared.styleCache.set(normalizedColumns, styles);
+    cachePageValue(prepared.styleCache, normalizedColumns, styles);
   }
   const actionMap = actionsByBlock(content);
   const parents = parentNodes(prepared.tree);
@@ -1814,14 +1841,13 @@ export function layoutPageContent(content: PageContent, columns: number): PageLa
     canvasStyle: bodyStyle?.text ?? {},
     styleIssues: styles.issues
   };
-  prepared.layoutCache.set(normalizedColumns, layout);
+  cachePageValue(prepared.layoutCache, normalizedColumns, layout);
   return layout;
 }
 
-/** Renders semantic page content through the same responsive layout used by the TUI. */
-export function renderDocumentToTerminal(input: RenderInput): RenderedPage {
-  const content = buildPageContent(input);
-  const contentWidth = documentContentColumns(input.width);
+/** Projects browser-internal semantic content through the legacy terminal-rendered contract. */
+export function renderPageContent(content: PageContent, width: number): RenderedPage {
+  const contentWidth = documentContentColumns(width);
   const layout = layoutPageContent(content, contentWidth);
   const lineByActionId = new Map(layout.actionPlacements.map((placement) => [placement.actionId, placement.rowIndex]));
   const links: RenderedLink[] = content.links
@@ -1856,4 +1882,9 @@ export function renderDocumentToTerminal(input: RenderInput): RenderedPage {
     parseErrorCount: content.parseErrorCount,
     fetchedAtIso: content.fetchedAtIso
   };
+}
+
+/** Renders semantic page content through the same responsive layout used by the TUI. */
+export function renderDocumentToTerminal(input: RenderInput): RenderedPage {
+  return renderPageContent(buildPageContent(input), input.width);
 }

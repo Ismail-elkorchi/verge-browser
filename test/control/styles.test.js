@@ -5,6 +5,7 @@ import { TextEncoder } from "node:util";
 import { HttpFields } from "@ismail-elkorchi/http-client";
 
 import { parseHtml } from "../../dist/app/parse-html.js";
+import { pageContent } from "../../dist/app/page-content.js";
 import {
   buildPageContent,
   documentBaseUrl,
@@ -273,13 +274,13 @@ test("linked stylesheet media conditions are evaluated at the current layout wid
   });
 
   const snapshot = await session.open("https://example.test/start");
-  const paragraph = snapshot.content.blocks.find((block) => block.text === "Responsive text");
+  const paragraph = pageContent(snapshot).blocks.find((block) => block.text === "Responsive text");
   assert.ok(paragraph);
   assert.equal(stylesheetLoads, 1);
-  assert.ok(authoredStyles(rowFor(layoutPageContent(snapshot.content, 60), paragraph.id)).some((style) =>
+  assert.ok(authoredStyles(rowFor(layoutPageContent(pageContent(snapshot), 60), paragraph.id)).some((style) =>
     style.foreground?.r === 18 && style.foreground.g === 52 && style.foreground.b === 86
   ));
-  assert.equal(authoredStyles(rowFor(layoutPageContent(snapshot.content, 120), paragraph.id)).some((style) =>
+  assert.equal(authoredStyles(rowFor(layoutPageContent(pageContent(snapshot), 120), paragraph.id)).some((style) =>
     style.foreground?.r === 18 && style.foreground.g === 52 && style.foreground.b === 86
   ), false);
 });
@@ -347,12 +348,12 @@ test("BrowserSession loads external stylesheets in document order and records fa
     "https://cdn.example.test/site/first.css",
     "https://cdn.example.test/site/missing.css"
   ]);
-  const paragraph = snapshot.content.blocks.find((block) => block.text === "Styled");
+  const paragraph = pageContent(snapshot).blocks.find((block) => block.text === "Styled");
   assert.ok(paragraph);
-  assert.ok(authoredStyles(rowFor(layoutPageContent(snapshot.content, 40), paragraph.id)).some((style) =>
+  assert.ok(authoredStyles(rowFor(layoutPageContent(pageContent(snapshot), 40), paragraph.id)).some((style) =>
     style.foreground?.r === 0 && style.foreground.g === 0 && style.foreground.b === 255
   ));
-  assert.ok(snapshot.content.styleIssues.some((issue) =>
+  assert.ok(pageContent(snapshot).styleIssues.some((issue) =>
     issue.code === "stylesheet-fetch" && issue.message.includes("missing stylesheet")
   ));
   assert.equal(snapshot.diagnostics.stylesheetCount, 2);
@@ -361,6 +362,7 @@ test("BrowserSession loads external stylesheets in document order and records fa
 
 test("BrowserSession enforces stylesheet count and aggregate byte budgets", async () => {
   const requests = [];
+  const requestBudgets = [];
   const session = new BrowserSession({
     loader: async (requestUrl) => ({
       requestUrl,
@@ -385,8 +387,9 @@ test("BrowserSession enforces stylesheet count and aggregate byte budgets", asyn
         detailMessage: "200 OK"
       }
     }),
-    stylesheetLoader: async (requestUrl) => {
+    stylesheetLoader: async (requestUrl, options) => {
       requests.push(requestUrl);
+      requestBudgets.push(options?.maxContentBytes);
       return {
         requestUrl,
         finalUrl: requestUrl,
@@ -408,9 +411,108 @@ test("BrowserSession enforces stylesheet count and aggregate byte budgets", asyn
     "https://example.test/one.css",
     "https://example.test/two.css"
   ]);
-  assert.equal(snapshot.content.stylesheetCount, 1);
+  assert.deepEqual(requestBudgets, [3, 1]);
+  assert.equal(pageContent(snapshot).stylesheetCount, 1);
   assert.equal(
-    snapshot.content.styleIssues.filter((issue) => issue.code === "stylesheet-limit").length,
+    pageContent(snapshot).styleIssues.filter((issue) => issue.code === "stylesheet-limit").length,
+    2
+  );
+});
+
+test("BrowserSession charges rejected MIME responses to the stylesheet transport budget", async () => {
+  const requestBudgets = [];
+  const session = new BrowserSession({
+    loader: async (requestUrl) => ({
+      requestUrl,
+      finalUrl: requestUrl,
+      status: 200,
+      statusText: "OK",
+      contentType: "text/html",
+      html: `
+        <link rel="stylesheet" href="/not-css">
+        <link rel="stylesheet" href="/still-bounded.css">
+        <p>Budgeted</p>
+      `,
+      responseFields: fields("text/html"),
+      fetchedAtIso: "2026-07-29T00:00:00.000Z",
+      networkOutcome: {
+        finalUrl: requestUrl,
+        kind: "ok",
+        status: 200,
+        statusText: "OK",
+        detailCode: "HTTP_200",
+        detailMessage: "200 OK"
+      }
+    }),
+    stylesheetLoader: async (requestUrl, options) => {
+      requestBudgets.push(options?.maxContentBytes);
+      return {
+        requestUrl,
+        finalUrl: requestUrl,
+        contentType: requestUrl.endsWith("not-css") ? "application/octet-stream" : "text/css",
+        responseFields: fields("application/octet-stream"),
+        bytes: new TextEncoder().encode("abc")
+      };
+    },
+    stylesheetPolicy: {
+      maxStylesheetBytes: 3,
+      maxTotalStylesheetBytes: 4
+    },
+    defaultParseMode: "text"
+  });
+
+  const snapshot = await session.open("https://example.test/start");
+  assert.deepEqual(requestBudgets, [3, 1]);
+  assert.equal(pageContent(snapshot).stylesheetCount, 0);
+  assert.ok(pageContent(snapshot).styleIssues.some((issue) =>
+    issue.code === "stylesheet-fetch" && issue.message.includes("non-CSS")
+  ));
+  assert.ok(pageContent(snapshot).styleIssues.some((issue) =>
+    issue.code === "stylesheet-limit" && issue.sourceUrl.endsWith("still-bounded.css")
+  ));
+});
+
+test("BrowserSession blocks local stylesheet reads initiated by remote documents", async () => {
+  const requested = [];
+  const session = new BrowserSession({
+    loader: async (requestUrl) => ({
+      requestUrl,
+      finalUrl: requestUrl,
+      status: 200,
+      statusText: "OK",
+      contentType: "text/html",
+      html: `
+        <base href="file:///private/">
+        <link rel="stylesheet" href="secrets.css">
+        <link rel="stylesheet" href="file:///etc/passwd">
+        <p>Remote page</p>
+      `,
+      responseFields: fields("text/html"),
+      fetchedAtIso: "2026-07-29T00:00:00.000Z",
+      networkOutcome: {
+        finalUrl: requestUrl,
+        kind: "ok",
+        status: 200,
+        statusText: "OK",
+        detailCode: "HTTP_200",
+        detailMessage: "200 OK"
+      }
+    }),
+    stylesheetLoader: async (requestUrl) => {
+      requested.push(requestUrl);
+      throw new Error("local stylesheet loader must not run");
+    },
+    defaultParseMode: "text"
+  });
+
+  const snapshot = await session.open("https://attacker.example/");
+
+  assert.deepEqual(requested, []);
+  assert.equal(
+    pageContent(snapshot).styleIssues.filter((issue) =>
+      issue.code === "stylesheet-fetch"
+      && issue.message.includes("Blocked page-initiated stylesheet protocol: file:")
+    ).length,
     2
   );
 });
@@ -514,4 +616,44 @@ test("document base URL is shared by links and forms", () => {
   assert.equal(content.links[0]?.resolvedHref, "https://example.test/assets/guide");
   const form = content.actions.find((action) => action.kind === "form");
   assert.equal(form?.actionUrl, "https://example.test/assets/submit");
+});
+
+test("author selector work and responsive layout caches stay bounded", () => {
+  const elements = Array.from(
+    { length: 700 },
+    (_, index) => `<p class="item-${String(index)}">Item ${String(index)}</p>`
+  ).join("");
+  const selectors = Array.from(
+    { length: 1_200 },
+    (_, index) => `.missing-${String(index)} { color: red }`
+  ).join("\n");
+  const content = contentFor(`<style>${selectors}</style>${elements}`);
+
+  assert.ok(content.styleIssues.some((issue) =>
+    issue.code === "stylesheet-limit"
+    && issue.message.includes("selector evaluation")
+  ));
+
+  const cacheContent = contentFor("<p>Cache</p>");
+  const first = layoutPageContent(cacheContent, 10);
+  for (let width = 11; width <= 43; width += 1) {
+    layoutPageContent(cacheContent, width);
+  }
+  const recent = layoutPageContent(cacheContent, 43);
+  assert.strictEqual(layoutPageContent(cacheContent, 43), recent);
+  assert.notStrictEqual(layoutPageContent(cacheContent, 10), first);
+});
+
+test("embedded stylesheet count is bounded even when every stylesheet is invalid", () => {
+  const content = contentFor(`
+    <html><head>
+      ${Array.from({ length: 80 }, () => "<style>}</style>").join("")}
+    </head><body><p>Still visible</p></body></html>
+  `);
+  const limit = content.styleIssues.find((issue) =>
+    issue.code === "stylesheet-limit"
+    && issue.message.includes("count exceeded")
+  );
+  assert.equal(limit?.occurrences, 16);
+  assert.ok(content.blocks.some((block) => block.text === "Still visible"));
 });

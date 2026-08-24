@@ -14,10 +14,15 @@ import {
 import type { HttpSessionAdapter } from "@ismail-elkorchi/http-client";
 
 import {
+  NetworkFetchError,
   PageNetworkClient,
+  fetchDocumentStylesheet,
   type LocalFileReader
 } from "./fetch-page.js";
-import { buildPageContent, documentBaseUrl } from "./render.js";
+import { withNavigationSource } from "./http-session-context.js";
+import { attachPageContent, pageContent } from "./page-content.js";
+import { buildPageContent, documentBaseUrl, renderPageContent } from "./render.js";
+import { assertPageInitiatedNavigation } from "./security.js";
 import { terminalMediaApplies } from "./styles.js";
 import type {
   FetchPagePayload,
@@ -25,12 +30,13 @@ import type {
   FetchPageStreamResult,
   FetchStylesheetResult,
   PageContent,
-  PageContentInput,
   PageDiagnostics,
   PageRequestOptions,
   PageSnapshot,
   PageStyleIssue,
-  PageStylesheetResource
+  PageStylesheetResource,
+  RenderInput,
+  RenderedPage
 } from "./types.js";
 
 export type PageLoader = (
@@ -43,12 +49,16 @@ export type PageStreamLoader = (
   requestOptions?: PageRequestOptions
 ) => Promise<FetchPageStreamResult>;
 
-export type PageContentBuilder = (input: PageContentInput) => PageContent;
-
 export type StylesheetLoader = (
   requestUrl: string,
-  requestOptions?: Pick<PageRequestOptions, "headers" | "signal">
+  requestOptions?: Pick<PageRequestOptions, "headers" | "signal"> & {
+    /** Maximum bytes this individual load may consume from the page budget. */
+    readonly maxContentBytes?: number;
+  }
 ) => Promise<FetchStylesheetResult>;
+
+/** Stable terminal renderer override retained for npm library compatibility. */
+export type PageRenderer = (input: RenderInput) => RenderedPage;
 
 export interface StylesheetPolicyOptions {
   readonly maxStylesheets?: number;
@@ -71,6 +81,8 @@ function stylesheetLimit(value: number | undefined, fallback: number, name: stri
 }
 
 type ParseMode = "text" | "stream";
+type NavigationAccess = "direct" | "page-initiated";
+const PAGE_INITIATED_NAVIGATION = Symbol("pageInitiatedNavigation");
 
 interface NavigationTimings {
   readonly fetchDurationMs: number;
@@ -83,6 +95,7 @@ interface NavigationTimings {
 interface HistoryEntry {
   readonly snapshot: PageSnapshot;
   readonly parseMode: ParseMode;
+  readonly navigationAccess: NavigationAccess;
 }
 
 export interface BrowserSessionOptions {
@@ -90,9 +103,10 @@ export interface BrowserSessionOptions {
   readonly httpSession?: HttpSessionAdapter;
   readonly loader?: PageLoader;
   readonly streamLoader?: PageStreamLoader;
-  readonly contentBuilder?: PageContentBuilder;
   readonly stylesheetLoader?: StylesheetLoader;
   readonly stylesheetPolicy?: StylesheetPolicyOptions;
+  readonly renderer?: PageRenderer;
+  readonly widthProvider?: () => number;
   readonly parseOptions?: ParseOptions;
   readonly defaultParseMode?: ParseMode;
   readonly localFileReader?: LocalFileReader;
@@ -219,9 +233,13 @@ export class BrowserSession {
   readonly #ownsNetworkClient: boolean;
   readonly #loader: PageLoader;
   readonly #streamLoader: PageStreamLoader;
-  readonly #contentBuilder: PageContentBuilder;
-  readonly #stylesheetLoader: StylesheetLoader;
+  readonly #pageInitiatedLoader: PageLoader;
+  readonly #pageInitiatedStreamLoader: PageStreamLoader;
+  readonly #stylesheetLoader: StylesheetLoader | null;
   readonly #stylesheetPolicy: Required<StylesheetPolicyOptions>;
+  readonly #localFileReader: LocalFileReader | undefined;
+  readonly #renderer: PageRenderer | null;
+  readonly #widthProvider: () => number;
   readonly #parseOptions: ParseOptions;
   readonly #defaultParseMode: ParseMode;
   readonly #history: HistoryEntry[] = [];
@@ -238,6 +256,7 @@ export class BrowserSession {
       );
     }
     const localFileReader = options.localFileReader;
+    this.#localFileReader = localFileReader;
     const needsNetworkClient = (
       options.loader === undefined
       || options.streamLoader === undefined
@@ -275,18 +294,27 @@ export class BrowserSession {
           requestOptions,
           localFileReader
         ));
-    this.#contentBuilder = options.contentBuilder ?? buildPageContent;
-    this.#stylesheetLoader = options.stylesheetLoader
+    this.#pageInitiatedLoader = options.loader
       ?? ((requestUrl, requestOptions) =>
-        this.#requiredNetworkClient().fetchStylesheet(
+        this.#requiredNetworkClient().fetchPage(
           requestUrl,
           undefined,
-          options.stylesheetPolicy?.maxStylesheetBytes === undefined
-            ? {}
-            : { maxContentBytes: options.stylesheetPolicy.maxStylesheetBytes },
+          undefined,
           requestOptions,
           localFileReader
         ));
+    this.#pageInitiatedStreamLoader = options.streamLoader
+      ?? ((requestUrl, requestOptions) =>
+        this.#requiredNetworkClient().fetchPageStream(
+          requestUrl,
+          undefined,
+          undefined,
+          requestOptions,
+          localFileReader
+        ));
+    this.#stylesheetLoader = options.stylesheetLoader ?? null;
+    this.#renderer = options.renderer ?? null;
+    this.#widthProvider = options.widthProvider ?? (() => 100);
     this.#stylesheetPolicy = {
       maxStylesheets: stylesheetLimit(
         options.stylesheetPolicy?.maxStylesheets,
@@ -351,13 +379,13 @@ export class BrowserSession {
   public open(requestUrl: string, signal?: AbortSignal): Promise<PageSnapshot> {
     return this.#navigate(requestUrl, "push", this.#defaultParseMode, {
       ...(signal === undefined ? {} : { signal })
-    });
+    }, "direct");
   }
 
   public openStream(requestUrl: string, signal?: AbortSignal): Promise<PageSnapshot> {
     return this.#navigate(requestUrl, "push", "stream", {
       ...(signal === undefined ? {} : { signal })
-    });
+    }, "direct");
   }
 
   public openWithRequest(
@@ -365,7 +393,23 @@ export class BrowserSession {
     requestOptions: PageRequestOptions,
     parseMode: ParseMode = this.#defaultParseMode
   ): Promise<PageSnapshot> {
-    return this.#navigate(requestUrl, "push", parseMode, requestOptions);
+    return this.#navigate(requestUrl, "push", parseMode, requestOptions, "direct");
+  }
+
+  public [PAGE_INITIATED_NAVIGATION](
+    sourceUrl: string,
+    requestUrl: string,
+    requestOptions: PageRequestOptions = {},
+    parseMode: ParseMode = this.#defaultParseMode
+  ): Promise<PageSnapshot> {
+    assertPageInitiatedNavigation(sourceUrl, requestUrl);
+    return this.#navigate(
+      requestUrl,
+      "push",
+      parseMode,
+      withNavigationSource(requestOptions, sourceUrl),
+      "page-initiated"
+    );
   }
 
   public reload(signal?: AbortSignal): Promise<PageSnapshot> {
@@ -373,7 +417,7 @@ export class BrowserSession {
     if (!current) return Promise.reject(new Error("No page is loaded"));
     return this.#navigate(current.snapshot.finalUrl, "replace", current.parseMode, {
       ...(signal === undefined ? {} : { signal })
-    });
+    }, current.navigationAccess);
   }
 
   public back(signal?: AbortSignal): Promise<PageSnapshot> {
@@ -396,14 +440,17 @@ export class BrowserSession {
     return Promise.resolve(entry.snapshot);
   }
 
-  public openLink(linkIndex: number, signal?: AbortSignal): Promise<PageSnapshot> {
+  public async openLink(linkIndex: number, signal?: AbortSignal): Promise<PageSnapshot> {
     const current = this.#current;
-    if (!current) return Promise.reject(new Error("No page is loaded"));
-    const link = current.content.links.find((candidate) => candidate.index === linkIndex);
-    if (!link) return Promise.reject(new Error(`No link exists at index ${String(linkIndex)}`));
-    return this.#navigate(link.resolvedHref, "push", current.diagnostics.parseMode, {
-      ...(signal === undefined ? {} : { signal })
-    });
+    if (!current) throw new Error("No page is loaded");
+    const link = pageContent(current).links.find((candidate) => candidate.index === linkIndex);
+    if (!link) throw new Error(`No link exists at index ${String(linkIndex)}`);
+    return this[PAGE_INITIATED_NAVIGATION](
+      current.finalUrl,
+      link.resolvedHref,
+      { ...(signal === undefined ? {} : { signal }) },
+      current.diagnostics.parseMode
+    );
   }
 
   async #loadStylesheets(
@@ -439,9 +486,19 @@ export class BrowserSession {
         continue;
       }
       try {
+        const requestUrl = new URL(link.href, baseUrl);
+        if (requestUrl.protocol !== "http:" && requestUrl.protocol !== "https:") {
+          issues.push({
+            code: "stylesheet-fetch",
+            message: `Blocked page-initiated stylesheet protocol: ${requestUrl.protocol}`,
+            sourceUrl: requestUrl.toString(),
+            occurrences: 1
+          });
+          continue;
+        }
         candidates.push({
           link,
-          requestUrl: new URL(link.href, baseUrl).toString()
+          requestUrl: requestUrl.toString()
         });
       } catch {
         issues.push({
@@ -452,29 +509,74 @@ export class BrowserSession {
         });
       }
     }
-    const fetchedStylesheets = await Promise.all(candidates.map(async (candidate) => {
-      try {
-        const fetched = await this.#stylesheetLoader(candidate.requestUrl, {
-          ...(requestOptions.signal === undefined ? {} : { signal: requestOptions.signal })
-        });
-        return { ...candidate, fetched } as const;
-      } catch (error) {
-        requestOptions.signal?.throwIfAborted();
-        return { ...candidate, error } as const;
-      }
-    }));
     let totalBytes = 0;
-    for (const result of fetchedStylesheets) {
-      if ("error" in result) {
+    for (const candidate of candidates) {
+      const remainingBytes = this.#stylesheetPolicy.maxTotalStylesheetBytes - totalBytes;
+      if (remainingBytes <= 0) {
         issues.push({
-          code: "stylesheet-fetch",
-          message: result.error instanceof Error ? result.error.message : String(result.error),
-          sourceUrl: result.requestUrl,
+          code: "stylesheet-limit",
+          message: `Aggregate stylesheet data reached ${String(this.#stylesheetPolicy.maxTotalStylesheetBytes)} bytes.`,
+          sourceUrl: candidate.requestUrl,
           occurrences: 1
         });
+        break;
+      }
+      const requestBudget = Math.min(
+        this.#stylesheetPolicy.maxStylesheetBytes,
+        remainingBytes
+      );
+      let fetched: FetchStylesheetResult;
+      try {
+        const stylesheetRequestOptions = {
+          ...(requestOptions.signal === undefined ? {} : { signal: requestOptions.signal }),
+          maxContentBytes: requestBudget
+        };
+        if (this.#stylesheetLoader === null) {
+          const networkClient = this.#requiredNetworkClient();
+          fetched = await fetchDocumentStylesheet(
+            networkClient,
+            candidate.requestUrl,
+            finalUrl,
+            undefined,
+            { maxContentBytes: requestBudget },
+            stylesheetRequestOptions,
+            this.#localFileReader
+          );
+        } else {
+          fetched = await this.#stylesheetLoader(candidate.requestUrl, stylesheetRequestOptions);
+        }
+      } catch (error) {
+        requestOptions.signal?.throwIfAborted();
+        issues.push({
+          code: error instanceof NetworkFetchError
+            && error.networkOutcome.kind === "size_limit"
+            ? "stylesheet-limit"
+            : "stylesheet-fetch",
+          message: error instanceof Error ? error.message : String(error),
+          sourceUrl: candidate.requestUrl,
+          occurrences: 1
+        });
+        if (
+          error instanceof NetworkFetchError
+          && error.networkOutcome.kind === "size_limit"
+        ) {
+          break;
+        }
         continue;
       }
-      const { fetched, link } = result;
+      const { link } = candidate;
+      if (fetched.bytes.byteLength > requestBudget) {
+        issues.push({
+          code: "stylesheet-limit",
+          message: requestBudget < this.#stylesheetPolicy.maxStylesheetBytes
+            ? `Aggregate stylesheet data exceeded ${String(this.#stylesheetPolicy.maxTotalStylesheetBytes)} bytes.`
+            : `Stylesheet exceeded ${String(this.#stylesheetPolicy.maxStylesheetBytes)} bytes.`,
+          sourceUrl: fetched.finalUrl,
+          occurrences: 1
+        });
+        break;
+      }
+      totalBytes += fetched.bytes.byteLength;
       const mediaType = fetched.contentType?.toLowerCase().split(";", 1)[0]?.trim();
       if (mediaType !== undefined && mediaType !== "text/css") {
         issues.push({
@@ -485,25 +587,6 @@ export class BrowserSession {
         });
         continue;
       }
-      if (fetched.bytes.byteLength > this.#stylesheetPolicy.maxStylesheetBytes) {
-        issues.push({
-          code: "stylesheet-limit",
-          message: `Stylesheet exceeded ${String(this.#stylesheetPolicy.maxStylesheetBytes)} bytes.`,
-          sourceUrl: fetched.finalUrl,
-          occurrences: 1
-        });
-        continue;
-      }
-      if (totalBytes + fetched.bytes.byteLength > this.#stylesheetPolicy.maxTotalStylesheetBytes) {
-        issues.push({
-          code: "stylesheet-limit",
-          message: `Aggregate stylesheet data exceeded ${String(this.#stylesheetPolicy.maxTotalStylesheetBytes)} bytes.`,
-          sourceUrl: fetched.finalUrl,
-          occurrences: 1
-        });
-        break;
-      }
-      totalBytes += fetched.bytes.byteLength;
       resources.push({
         ownerNodeId: link.ownerNodeId,
         requestUrl: fetched.requestUrl,
@@ -519,7 +602,8 @@ export class BrowserSession {
     return { resources, issues };
   }
 
-  public async applyEdits(edits: readonly Edit[]): Promise<PageSnapshot> {
+  public async applyEdits(edits: readonly Edit[], signal?: AbortSignal): Promise<PageSnapshot> {
+    signal?.throwIfAborted();
     const current = this.#current;
     if (!current) throw new Error("No page is loaded");
     if (current.document.sourceText === null) {
@@ -528,13 +612,18 @@ export class BrowserSession {
     const startedAtMs = Date.now();
     const patchedHtml = applyPatchPlan(current.document, computePatch(current.document, edits));
     const parseStartedAtMs = Date.now();
-    const document = parse(patchedHtml, this.#parseOptions);
+    const document = parse(patchedHtml, {
+      ...this.#parseOptions,
+      ...(signal === undefined ? {} : { signal })
+    });
     const parseDurationMs = Date.now() - parseStartedAtMs;
     const stylesheetStartedAtMs = Date.now();
-    const stylesheets = await this.#loadStylesheets(document.tree, current.finalUrl, {});
+    const stylesheets = await this.#loadStylesheets(document.tree, current.finalUrl, {
+      ...(signal === undefined ? {} : { signal })
+    });
     const stylesheetDurationMs = Date.now() - stylesheetStartedAtMs;
     const contentStartedAtMs = Date.now();
-    const content = this.#contentBuilder({
+    const renderInput: RenderInput = {
       tree: document.tree,
       requestUrl: current.requestUrl,
       finalUrl: current.finalUrl,
@@ -542,13 +631,18 @@ export class BrowserSession {
       statusText: current.statusText,
       fetchedAtIso: current.fetchedAtIso,
       stylesheets: stylesheets.resources,
-      stylesheetIssues: stylesheets.issues
-    });
+      stylesheetIssues: stylesheets.issues,
+      width: Math.max(40, Math.floor(this.#widthProvider()))
+    };
+    const content = buildPageContent(renderInput);
     const contentDurationMs = Date.now() - contentStartedAtMs;
+    signal?.throwIfAborted();
     const snapshot: PageSnapshot = {
       ...current,
       document,
-      content,
+      rendered: this.#renderer === null
+        ? renderPageContent(content, renderInput.width)
+        : this.#renderer(renderInput),
       diagnostics: diagnosticsFromDocument(
         document,
         content,
@@ -564,11 +658,14 @@ export class BrowserSession {
         current.diagnostics.networkOutcome
       )
     };
+    attachPageContent(snapshot, content);
     this.#current = snapshot;
     if (this.#historyIndex >= 0) {
       this.#history[this.#historyIndex] = {
         snapshot,
-        parseMode: current.diagnostics.parseMode
+        parseMode: current.diagnostics.parseMode,
+        navigationAccess: this.#history[this.#historyIndex]?.navigationAccess
+          ?? "direct"
       };
     }
     return snapshot;
@@ -596,8 +693,13 @@ export class BrowserSession {
     });
   }
 
-  #commitHistory(snapshot: PageSnapshot, mode: "push" | "replace", parseMode: ParseMode): void {
-    const entry = { snapshot, parseMode };
+  #commitHistory(
+    snapshot: PageSnapshot,
+    mode: "push" | "replace",
+    parseMode: ParseMode,
+    navigationAccess: NavigationAccess
+  ): void {
+    const entry = { snapshot, parseMode, navigationAccess };
     if (mode === "replace") {
       if (this.#historyIndex < 0) {
         this.#history.push(entry);
@@ -616,18 +718,35 @@ export class BrowserSession {
     requestUrl: string,
     mode: "push" | "replace",
     parseMode: ParseMode,
-    requestOptions: PageRequestOptions
+    requestOptions: PageRequestOptions,
+    navigationAccess: NavigationAccess
   ): Promise<PageSnapshot> {
     const startedAtMs = Date.now();
     requestOptions.signal?.throwIfAborted();
     const fetchStartedAtMs = Date.now();
-    const fetchedPage = parseMode === "stream"
-      ? await this.#streamLoader(requestUrl, requestOptions)
-      : await this.#loader(requestUrl, requestOptions);
+    const fetchedPage = navigationAccess === "page-initiated"
+      ? parseMode === "stream"
+        ? await this.#pageInitiatedStreamLoader(requestUrl, requestOptions)
+        : await this.#pageInitiatedLoader(requestUrl, requestOptions)
+      : parseMode === "stream"
+        ? await this.#streamLoader(requestUrl, requestOptions)
+        : await this.#loader(requestUrl, requestOptions);
+    let document: ParsedDocument;
     const fetchDurationMs = Date.now() - fetchStartedAtMs;
-    requestOptions.signal?.throwIfAborted();
     const parseStartedAtMs = Date.now();
-    const document = await this.#parseFetchedPayload(parseMode, fetchedPage, requestOptions.signal);
+    try {
+      requestOptions.signal?.throwIfAborted();
+      document = await this.#parseFetchedPayload(parseMode, fetchedPage, requestOptions.signal);
+    } catch (error) {
+      if ("stream" in fetchedPage && !fetchedPage.stream.locked) {
+        try {
+          await fetchedPage.stream.cancel(error);
+        } catch {
+          // Preserve the navigation or parser failure that caused cleanup.
+        }
+      }
+      throw error;
+    }
     const parseDurationMs = Date.now() - parseStartedAtMs;
     requestOptions.signal?.throwIfAborted();
     const stylesheetStartedAtMs = Date.now();
@@ -639,7 +758,7 @@ export class BrowserSession {
     const stylesheetDurationMs = Date.now() - stylesheetStartedAtMs;
     requestOptions.signal?.throwIfAborted();
     const contentStartedAtMs = Date.now();
-    const content = this.#contentBuilder({
+    const renderInput: RenderInput = {
       tree: document.tree,
       requestUrl: fetchedPage.requestUrl,
       finalUrl: fetchedPage.finalUrl,
@@ -647,8 +766,10 @@ export class BrowserSession {
       statusText: fetchedPage.statusText,
       fetchedAtIso: fetchedPage.fetchedAtIso,
       stylesheets: stylesheets.resources,
-      stylesheetIssues: stylesheets.issues
-    });
+      stylesheetIssues: stylesheets.issues,
+      width: Math.max(40, Math.floor(this.#widthProvider()))
+    };
+    const content = buildPageContent(renderInput);
     const contentDurationMs = Date.now() - contentStartedAtMs;
     const snapshot: PageSnapshot = {
       requestUrl: fetchedPage.requestUrl,
@@ -659,7 +780,9 @@ export class BrowserSession {
       responseFields: fetchedPage.responseFields,
       fetchedAtIso: fetchedPage.fetchedAtIso,
       document,
-      content,
+      rendered: this.#renderer === null
+        ? renderPageContent(content, renderInput.width)
+        : this.#renderer(renderInput),
       diagnostics: diagnosticsFromDocument(
         document,
         content,
@@ -675,8 +798,25 @@ export class BrowserSession {
         fetchedPage.networkOutcome
       )
     };
+    attachPageContent(snapshot, content);
     this.#current = snapshot;
-    this.#commitHistory(snapshot, mode, parseMode);
+    this.#commitHistory(snapshot, mode, parseMode, navigationAccess);
     return snapshot;
   }
+}
+
+/** @internal Applies the browser workspace's page-initiated network capability. */
+export function openPageInitiatedNavigation(
+  session: BrowserSession,
+  sourceUrl: string,
+  requestUrl: string,
+  requestOptions: PageRequestOptions = {},
+  parseMode?: "text" | "stream"
+): Promise<PageSnapshot> {
+  return session[PAGE_INITIATED_NAVIGATION](
+    sourceUrl,
+    requestUrl,
+    requestOptions,
+    parseMode
+  );
 }

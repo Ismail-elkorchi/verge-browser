@@ -112,3 +112,74 @@ test("buildFormSubmissionRequest rejects unsupported encodings and methods", () 
     /Unsupported form method/
   );
 });
+
+test("forms honor disabled ancestors, empty numeric constraints, and button defaults", () => {
+  const document = parse(`
+    <form method="invalid" action="/submit" enctype="multipart/form-data">
+      <fieldset disabled>
+        <legend><input name="legend" value="kept"></legend>
+        <div><input name="disabled" value="secret"></div>
+      </fieldset>
+      <input type="number" name="count" min="" max="" step="">
+      <select name="choice"><optgroup disabled><option selected value="blocked">Blocked</option></optgroup></select>
+      <button name="intent">Send</button>
+    </form>
+  `);
+  const form = extractForms(document.tree, "https://example.test/base")[0];
+  assert.ok(form);
+  assert.equal(form.method, "get");
+  assert.equal(form.controls.find((control) => control.name === "legend")?.disabled, false);
+  assert.equal(form.controls.find((control) => control.name === "disabled")?.disabled, true);
+  const number = form.controls.find((control) => control.kind === "text" && control.inputType === "number");
+  assert.deepEqual(number && { min: number.min, max: number.max, step: number.step }, {
+    min: undefined,
+    max: undefined,
+    step: undefined
+  });
+  const select = form.controls.find((control) => control.kind === "select");
+  assert.ok(select);
+  assert.equal(select?.options[0]?.disabled, true);
+  assert.equal(form.controls.find((control) => control.kind === "submit")?.value, "");
+
+  assert.equal(
+    buildFormSubmissionRequest(
+      form,
+      [],
+      form.controls.find((control) => control.kind === "submit")?.id
+    ).url,
+    "https://example.test/submit?legend=kept&count=&intent="
+  );
+  assert.equal(
+    buildGetSubmissionUrl(form, [{ controlId: select.id, value: "blocked" }]),
+    "https://example.test/submit?legend=kept&count="
+  );
+});
+
+test("form extraction bounds page, control, and select-option expansion", () => {
+  const manyForms = parse(Array.from(
+    { length: 300 },
+    (_, index) => `<form aria-label="form-${String(index)}"></form>`
+  ).join(""));
+  assert.equal(extractForms(manyForms.tree, "https://example.test/").length, 256);
+
+  const largeForm = parse(`<form>
+    ${Array.from(
+      { length: 2_100 },
+      (_, index) => `<input name="field-${String(index)}">`
+    ).join("")}
+  </form>`);
+  assert.equal(
+    extractForms(largeForm.tree, "https://example.test/")[0]?.controls.length,
+    2_000
+  );
+
+  const largeSelect = parse(`<form><select name="choice">
+    ${Array.from(
+      { length: 2_100 },
+      (_, index) => `<option value="${String(index)}">${String(index)}</option>`
+    ).join("")}
+  </select></form>`);
+  const select = extractForms(largeSelect.tree, "https://example.test/")[0]
+    ?.controls.find((control) => control.kind === "select");
+  assert.equal(select?.kind === "select" ? select.options.length : 0, 2_000);
+});

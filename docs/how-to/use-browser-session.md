@@ -37,10 +37,14 @@ const session = new BrowserSession({
   defaultParseMode: "text"
 });
 
-const snapshot = await session.open("https://example.test/");
-console.log(snapshot.status);
-console.log(snapshot.content.blocks.length > 0);
-console.log(snapshot.diagnostics.parseErrorCount);
+try {
+  const snapshot = await session.open("https://example.test/");
+  console.log(snapshot.status);
+  console.log(snapshot.rendered.lines.length > 0);
+  console.log(snapshot.diagnostics.parseErrorCount);
+} finally {
+  await session.close();
+}
 ```
 
 ## Expected output

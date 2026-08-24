@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { BrowserSession } from "./app/session.js";
 import { BrowserStore } from "./app/storage.js";
-import { createNodeHost } from "./runtime/node-host.js";
 import { createNodeBrowserServices } from "./runtime/node-browser-services.js";
 import { renderBrowserOnce, runBrowserTui } from "./ui/run.js";
 import type { HttpSessionAdapter } from "@ismail-elkorchi/http-client";
@@ -36,7 +35,6 @@ function parseCliFlags(argv: readonly string[]): CliFlags {
 
 async function main(): Promise<void> {
   const cliFlags = parseCliFlags(process.argv.slice(2));
-  const runtimeHost = createNodeHost();
   const services = createNodeBrowserServices();
   const store = await BrowserStore.open();
   const searchUrlTemplate = process.env["VERGE_SEARCH_URL_TEMPLATE"];
@@ -44,10 +42,7 @@ async function main(): Promise<void> {
   const browserOptions = {
     store,
     services,
-    createSession: (httpSession: HttpSessionAdapter) => new BrowserSession({
-      httpSession,
-      localFileReader: (path) => runtimeHost.readFileText(path)
-    }),
+    createSession: (httpSession: HttpSessionAdapter) => new BrowserSession({ httpSession }),
     ...(searchUrlTemplate === undefined ? {} : { searchUrlTemplate }),
     ...(downloadDirectory === undefined ? {} : { downloadDirectory }),
     restoreWorkspace: cliFlags.initialTarget === null && !cliFlags.runOnce

@@ -57,7 +57,7 @@
   "dependencies": {
     "@ismail-elkorchi/css-parser": "0.2.0",
     "@ismail-elkorchi/html-parser": "0.2.1",
-    "@ismail-elkorchi/http-client": "^0.1.0",
+    "@ismail-elkorchi/http-client": "0.1.0",
     "@ismail-elkorchi/terminal-ui": "0.1.2",
     "tough-cookie": "6.0.2"
   },

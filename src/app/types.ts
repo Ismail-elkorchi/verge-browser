@@ -439,8 +439,8 @@ export interface PageSnapshot {
   readonly fetchedAtIso: string;
   /** Parsed HTML document, including its tree, source, and resource metadata. */
   readonly document: ParsedDocument;
-  /** Semantic page content retained independently from terminal size. */
-  readonly content: PageContent;
+  /** Stable terminal rendering retained for library compatibility. */
+  readonly rendered: RenderedPage;
   /** Performance and triage metadata for the snapshot. */
   readonly diagnostics: PageDiagnostics;
 }

@@ -7,9 +7,12 @@ import {
   type HttpErrorCode,
   type HttpRequestOptions,
   type HttpSessionAdapter,
+  type HttpSessionRequestContext,
+  type HttpSessionResponseContext,
   type StreamingHttpResult,
   type StreamingHttpResponse
 } from "@ismail-elkorchi/http-client";
+import { fileURLToPath } from "node:url";
 
 import { formatHelpText } from "./commands.js";
 import {
@@ -19,6 +22,10 @@ import {
   resolveSecurityPolicy,
   type SecurityPolicyOptions
 } from "./security.js";
+import {
+  navigationHttpSession,
+  navigationSource
+} from "./http-session-context.js";
 import type {
   FetchPageResult,
   FetchPageStreamResult,
@@ -29,6 +36,7 @@ import type {
 } from "./types.js";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
+const DOCUMENT_STYLESHEET_URL = Symbol("documentStylesheetUrl");
 const TRANSIENT_HTTP_FAILURES: ReadonlySet<HttpErrorCode> = new Set([
   "CONNECT_TIMEOUT",
   "NETWORK_FAILURE",
@@ -70,6 +78,39 @@ export type LocalFileReader = (path: string) => Promise<string>;
 async function defaultReadLocalFileText(path: string): Promise<string> {
   const nodeFs = await import("node:fs/promises");
   return nodeFs.readFile(path, "utf8");
+}
+
+async function readDefaultLocalFileTextBounded(
+  path: string,
+  requestUrl: string,
+  maxContentBytes: number
+): Promise<string> {
+  const nodeFs = await import("node:fs/promises");
+  const handle = await nodeFs.open(path, "r");
+  const decoder = new TextDecoder();
+  const chunks: string[] = [];
+  let receivedBytes = 0;
+  try {
+    const file = await handle.stat();
+    if (!file.isFile() || file.size > maxContentBytes) {
+      throw fileSizeLimitError(requestUrl, maxContentBytes);
+    }
+    for (;;) {
+      const remainingWithSentinel = maxContentBytes - receivedBytes + 1;
+      const buffer = new Uint8Array(Math.min(64 * 1024, remainingWithSentinel));
+      const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, null);
+      if (bytesRead === 0) break;
+      receivedBytes += bytesRead;
+      if (receivedBytes > maxContentBytes) {
+        throw fileSizeLimitError(requestUrl, maxContentBytes);
+      }
+      chunks.push(decoder.decode(buffer.subarray(0, bytesRead), { stream: true }));
+    }
+    chunks.push(decoder.decode());
+    return chunks.join("");
+  } finally {
+    await handle.close();
+  }
 }
 
 function createNetworkOutcome(
@@ -236,12 +277,30 @@ function assertTimeout(timeoutMs: number): void {
   }
 }
 
-async function fetchFileUrl(requestUrl: string, readLocalFileText: LocalFileReader): Promise<FetchPageResult> {
+function fileSizeLimitError(requestUrl: string, maxContentBytes: number): NetworkFetchError {
+  return new NetworkFetchError(
+    createNetworkOutcome("size_limit", {
+      finalUrl: requestUrl,
+      detailCode: "MAX_CONTENT_BYTES",
+      detailMessage: `Response exceeded maxContentBytes=${String(maxContentBytes)}`
+    })
+  );
+}
+
+async function fetchFileUrl(
+  requestUrl: string,
+  readLocalFileText: LocalFileReader,
+  maxContentBytes: number
+): Promise<FetchPageResult> {
   const fileUrl = new URL(requestUrl);
   assertAllowedProtocol(fileUrl);
-
-  const filePath = decodeURIComponent(fileUrl.pathname);
-  const html = await readLocalFileText(filePath);
+  const filePath = fileURLToPath(fileUrl);
+  const html = readLocalFileText === defaultReadLocalFileText
+    ? await readDefaultLocalFileTextBounded(filePath, requestUrl, maxContentBytes)
+    : await readLocalFileText(filePath);
+  if (utf8ByteLength(html) > maxContentBytes) {
+    throw fileSizeLimitError(requestUrl, maxContentBytes);
+  }
 
   return {
     requestUrl,
@@ -276,6 +335,14 @@ function streamFromUtf8(value: string): ReadableStream<Uint8Array> {
       controller.close();
     }
   });
+}
+
+function hasProtocol(requestUrl: string, protocol: string): boolean {
+  try {
+    return new URL(requestUrl).protocol === protocol;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -453,8 +520,12 @@ function responseStream(
       }
     },
     async cancel(reason) {
-      await reader.cancel(reason);
-      await response.completion;
+      response.cancel(reason instanceof Error ? reason : undefined);
+      try {
+        await reader.cancel(reason);
+      } finally {
+        await response.completion;
+      }
     }
   }, { highWaterMark: 0 });
 }
@@ -497,6 +568,29 @@ type HttpFetch = (
   requestUrl: string,
   options: HttpRequestOptions
 ) => Promise<StreamingHttpResult>;
+
+class SameOriginHttpSession implements HttpSessionAdapter {
+  readonly #session: HttpSessionAdapter;
+  readonly #origin: string;
+
+  public constructor(session: HttpSessionAdapter, documentUrl: string) {
+    this.#session = session;
+    this.#origin = new URL(documentUrl).origin;
+  }
+
+  public prepareRequest(context: HttpSessionRequestContext) {
+    return new URL(context.url).origin === this.#origin
+      ? this.#session.prepareRequest(context)
+      : undefined;
+  }
+
+  public acceptResponse(context: HttpSessionResponseContext) {
+    if (new URL(context.url).origin === this.#origin) {
+      return this.#session.acceptResponse(context);
+    }
+    return undefined;
+  }
+}
 
 async function fetchNetworkResponse(
   fetchHttp: HttpFetch,
@@ -631,6 +725,9 @@ async function fetchPageWithClient(
 
   const localAboutPage = aboutPage(requestUrl);
   if (localAboutPage !== null) {
+    if (utf8ByteLength(localAboutPage.html) > policy.maxContentBytes) {
+      throw fileSizeLimitError(requestUrl, policy.maxContentBytes);
+    }
     return {
       requestUrl,
       finalUrl: requestUrl,
@@ -652,8 +749,12 @@ async function fetchPageWithClient(
     };
   }
 
-  if (requestUrl.startsWith("file://")) {
-    const page = await fetchFileUrl(requestUrl, readLocalFileText);
+  if (hasProtocol(requestUrl, "file:")) {
+    const page = await fetchFileUrl(
+      requestUrl,
+      readLocalFileText,
+      policy.maxContentBytes
+    );
     requestOptions.signal?.throwIfAborted();
     return page;
   }
@@ -718,20 +819,16 @@ async function fetchStylesheetWithClient(
     ...securityPolicy,
     maxContentBytes: securityPolicy.maxContentBytes ?? 512 * 1024
   });
-  if (requestUrl.startsWith("file://")) {
+  if (hasProtocol(requestUrl, "file:")) {
     const fileUrl = new URL(requestUrl);
     assertAllowedProtocol(fileUrl);
-    const css = await readLocalFileText(decodeURIComponent(fileUrl.pathname));
+    const filePath = fileURLToPath(fileUrl);
+    const css = readLocalFileText === defaultReadLocalFileText
+      ? await readDefaultLocalFileTextBounded(filePath, requestUrl, policy.maxContentBytes)
+      : await readLocalFileText(filePath);
     const bytes = UTF8_ENCODER.encode(css);
     if (bytes.byteLength > policy.maxContentBytes) {
-      throw new NetworkFetchError(
-        createNetworkOutcome("size_limit", {
-          finalUrl: requestUrl,
-          detailCode: "MAX_CONTENT_BYTES",
-          detailMessage:
-            `Response exceeded maxContentBytes=${String(policy.maxContentBytes)}`
-        })
-      );
+      throw fileSizeLimitError(requestUrl, policy.maxContentBytes);
     }
     return {
       requestUrl,
@@ -756,7 +853,7 @@ async function fetchStylesheetWithClient(
       CSS_RESOURCE_PROFILE
     );
     if (result.status < 200 || result.status >= 300) {
-      throw new NetworkFetchError(
+      const error = new NetworkFetchError(
         createNetworkOutcome("http_error", {
           finalUrl: result.finalUrl,
           status: result.status,
@@ -766,6 +863,8 @@ async function fetchStylesheetWithClient(
             `Stylesheet request failed with ${String(result.status)} ${result.statusText}`
         })
       );
+      await result.body.cancel(error);
+      throw error;
     }
     const bytes = await readByteStream(result.body);
     const transportEncodingLabel = contentTypeEncoding(result.contentType);
@@ -850,8 +949,12 @@ async function fetchPageStreamWithClient(
     };
   }
 
-  if (requestUrl.startsWith("file://")) {
-    const filePage = await fetchFileUrl(requestUrl, readLocalFileText);
+  if (hasProtocol(requestUrl, "file:")) {
+    const filePage = await fetchFileUrl(
+      requestUrl,
+      readLocalFileText,
+      policy.maxContentBytes
+    );
     requestOptions.signal?.throwIfAborted();
     const fileBytes = utf8ByteLength(filePage.html);
     if (fileBytes > policy.maxContentBytes) {
@@ -976,9 +1079,13 @@ export class PageNetworkClient {
     requestOptions: PageRequestOptions = {},
     readLocalFileText: LocalFileReader = defaultReadLocalFileText
   ): Promise<FetchPageResult> {
+    const session = navigationHttpSession(
+      this.#session,
+      navigationSource(requestOptions)
+    );
     return fetchPageWithClient(
       (url, options) => this.#publicClient.fetch(url, options),
-      this.#session,
+      session,
       requestUrl,
       timeoutMs,
       securityPolicy,
@@ -1015,9 +1122,15 @@ export class PageNetworkClient {
     requestOptions: Pick<PageRequestOptions, "headers" | "signal"> = {},
     readLocalFileText: LocalFileReader = defaultReadLocalFileText
   ): Promise<FetchStylesheetResult> {
+    const documentUrl = (requestOptions as typeof requestOptions & {
+      readonly [DOCUMENT_STYLESHEET_URL]?: string;
+    })[DOCUMENT_STYLESHEET_URL];
+    const stylesheetSession = this.#session === undefined || documentUrl === undefined
+      ? this.#session
+      : new SameOriginHttpSession(this.#session, documentUrl);
     return fetchStylesheetWithClient(
       (url, options) => this.#publicClient.fetch(url, options),
-      this.#session,
+      stylesheetSession,
       requestUrl,
       timeoutMs,
       securityPolicy,
@@ -1033,9 +1146,13 @@ export class PageNetworkClient {
     requestOptions: PageRequestOptions = {},
     readLocalFileText: LocalFileReader = defaultReadLocalFileText
   ): Promise<FetchPageStreamResult> {
+    const session = navigationHttpSession(
+      this.#session,
+      navigationSource(requestOptions)
+    );
     return fetchPageStreamWithClient(
       (url, options) => this.#publicClient.fetch(url, options),
-      this.#session,
+      session,
       requestUrl,
       timeoutMs,
       securityPolicy,
@@ -1063,17 +1180,17 @@ export class PageNetworkClient {
   }
 
   public async close(): Promise<void> {
-    await Promise.all([
-      this.#publicClient.close(),
-      this.#localNavigationClient.close()
-    ]);
+    await settleCleanup([
+      () => this.#publicClient.close(),
+      () => this.#localNavigationClient.close()
+    ], "Failed to close every page-network transport.");
   }
 
   public async destroy(reason?: Error): Promise<void> {
-    await Promise.all([
-      this.#publicClient.destroy(reason),
-      this.#localNavigationClient.destroy(reason)
-    ]);
+    await settleCleanup([
+      () => this.#publicClient.destroy(reason),
+      () => this.#localNavigationClient.destroy(reason)
+    ], "Failed to destroy every page-network transport.");
   }
 
   async #fetchNavigation(
@@ -1090,6 +1207,25 @@ export class PageNetworkClient {
     }
     return this.#localNavigationClient.fetch(requestUrl, options);
   }
+}
+
+/** @internal BrowserSession resource-loading bridge. */
+export function fetchDocumentStylesheet(
+  client: PageNetworkClient,
+  requestUrl: string,
+  documentUrl: string,
+  timeoutMs: number | undefined,
+  securityPolicy: SecurityPolicyOptions,
+  requestOptions: Pick<PageRequestOptions, "headers" | "signal">,
+  readLocalFileText?: LocalFileReader
+): Promise<FetchStylesheetResult> {
+  const scopedOptions = {
+    ...requestOptions,
+    [DOCUMENT_STYLESHEET_URL]: documentUrl
+  };
+  return readLocalFileText === undefined
+    ? client.fetchStylesheet(requestUrl, timeoutMs, securityPolicy, scopedOptions)
+    : client.fetchStylesheet(requestUrl, timeoutMs, securityPolicy, scopedOptions, readLocalFileText);
 }
 
 /** Fetches and buffers one page with an operation-scoped HTTP client. */
@@ -1166,9 +1302,10 @@ export async function fetchPageStream(
   }
 }
 
-function closeClientWithStream(
+/** @internal Binds an operation-scoped client's lifetime to a returned stream. */
+export function closeClientWithStream(
   stream: ReadableStream<Uint8Array>,
-  client: PageNetworkClient
+  client: Pick<PageNetworkClient, "close" | "destroy">
 ): ReadableStream<Uint8Array> {
   const reader = stream.getReader();
   return new ReadableStream<Uint8Array>({
@@ -1187,16 +1324,49 @@ function closeClientWithStream(
       }
     },
     async cancel(reason) {
-      await reader.cancel(reason);
-      await client.destroy(
-        reason instanceof Error
-          ? reason
-          : new Error("Page response stream was cancelled.")
-      );
+      let cancellationError: unknown;
+      try {
+        await reader.cancel(reason);
+      } catch (error) {
+        cancellationError = error;
+      }
+      let destroyError: unknown;
+      try {
+        await client.destroy(
+          reason instanceof Error
+            ? reason
+            : new Error("Page response stream was cancelled.")
+        );
+      } catch (error) {
+        destroyError = error;
+      }
+      if (cancellationError !== undefined && destroyError !== undefined) {
+        throw new AggregateError(
+          [cancellationError, destroyError],
+          "Failed to cancel the page stream and destroy its HTTP client."
+        );
+      }
+      if (cancellationError !== undefined) throw toError(cancellationError);
+      if (destroyError !== undefined) throw toError(destroyError);
     }
   }, { highWaterMark: 0 });
 }
 
 function toError(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value));
+}
+
+async function settleCleanup(
+  operations: readonly (() => Promise<void>)[],
+  message: string
+): Promise<void> {
+  const outcomes = await Promise.allSettled(
+    operations.map((operation) => Promise.resolve().then(operation))
+  );
+  const errors: unknown[] = [];
+  for (const outcome of outcomes) {
+    if (outcome.status === "rejected") errors.push(outcome.reason as unknown);
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, message);
 }

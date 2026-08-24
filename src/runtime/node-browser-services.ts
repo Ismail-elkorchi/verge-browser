@@ -9,7 +9,10 @@ import {
   parseContentLength
 } from "@ismail-elkorchi/http-client";
 
+import { navigationHttpSession } from "../app/http-session-context.js";
 import type { BrowserServices, DownloadRequest, DownloadResult } from "../ui/services.js";
+
+const DEFAULT_DOWNLOAD_RESPONSE_TIMEOUT_MS = 30_000;
 
 async function writeTextFile(path: string, content: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
@@ -38,17 +41,20 @@ async function runCommand(command: string, args: readonly string[], options: { r
   });
 }
 
-function externalOpenCommand(target: string): { readonly command: string; readonly args: readonly string[] } {
-  if (process.platform === "darwin") {
+export function externalOpenCommand(
+  target: string,
+  platform: NodeJS.Platform = process.platform
+): { readonly command: string; readonly args: readonly string[] } {
+  if (platform === "darwin") {
     return {
       command: "open",
       args: [target]
     };
   }
-  if (process.platform === "win32") {
+  if (platform === "win32") {
     return {
-      command: "cmd",
-      args: ["/c", "start", "", target]
+      command: "explorer.exe",
+      args: [target]
     };
   }
   return {
@@ -75,7 +81,17 @@ function safeFileName(value: string): string {
     .replaceAll(/[\u0000-\u001F\u007F<>:"/\\|?*]+/gu, "-")
     .replaceAll(/^\.+|\.+$/gu, "")
     .trim();
-  return cleaned.length === 0 ? "download" : cleaned.slice(0, 180);
+  if (cleaned.length === 0) return "download";
+  let bounded = "";
+  for (const character of cleaned) {
+    const candidate = `${bounded}${character}`;
+    if (Buffer.byteLength(candidate, "utf8") > 180) break;
+    bounded = candidate;
+  }
+  if (/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(bounded)) {
+    return `_${bounded}`;
+  }
+  return bounded.length === 0 ? "download" : bounded;
 }
 
 function decodePathSegment(value: string): string {
@@ -115,9 +131,29 @@ async function claimDestination(tempPath: string, directory: string, fileName: s
   throw new Error(`Could not choose a free destination for ${fileName}.`);
 }
 
+async function writeAll(
+  handle: Awaited<ReturnType<typeof open>>,
+  bytes: Uint8Array
+): Promise<void> {
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    const result = await handle.write(
+      bytes,
+      offset,
+      bytes.byteLength - offset,
+      null
+    );
+    if (result.bytesWritten < 1) {
+      throw new Error("Download file write made no progress.");
+    }
+    offset += result.bytesWritten;
+  }
+}
+
 async function downloadFile(
   client: NodeHttpClient,
-  request: DownloadRequest
+  request: DownloadRequest,
+  responseTimeoutMs: number
 ): Promise<DownloadResult> {
   if (!Number.isSafeInteger(request.maxBytes) || request.maxBytes < 1) {
     throw new RangeError("Download maxBytes must be a positive safe integer.");
@@ -147,11 +183,13 @@ async function downloadFile(
   const response = await client.fetch(request.url, {
     method: "GET",
     fields: fields.lines(),
-    session: request.session,
+    session: navigationHttpSession(request.session, request.sourceUrl)
+      ?? request.session,
     ...(request.signal === undefined ? {} : { signal: request.signal }),
     timeouts: {
       totalMs: null,
-      responseBodyProgressMs: null
+      responseFieldsMs: responseTimeoutMs,
+      responseBodyProgressMs: responseTimeoutMs
     },
     responseContentDecoding: "preserve",
     responseTransferLimits: {
@@ -185,9 +223,10 @@ async function downloadFile(
     request.directory,
     `.${fileName}.part-${String(process.pid)}-${crypto.randomUUID()}`
   );
-  const handle = await open(tempPath, "wx");
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
   let receivedBytes = 0;
   try {
+    handle = await open(tempPath, "wx");
     const reader = response.body.getReader();
     try {
       for (;;) {
@@ -195,7 +234,7 @@ async function downloadFile(
         const next = await reader.read();
         if (next.done) break;
         receivedBytes += next.value.byteLength;
-        await handle.write(next.value);
+        await writeAll(handle, next.value);
       }
     } finally {
       reader.releaseLock();
@@ -209,12 +248,13 @@ async function downloadFile(
     }
     await handle.sync();
     await handle.close();
+    handle = undefined;
     const path = await claimDestination(tempPath, request.directory, fileName);
     return { path, fileName: basename(path), receivedBytes, totalBytes };
   } catch (error) {
     response.cancel(error instanceof Error ? error : undefined);
     await response.completion;
-    await handle.close().catch(() => undefined);
+    await handle?.close().catch(() => undefined);
     await rm(tempPath, { force: true });
     throw error;
   }
@@ -224,11 +264,24 @@ export interface NodeBrowserServicesOptions {
   readonly downloadAddressPolicy?:
     | "public-only"
     | "allow-private-and-local";
+  /** Maximum wait for response fields or additional response-body bytes. */
+  readonly downloadResponseTimeoutMs?: number;
 }
 
 export function createNodeBrowserServices(
   options: NodeBrowserServicesOptions = {}
 ): BrowserServices {
+  const responseTimeoutMs = options.downloadResponseTimeoutMs
+    ?? DEFAULT_DOWNLOAD_RESPONSE_TIMEOUT_MS;
+  if (
+    !Number.isSafeInteger(responseTimeoutMs)
+    || responseTimeoutMs < 1
+    || responseTimeoutMs > 2_147_483_647
+  ) {
+    throw new RangeError(
+      "downloadResponseTimeoutMs must be a positive safe integer no greater than 2147483647."
+    );
+  }
   const client = new NodeHttpClient(
     options.downloadAddressPolicy === "allow-private-and-local"
       ? {
@@ -244,7 +297,7 @@ export function createNodeBrowserServices(
       await writeTextFile(path, content);
     },
     async downloadFile(request): Promise<DownloadResult> {
-      return downloadFile(client, request);
+      return downloadFile(client, request, responseTimeoutMs);
     },
     async openExternal(target: string): Promise<void> {
       const command = externalOpenCommand(target);

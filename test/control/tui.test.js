@@ -22,8 +22,10 @@ import { createTuiRuntime, runTui } from "@ismail-elkorchi/terminal-ui/tui";
 import { HttpFields } from "@ismail-elkorchi/http-client";
 
 import { BrowserSession } from "../../dist/app/session.js";
+import { attachPageContent, pageContent } from "../../dist/app/page-content.js";
 import { NetworkFetchError } from "../../dist/app/fetch-page.js";
 import { BrowserStore } from "../../dist/app/storage.js";
+import { BrowserController } from "../../dist/ui/browser-controller.js";
 import { browserTuiFailureMessage, prepareBrowserTui } from "../../dist/ui/run.js";
 
 function createLoader(htmlMap) {
@@ -208,7 +210,7 @@ function findNode(node, id) {
 test("Verge renders a browser shell and preserves navigation, focus, scrolling, and quit", async () => {
   const { runtime } = await fixture();
 
-  assert.equal(runtime.state().documents[0].snapshot.content.title, "Index");
+  assert.equal(pageContent(runtime.state().documents[0].snapshot).title, "Index");
   assert.equal(findRole(runtime.frame().accessibility.root, "document")?.label, "Index");
   assert.equal(findRole(runtime.frame().accessibility.root, "toolbar")?.label, "Browser navigation");
   assert.equal(
@@ -223,7 +225,7 @@ test("Verge renders a browser shell and preserves navigation, focus, scrolling, 
   assert.equal(runtime.frame().hitTargets?.some((target) => target.id === "browser-back:control"), false);
   assert.equal(decodeAccessibleSnapshot(runtime.frame().accessibility).status, "success");
 
-  const focusedActionId = runtime.state().documents[0].snapshot.content.actions[0].id;
+  const focusedActionId = pageContent(runtime.state().documents[0].snapshot).actions[0].id;
   for (let attempt = 0; attempt < 20 && !runtime.frame().focusPath?.includes(focusedActionId); attempt += 1) {
     await runtime.handleInput(keyEvent("tab"));
   }
@@ -289,7 +291,7 @@ test("Tab traversal reveals links beyond the document viewport", async () => {
     loaderFactory: () => createLoader(pages)
   });
   const document = runtime.state().documents[0];
-  const lastLink = document.snapshot.content.links.at(-1);
+  const lastLink = pageContent(document.snapshot).links.at(-1);
   assert.ok(lastLink);
   const initialAnchor = document.scrollAnchor;
 
@@ -520,7 +522,7 @@ test("browser and link actions use anchored menus instead of modal button grids"
   assert.equal(runtime.state().overlay, null);
   assert.equal(runtime.state().sidePanel, "history");
 
-  const link = runtime.state().documents[0].snapshot.content.links[0];
+  const link = pageContent(runtime.state().documents[0].snapshot).links[0];
   const linkTarget = runtime.frame().hitTargets?.find((target) =>
     target.id.startsWith(`activate:${link.id}:`)
   );
@@ -707,7 +709,7 @@ test("Verge supports exact find, adaptive library panels, and inline semantic fo
   assert.equal(count.inputType, "number");
   await runtime.dispatch({ kind: "formValues", controlId: query.id, values: [] });
   await runtime.dispatch({ kind: "submitForm", formId: form.id });
-  assert.equal(runtime.state().documents[0].snapshot.content.title, "Index");
+  assert.equal(pageContent(runtime.state().documents[0].snapshot).title, "Index");
   assert.match(runtime.state().status?.text ?? "", /required/u);
   await runtime.dispatch({ kind: "resetForm", formId: form.id });
   await runtime.dispatch({
@@ -744,7 +746,35 @@ test("Verge supports exact find, adaptive library panels, and inline semantic fo
   assert.equal(findNode(runtime.frame().accessibility.root, countNode.labelledBy)?.value, "Count");
   await runtime.dispatch({ kind: "submitForm", formId: form.id, submitterId: form.controls.find((control) => control.kind === "submit").id });
   await waitUntil(runtime, () => runtime.state().documents[0].snapshot.finalUrl.includes("/search?"));
-  assert.equal(runtime.state().documents[0].snapshot.content.title, "Results");
+  assert.equal(pageContent(runtime.state().documents[0].snapshot).title, "Results");
+});
+
+test("find-in-page caps dense match sets without rescanning every layout row", async () => {
+  const target = "https://find-limit.test/";
+  const { runtime } = await fixture({
+    initialUrl: target,
+    loaderFactory(htmlMap) {
+      htmlMap.set(target, `<html><body><p>${"a".repeat(5000)}</p></body></html>`);
+      return createLoader(htmlMap);
+    }
+  });
+
+  await runtime.dispatch({ kind: "openFind" });
+  await runtime.dispatch({
+    kind: "findAction",
+    action: { kind: "edit", operation: { kind: "insert", text: "a" } }
+  });
+  const search = runtime.state().documents[0]?.search;
+  assert.equal(search?.matches.length, 2000);
+  assert.equal(search?.truncated, true);
+  assert.match(runtime.state().status?.text ?? "", /2000\+/u);
+
+  await runtime.dispatch({
+    kind: "findAction",
+    action: { kind: "edit", operation: { kind: "insert", text: "b".repeat(5000) } }
+  });
+  assert.equal(runtime.state().findBar?.input.text.length, 1024);
+  assert.equal(runtime.state().documents[0]?.search?.query.length, 1024);
 });
 
 test("Verge supports new tabs, restored tabs, bookmarks, downloads, exports, and external opening", async () => {
@@ -776,9 +806,340 @@ test("Verge supports new tabs, restored tabs, bookmarks, downloads, exports, and
   assert.equal(runtime.exit().status, "completed");
 });
 
+test("closing a loading tab cancels its navigation before the tab can be reopened", async () => {
+  const started = Promise.withResolvers();
+  const aborted = Promise.withResolvers();
+  const { runtime } = await fixture({
+    loaderFactory(htmlMap) {
+      const load = createLoader(htmlMap);
+      return async (requestUrl, requestOptions) => {
+        if (requestUrl !== "https://example.test/slow") {
+          return load(requestUrl, requestOptions);
+        }
+        started.resolve();
+        return new Promise((_resolve, reject) => {
+          requestOptions?.signal?.addEventListener("abort", () => {
+            aborted.resolve();
+            reject(requestOptions.signal.reason);
+          }, { once: true });
+        });
+      };
+    }
+  });
+
+  await runtime.dispatch({ kind: "newDocument", target: "https://example.test/next" });
+  await waitUntil(runtime, () => runtime.state().documents.length === 2);
+  await runtime.dispatch({ kind: "omniboxSubmit", value: "https://example.test/slow" });
+  await started.promise;
+
+  await runtime.dispatch({ kind: "closeDocument" });
+  await aborted.promise;
+  assert.equal(runtime.state().documents.length, 1);
+
+  await runtime.dispatch({ kind: "reopenDocument" });
+  assert.equal(runtime.state().documents.length, 2);
+  assert.equal(
+    runtime.state().documents[1]?.snapshot.finalUrl,
+    "https://example.test/next"
+  );
+  assert.equal(runtime.state().documents[1]?.canGoBack, false);
+});
+
+test("navigation commits to the UI before slow profile persistence can be cancelled", async () => {
+  const { runtime, store } = await fixture();
+  const persistenceStarted = Promise.withResolvers();
+  const allowPersistence = Promise.withResolvers();
+  const recordPage = store.recordPage.bind(store);
+  store.recordPage = async (...args) => {
+    persistenceStarted.resolve();
+    await allowPersistence.promise;
+    return recordPage(...args);
+  };
+
+  await runtime.dispatch({ kind: "omniboxSubmit", value: "https://example.test/next" });
+  await persistenceStarted.promise;
+  await waitUntil(runtime, () =>
+    runtime.state().documents[0]?.snapshot.finalUrl === "https://example.test/next"
+  );
+  assert.equal(runtime.state().documents[0]?.loading, false);
+
+  allowPersistence.resolve();
+  await waitUntil(runtime, () =>
+    runtime.state().history.some((entry) => entry.url === "https://example.test/next")
+  );
+});
+
+test("BrowserController destroys failed sessions and protects provisional tabs from stale persistence", async () => {
+  const store = {
+    httpSession: {},
+    async saveWorkspace() {
+    },
+    async flush() {
+    }
+  };
+  const services = {
+    async close() {
+    }
+  };
+  let failedDestroyCount = 0;
+  const failing = new BrowserController({
+    store,
+    services,
+    createSession: () => ({
+      async open() {
+        throw new Error("open failed");
+      },
+      async close() {
+      },
+      async destroy() {
+        failedDestroyCount += 1;
+      }
+    })
+  });
+  await assert.rejects(failing.openNew("about:newtab"), /open failed/u);
+  assert.equal(failedDestroyCount, 1);
+  await failing.close();
+
+  const opening = Promise.withResolvers();
+  let closeCount = 0;
+  const snapshot = attachPageContent({
+    finalUrl: "about:newtab",
+    rendered: { title: "New Tab" }
+  }, { title: "New Tab", blocks: [{ id: "page:newtab", text: "New Tab" }] });
+  const controller = new BrowserController({
+    store,
+    services,
+    createSession: () => ({
+      current: snapshot,
+      async open() {
+        return opening.promise;
+      },
+      canBack() {
+        return false;
+      },
+      canForward() {
+        return false;
+      },
+      async close() {
+        closeCount += 1;
+      },
+      async destroy() {
+      }
+    })
+  });
+  const pending = controller.openNew("about:newtab");
+  const emptyState = {
+    documents: [],
+    recentlyClosed: [],
+    activeDocumentIndex: 0,
+    sidePanel: null
+  };
+  await controller.saveWorkspace(emptyState);
+  opening.resolve(snapshot);
+  const document = await pending;
+  await controller.saveWorkspace(emptyState);
+  assert.equal(closeCount, 0);
+
+  await controller.saveWorkspace({
+    ...emptyState,
+    documents: [document]
+  });
+  await controller.saveWorkspace(emptyState);
+  assert.equal(closeCount, 1);
+  await controller.close();
+});
+
+test("BrowserController awaits every cleanup and flush after a close failure", async () => {
+  const closed = [];
+  let servicesClosed = false;
+  let flushed = false;
+  let sessionNumber = 0;
+  const controller = new BrowserController({
+    store: {
+      httpSession: {},
+      async flush() {
+        flushed = true;
+      }
+    },
+    services: {
+      async close() {
+        servicesClosed = true;
+      }
+    },
+    createSession: () => {
+      sessionNumber += 1;
+      const number = sessionNumber;
+      const snapshot = attachPageContent({
+        finalUrl: `about:cleanup-${String(number)}`,
+        rendered: { title: "Cleanup" }
+      }, {
+        title: "Cleanup",
+        blocks: [{ id: `page:${String(number)}`, text: "Cleanup" }]
+      });
+      return {
+        async open() {
+          return snapshot;
+        },
+        async close() {
+          closed.push(number);
+          if (number === 1) throw new Error("first session close failed");
+        },
+        async destroy() {
+        }
+      };
+    }
+  });
+  await controller.openNew("about:newtab");
+  await controller.openNew("about:newtab");
+
+  await assert.rejects(controller.close(), /first session close failed/u);
+  assert.deepEqual(closed.sort(), [1, 2]);
+  assert.equal(servicesClosed, true);
+  assert.equal(flushed, true);
+});
+
+test("stale workspace cleanup cannot overwrite a newer persisted workspace", async () => {
+  const savedWorkspaces = [];
+  const store = {
+    httpSession: {},
+    async saveWorkspace(workspace) {
+      savedWorkspaces.push(workspace);
+    },
+    async flush() {
+    }
+  };
+  const secondCloseStarted = Promise.withResolvers();
+  const allowSecondClose = Promise.withResolvers();
+  let sessionNumber = 0;
+  const controller = new BrowserController({
+    store,
+    services: { async close() {} },
+    createSession: () => {
+      sessionNumber += 1;
+      const currentNumber = sessionNumber;
+      const snapshot = attachPageContent({
+        finalUrl: `about:tab-${String(currentNumber)}`,
+        rendered: { title: `Tab ${String(currentNumber)}` }
+      }, {
+        title: `Tab ${String(currentNumber)}`,
+        blocks: [{ id: `page:${String(currentNumber)}`, text: "Tab" }]
+      });
+      return {
+        current: snapshot,
+        async open() {
+          return snapshot;
+        },
+        canBack() {
+          return false;
+        },
+        canForward() {
+          return false;
+        },
+        async close() {
+          if (currentNumber === 2) {
+            secondCloseStarted.resolve();
+            await allowSecondClose.promise;
+          }
+        },
+        async destroy() {
+        }
+      };
+    }
+  });
+  const first = await controller.openNew("about:newtab");
+  const second = await controller.openNew("about:newtab");
+  const baseState = {
+    documents: [first, second],
+    recentlyClosed: [],
+    activeDocumentIndex: 0,
+    sidePanel: null
+  };
+  await controller.saveWorkspace(baseState);
+
+  const stale = controller.saveWorkspace({ ...baseState, documents: [first] });
+  await secondCloseStarted.promise;
+  await controller.saveWorkspace({
+    ...baseState,
+    documents: [first],
+    sidePanel: "history"
+  });
+  allowSecondClose.resolve();
+  await stale;
+
+  assert.equal(savedWorkspaces.at(-1)?.sidePanel, "history");
+  await controller.close();
+});
+
+test("remote forms cannot submit into the local-file navigation capability", async () => {
+  const snapshot = attachPageContent({
+    finalUrl: "https://remote.example/",
+    rendered: { title: "Remote" }
+  }, {
+    title: "Remote",
+    blocks: [{ id: "page:remote", text: "Remote" }]
+  });
+  let navigationCount = 0;
+  const controller = new BrowserController({
+    store: {
+      httpSession: {},
+      async saveWorkspace() {},
+      async flush() {}
+    },
+    services: { async close() {} },
+    createSession: () => ({
+      current: snapshot,
+      async open() {
+        return snapshot;
+      },
+      async openWithRequest() {
+        navigationCount += 1;
+        return snapshot;
+      },
+      canBack() {
+        return false;
+      },
+      canForward() {
+        return false;
+      },
+      async close() {},
+      async destroy() {}
+    })
+  });
+  const document = await controller.openNew("https://remote.example/");
+  await assert.rejects(
+    controller.submitForm(document, {
+      id: "form:local",
+      index: 1,
+      label: "Open",
+      method: "get",
+      encoding: "application/x-www-form-urlencoded",
+      actionUrl: "file:///private/secret.txt",
+      controls: []
+    }, [], undefined),
+    /page-initiated local-file/u
+  );
+  assert.equal(navigationCount, 0);
+  await controller.close();
+});
+
 test("Verge restores persisted tabs, selection, and library panel", async () => {
+  let activeLoads = 0;
+  let maximumActiveLoads = 0;
   const { runtime } = await fixture({
     restoreWorkspace: true,
+    loaderFactory(htmlMap) {
+      const load = createLoader(htmlMap);
+      return async (...args) => {
+        activeLoads += 1;
+        maximumActiveLoads = Math.max(maximumActiveLoads, activeLoads);
+        await Promise.resolve();
+        try {
+          return await load(...args);
+        } finally {
+          activeLoads -= 1;
+        }
+      };
+    },
     workspace: {
       documents: [
         { url: "https://example.test/", scrollAnchor: { blockId: "missing", rowOffset: 0 } },
@@ -795,6 +1156,7 @@ test("Verge restores persisted tabs, selection, and library panel", async () => 
   );
   assert.equal(runtime.state().activeDocumentIndex, 1);
   assert.equal(runtime.state().sidePanel, "bookmarks");
+  assert.equal(maximumActiveLoads, 1);
 });
 
 test("closing the final tab replaces it with the new-tab dashboard", async () => {
@@ -826,7 +1188,7 @@ test("non-HTML navigation offers a download instead of replacing the page", asyn
 
   await runtime.dispatch({ kind: "omniboxSubmit", value: archiveUrl });
   await waitUntil(runtime, () => runtime.state().overlay?.kind === "downloadPrompt");
-  assert.equal(runtime.state().documents[0].snapshot.content.title, "Index");
+  assert.equal(pageContent(runtime.state().documents[0].snapshot).title, "Index");
   assert.match(renderFramePlain(runtime.frame()), /Download resource\?/u);
   const dialogRows = new Set(runtime.frame().cells
     .filter((cell) => cell.source?.elementId === "download-prompt:surface")

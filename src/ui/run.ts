@@ -26,11 +26,14 @@ export async function prepareBrowserTui(initialTarget: string, options: BrowserT
   try {
     const workspace = options.restoreWorkspace === true ? controller.workspace() : null;
     const storedDocuments = workspace?.documents ?? [];
-    const documents = storedDocuments.length === 0
-      ? [await controller.openInitial(initialTarget)]
-      : await Promise.all(storedDocuments.map((document) =>
-        controller.openInitial(document.url, document.scrollAnchor)
-      ));
+    const documents = [];
+    if (storedDocuments.length === 0) {
+      documents.push(await controller.openInitial(initialTarget));
+    } else {
+      for (const document of storedDocuments) {
+        documents.push(await controller.openInitial(document.url, document.scrollAnchor));
+      }
+    }
     const state = createBrowserInitialState(
       documents,
       workspace?.activeDocumentIndex ?? 0,

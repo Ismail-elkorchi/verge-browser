@@ -201,6 +201,13 @@ const ASCII_INSENSITIVE_ATTRIBUTES = new Set([
 ]);
 const MAX_ISSUES = 128;
 const MAX_ISSUES_PER_CODE = 32;
+const MAX_SELECTOR_QUERIES = 4_096;
+const MAX_SELECTOR_STEPS = 500_000;
+const MAX_SELECTOR_STEPS_PER_QUERY = 500_000;
+const MAX_AUTHOR_STYLESHEET_SOURCES = 64;
+const MAX_INLINE_STYLESHEET_BYTES = 512 * 1024;
+const MAX_AUTHOR_STYLESHEET_BYTES = 2 * 1024 * 1024;
+const UTF8_ENCODER = new TextEncoder();
 
 const NAMED_COLORS: Readonly<Record<string, PageColor>> = Object.freeze({
   aliceblue: { r: 240, g: 248, b: 255 },
@@ -505,18 +512,34 @@ function stylesheetSources(
 ): readonly StylesheetSource[] {
   const resourceByOwner = new Map(resources.map((resource) => [resource.ownerNodeId, resource]));
   const sources: StylesheetSource[] = [];
+  let stylesheetBytes = 0;
+  let consideredStylesheets = 0;
   for (const element of allElements(tree)) {
     signal?.throwIfAborted();
     const tag = element.localName.toLowerCase();
     if (tag === "style") {
+      if (consideredStylesheets >= MAX_AUTHOR_STYLESHEET_SOURCES) {
+        issues.add("stylesheet-limit", "Author stylesheet count exceeded the page budget.", "inline");
+        continue;
+      }
+      consideredStylesheets += 1;
       const media = getAttributeValue(element, "media");
       if (!terminalMediaApplies(media)) {
         issues.add("stylesheet-media", "Skipped a stylesheet whose media query does not target terminal rendering.", "inline");
         continue;
       }
+      const stylesheetText = textOfElement(element);
+      const stylesheetByteLength = UTF8_ENCODER.encode(stylesheetText).byteLength;
+      if (
+        stylesheetByteLength > MAX_INLINE_STYLESHEET_BYTES
+        || stylesheetBytes + stylesheetByteLength > MAX_AUTHOR_STYLESHEET_BYTES
+      ) {
+        issues.add("stylesheet-limit", "Embedded stylesheet data exceeded the page budget.", "inline");
+        continue;
+      }
       let parsed: ReturnType<typeof parseStylesheet>;
       try {
-        parsed = parseStylesheet(textOfElement(element), {
+        parsed = parseStylesheet(stylesheetText, {
           ...(signal === undefined ? {} : { signal })
         });
       } catch (error) {
@@ -538,11 +561,21 @@ function stylesheetSources(
         stylesheet: parsed.value,
         ...(media === undefined ? {} : { media })
       });
+      stylesheetBytes += stylesheetByteLength;
       continue;
     }
     if (tag !== "link") continue;
     const resource = resourceByOwner.get(element.id);
     if (!resource) continue;
+    if (consideredStylesheets >= MAX_AUTHOR_STYLESHEET_SOURCES) {
+      issues.add("stylesheet-limit", "Author stylesheet count exceeded the page budget.", resource.finalUrl);
+      continue;
+    }
+    consideredStylesheets += 1;
+    if (stylesheetBytes + resource.bytes.byteLength > MAX_AUTHOR_STYLESHEET_BYTES) {
+      issues.add("stylesheet-limit", "Author stylesheet data exceeded the page budget.", resource.finalUrl);
+      continue;
+    }
     let parsed: ReturnType<typeof parseStylesheetBytes>;
     try {
       parsed = parseStylesheetBytes(resource.bytes, {
@@ -577,6 +610,7 @@ function stylesheetSources(
       stylesheet: parsed.value,
       ...(resource.media === undefined ? {} : { media: resource.media })
     });
+    stylesheetBytes += resource.bytes.byteLength;
   }
   return sources;
 }
@@ -643,10 +677,24 @@ function collectRuleCandidates(
 ): number {
   const environment = selectorEnvironment();
   let sourceOrder = 0;
+  let selectorQueries = 0;
+  let selectorSteps = 0;
+  const selectorBudget = { exhausted: false };
+  const exhaustSelectorBudget = (sourceUrl: string): void => {
+    if (selectorBudget.exhausted) return;
+    selectorBudget.exhausted = true;
+    issues.add(
+      "stylesheet-limit",
+      "Author selector evaluation exceeded the page work budget.",
+      sourceUrl
+    );
+  };
   for (const source of sources) {
+    if (selectorBudget.exhausted) break;
     if (!mediaQueryApplies(source.media, columns, issues, source.sourceUrl)) continue;
     const visitRules = (rules: CssStylesheet["rules"]): void => {
       for (const rule of rules) {
+      if (selectorBudget.exhausted) return;
       signal?.throwIfAborted();
       if (rule.kind === "at-rule") {
         if (rule.name.toLowerCase() === "media" && rule.block !== null) {
@@ -675,19 +723,43 @@ function collectRuleCandidates(
       const specificities = specificitiesOfSelectorList(parsed.value);
       const matchingSpecificity = new Map<ElementNode, SelectorSpecificity>();
       for (const [index, selector] of parsed.value.selectors.entries()) {
+        if (
+          selectorQueries >= MAX_SELECTOR_QUERIES
+          || selectorSteps >= MAX_SELECTOR_STEPS
+        ) {
+          exhaustSelectorBudget(source.sourceUrl);
+          return;
+        }
         let result: ReturnType<typeof querySelectorList<StyleTreeNode>>;
         try {
+          selectorQueries += 1;
           result = querySelectorList(
             selectorListFor(selector, parsed.value),
             tree,
             environment,
             {
-              limits: { maxNodes: 250_000, maxDepth: 2_048, maxSteps: 1_000_000 },
+              limits: {
+                maxNodes: 250_000,
+                maxDepth: 2_048,
+                maxSteps: Math.min(
+                  MAX_SELECTOR_STEPS_PER_QUERY,
+                  MAX_SELECTOR_STEPS - selectorSteps
+                )
+              },
               ...(signal === undefined ? {} : { signal })
             }
           );
         } catch (error) {
           signal?.throwIfAborted();
+          if (
+            error !== null
+            && typeof error === "object"
+            && "code" in error
+            && error.code === "CSS_RESOURCE_LIMIT_EXCEEDED"
+          ) {
+            exhaustSelectorBudget(source.sourceUrl);
+            return;
+          }
           issues.add(
             "selector-unknown",
             error instanceof Error ? error.message : String(error),
@@ -695,6 +767,7 @@ function collectRuleCandidates(
           );
           continue;
         }
+        selectorSteps += result.usage.steps;
         const specificity = specificities[index] ?? { a: 0, b: 0, c: 0 };
         for (const match of result.matches) {
           if (match.kind !== "element") continue;

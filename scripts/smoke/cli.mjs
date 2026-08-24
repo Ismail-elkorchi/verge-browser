@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 
 async function createFixture() {
   const fixtureDirectory = await mkdtemp(join(tmpdir(), "verge-browser-smoke-"));
@@ -28,7 +29,7 @@ async function createFixture() {
 
 async function runSmokeCheck() {
   const fixtureDirectory = await createFixture();
-  const target = `file://${fixtureDirectory}/index.html`;
+  const target = pathToFileURL(join(fixtureDirectory, "index.html")).href;
 
   try {
     const once = spawnSync(process.execPath, ["dist/cli.js", "--once", target], {

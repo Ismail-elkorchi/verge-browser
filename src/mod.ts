@@ -65,12 +65,7 @@ export {
   type PagerViewport
 } from "./app/pager.js";
 export { parseHtml } from "./app/parse-html.js";
-export {
-  buildPageContent,
-  documentBaseUrl,
-  layoutPageContent,
-  renderDocumentToTerminal
-} from "./app/render.js";
+export { renderDocumentToTerminal } from "./app/render.js";
 export { createSearchState, hasSearchMatches, activeSearchLineIndex, moveSearchMatch, type SearchState } from "./app/search.js";
 export { DEFAULT_SECURITY_POLICY, assertAllowedProtocol, assertAllowedUrl, isHtmlLikeContentType, type SecurityPolicyOptions } from "./app/security.js";
 export {
@@ -78,28 +73,13 @@ export {
   type BrowserSessionOptions,
   type PageLoader,
   type PageStreamLoader,
-  type PageContentBuilder,
-  type StylesheetLoader,
+  type PageRenderer,
   type StylesheetPolicyOptions
 } from "./app/session.js";
 export { terminalWidth, terminalHeight, clearTerminal, formatRenderedPage, formatLinkTable } from "./app/terminal.js";
 export type {
   NetworkOutcome,
   NetworkOutcomeKind,
-  PageAction,
-  PageActionPlacement,
-  PageBlock,
-  PageBlockKind,
-  PageColor,
-  PageRegion,
-  PageContent,
-  PageContentInput,
-  PageFormAction,
-  PageLayout,
-  PageLayoutFragment,
-  PageLayoutRow,
-  PageLayoutStyleRun,
-  PageLinkAction,
   RenderedLink,
   RenderedPage,
   FetchPageResult,
@@ -110,9 +90,6 @@ export type {
   PageStyleIssue,
   PageStyleIssueCode,
   PageStylesheetResource,
-  PageTextAlign,
-  PageTextStyle,
-  PageWhiteSpace,
   FetchStylesheetResult,
   RenderInput,
   PageSnapshot,

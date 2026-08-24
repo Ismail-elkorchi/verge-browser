@@ -10,6 +10,10 @@ import { extractCompleteText } from "./text.js";
 import type { PageRequestOptions } from "./types.js";
 import { resolveHref } from "./url.js";
 
+const MAX_FORMS_PER_PAGE = 256;
+const MAX_CONTROLS_PER_FORM = 2_000;
+const MAX_OPTIONS_PER_SELECT = 2_000;
+
 export interface FormControlBase {
   readonly id: string;
   readonly name: string;
@@ -132,40 +136,60 @@ export interface FormSubmissionRequest {
   readonly requestOptions: PageRequestOptions;
 }
 
-function collectFormControls(formNode: ElementNode): readonly ElementNode[] {
-  const controls: ElementNode[] = [];
-  const pending: ElementNode[] = [...formNode.children]
+interface FormControlNode {
+  readonly node: ElementNode;
+  readonly disabledByFieldset: boolean;
+}
+
+function collectFormControls(formNode: ElementNode): readonly FormControlNode[] {
+  const controls: FormControlNode[] = [];
+  const pending: FormControlNode[] = [...formNode.children]
     .reverse()
-    .filter((child): child is ElementNode => child.kind === "element");
-  while (pending.length > 0) {
-    const node = pending.pop();
-    if (!node) continue;
+    .filter((child): child is ElementNode => child.kind === "element")
+    .map((node) => ({ node, disabledByFieldset: false }));
+  while (pending.length > 0 && controls.length < MAX_CONTROLS_PER_FORM) {
+    const current = pending.pop();
+    if (!current) continue;
+    const { node, disabledByFieldset } = current;
     const tag = node.localName.toLowerCase();
     if (tag === "input" || tag === "textarea" || tag === "select" || tag === "button") {
-      controls.push(node);
+      controls.push(current);
       continue;
     }
+    const disabledFieldset = tag === "fieldset" && hasAttribute(node, "disabled");
+    const firstLegend = disabledFieldset
+      ? node.children.find((child): child is ElementNode =>
+        child.kind === "element" && child.localName.toLowerCase() === "legend")
+      : undefined;
     for (let index = node.children.length - 1; index >= 0; index -= 1) {
       const child = node.children[index];
-      if (child?.kind === "element") pending.push(child);
+      if (child?.kind === "element") {
+        pending.push({
+          node: child,
+          disabledByFieldset: disabledByFieldset || (disabledFieldset && child !== firstLegend)
+        });
+      }
     }
   }
   return controls;
 }
 
-function optionNodes(selectNode: ElementNode): readonly ElementNode[] {
-  const options: ElementNode[] = [];
-  const pending: ElementNode[] = [selectNode];
-  while (pending.length > 0) {
-    const node = pending.pop();
-    if (!node) continue;
+function optionNodes(selectNode: ElementNode): readonly { readonly node: ElementNode; readonly disabled: boolean }[] {
+  const options: { readonly node: ElementNode; readonly disabled: boolean }[] = [];
+  const pending = [{ node: selectNode, disabled: false }];
+  while (pending.length > 0 && options.length < MAX_OPTIONS_PER_SELECT) {
+    const current = pending.pop();
+    if (!current) continue;
+    const { node } = current;
     if (node !== selectNode && node.localName.toLowerCase() === "option") {
-      options.push(node);
+      options.push(current);
       continue;
     }
+    const disabled = current.disabled
+      || (node.localName.toLowerCase() === "optgroup" && hasAttribute(node, "disabled"));
     for (let index = node.children.length - 1; index >= 0; index -= 1) {
       const child = node.children[index];
-      if (child?.kind === "element") pending.push(child);
+      if (child?.kind === "element") pending.push({ node: child, disabled });
     }
   }
   return options;
@@ -187,19 +211,29 @@ function controlLabel(
 
 function labels(tree: DocumentTree): ReadonlyMap<string, string> {
   const values = new Map<string, string>();
-  for (const node of findAllByTagName(tree, "label")) {
+  const pending = [...tree.children].reverse();
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (node?.kind !== "element") continue;
+    if (node.localName.toLowerCase() !== "label") {
+      for (let index = node.children.length - 1; index >= 0; index -= 1) {
+        const child = node.children[index];
+        if (child !== undefined) pending.push(child);
+      }
+      continue;
+    }
     const target = getAttributeValue(node, "for");
     const text = extractCompleteText(node).replace(/\s+/gu, " ").trim();
     if (text.length === 0) continue;
     if (target) values.set(`attribute:${target}`, text);
-    const pending = [...node.children];
-    while (pending.length > 0) {
-      const child = pending.pop();
+    const labelChildren = [...node.children];
+    while (labelChildren.length > 0) {
+      const child = labelChildren.pop();
       if (!child || child.kind !== "element") continue;
       if (["input", "textarea", "select", "button"].includes(child.localName.toLowerCase())) {
         values.set(`node:${String(child.id)}`, text);
       }
-      pending.push(...child.children);
+      labelChildren.push(...child.children);
     }
   }
   return values;
@@ -207,23 +241,25 @@ function labels(tree: DocumentTree): ReadonlyMap<string, string> {
 
 function commonControl(
   node: ElementNode,
-  labelsByTarget: ReadonlyMap<string, string>
+  labelsByTarget: ReadonlyMap<string, string>,
+  disabledByFieldset = false
 ): FormControlBase {
   return {
     id: `control:${String(node.id)}`,
     name: getAttributeValue(node, "name") ?? "",
     label: controlLabel(node, labelsByTarget),
-    disabled: hasAttribute(node, "disabled"),
+    disabled: disabledByFieldset || hasAttribute(node, "disabled"),
     required: hasAttribute(node, "required")
   };
 }
 
 function extractControl(
   node: ElementNode,
-  labelsByTarget: ReadonlyMap<string, string>
+  labelsByTarget: ReadonlyMap<string, string>,
+  disabledByFieldset = false
 ): FormControl {
   const tag = node.localName.toLowerCase();
-  const common = commonControl(node, labelsByTarget);
+  const common = commonControl(node, labelsByTarget, disabledByFieldset);
   if (tag === "textarea") {
     const placeholder = getAttributeValue(node, "placeholder");
     return {
@@ -235,12 +271,16 @@ function extractControl(
     };
   }
   if (tag === "select") {
-    const options = optionNodes(node).map((option, index, all) => ({
-      value: getAttributeValue(option, "value") ?? extractCompleteText(option),
-      label: extractCompleteText(option).replace(/\s+/gu, " ").trim(),
-      selected: hasAttribute(option, "selected")
-        || (!hasAttribute(node, "multiple") && !all.some((entry) => hasAttribute(entry, "selected")) && index === 0),
-      disabled: hasAttribute(option, "disabled")
+    const optionEntries = optionNodes(node);
+    const hasSelectedOption = optionEntries.some((entry) =>
+      hasAttribute(entry.node, "selected")
+    );
+    const options = optionEntries.map((entry, index) => ({
+      value: getAttributeValue(entry.node, "value") ?? extractCompleteText(entry.node),
+      label: extractCompleteText(entry.node).replace(/\s+/gu, " ").trim(),
+      selected: hasAttribute(entry.node, "selected")
+        || (!hasAttribute(node, "multiple") && !hasSelectedOption && index === 0),
+      disabled: entry.disabled || hasAttribute(entry.node, "disabled")
     }));
     return { ...common, kind: "select", multiple: hasAttribute(node, "multiple"), options };
   }
@@ -252,7 +292,7 @@ function extractControl(
         ...common,
         label: buttonText || common.label,
         kind: type,
-        value: getAttributeValue(node, "value") ?? extractCompleteText(node).trim()
+        value: getAttributeValue(node, "value") ?? ""
       };
     }
     return { ...common, kind: "unsupported", inputType: type, reason: `Unsupported button type: ${type}` };
@@ -302,12 +342,12 @@ function extractControl(
 
 function normalizeMethod(value: string | null | undefined): string {
   const normalized = value?.trim().toLowerCase() ?? "";
-  return normalized.length === 0 ? "get" : normalized;
+  return normalized === "post" || normalized === "dialog" ? normalized : "get";
 }
 
 function finiteNumberAttribute(node: ElementNode, name: string): number | undefined {
   const raw = getAttributeValue(node, name);
-  if (raw === undefined) return undefined;
+  if (raw === undefined || raw.trim().length === 0) return undefined;
   const value = Number(raw);
   return Number.isFinite(value) ? value : undefined;
 }
@@ -317,8 +357,11 @@ export function extractForms(tree: DocumentTree, baseUrl: string): readonly Form
   const labelsByTarget = labels(tree);
   let formIndex = 0;
   for (const formNode of findAllByTagName(tree, "form")) {
+    if (formIndex >= MAX_FORMS_PER_PAGE) break;
     const actionRaw = getAttributeValue(formNode, "action") ?? baseUrl;
-    const controls = collectFormControls(formNode).map((control) => extractControl(control, labelsByTarget));
+    const controls = collectFormControls(formNode).map(({ node, disabledByFieldset }) =>
+      extractControl(node, labelsByTarget, disabledByFieldset)
+    );
     const index = formIndex + 1;
     forms.push({
       id: `form:${String(formNode.id)}`,
@@ -354,8 +397,14 @@ function successfulValues(
     }
     const supplied = replacements.get(control.id);
     if (supplied !== undefined) {
+      const enabledSelectValues = control.kind === "select"
+        ? new Set(control.options.filter((option) => !option.disabled).map((option) => option.value))
+        : null;
       for (const value of supplied) {
-        if (value !== null) params.append(control.name, value);
+        if (value === null) continue;
+        if (enabledSelectValues === null || enabledSelectValues.has(value)) {
+          params.append(control.name, value);
+        }
       }
       continue;
     }
@@ -395,7 +444,7 @@ export function buildFormSubmissionRequest(
 ): FormSubmissionRequest {
   const method = form.method.toLowerCase();
   if (method !== "get" && method !== "post") throw new Error(`Unsupported form method: ${form.method}`);
-  if (form.encoding !== "application/x-www-form-urlencoded") {
+  if (method === "post" && form.encoding !== "application/x-www-form-urlencoded") {
     throw new Error(`Unsupported form encoding: ${form.encoding}`);
   }
   const params = successfulValues(form, values, submitterId);

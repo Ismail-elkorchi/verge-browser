@@ -76,20 +76,23 @@ npm install @ismail-elkorchi/verge-browser
 
 ```ts
 import {
-  BrowserSession,
-  layoutPageContent,
+  parseHtml,
+  renderDocumentToTerminal,
   resolveInputUrl
 } from "@ismail-elkorchi/verge-browser";
 
 const target = resolveInputUrl("example.com");
-const session = new BrowserSession();
-try {
-  const page = await session.open(target);
-  const layout = layoutPageContent(page.content, 80);
-  console.log(layout.rows.map((row) => row.text).join("\n"));
-} finally {
-  await session.close();
-}
+const document = parseHtml("<main><h1>Example</h1></main>");
+const page = renderDocumentToTerminal({
+  tree: document.tree,
+  requestUrl: target,
+  finalUrl: target,
+  status: 200,
+  statusText: "OK",
+  fetchedAtIso: new Date().toISOString(),
+  width: 80
+});
+console.log(page.lines.join("\n"));
 ```
 
 The npm package contains the full Node CLI and library. The JSR package exposes
@@ -105,6 +108,19 @@ font metrics, generated content, animation, or raster images. Client-rendered
 sites, anti-bot challenges, media, and unsupported form encodings may therefore
 be unavailable. Network access remains constrained by the package’s protocol,
 redirect, content-type, timeout, and size policies.
+Interactive projection is capped at 256 forms per page, 2,000 controls per
+form, and 2,000 options per select to keep hostile documents responsive.
+
+On POSIX hosts, persisted cookies, history, and workspace data use a `0700`
+default profile directory and `0600` state files. Windows uses the current user
+profile directory ACL. Automatic cross-origin stylesheets are anonymous, and
+page-initiated stylesheets and downloads never inherit the explicit-local-
+navigation capability. Links and forms also retain the public-network boundary
+and cannot manufacture `file:` or private-network navigation; local targets
+remain available when entered explicitly. Cookie `SameSite` context follows the
+initiating page for links, forms, redirects, and downloads; omitted attributes
+default to `Lax`, and `SameSite=None` cookies require `Secure`.
+`Secure` cookies are accepted only from HTTPS responses.
 
 See the [first-session tutorial](docs/tutorial/first-session.md), [CLI
 reference](docs/reference/cli.md), and [API overview](docs/reference/api-overview.md).

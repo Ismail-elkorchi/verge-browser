@@ -10,7 +10,12 @@ import {
   type FormEntry
 } from "../app/forms.js";
 import { buildPageContent } from "../app/render.js";
-import type { BrowserSession } from "../app/session.js";
+import { pageContent } from "../app/page-content.js";
+import { assertPageInitiatedNavigation } from "../app/security.js";
+import {
+  openPageInitiatedNavigation,
+  type BrowserSession
+} from "../app/session.js";
 import {
   type BrowserWorkspace,
   type DownloadRecord,
@@ -61,6 +66,7 @@ function readerLines(snapshot: PageSnapshot): readonly string[] {
 }
 
 function diagnosticsLines(snapshot: PageSnapshot): readonly string[] {
+  const content = pageContent(snapshot);
   return [
     `URL: ${snapshot.finalUrl}`,
     `Status: ${String(snapshot.status)} ${snapshot.statusText}`,
@@ -74,10 +80,25 @@ function diagnosticsLines(snapshot: PageSnapshot): readonly string[] {
     `Stylesheets: ${String(snapshot.diagnostics.stylesheetCount)}`,
     `Style issues: ${String(snapshot.diagnostics.styleIssueCount)}`,
     `Total ms: ${String(snapshot.diagnostics.totalDurationMs)}`,
-    ...snapshot.content.styleIssues.slice(0, 12).map((issue) =>
+    ...content.styleIssues.slice(0, 12).map((issue) =>
       `CSS ${issue.code}${issue.occurrences > 1 ? ` ×${String(issue.occurrences)}` : ""}: ${issue.message} (${issue.sourceUrl})`
     )
   ];
+}
+
+async function settleBrowserCleanup(
+  operations: readonly (() => Promise<void>)[],
+  message: string
+): Promise<void> {
+  const outcomes = await Promise.allSettled(
+    operations.map((operation) => Promise.resolve().then(operation))
+  );
+  const errors: unknown[] = [];
+  for (const outcome of outcomes) {
+    if (outcome.status === "rejected") errors.push(outcome.reason as unknown);
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, message);
 }
 
 export interface BrowserControllerOptions {
@@ -104,7 +125,9 @@ export class BrowserController {
   readonly #downloadDirectory: string;
   readonly #downloadMaxBytes: number;
   readonly #sessions = new Map<string, BrowserSession>();
+  readonly #provisionalSessionIds = new Set<string>();
   #nextDocumentNumber = 1;
+  #workspaceSaveRevision = 0;
 
   public constructor(options: BrowserControllerOptions) {
     this.#store = options.store;
@@ -128,6 +151,10 @@ export class BrowserController {
   }
 
   public async saveWorkspace(state: BrowserTuiState): Promise<void> {
+    const revision = ++this.#workspaceSaveRevision;
+    for (const document of [...state.documents, ...state.recentlyClosed]) {
+      this.#provisionalSessionIds.delete(document.id);
+    }
     await this.#releaseDiscardedSessions(state);
     const workspace: BrowserWorkspace = {
       documents: state.documents.map((document) => ({
@@ -137,25 +164,43 @@ export class BrowserController {
       activeDocumentIndex: state.activeDocumentIndex,
       sidePanel: state.sidePanel satisfies StoredSidePanel
     };
+    if (revision !== this.#workspaceSaveRevision) return;
     await this.#store.saveWorkspace(workspace);
   }
 
   public async close(): Promise<void> {
     const sessions = [...this.#sessions.values()];
     this.#sessions.clear();
-    await Promise.all([
-      ...sessions.map(async (session) => {
-        await session.close();
-      }),
-      this.#services.close()
-    ]);
+    this.#provisionalSessionIds.clear();
+    const errors: unknown[] = [];
+    try {
+      await settleBrowserCleanup([
+        ...sessions.map((session) => () => session.close()),
+        () => this.#services.close()
+      ], "Failed to close every browser session and host service.");
+    } catch (error) {
+      if (error instanceof AggregateError) {
+        for (const nested of error.errors as unknown[]) errors.push(nested);
+      } else {
+        errors.push(error);
+      }
+    }
+    try {
+      await this.#store.flush();
+    } catch (error) {
+      errors.push(error);
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) {
+      throw new AggregateError(errors, "Failed to close every browser resource.");
+    }
   }
 
   public async openInitial(
     target: string,
     scrollAnchor?: BrowserDocumentState["scrollAnchor"]
   ): Promise<BrowserDocumentState> {
-    return this.#openNewDocument(target, undefined, scrollAnchor);
+    return this.#openNewDocument(target, undefined, scrollAnchor, true);
   }
 
   public resolveOmnibox(value: string, currentUrl: string): string {
@@ -206,7 +251,7 @@ export class BrowserController {
       return false;
     };
 
-    if (addUntilFull(document.snapshot.content.links, (link) => ({
+    if (addUntilFull(pageContent(document.snapshot).links, (link) => ({
         value: link.resolvedHref,
         label: link.label,
         description: "Current page"
@@ -237,6 +282,34 @@ export class BrowserController {
     return { canGoBack: session.canBack(), canGoForward: session.canForward() };
   }
 
+  public restoreDocument(document: BrowserDocumentState): BrowserDocumentState {
+    const session = this.#session(document.id);
+    const snapshot = session.current ?? document.snapshot;
+    const snapshotChanged = snapshot !== document.snapshot;
+    const content = pageContent(snapshot);
+    const scrollAnchor = content.blocks.some(
+      (block) => block.id === document.scrollAnchor.blockId
+    )
+      ? document.scrollAnchor
+      : {
+        blockId: content.blocks[0]?.id ?? "page:empty",
+        rowOffset: 0
+      };
+    return {
+      ...document,
+      snapshot,
+      scrollAnchor,
+      ...(snapshotChanged
+        ? { search: null, formValues: {}, formEditors: {} }
+        : {}),
+      loading: false,
+      pendingUrl: null,
+      canGoBack: session.canBack(),
+      canGoForward: session.canForward(),
+      error: null
+    };
+  }
+
   public async navigate(
     document: BrowserDocumentState,
     target: string,
@@ -244,13 +317,11 @@ export class BrowserController {
     parseMode?: "text" | "stream"
   ): Promise<PageSnapshot> {
     const resolvedTarget = resolveInputUrl(target, document.snapshot.finalUrl);
-    const snapshot = await this.#session(document.id).openWithRequest(
+    return this.#session(document.id).openWithRequest(
       resolvedTarget,
       requestOptions,
       parseMode
     );
-    await this.#persist(snapshot);
-    return snapshot;
   }
 
   public async openLink(
@@ -258,9 +329,7 @@ export class BrowserController {
     linkIndex: number,
     signal?: AbortSignal
   ): Promise<PageSnapshot> {
-    const snapshot = await this.#session(document.id).openLink(linkIndex, signal);
-    await this.#persist(snapshot);
-    return snapshot;
+    return this.#session(document.id).openLink(linkIndex, signal);
   }
 
   public async traverse(
@@ -269,13 +338,11 @@ export class BrowserController {
     signal?: AbortSignal
   ): Promise<PageSnapshot> {
     const session = this.#session(document.id);
-    const snapshot = operation === "back"
+    return operation === "back"
       ? await session.back(signal)
       : operation === "forward"
         ? await session.forward(signal)
         : await session.reload(signal);
-    await this.#persist(snapshot);
-    return snapshot;
   }
 
   public openNew(
@@ -283,6 +350,15 @@ export class BrowserController {
     signal?: AbortSignal
   ): Promise<BrowserDocumentState> {
     return this.#openNewDocument(target, signal);
+  }
+
+  public openNewFromDocument(
+    document: BrowserDocumentState,
+    target: string,
+    signal?: AbortSignal
+  ): Promise<BrowserDocumentState> {
+    assertPageInitiatedNavigation(document.snapshot.finalUrl, target);
+    return this.#openNewDocument(target, signal, undefined, false, document.snapshot.finalUrl);
   }
 
   public async submitForm(
@@ -293,19 +369,28 @@ export class BrowserController {
     signal?: AbortSignal
   ): Promise<PageSnapshot> {
     const submission = buildFormSubmissionRequest(form, values, submitterId);
-    return this.navigate(document, submission.url, {
+    assertPageInitiatedNavigation(document.snapshot.finalUrl, submission.url);
+    return openPageInitiatedNavigation(
+      this.#session(document.id),
+      document.snapshot.finalUrl,
+      submission.url,
+      {
       ...submission.requestOptions,
       ...(signal === undefined ? {} : { signal })
-    });
+      }
+    );
   }
 
   public async applyEdits(
     document: BrowserDocumentState,
-    edits: readonly Edit[]
+    edits: readonly Edit[],
+    signal?: AbortSignal
   ): Promise<PageSnapshot> {
-    const snapshot = await this.#session(document.id).applyEdits(edits);
+    return this.#session(document.id).applyEdits(edits, signal);
+  }
+
+  public async persistSnapshot(snapshot: PageSnapshot): Promise<void> {
     await this.#persist(snapshot);
-    return snapshot;
   }
 
   public pickerEntries(
@@ -317,7 +402,7 @@ export class BrowserController {
     const active = documents[activeDocumentIndex];
     if (!active) return [];
     if (kind === "links") {
-      return active.snapshot.content.links.map((link) => ({
+      return pageContent(active.snapshot).links.map((link) => ({
         id: `link-${String(link.index)}`,
         label: link.label,
         description: link.resolvedHref,
@@ -326,7 +411,7 @@ export class BrowserController {
     }
     if (kind === "outline") {
       return buildOutline(active.snapshot.document.tree).entries.map((entry, index) => {
-        const blockId = active.snapshot.content.blocks.find(
+        const blockId = pageContent(active.snapshot).blocks.find(
           (block) => block.text.toLowerCase().includes(entry.text.trim().toLowerCase())
         )?.id;
         return {
@@ -369,7 +454,7 @@ export class BrowserController {
   public async toggleBookmark(document: BrowserDocumentState, name?: string): Promise<string> {
     const added = await this.#store.toggleBookmark(
       document.snapshot.finalUrl,
-      name ?? document.snapshot.content.title
+      name ?? pageContent(document.snapshot).title
     );
     return added ? "Bookmark added." : "Bookmark removed.";
   }
@@ -394,8 +479,13 @@ export class BrowserController {
   public async download(
     url: string,
     id: string,
+    sourceUrl: string,
     signal?: AbortSignal
   ): Promise<DownloadRecord> {
+    const parsedUrl = new URL(url);
+    if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+      throw new Error(`Downloads require an HTTP or HTTPS URL, not ${parsedUrl.protocol}`);
+    }
     const startedAtIso = new Date().toISOString();
     const initial: DownloadRecord = {
       id,
@@ -413,6 +503,7 @@ export class BrowserController {
     try {
       const downloaded = await this.#services.downloadFile({
         url,
+        sourceUrl,
         directory: this.#downloadDirectory,
         maxBytes: this.#downloadMaxBytes,
         session: this.#store.httpSession,
@@ -454,43 +545,67 @@ export class BrowserController {
   }
 
   public async openExternal(target: string): Promise<string> {
-    await this.#services.openExternal(target);
-    return `Opened ${target} externally.`;
+    const parsedTarget = new URL(target);
+    if (
+      parsedTarget.protocol !== "http:"
+      && parsedTarget.protocol !== "https:"
+      && parsedTarget.protocol !== "file:"
+    ) {
+      throw new Error(`External opening does not support ${parsedTarget.protocol}`);
+    }
+    await this.#services.openExternal(parsedTarget.toString());
+    return `Opened ${parsedTarget.toString()} externally.`;
   }
 
   async #openNewDocument(
     target: string,
     signal?: AbortSignal,
-    scrollAnchor?: BrowserDocumentState["scrollAnchor"]
+    scrollAnchor?: BrowserDocumentState["scrollAnchor"],
+    persist = false,
+    sourceUrl?: string
   ): Promise<BrowserDocumentState> {
     const id = this.#newDocumentId();
     const session = this.#createSession(this.#store.httpSession);
     this.#sessions.set(id, session);
-    const snapshot = await this.#open(session, target, signal);
-    return this.#document(id, snapshot, scrollAnchor);
+    this.#provisionalSessionIds.add(id);
+    try {
+      const snapshot = await this.#open(session, target, signal, sourceUrl);
+      if (persist) await this.#persist(snapshot);
+      return this.#document(id, snapshot, scrollAnchor);
+    } catch (error) {
+      this.#sessions.delete(id);
+      this.#provisionalSessionIds.delete(id);
+      await session.destroy(error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    }
   }
 
-  async #open(session: BrowserSession, target: string, signal?: AbortSignal): Promise<PageSnapshot> {
+  async #open(
+    session: BrowserSession,
+    target: string,
+    signal?: AbortSignal,
+    sourceUrl?: string
+  ): Promise<PageSnapshot> {
     const resolvedTarget = resolveInputUrl(target);
-    const snapshot = await session.open(
-      resolvedTarget,
-      signal
-    );
-    await this.#persist(snapshot);
+    const snapshot = sourceUrl === undefined
+      ? await session.open(resolvedTarget, signal)
+      : await openPageInitiatedNavigation(
+        session,
+        sourceUrl,
+        resolvedTarget,
+        { ...(signal === undefined ? {} : { signal }) }
+      );
     return snapshot;
   }
 
   async #persist(snapshot: PageSnapshot): Promise<void> {
     if (snapshot.finalUrl.startsWith("about:")) return;
-    await this.#store.recordHistory(
+    const content = pageContent(snapshot);
+    await this.#store.recordPage(
       snapshot.finalUrl,
-      snapshot.content.title,
-      excerpt(snapshot.content.blocks.map((block) => block.text))
-    );
-    await this.#store.recordIndexDocument(
-      snapshot.finalUrl,
-      snapshot.content.title,
-      snapshot.content.blocks.map((block) => block.text).join("\n")
+      content.title,
+      excerpt(content.blocks.map((block) => block.text)),
+      content.blocks.map((block) => block.text).join("\n")
     );
   }
 
@@ -506,14 +621,13 @@ export class BrowserController {
       ...state.recentlyClosed.map((document) => document.id)
     ]);
     const discarded = [...this.#sessions.entries()]
-      .filter(([id]) => !retainedIds.has(id));
+      .filter(([id]) => !retainedIds.has(id) && !this.#provisionalSessionIds.has(id));
     for (const [id] of discarded) {
       this.#sessions.delete(id);
     }
-    await Promise.all(
-      discarded.map(async ([, session]) => {
-        await session.close();
-      })
+    await settleBrowserCleanup(
+      discarded.map(([, session]) => () => session.close()),
+      "Failed to close every discarded browser session."
     );
   }
 
@@ -528,12 +642,13 @@ export class BrowserController {
     snapshot: PageSnapshot,
     restoredScrollAnchor?: BrowserDocumentState["scrollAnchor"]
   ): BrowserDocumentState {
-    const firstAnchor = { blockId: snapshot.content.blocks[0]?.id ?? "page:empty", rowOffset: 0 };
+    const content = pageContent(snapshot);
+    const firstAnchor = { blockId: content.blocks[0]?.id ?? "page:empty", rowOffset: 0 };
     return {
       id,
       snapshot,
       scrollAnchor: restoredScrollAnchor
-        && snapshot.content.blocks.some((block) => block.id === restoredScrollAnchor.blockId)
+        && content.blocks.some((block) => block.id === restoredScrollAnchor.blockId)
         ? restoredScrollAnchor
         : firstAnchor,
       search: null,

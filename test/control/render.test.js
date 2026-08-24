@@ -529,3 +529,26 @@ test("layout uses structural spacing instead of blank rows after every block", (
     ["Title", "Introduction", "- One", "- Two", "- Three", "| A |", "| B |"]
   );
 });
+
+test("large forms with unique radio groups avoid quadratic rendering work", {
+  timeout: 10_000
+}, () => {
+  const controlCount = 30_000;
+  const document = parse(`<form>${Array.from(
+    { length: controlCount },
+    (_, index) => `<input type="radio" name="group-${String(index)}">`
+  ).join("")}</form>`);
+
+  const rendered = renderDocumentToTerminal({
+    tree: document.tree,
+    requestUrl: "https://example.test/large-form",
+    finalUrl: "https://example.test/large-form",
+    status: 200,
+    statusText: "OK",
+    fetchedAtIso: "2026-01-01T00:00:00.000Z",
+    width: 80
+  });
+
+  assert.equal(rendered.actionables[0]?.kind, "form");
+  assert.equal(rendered.actionables[0]?.fieldCount, 2_000);
+});

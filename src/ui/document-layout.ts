@@ -1,11 +1,12 @@
 import type { Rect } from "@ismail-elkorchi/terminal-ui/renderer";
 
 import { documentContentColumns, layoutPageContent } from "../app/render.js";
+import { pageContent } from "../app/page-content.js";
 import type { PageAction, PageContent, PageLayout } from "../app/types.js";
 import type { BrowserDocumentState } from "./model.js";
 
 export function documentLayout(document: BrowserDocumentState, columns: number): PageLayout {
-  return pageContentLayout(document.snapshot.content, columns);
+  return pageContentLayout(pageContent(document.snapshot), columns);
 }
 
 export function pageContentLayout(content: PageContent, columns: number): PageLayout {
@@ -75,7 +76,7 @@ export function actionById(
 ): PageAction | undefined {
   return actionId === null
     ? undefined
-    : document.snapshot.content.actions.find((action) => action.id === actionId);
+    : pageContent(document.snapshot).actions.find((action) => action.id === actionId);
 }
 
 export function activeSearchMatch(document: BrowserDocumentState) {
