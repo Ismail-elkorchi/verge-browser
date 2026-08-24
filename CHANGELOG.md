@@ -40,9 +40,9 @@ All notable changes are documented in this file.
   start.
 - Restrict persisted cookies and browsing state to POSIX `0700` directories and
   `0600` files; bound indexed text, restored tabs, downloads, cookie candidates,
-  and serialized state; refuse a symlink state file; and leave non-profile
-  custom parent directories untouched. Windows uses the current user profile
-  ACL.
+  and serialized state; refuse a symlink state file; validate and read state
+  through the same open handle; and leave non-profile custom parent directories
+  untouched. Windows uses the current user profile ACL.
 - Keep page-initiated stylesheet cookies on the document origin, including
   across redirects, make cross-origin stylesheet requests anonymous, and
   enforce `SameSite` context for page navigation and downloads, including

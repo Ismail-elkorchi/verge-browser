@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { HttpFields } from "@ismail-elkorchi/http-client";
 
-import { BrowserStore } from "../../dist/app/storage.js";
+import { BrowserStore, readBrowserStateFile } from "../../dist/app/storage.js";
 
 test("BrowserStore persists bookmarks and history", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "verge-store-"));
@@ -296,6 +296,27 @@ test("BrowserStore refuses a symlink in place of the credential-bearing state fi
       BrowserStore.open({ statePath }),
       /state path must be a regular file/u
     );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("state loading reads the same file handle that passed validation", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "verge-store-race-"));
+  const statePath = join(tempDir, "state.json");
+  const originalPath = join(tempDir, "original.json");
+  const replacementPath = join(tempDir, "replacement.json");
+
+  try {
+    await writeFile(statePath, '{"marker":"original"}\n', "utf8");
+    await writeFile(replacementPath, '{"marker":"replacement"}\n', "utf8");
+    const loaded = await readBrowserStateFile(statePath, async () => {
+      await rename(statePath, originalPath);
+      await rename(replacementPath, statePath);
+    });
+
+    assert.equal(JSON.parse(loaded).marker, "original");
+    assert.equal(JSON.parse(await readFile(statePath, "utf8")).marker, "replacement");
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

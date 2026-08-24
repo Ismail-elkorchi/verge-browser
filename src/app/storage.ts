@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { constants as fileSystemConstants } from "node:fs";
+import { chmod, lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { homedir } from "node:os";
 
@@ -300,28 +301,75 @@ function normalizeState(value: unknown): BrowserState {
   };
 }
 
-async function loadStateFromPath(statePath: string): Promise<BrowserState> {
+/** @internal Reads credential-bearing state through one validated file handle. */
+export async function readBrowserStateFile(
+  statePath: string,
+  afterOpen: () => void | Promise<void> = () => undefined
+): Promise<string | null> {
+  let expectedWindowsFile: Awaited<ReturnType<typeof lstat>> | undefined;
+  if (process.platform === "win32") {
+    try {
+      expectedWindowsFile = await lstat(statePath);
+      if (!expectedWindowsFile.isFile() || expectedWindowsFile.isSymbolicLink()) {
+        throw new Error(`Browser state path must be a regular file: ${statePath}`);
+      }
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+        return null;
+      }
+      throw error;
+    }
+  }
+  let handle: Awaited<ReturnType<typeof open>>;
   try {
-    const file = await lstat(statePath);
-    if (!file.isFile() || file.isSymbolicLink()) {
-      throw new Error(`Browser state path must be a regular file: ${statePath}`);
+    handle = await open(
+      statePath,
+      process.platform === "win32"
+        ? fileSystemConstants.O_RDONLY
+        : fileSystemConstants.O_RDONLY | fileSystemConstants.O_NOFOLLOW
+    );
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error) {
+      if (error.code === "ENOENT") return null;
+      if (error.code === "ELOOP") {
+        throw new Error(`Browser state path must be a regular file: ${statePath}`, {
+          cause: error
+        });
+      }
+    }
+    throw error;
+  }
+  try {
+    await afterOpen();
+    const file = await handle.stat();
+    if (!file.isFile()) throw new Error(`Browser state path must be a regular file: ${statePath}`);
+    if (
+      expectedWindowsFile !== undefined
+      && (
+        file.dev !== expectedWindowsFile.dev
+        || file.ino !== expectedWindowsFile.ino
+      )
+    ) {
+      throw new Error(`Browser state path changed while it was opened: ${statePath}`);
     }
     if (file.size > MAX_STATE_BYTES) {
       throw new Error(`Browser state exceeds the ${String(MAX_STATE_BYTES)}-byte safety limit: ${statePath}`);
     }
-    await restrictPermissions(statePath, PRIVATE_FILE_MODE);
-    const rawText = await readFile(statePath, "utf8");
-    try {
-      const parsed = JSON.parse(rawText) as unknown;
-      return normalizeState(parsed);
-    } catch {
-      return createEmptyState();
-    }
-  } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error["code"] === "ENOENT") {
-      return createEmptyState();
-    }
-    throw error;
+    if (process.platform !== "win32") await handle.chmod(PRIVATE_FILE_MODE);
+    return await handle.readFile("utf8");
+  } finally {
+    await handle.close();
+  }
+}
+
+async function loadStateFromPath(statePath: string): Promise<BrowserState> {
+  const rawText = await readBrowserStateFile(statePath);
+  if (rawText === null) return createEmptyState();
+  try {
+    const parsed = JSON.parse(rawText) as unknown;
+    return normalizeState(parsed);
+  } catch {
+    return createEmptyState();
   }
 }
 
@@ -366,7 +414,6 @@ async function saveStateToPath(statePath: string, state: BrowserState): Promise<
     });
     await restrictPermissions(tempPath, PRIVATE_FILE_MODE);
     await rename(tempPath, statePath);
-    await restrictPermissions(statePath, PRIVATE_FILE_MODE);
   } finally {
     await rm(tempPath, { force: true });
   }

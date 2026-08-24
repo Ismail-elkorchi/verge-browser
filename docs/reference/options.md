@@ -128,6 +128,9 @@
 - A custom `statePath` always receives `0600` file protection, but its existing
   parent directory is not chmodded unless it is the dedicated
   `verge-browser` profile directory. Callers own custom parent-directory access.
+- State loading rejects symbolic-link paths and validates and reads through one
+  file handle so a path replacement cannot redirect the credential-bearing
+  read.
 - Indexed page text is capped at 16 KiB for each of at most 250 pages, the
   workspace at 50 tabs, downloads at 200 records, and the persisted cookie jar
   at 1,000 cookies / 4 MiB. State input and replacement files have an 80 MiB
