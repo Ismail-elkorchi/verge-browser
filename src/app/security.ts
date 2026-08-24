@@ -24,6 +24,47 @@ export const DEFAULT_SECURITY_POLICY: Required<SecurityPolicyOptions> = Object.f
   retryDelayMs: 75
 });
 
+export function resolveSecurityPolicy(
+  options: SecurityPolicyOptions
+): Required<SecurityPolicyOptions> {
+  const candidate: unknown = options;
+  if (
+    typeof candidate !== "object"
+    || candidate === null
+    || Array.isArray(candidate)
+  ) {
+    throw new TypeError("Security policy must be an object.");
+  }
+  const knownKeys = new Set([
+    "maxRedirects",
+    "maxContentBytes",
+    "maxRequestRetries",
+    "retryDelayMs"
+  ]);
+  const unknownKey = Object.keys(candidate).find((key) => !knownKeys.has(key));
+  if (unknownKey !== undefined) {
+    throw new TypeError(`Unknown security policy option: ${unknownKey}`);
+  }
+  const resolved = {
+    ...DEFAULT_SECURITY_POLICY,
+    ...candidate as SecurityPolicyOptions
+  };
+  assertNonNegativeSafeInteger(resolved.maxRedirects, "maxRedirects");
+  assertNonNegativeSafeInteger(resolved.maxContentBytes, "maxContentBytes");
+  assertNonNegativeSafeInteger(
+    resolved.maxRequestRetries,
+    "maxRequestRetries"
+  );
+  assertNonNegativeSafeInteger(resolved.retryDelayMs, "retryDelayMs");
+  return Object.freeze(resolved);
+}
+
+function assertNonNegativeSafeInteger(value: number, name: string): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError(`${name} must be a non-negative safe integer.`);
+  }
+}
+
 /**
  * Validates that a parsed URL uses one of the supported protocols.
  *
@@ -53,6 +94,18 @@ export function assertAllowedUrl(rawUrl: string): URL {
   return parsed;
 }
 
+export function assertPageInitiatedNavigation(sourceUrl: string, targetUrl: string): void {
+  const source = new URL(sourceUrl);
+  const target = new URL(targetUrl);
+  assertAllowedProtocol(target);
+  if (
+    target.protocol === "file:"
+    && source.protocol !== "file:"
+  ) {
+    throw new Error("Blocked a page-initiated local-file navigation.");
+  }
+}
+
 /**
  * Determines whether a response content type should be treated as HTML-like input.
  *
@@ -63,6 +116,9 @@ export function assertAllowedUrl(rawUrl: string): URL {
  */
 export function isHtmlLikeContentType(contentType: string | null): boolean {
   if (!contentType) return true;
-  const normalized = contentType.toLowerCase();
-  return normalized.includes("text/html") || normalized.includes("application/xhtml+xml") || normalized.includes("application/xml");
+  const essence = contentType.split(";", 1)[0]?.trim().toLowerCase();
+  return essence === "text/html"
+    || essence === "application/xhtml+xml"
+    || essence === "application/xml"
+    || essence === "text/xml";
 }

@@ -3,19 +3,14 @@ import test from "node:test";
 
 import { parseCommand } from "../../dist/app/commands.js";
 
-test("parseCommand handles link index", () => {
-  assert.deepEqual(parseCommand("open 7"), { kind: "open-link", index: 7 });
-  assert.deepEqual(parseCommand("7"), { kind: "open-link", index: 7 });
-});
-
 test("parseCommand handles navigation and control", () => {
   assert.deepEqual(parseCommand("go example.com"), { kind: "go", target: "example.com" });
   assert.deepEqual(parseCommand("stream example.com"), { kind: "go-stream", target: "example.com" });
   assert.deepEqual(parseCommand("help"), { kind: "help" });
   assert.deepEqual(parseCommand("reader"), { kind: "reader" });
-  assert.deepEqual(parseCommand("documents"), { kind: "documents" });
   assert.deepEqual(parseCommand("back"), { kind: "back" });
   assert.deepEqual(parseCommand("diag"), { kind: "diag" });
+  assert.deepEqual(parseCommand("diagnostics"), { kind: "diag" });
   assert.deepEqual(parseCommand("outline"), { kind: "outline" });
   assert.deepEqual(parseCommand("close"), { kind: "close-document" });
   assert.deepEqual(parseCommand("reopen"), { kind: "reopen-document" });
@@ -24,22 +19,14 @@ test("parseCommand handles navigation and control", () => {
 
 test("parseCommand handles bookmark and history commands", () => {
   assert.deepEqual(parseCommand("bookmark"), { kind: "bookmark-list" });
+  assert.deepEqual(parseCommand("bookmarks"), { kind: "bookmark-list" });
   assert.deepEqual(parseCommand("bookmark add"), { kind: "bookmark-add" });
   assert.deepEqual(parseCommand("bookmark add Main Site"), { kind: "bookmark-add", name: "Main Site" });
-  assert.deepEqual(parseCommand("bookmark open 2"), { kind: "bookmark-open", index: 2 });
   assert.deepEqual(parseCommand("cookie"), { kind: "cookie-list" });
   assert.deepEqual(parseCommand("cookie clear"), { kind: "cookie-clear" });
   assert.deepEqual(parseCommand("history"), { kind: "history-list" });
-  assert.deepEqual(parseCommand("history open 1"), { kind: "history-open", index: 1 });
+  assert.deepEqual(parseCommand("downloads"), { kind: "download-list" });
   assert.deepEqual(parseCommand("recall alpha beta"), { kind: "recall", query: "alpha beta" });
-  assert.deepEqual(parseCommand("recall open 1"), { kind: "recall-open", index: 1 });
-  assert.deepEqual(parseCommand("form"), { kind: "form-list" });
-  assert.deepEqual(parseCommand("form submit 1"), { kind: "form-submit", index: 1, overrides: {} });
-  assert.deepEqual(parseCommand("form submit 2 q=term page=3"), {
-    kind: "form-submit",
-    index: 2,
-    overrides: { q: "term", page: "3" }
-  });
 });
 
 test("parseCommand handles viewport commands", () => {
@@ -77,31 +64,24 @@ test("parseCommand handles viewport commands", () => {
     target: 9,
     html: "<span>z</span>"
   });
-  assert.deepEqual(parseCommand("download ./snapshot.html"), {
+  assert.deepEqual(parseCommand("download"), { kind: "download" });
+  assert.deepEqual(parseCommand("download https://example.com/archive.zip"), {
     kind: "download",
+    target: "https://example.com/archive.zip"
+  });
+  assert.deepEqual(parseCommand("save page ./snapshot.html"), {
+    kind: "save-page",
     path: "./snapshot.html"
   });
   assert.deepEqual(parseCommand("save text ./view.txt"), {
     kind: "save-text",
     path: "./view.txt"
   });
-  assert.deepEqual(parseCommand("save csv ./view.csv"), {
-    kind: "save-csv",
-    path: "./view.csv"
-  });
 });
 
-test("parseCommand rejects non-positive indices", () => {
-  assert.deepEqual(parseCommand("open 0"), {
+test("parseCommand treats unrecognized input as a location or search", () => {
+  assert.deepEqual(parseCommand("0"), {
     kind: "go",
     target: "0"
-  });
-  assert.deepEqual(parseCommand("bookmark open 0"), {
-    kind: "invalid",
-    reason: "bookmark open requires a positive numeric index"
-  });
-  assert.deepEqual(parseCommand("history open 0"), {
-    kind: "invalid",
-    reason: "history open requires a positive numeric index"
   });
 });

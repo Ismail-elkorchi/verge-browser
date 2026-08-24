@@ -31,5 +31,8 @@ import { parse, type ParsedDocument, type ParseOptions } from "@ismail-elkorchi/
  * ```
  */
 export function parseHtml(html: string, options: ParseOptions = {}): ParsedDocument {
-  return parse(html, options);
+  return parse(html, {
+    scriptingMode: "disabled",
+    ...options
+  });
 }

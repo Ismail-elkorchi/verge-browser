@@ -31,21 +31,23 @@
  * @module
  */
 export { formatHelpText, parseCommand, type BrowserCommand } from "./app/commands.js";
-export { parseSetCookie, mergeSetCookieHeaders, pruneExpiredCookies, cookieHeaderForUrl, type CookieEntry } from "./app/cookies.js";
 export {
   fetchPage,
   fetchPageStream,
+  fetchStylesheet,
   readByteStreamToText,
-  classifyNetworkFailure,
   NetworkFetchError,
-  type LocalFileReader
+  PageNetworkClient,
+  type LocalFileReader,
+  type PageNetworkClientOptions
 } from "./app/fetch-page.js";
 export {
   extractForms,
   buildGetSubmissionUrl,
   buildFormSubmissionRequest,
   type FormEntry,
-  type FormField,
+  type FormControl,
+  type FormControlValue,
   type FormSubmissionRequest
 } from "./app/forms.js";
 export {
@@ -71,7 +73,8 @@ export {
   type BrowserSessionOptions,
   type PageLoader,
   type PageStreamLoader,
-  type PageRenderer
+  type PageRenderer,
+  type StylesheetPolicyOptions
 } from "./app/session.js";
 export { terminalWidth, terminalHeight, clearTerminal, formatRenderedPage, formatLinkTable } from "./app/terminal.js";
 export type {
@@ -84,11 +87,20 @@ export type {
   FetchPagePayload,
   PageRequestOptions,
   PageDiagnostics,
+  PageStyleIssue,
+  PageStyleIssueCode,
+  PageStylesheetResource,
+  FetchStylesheetResult,
   RenderInput,
   PageSnapshot,
   KeyboardKey
 } from "./app/types.js";
-export { resolveInputUrl, resolveHref } from "./app/url.js";
+export {
+  DEFAULT_SEARCH_URL_TEMPLATE,
+  resolveInputUrl,
+  resolveOmniboxInput,
+  resolveHref
+} from "./app/url.js";
 export { createBunHost } from "./runtime/bun-host.js";
 export { createDenoHost } from "./runtime/deno-host.js";
 export { createNodeHost } from "./runtime/node-host.js";

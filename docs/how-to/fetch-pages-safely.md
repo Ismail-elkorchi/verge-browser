@@ -10,14 +10,23 @@ protocol and network behavior.
 
 ## Copy/paste
 ```ts
-import { assertAllowedUrl, fetchPage, resolveInputUrl } from "@ismail-elkorchi/verge-browser";
+import {
+  PageNetworkClient,
+  assertAllowedUrl,
+  resolveInputUrl
+} from "@ismail-elkorchi/verge-browser";
 
 const url = resolveInputUrl("example.com");
 assertAllowedUrl(url);
 
-const result = await fetchPage(url);
-console.log(result.status);
-console.log(result.finalUrl);
+const client = new PageNetworkClient();
+try {
+  const result = await client.fetchPage(url);
+  console.log(result.status);
+  console.log(result.finalUrl);
+} finally {
+  await client.close();
+}
 ```
 
 ## Expected output

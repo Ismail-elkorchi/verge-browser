@@ -9,9 +9,8 @@ library examples and defines the package's runtime boundaries.
 - [Use `BrowserSession` with a local loader](./how-to/use-browser-session.md)
 - [Fetch pages safely](./how-to/fetch-pages-safely.md)
 - [Handle network failures](./how-to/handle-network-failures.md)
-- [Work with forms and cookies](./how-to/forms-and-cookies.md)
 - [Render HTML to terminal text](./how-to/render-html-to-terminal.md)
-- [Extract an HTML and CSS snapshot](./how-to/extract-html-css-snapshot.md)
+- [Use author CSS](./how-to/use-author-css.md)
 - [Parse browser commands](./how-to/parse-browser-commands.md)
 - [Run a minimal audit](./how-to/run-minimal-audit.md)
 

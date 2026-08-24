@@ -9,6 +9,8 @@ import {
   validateParserPackageContract
 } from "./parser-package-contract.mjs";
 
+const HTTP_CLIENT_PACKAGE_NAME = "@ismail-elkorchi/http-client";
+
 function run(command, args, { cwd, capture = false } = {}) {
   const result = spawnSync(command, args, {
     cwd,
@@ -97,9 +99,15 @@ try {
   );
   await writeFile(
     join(consumerRoot, "smoke.mjs"),
-    `import { parseHtml, renderDocumentToTerminal } from "@ismail-elkorchi/verge-browser";
+    `import {
+  PageNetworkClient,
+  parseHtml,
+  renderDocumentToTerminal
+} from "@ismail-elkorchi/verge-browser";
 
 const document = parseHtml("<main><h1>Packed consumer</h1><p>Public parser.</p></main>");
+const networkClient = new PageNetworkClient();
+await networkClient.close();
 if (
   document.tree.kind !== "document" ||
   document.metadata.inputKind !== "text" ||
@@ -127,7 +135,6 @@ if (!rendered.lines.join("\\n").includes("Packed consumer")) {
     "npm",
     [
       "install",
-      "--ignore-scripts",
       "--no-audit",
       "--no-fund",
       "--registry=https://registry.npmjs.org"
@@ -165,11 +172,30 @@ if (!rendered.lines.join("\\n").includes("Packed consumer")) {
     lockEntry: consumerLock.packages?.[`node_modules/${HTML_PARSER_PACKAGE_NAME}`],
     installedManifest: installedParser
   });
+  const installedHttpClient = await readJson(
+    join(
+      consumerRoot,
+      "node_modules",
+      "@ismail-elkorchi",
+      "http-client",
+      "package.json"
+    )
+  );
+  if (
+    installedHttpClient.name !== HTTP_CLIENT_PACKAGE_NAME
+    || installedVerge.dependencies?.[HTTP_CLIENT_PACKAGE_NAME]
+      !== workspaceManifest.dependencies?.[HTTP_CLIENT_PACKAGE_NAME]
+    || consumerLock.packages?.[`node_modules/${HTTP_CLIENT_PACKAGE_NAME}`]?.version
+      !== installedHttpClient.version
+  ) {
+    throw new Error("packed Verge does not install its declared http-client release");
+  }
 
   run(process.execPath, ["smoke.mjs"], { cwd: consumerRoot });
   process.stdout.write(
     `packed consumer verified: ${workspaceManifest.name}@${workspaceManifest.version} (${String(packedFileCount)} files) -> ` +
-      `${parserEvidence.name}@${parserEvidence.version} ${parserEvidence.integrity}\n`
+      `${parserEvidence.name}@${parserEvidence.version} ${parserEvidence.integrity}; `
+      + `${installedHttpClient.name}@${installedHttpClient.version}\n`
   );
 } finally {
   await rm(temporaryRoot, { recursive: true, force: true });

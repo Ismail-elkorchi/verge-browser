@@ -1,5 +1,42 @@
 import { assertAllowedProtocol } from "./security.js";
 
+export const DEFAULT_SEARCH_URL_TEMPLATE = "https://html.duckduckgo.com/html/?q={query}";
+
+function looksLikeDirectLocation(value: string): boolean {
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/u.test(value)) return true;
+  if (/^(?:\.{0,2}\/|[?#])/u.test(value)) return true;
+  const authority = value.split("/")[0] ?? "";
+  return authority === "localhost"
+    || /^localhost:\d+$/u.test(authority)
+    || /^\[[0-9a-fA-F:]+\](?::\d+)?$/u.test(authority)
+    || /^(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?$/u.test(authority)
+    || /^(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?::\d+)?$/u.test(authority);
+}
+
+function looksLikeRelativeLocation(value: string): boolean {
+  return value.startsWith("/")
+    || value.startsWith("./")
+    || value.startsWith("../")
+    || value.startsWith("#")
+    || value.startsWith("?");
+}
+
+export function resolveOmniboxInput(
+  rawInput: string,
+  currentUrl?: string,
+  searchUrlTemplate = DEFAULT_SEARCH_URL_TEMPLATE
+): string {
+  const value = rawInput.trim();
+  if (value.length === 0) throw new Error("Location or search input is empty");
+  if (looksLikeDirectLocation(value)) {
+    return resolveInputUrl(value, looksLikeRelativeLocation(value) ? currentUrl : undefined);
+  }
+  if (!searchUrlTemplate.includes("{query}")) {
+    throw new Error("Search URL template must contain {query}.");
+  }
+  return resolveInputUrl(searchUrlTemplate.replaceAll("{query}", encodeURIComponent(value)));
+}
+
 /**
  * Resolves user input into a normalized absolute URL string.
  *
@@ -27,7 +64,7 @@ export function resolveInputUrl(rawInput: string, currentUrl?: string): string {
     throw new Error("URL input is empty");
   }
 
-  if (trimmedInput === "about:help") {
+  if (trimmedInput === "about:help" || trimmedInput === "about:newtab") {
     return trimmedInput;
   }
 

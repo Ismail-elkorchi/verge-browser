@@ -27,10 +27,10 @@ try {
 ## Expected output
 ```txt
 dns
-ENOTFOUND
+DNS_ERROR
 ```
 
-The exact `detailCode` can vary by runtime, but the `kind` stays deterministic.
+The Node fetch client exposes stable transport-level detail codes.
 
 ## Common failure modes
 - Code branches on raw exception message text instead of `networkOutcome.kind`.
