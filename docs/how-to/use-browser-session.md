@@ -40,7 +40,7 @@ const session = new BrowserSession({
 try {
   const snapshot = await session.open("https://example.test/");
   console.log(snapshot.status);
-  console.log(snapshot.rendered.lines.length > 0);
+  console.log(snapshot.document.headings[0]?.text);
   console.log(snapshot.diagnostics.parseErrorCount);
 } finally {
   await session.close();
@@ -50,7 +50,7 @@ try {
 ## Expected output
 ```txt
 200
-true
+Local Session
 0
 ```
 

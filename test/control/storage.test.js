@@ -114,7 +114,7 @@ test("BrowserStore serializes concurrent history, workspace, and download writes
     const workspace = {
       documents: [{
         url: "https://example.com/",
-        scrollAnchor: { blockId: "block:1", rowOffset: 2 }
+        scrollAnchor: { target: { kind: "element-id", value: "content" }, rowOffset: 2 }
       }],
       activeDocumentIndex: 0,
       sidePanel: "downloads"
@@ -168,6 +168,26 @@ test("BrowserStore restricts persisted browsing data and cookie permissions", {
   }
 });
 
+test("BrowserStore rejects an insecure caller-owned state directory without changing it", {
+  skip: process.platform === "win32" ? "Windows relies on directory ACLs rather than POSIX modes" : false
+}, async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "verge-store-insecure-parent-"));
+  const stateDirectory = join(tempDir, "shared-profile");
+  const statePath = join(stateDirectory, "state.json");
+
+  try {
+    await mkdir(stateDirectory, { mode: 0o777 });
+    await chmod(stateDirectory, 0o777);
+    await assert.rejects(
+      BrowserStore.open({ statePath }),
+      /directory permissions must exclude group and other users/u
+    );
+    assert.equal((await stat(stateDirectory)).mode & 0o777, 0o777);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("BrowserStore bounds remote page text and restored workspace size", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "verge-store-bounds-"));
   const statePath = join(tempDir, "state.json");
@@ -182,7 +202,7 @@ test("BrowserStore bounds remote page text and restored workspace size", async (
     await store.saveWorkspace({
       documents: Array.from({ length: 75 }, (_, index) => ({
         url: `https://example.test/${String(index)}`,
-        scrollAnchor: { blockId: "page:start", rowOffset: 0 }
+        scrollAnchor: { target: null, rowOffset: 0 }
       })),
       activeDocumentIndex: 74,
       sidePanel: null
@@ -226,7 +246,10 @@ test("BrowserStore canonicalizes attacker-controlled persisted collections befor
       workspace: {
         documents: [{
           url: "https://example.test/",
-          scrollAnchor: { blockId: oversized, rowOffset: Number.MAX_SAFE_INTEGER }
+          scrollAnchor: {
+            target: { kind: "element-id", value: oversized.slice(0, 512) },
+            rowOffset: Number.MAX_SAFE_INTEGER
+          }
         }],
         activeDocumentIndex: 0,
         sidePanel: null
@@ -262,7 +285,7 @@ test("BrowserStore canonicalizes attacker-controlled persisted collections befor
 
     const store = await BrowserStore.open({ statePath });
     assert.equal(store.listDownloads().length, 200);
-    assert.equal(store.workspace()?.documents[0]?.scrollAnchor.blockId.length, 512);
+    assert.equal(store.workspace()?.documents[0]?.scrollAnchor.target.value.length, 512);
     assert.equal(store.workspace()?.documents[0]?.scrollAnchor.rowOffset, 10_000_000);
     assert.equal(store.listCookies().length, 1);
 
@@ -289,7 +312,7 @@ test("BrowserStore refuses a symlink in place of the credential-bearing state fi
   const targetPath = join(tempDir, "target.json");
 
   try {
-    await mkdir(stateDirectory);
+    await mkdir(stateDirectory, { mode: 0o700 });
     await writeFile(targetPath, "{}\n", "utf8");
     await symlink(targetPath, statePath);
     await assert.rejects(

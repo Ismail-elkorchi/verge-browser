@@ -79,10 +79,11 @@
 - `stylesheetPolicy` bounds stylesheet count, per-resource bytes, and aggregate
   transport/buffering work. Stylesheets load in document order so later
   requests are not started after the aggregate budget is exhausted.
-- `parseOptions` defaults to the package's bounded HTML parse profile.
-- `renderer` and `widthProvider` retain the legacy terminal-rendered snapshot
-  adapter for library consumers. They do not replace the browser workspace's
-  internal semantic and responsive layout pipeline.
+- `parseOptions` accepts Verge-owned parse budgets and
+  defaults to the package's bounded HTML parse profile. Structure, source
+  spans, retained decoded source, disabled scripting, and summary diagnostics
+  are fixed invariants of the document boundary rather than parser-specific
+  options.
 - `defaultParseMode` defaults to `"stream"` so the HTML parser receives the
   response bytes and transport encoding evidence. Use `"text"` only with a
   loader that already decoded the HTML.
@@ -104,16 +105,20 @@
 - `signal`: aborts the request, retry wait, and session navigation.
 
 ### `PageSnapshot`
-- `document` is the parser's identity-bearing result and contains `tree`,
-  `metadata`, and the retained decoded HTML in `sourceText`.
-- Browser sessions retain source for both buffered and streamed HTML. Raw
-  `parseHtml()` calls retain it only when requested with
-  `sourceRetention: "text"`.
-- `rendered` preserves the stable width-specific `RenderedPage` library
-  adapter. The browser workspace's semantic/layout projection is internal, so
-  `PageSnapshot` does not expose today’s flatten-first block representation.
-- CSS diagnostics for the interactive workspace remain available in the
-  browser diagnostics view rather than expanding the stable snapshot shape.
+- `document` is Verge's immutable `WebDocumentSnapshotView`, with opaque node
+  references, parent/child structure, retained decoded source, source metadata,
+  and prebuilt semantic indexes.
+- Browser sessions retain source for buffered and streamed HTML. The public
+  `parseWebDocument*()` factories use the same deliberate document contract.
+- The factories return `WebDocumentSnapshotView`; the parser result and the
+  concrete snapshot implementation are not public construction APIs.
+- Presentation is derived for the current viewport. There is no pre-rendered,
+  fixed-width field on the snapshot.
+- `stylesheets` contains the bounded resources attached to the document;
+  `styleDiagnostics` contains stylesheet collection/load failures.
+- `diagnostics.stylesheetLoadIssueCount` counts those load failures. Cascade
+  diagnostics remain part of the browser diagnostics presentation because
+  they depend on the active style environment.
 - `applyEdits()` is asynchronous because changed HTML can change linked
   stylesheet resources.
 - `responseFields` preserves ordered response field lines as `HttpFields`.
@@ -123,11 +128,16 @@
 ### Browser state storage
 - Persisted cookies, history, downloads, index data, tabs, and scroll anchors
   share one state file.
+- Persisted scroll anchors use durable HTML-id or source locators. Opaque
+  document-node references remain scoped to one immutable snapshot and are not
+  serialized as cross-session identities.
 - The default POSIX profile directory is restricted to `0700`; state and
   replacement files are `0600`, including existing state files when reopened.
 - A custom `statePath` always receives `0600` file protection, but its existing
   parent directory is not chmodded unless it is the dedicated
-  `verge-browser` profile directory. Callers own custom parent-directory access.
+  `verge-browser` profile directory. On POSIX, Verge rejects a caller-owned
+  existing parent that grants group or other access; callers own arranging a
+  suitable private directory.
 - State loading rejects symbolic-link paths and validates and reads through one
   file handle so a path replacement cannot redirect the credential-bearing
   read.

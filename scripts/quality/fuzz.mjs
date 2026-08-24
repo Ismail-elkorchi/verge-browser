@@ -1,106 +1,41 @@
 import { createHash } from "node:crypto";
 
-import { parse } from "@ismail-elkorchi/html-parser";
-
-import { renderDocumentToTerminal } from "../../dist/app/render.js";
+import { createDocumentState, parseWebDocument } from "../../dist/document/index.js";
+import { presentDocument } from "../../dist/presentation/pipeline.js";
+import { terminalTextMeasurer } from "../../dist/ui/terminal-measure.js";
 
 const PROFILES = Object.freeze({
-  ci: Object.freeze({
-    firstSeed: 20260226,
-    caseCount: 128,
-    maxDepth: 5,
-    sectionCount: 8
-  }),
-  release: Object.freeze({
-    firstSeed: 20260226,
-    caseCount: 512,
-    maxDepth: 6,
-    sectionCount: 10
-  })
+  ci: Object.freeze({ firstSeed: 20260226, caseCount: 128, maxDepth: 5, sectionCount: 8 }),
+  release: Object.freeze({ firstSeed: 20260226, caseCount: 512, maxDepth: 6, sectionCount: 10 })
+});
+const TAGS = Object.freeze([
+  "a", "article", "blockquote", "code", "details", "div", "form", "h1", "h2", "h3",
+  "img", "input", "li", "ol", "p", "pre", "section", "span", "summary", "table",
+  "tbody", "td", "th", "tr", "ul", "x-card"
+]);
+const DISPLAYS = Object.freeze([
+  "block", "inline", "contents", "none", "list-item", "table", "table-row",
+  "table-cell", "flex", "grid"
+]);
+const ATTRIBUTES = Object.freeze(["aria-label", "class", "data-k", "hidden", "href", "id", "name", "title", "value"]);
+const WORDS = Object.freeze([
+  "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa",
+  "lambda", "mu", "nu", "xi", "omicron", "pi", "rho", "sigma", "tau", "upsilon", "phi",
+  "chi", "psi", "omega", "界", "é"
+]);
+const PROFILE = Object.freeze({
+  cellWidthPx: 8,
+  rowHeightPx: 16,
+  colorDepth: 24,
+  unicode: true,
+  ambiguousWidth: 1
 });
 
-const TAGS = Object.freeze([
-  "a",
-  "article",
-  "blockquote",
-  "code",
-  "details",
-  "div",
-  "form",
-  "h1",
-  "h2",
-  "h3",
-  "img",
-  "input",
-  "li",
-  "ol",
-  "p",
-  "pre",
-  "section",
-  "span",
-  "summary",
-  "table",
-  "td",
-  "th",
-  "tr",
-  "ul"
-]);
-
-const ATTRIBUTES = Object.freeze([
-  "aria-label",
-  "class",
-  "data-k",
-  "hidden",
-  "href",
-  "id",
-  "name",
-  "title",
-  "value"
-]);
-
-const WORDS = Object.freeze([
-  "alpha",
-  "beta",
-  "gamma",
-  "delta",
-  "epsilon",
-  "zeta",
-  "eta",
-  "theta",
-  "iota",
-  "kappa",
-  "lambda",
-  "mu",
-  "nu",
-  "xi",
-  "omicron",
-  "pi",
-  "rho",
-  "sigma",
-  "tau",
-  "upsilon",
-  "phi",
-  "chi",
-  "psi",
-  "omega"
-]);
-
 function parseProfile(argv) {
-  if (argv.length > 1) {
-    throw new Error("usage: node scripts/quality/fuzz.mjs [--profile=ci|release]");
-  }
-
-  const profileArgument = argv[0];
-  if (profileArgument === undefined) {
-    return "ci";
-  }
-  if (profileArgument === "--profile=ci") {
-    return "ci";
-  }
-  if (profileArgument === "--profile=release") {
-    return "release";
-  }
-  throw new Error(`unsupported argument: ${profileArgument}`);
+  if (argv.length > 1) throw new Error("usage: node scripts/quality/fuzz.mjs [--profile=ci|release]");
+  if (argv[0] === undefined || argv[0] === "--profile=ci") return "ci";
+  if (argv[0] === "--profile=release") return "release";
+  throw new Error(`unsupported argument: ${argv[0]}`);
 }
 
 function createRandom(seed) {
@@ -120,20 +55,17 @@ function chance(random, probability) {
 }
 
 function randomText(random, minimumWords, maximumWords) {
-  const wordCount =
-    minimumWords + Math.floor(random() * (maximumWords - minimumWords + 1));
-  return Array.from({ length: wordCount }, () => pick(random, WORDS)).join(" ");
+  const count = minimumWords + Math.floor(random() * (maximumWords - minimumWords + 1));
+  return Array.from({ length: count }, () => pick(random, WORDS)).join(" ");
 }
 
-function attributeValue(random, attributeName, index) {
-  if (attributeName === "href") {
+function attributeValue(random, name, index) {
+  if (name === "href") {
     return chance(random, 0.2)
       ? `../${pick(random, WORDS)}?case=${String(index)}`
       : `https://example.test/${pick(random, WORDS)}/${String(index)}`;
   }
-  if (attributeName === "hidden") {
-    return "";
-  }
+  if (name === "hidden") return "";
   return `${pick(random, WORDS)}-${pick(random, WORDS)}-${String(index)}`;
 }
 
@@ -141,44 +73,34 @@ function openingTag(random, tagName, index) {
   const attributes = [];
   const attributeCount = Math.floor(random() * 4);
   for (let attributeIndex = 0; attributeIndex < attributeCount; attributeIndex += 1) {
-    const attributeName = pick(random, ATTRIBUTES);
-    const value = attributeValue(random, attributeName, index + attributeIndex);
-    attributes.push(value.length === 0 ? attributeName : `${attributeName}="${value}"`);
+    const name = pick(random, ATTRIBUTES);
+    const value = attributeValue(random, name, index + attributeIndex);
+    attributes.push(value.length === 0 ? name : `${name}="${value}"`);
   }
+  if (chance(random, 0.25)) attributes.push(`style="display:${pick(random, DISPLAYS)}"`);
   return `<${tagName}${attributes.length === 0 ? "" : ` ${attributes.join(" ")}`}>`;
 }
 
 function closingTag(random, tagName) {
-  if (chance(random, 0.08)) {
-    return `<${tagName}`;
-  }
-  if (chance(random, 0.08)) {
-    return `</${tagName}`;
-  }
+  if (chance(random, 0.08)) return `<${tagName}`;
+  if (chance(random, 0.08)) return `</${tagName}`;
   return `</${tagName}>`;
 }
 
 function generateNode(random, depth, maxDepth, index) {
   if (depth >= maxDepth || chance(random, 0.25)) {
-    return chance(random, 0.15)
-      ? `<!-- ${randomText(random, 2, 6)} -->`
-      : randomText(random, 1, 8);
+    return chance(random, 0.15) ? `<!-- ${randomText(random, 2, 6)} -->` : randomText(random, 1, 8);
   }
-
   const tagName = pick(random, TAGS);
   const prefix = openingTag(random, tagName, index);
-  if (tagName === "img" || tagName === "input") {
-    return prefix;
-  }
+  if (tagName === "img" || tagName === "input") return prefix;
   if (tagName === "pre" || tagName === "code") {
     return `${prefix}${randomText(random, 2, 6)}\n  ${randomText(random, 2, 5)}\n\t${randomText(random, 1, 4)}${closingTag(random, tagName)}`;
   }
-
   const childCount = 1 + Math.floor(random() * 4);
   const children = Array.from(
     { length: childCount },
-    (_, childIndex) =>
-      generateNode(random, depth + 1, maxDepth, index + childIndex + 1)
+    (_, childIndex) => generateNode(random, depth + 1, maxDepth, index + childIndex + 1)
   );
   return `${prefix}${children.join("")}${closingTag(random, tagName)}`;
 }
@@ -199,44 +121,70 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function evaluate(html) {
-  const document = parse(html, {
-    captureSpans: false,
-    trace: "none"
-  });
-  const rendered = renderDocumentToTerminal({
-    tree: document.tree,
-    requestUrl: "https://fuzz.example/",
-    finalUrl: "https://fuzz.example/",
-    status: 200,
-    statusText: "OK",
-    fetchedAtIso: "2026-01-01T00:00:00.000Z",
-    width: 80
-  });
+function treePayload(tree, root, node, children) {
+  const seen = new Set();
+  const output = [];
+  const pending = [root];
+  while (pending.length > 0) {
+    const id = pending.pop();
+    if (seen.has(id)) throw new Error(`cycle or duplicate tree identity: ${id}`);
+    seen.add(id);
+    const value = node(id);
+    const childValues = children(id);
+    output.push({ id, kind: value.kind, source: value.source, children: childValues.map((child) => child.id) });
+    for (let index = childValues.length - 1; index >= 0; index -= 1) pending.push(childValues[index].id);
+  }
+  return output;
+}
 
+function evaluate(html) {
+  const document = parseWebDocument(html, {
+    requestUrl: "https://fuzz.example/",
+    finalUrl: "https://fuzz.example/"
+  });
+  const presentation = presentDocument({
+    document,
+    state: createDocumentState(document),
+    resources: [],
+    viewport: { columns: 80, rows: 24 },
+    measurer: terminalTextMeasurer(),
+    profile: PROFILE
+  });
+  const formatting = treePayload(
+    presentation.formatting,
+    presentation.formatting.root,
+    (id) => presentation.formatting.node(id),
+    (id) => presentation.formatting.children(id)
+  );
+  const fragments = treePayload(
+    presentation.fragments,
+    presentation.fragments.root,
+    (id) => presentation.fragments.fragment(id),
+    (id) => presentation.fragments.children(id)
+  );
   return {
-    parseErrorIds: document.tree.errors.map((error) => error.parseErrorId),
-    rendered
+    diagnostics: document.diagnostics.map(({ id }) => id),
+    title: document.title,
+    links: document.links.map(({ node, destination }) => ({ node, destination })),
+    styleOutcome: presentation.styles.outcome,
+    formattingOutcome: presentation.formatting.outcome,
+    fragmentOutcome: presentation.fragments.outcome,
+    formatting,
+    fragments,
+    rows: presentation.fragments.rows.map((row) => row.text),
+    actions: presentation.fragments.focusTargets.map(({ node, action }) => ({ node, action }))
   };
 }
 
-const profile = parseProfile(process.argv.slice(2));
-const policy = PROFILES[profile];
+const profileName = parseProfile(process.argv.slice(2));
+const policy = PROFILES[profileName];
 const failures = [];
-
 for (let index = 0; index < policy.caseCount; index += 1) {
   const seed = policy.firstSeed + index;
   const html = generateHtml(seed, policy);
-
   try {
-    const first = evaluate(html);
-    const second = evaluate(html);
-    if (JSON.stringify(first) !== JSON.stringify(second)) {
-      failures.push({
-        seed,
-        htmlSha256: sha256(html),
-        reason: "non-deterministic parse or render output"
-      });
+    if (JSON.stringify(evaluate(html)) !== JSON.stringify(evaluate(html))) {
+      failures.push({ seed, htmlSha256: sha256(html), reason: "non-deterministic pipeline output" });
     }
   } catch (error) {
     failures.push({
@@ -246,16 +194,10 @@ for (let index = 0; index < policy.caseCount; index += 1) {
     });
   }
 }
-
 if (failures.length > 0) {
   for (const failure of failures) {
-    process.stderr.write(
-      `fuzz failure: seed=${String(failure.seed)} sha256=${failure.htmlSha256} ${failure.reason}\n`
-    );
+    process.stderr.write(`fuzz failure: seed=${String(failure.seed)} sha256=${failure.htmlSha256} ${failure.reason}\n`);
   }
   throw new Error(`${String(failures.length)} deterministic fuzz case(s) failed`);
 }
-
-process.stdout.write(
-  `fuzz ${profile} ok: ${String(policy.caseCount)} crash-free deterministic cases\n`
-);
+process.stdout.write(`fuzz ${profileName} ok: ${String(policy.caseCount)} crash-free deterministic structural pipeline cases\n`);

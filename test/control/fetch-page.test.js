@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { ReadableStream } from "node:stream/web";
 import test from "node:test";
-import { TextDecoder } from "node:util";
+import { TextDecoder, TextEncoder } from "node:util";
 
 import {
   NetworkFetchError,
@@ -35,6 +35,18 @@ test("fetchPage supports about:help without network", async () => {
   assert.ok(page.html.includes("verge-browser"));
   assert.ok(page.html.includes("save text &lt;path&gt;"));
   assert.ok(page.html.includes("Ctrl+L"));
+});
+
+test("byte-stream text reading releases its reader after a stream failure", async () => {
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode("partial"));
+      controller.error(new Error("stream failed"));
+    }
+  });
+
+  await assert.rejects(readByteStreamToText(stream), /stream failed/u);
+  assert.equal(stream.locked, false);
 });
 
 test("fetchPage supports file URLs", async () => {
@@ -82,11 +94,12 @@ test("fetchPageStream supports about:help without network", async () => {
 
 test("a failed stream cancellation still destroys its operation-scoped client", async () => {
   let destroyCalls = 0;
-  const stream = closeClientWithStream(new ReadableStream({
+  const upstream = new ReadableStream({
     cancel() {
       throw new Error("underlying cancellation failed");
     }
-  }), {
+  });
+  const stream = closeClientWithStream(upstream, {
     async close() {},
     async destroy() {
       destroyCalls += 1;
@@ -95,6 +108,25 @@ test("a failed stream cancellation still destroys its operation-scoped client", 
 
   await assert.rejects(stream.cancel("stop"), /underlying cancellation failed/u);
   assert.equal(destroyCalls, 1);
+  assert.equal(upstream.locked, false);
+});
+
+test("operation-scoped stream completion releases the upstream reader lock", async () => {
+  let closeCalls = 0;
+  const upstream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode("complete"));
+      controller.close();
+    }
+  });
+  const stream = closeClientWithStream(upstream, {
+    async close() { closeCalls += 1; },
+    async destroy() { throw new Error("unexpected destroy"); }
+  });
+
+  assert.equal(await readByteStreamToText(stream), "complete");
+  assert.equal(closeCalls, 1);
+  assert.equal(upstream.locked, false);
 });
 
 test("network clients allow direct local navigation but block local subresources", async () => {
@@ -168,7 +200,7 @@ test("BrowserSession does not grant private-network access to links or forms", a
     assert.equal(privateRequests, 0);
 
     const explicit = await session.open(privateUrl);
-    assert.match(explicit.rendered.lines.join("\n"), /private service/u);
+    assert.match(explicit.document.text(explicit.document.body), /private service/u);
     assert.equal(privateRequests, 1);
   } finally {
     await session.destroy();
@@ -230,11 +262,9 @@ test("BrowserSession streams transport bytes through HTML encoding detection", a
     const snapshot = await session.open(
       `http://127.0.0.1:${String(address.port)}/`
     );
-    assert.equal(snapshot.rendered.title, "€");
-    assert.deepEqual(snapshot.document.metadata.encoding, {
-      name: "windows-1252",
-      source: "transport"
-    });
+    assert.equal(snapshot.document.title, "€");
+    assert.equal(snapshot.document.sourceMetadata.encoding, "windows-1252");
+    assert.equal(snapshot.document.sourceMetadata.encodingSource, "transport");
   } finally {
     await session.close();
     await client.close();

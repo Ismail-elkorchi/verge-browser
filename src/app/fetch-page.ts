@@ -355,17 +355,19 @@ export async function readByteStreamToText(stream: ReadableStream<Uint8Array>): 
   const reader = stream.getReader();
   const textDecoder = new TextDecoder();
   let html = "";
-
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      html += textDecoder.decode(value, { stream: true });
     }
-    html += textDecoder.decode(value, { stream: true });
+    html += textDecoder.decode();
+    return html;
+  } finally {
+    reader.releaseLock();
   }
-
-  html += textDecoder.decode();
-  return html;
 }
 
 async function readByteStream(
@@ -374,19 +376,23 @@ async function readByteStream(
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
   let length = 0;
-  for (;;) {
-    const next = await reader.read();
-    if (next.done) break;
-    chunks.push(next.value);
-    length += next.value.byteLength;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      chunks.push(next.value);
+      length += next.value.byteLength;
+    }
+    const bytes = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return bytes;
+  } finally {
+    reader.releaseLock();
   }
-  const bytes = new Uint8Array(length);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return bytes;
 }
 
 interface NetworkFetchResult {
@@ -507,8 +513,10 @@ function responseStream(
             response.finalUrl
           );
         }
+        reader.releaseLock();
         controller.close();
       } catch (error) {
+        reader.releaseLock();
         controller.error(
           operationFailure(
             error,
@@ -524,6 +532,7 @@ function responseStream(
       try {
         await reader.cancel(reason);
       } finally {
+        reader.releaseLock();
         await response.completion;
       }
     }
@@ -1313,12 +1322,14 @@ export function closeClientWithStream(
       try {
         const next = await reader.read();
         if (next.done) {
+          reader.releaseLock();
           await client.close();
           controller.close();
           return;
         }
         controller.enqueue(next.value);
       } catch (error) {
+        reader.releaseLock();
         await client.destroy(toError(error));
         controller.error(error);
       }
@@ -1329,6 +1340,8 @@ export function closeClientWithStream(
         await reader.cancel(reason);
       } catch (error) {
         cancellationError = error;
+      } finally {
+        reader.releaseLock();
       }
       let destroyError: unknown;
       try {

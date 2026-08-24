@@ -37,33 +37,6 @@ test("parseCommand handles viewport commands", () => {
   assert.deepEqual(parseCommand("find alpha"), { kind: "find", query: "alpha" });
   assert.deepEqual(parseCommand("find next"), { kind: "find-next" });
   assert.deepEqual(parseCommand("find prev"), { kind: "find-prev" });
-  assert.deepEqual(parseCommand("patch remove-node 11"), { kind: "patch-remove-node", target: 11 });
-  assert.deepEqual(parseCommand("patch replace-text 22 alpha beta"), {
-    kind: "patch-replace-text",
-    target: 22,
-    value: "alpha beta"
-  });
-  assert.deepEqual(parseCommand("patch set-attr 7 class nav primary"), {
-    kind: "patch-set-attr",
-    target: 7,
-    name: "class",
-    value: "nav primary"
-  });
-  assert.deepEqual(parseCommand("patch remove-attr 7 class"), {
-    kind: "patch-remove-attr",
-    target: 7,
-    name: "class"
-  });
-  assert.deepEqual(parseCommand("patch insert-before 9 <span>z</span>"), {
-    kind: "patch-insert-before",
-    target: 9,
-    html: "<span>z</span>"
-  });
-  assert.deepEqual(parseCommand("patch insert-after 9 <span>z</span>"), {
-    kind: "patch-insert-after",
-    target: 9,
-    html: "<span>z</span>"
-  });
   assert.deepEqual(parseCommand("download"), { kind: "download" });
   assert.deepEqual(parseCommand("download https://example.com/archive.zip"), {
     kind: "download",

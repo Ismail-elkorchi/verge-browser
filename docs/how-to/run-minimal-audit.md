@@ -42,7 +42,7 @@ try {
   const audit = {
     status: snapshot.status,
     parseErrorCount: snapshot.diagnostics.parseErrorCount,
-    linkCount: snapshot.rendered.links.length,
+    linkCount: snapshot.document.links.length,
     triageIds: snapshot.diagnostics.triageIds
   };
 

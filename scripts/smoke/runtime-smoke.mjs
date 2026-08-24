@@ -1,40 +1,28 @@
-import { parse, parseBytes, parseStream, serialize } from "@ismail-elkorchi/html-parser";
-
-import { renderDocumentToTerminal } from "../../dist/app/render.js";
+import {
+  createDocumentState,
+  parseWebDocument,
+  parseWebDocumentBytes,
+  parseWebDocumentStream
+} from "../../dist/document/index.js";
+import { presentDocument } from "../../dist/presentation/pipeline.js";
+import { terminalTextMeasurer } from "../../dist/ui/terminal-measure.js";
 
 function parseArgs(argv) {
   let runtime = "node";
   let reportPath = "reports/smoke-node.json";
-
   for (const arg of argv) {
-    if (arg.startsWith("--runtime=")) {
-      runtime = arg.slice("--runtime=".length);
-      continue;
-    }
-    if (arg.startsWith("--report=")) {
-      reportPath = arg.slice("--report=".length);
-      continue;
-    }
-    throw new Error(`unsupported argument: ${arg}`);
+    if (arg.startsWith("--runtime=")) runtime = arg.slice("--runtime=".length);
+    else if (arg.startsWith("--report=")) reportPath = arg.slice("--report=".length);
+    else throw new Error(`unsupported argument: ${arg}`);
   }
-
-  if (!["node", "deno", "bun"].includes(runtime)) {
-    throw new Error(`unsupported runtime: ${runtime}`);
-  }
-  if (reportPath.length === 0) {
-    throw new Error("report path must not be empty");
-  }
-
+  if (!["node", "deno", "bun"].includes(runtime)) throw new Error(`unsupported runtime: ${runtime}`);
+  if (reportPath.length === 0) throw new Error("report path must not be empty");
   return { runtime, reportPath };
 }
 
 function detectRuntime() {
-  if (typeof Deno !== "undefined") {
-    return "deno";
-  }
-  if (typeof Bun !== "undefined") {
-    return "bun";
-  }
+  if (typeof Deno !== "undefined") return "deno";
+  if (typeof Bun !== "undefined") return "bun";
   return "node";
 }
 
@@ -58,127 +46,98 @@ async function sha256Hex(value) {
 
 function dirname(path) {
   const slashIndex = path.lastIndexOf("/");
-  if (slashIndex <= 0) {
-    return ".";
-  }
-  return path.slice(0, slashIndex);
+  return slashIndex <= 0 ? "." : path.slice(0, slashIndex);
 }
 
 async function writeReport(path, text) {
-  const runtime = detectRuntime();
-
-  if (runtime === "deno") {
-    const denoApi = globalThis.Deno;
-    if (!denoApi) {
-      throw new Error("Deno runtime API is unavailable");
-    }
-    await denoApi.mkdir(dirname(path), { recursive: true });
-    await denoApi.writeTextFile(path, text);
+  if (detectRuntime() === "deno") {
+    await globalThis.Deno.mkdir(dirname(path), { recursive: true });
+    await globalThis.Deno.writeTextFile(path, text);
     return;
   }
-
   const fs = await import("node:fs/promises");
   await fs.mkdir(dirname(path), { recursive: true });
   await fs.writeFile(path, text, "utf8");
 }
 
+function documentPayload(document) {
+  return {
+    title: document.title,
+    bodyText: document.body === null ? "" : document.text(document.body),
+    links: document.links.map(({ label, destination }) => ({ label, destination })),
+    errors: document.diagnostics.map(({ id }) => id),
+    nodeCount: document.sourceMetadata.parserNodeCount
+  };
+}
+
 async function runSmoke(expectedRuntime) {
   const runtime = detectRuntime();
-  if (runtime !== expectedRuntime) {
-    throw new Error(`Runtime mismatch: expected ${expectedRuntime}, detected ${runtime}`);
-  }
+  if (runtime !== expectedRuntime) throw new Error(`Runtime mismatch: expected ${expectedRuntime}, detected ${runtime}`);
 
-  const html = "<html><head><title>Runtime</title></head><body><h1>Smoke</h1><p>alpha beta</p></body></html>";
+  const html = "<html><head><title>Runtime</title><style>h1{color:#0af}</style></head><body><h1>Smoke</h1><p>alpha beta</p><a href='/next'>Next</a></body></html>";
+  const context = { requestUrl: "https://runtime.example/", finalUrl: "https://runtime.example/" };
   const bytes = new globalThis.TextEncoder().encode(html);
-
-  const documentFromText = parse(html, { captureSpans: true, trace: "summary" });
-  const documentFromBytes = parseBytes(bytes, { captureSpans: true, trace: "summary" });
-  const documentFromStream = await parseStream(createHtmlStream(html), { captureSpans: true, trace: "summary" });
-
-  const rendered = renderDocumentToTerminal({
-    tree: documentFromText.tree,
-    requestUrl: "https://runtime.example/",
-    finalUrl: "https://runtime.example/",
-    status: 200,
-    statusText: "OK",
-    fetchedAtIso: "2026-01-01T00:00:00.000Z",
-    width: 80
+  const fromText = parseWebDocument(html, context);
+  const fromBytes = parseWebDocumentBytes(bytes, context);
+  const fromStream = await parseWebDocumentStream(createHtmlStream(html), context);
+  const payloads = [fromText, fromBytes, fromStream].map(documentPayload);
+  const presentation = presentDocument({
+    document: fromText,
+    state: createDocumentState(fromText),
+    resources: [],
+    viewport: { columns: 40, rows: 12 },
+    measurer: terminalTextMeasurer(),
+    profile: {
+      cellWidthPx: 8,
+      rowHeightPx: 16,
+      colorDepth: 24,
+      unicode: true,
+      ambiguousWidth: 1
+    }
   });
-
-  const serialized = serialize(documentFromText.tree);
-  const serializedBytes = serialize(documentFromBytes.tree);
-  const serializedStream = serialize(documentFromStream.tree);
-
-  const errorIdsFromText = documentFromText.tree.errors.map((entry) => entry.parseErrorId);
-  const errorIdsFromBytes = documentFromBytes.tree.errors.map((entry) => entry.parseErrorId);
-  const errorIdsFromStream = documentFromStream.tree.errors.map((entry) => entry.parseErrorId);
-
   const checks = {
-    parse: documentFromText.tree.kind === "document",
-    parseBytes: documentFromBytes.tree.kind === "document",
-    parseStream: documentFromStream.tree.kind === "document",
-    determinism:
-      serialized === serializedBytes &&
-      serialized === serializedStream &&
-      JSON.stringify(errorIdsFromText) === JSON.stringify(errorIdsFromBytes) &&
-      JSON.stringify(errorIdsFromText) === JSON.stringify(errorIdsFromStream),
-    render: rendered.lines.length > 0 && typeof rendered.title === "string" && rendered.title.length > 0,
-    serialize: serialized.includes("<title>Runtime</title>")
+    parseText: fromText.node(fromText.root).kind === "document",
+    parseBytes: fromBytes.node(fromBytes.root).kind === "document",
+    parseStream: fromStream.node(fromStream.root).kind === "document",
+    determinism: JSON.stringify(payloads[0]) === JSON.stringify(payloads[1])
+      && JSON.stringify(payloads[0]) === JSON.stringify(payloads[2]),
+    style: presentation.styles.outcome.status === "complete",
+    formatting: presentation.formatting.outcome.status === "complete",
+    fragments: presentation.fragments.outcome.status === "complete",
+    render: presentation.fragments.rows.some((row) => row.text.includes("Smoke"))
   };
-
   const stablePayload = {
-    serialized,
-    lines: rendered.lines,
-    links: rendered.links,
-    errorIds: errorIdsFromText
+    document: payloads[0],
+    rows: presentation.fragments.rows.map((row) => row.text),
+    focus: presentation.fragments.focusTargets.map((target) => target.action.kind)
   };
-
-  const hash = await sha256Hex(JSON.stringify(stablePayload));
-
   return {
     runtime,
-    ok: Object.values(checks).every((value) => value === true),
-    hash,
+    ok: Object.values(checks).every(Boolean),
+    hash: await sha256Hex(JSON.stringify(stablePayload)),
     checks,
-    details: {
-      serializedBytes,
-      serializedStream,
-      errorIdsFromText,
-      errorIdsFromBytes,
-      errorIdsFromStream
-    }
+    details: { documentVariants: payloads }
   };
 }
 
 async function main() {
   const { runtime, reportPath } = parseArgs(process.argv.slice(2));
   const timestamp = new Date().toISOString();
-
   try {
     const result = await runSmoke(runtime);
-    const report = {
-      suite: "runtime-smoke",
-      timestamp,
-      ...result
-    };
+    const report = { suite: "runtime-smoke", timestamp, ...result };
     await writeReport(reportPath, `${JSON.stringify(report, null, 2)}\n`);
-    if (!report.ok) {
-      throw new Error("runtime smoke checks failed");
-    }
+    if (!report.ok) throw new Error("runtime smoke checks failed");
   } catch (error) {
-    const report = {
+    await writeReport(reportPath, `${JSON.stringify({
       suite: "runtime-smoke",
       timestamp,
       runtime,
       ok: false,
       error: error instanceof Error ? error.message : String(error)
-    };
-    await writeReport(reportPath, `${JSON.stringify(report, null, 2)}\n`);
+    }, null, 2)}\n`);
     throw error;
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
+await main();

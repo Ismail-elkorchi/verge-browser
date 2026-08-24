@@ -1,7 +1,7 @@
 # @ismail-elkorchi/verge-browser
 
-A keyboard- and pointer-driven web browser for the terminal, plus reusable HTML
-fetching, parsing, and semantic rendering APIs.
+A keyboard- and pointer-driven web browser for the terminal, plus reusable
+navigation, transport, and immutable web-document APIs.
 
 ## Install
 
@@ -34,6 +34,7 @@ Ctrl+Shift+T        reopen the last closed tab
 Ctrl+Tab            next tab
 Ctrl+1..9           select a tab
 Tab / Shift+Tab     move between browser and page controls
+Up / Down           move between focused page actions; otherwise scroll
 Enter               activate the focused control
 : / ? / q           actions / help / quit
 ```
@@ -50,10 +51,10 @@ persistence. Non-HTML navigation offers to download the resource instead of
 replacing the current page.
 
 Author CSS contributes page colors, emphasis, visibility, spacing, borders,
-and responsive flow, flex, and grid arrangements. Verge resolves custom
-properties and width media queries against terminal columns while retaining
-semantic HTML when a browser layout cannot be represented. Reader view ignores
-author styling, and page CSS never controls browser chrome or focus indication.
+block/inline flow, flex direction/wrapping/alignment, and grids with explicit
+terminal-sized tracks. Verge resolves custom properties and width media queries
+against terminal columns. Reader view ignores author styling, and page CSS
+never controls browser chrome or focus indication.
 
 Downloads go to `Downloads` unless `VERGE_DOWNLOAD_DIR` is set. Partial files
 are removed after cancellation or failure, and existing files are not
@@ -61,8 +62,9 @@ overwritten.
 
 ## Plain output
 
-`--once` loads one target, renders the same browser element tree as plain text,
-and exits without terminal control sequences:
+`--once` loads one target, projects the same terminal fragments used by the
+interactive page view to plain text, and exits without terminal control
+sequences:
 
 ```sh
 verge --once https://example.com
@@ -76,24 +78,26 @@ npm install @ismail-elkorchi/verge-browser
 
 ```ts
 import {
-  parseHtml,
-  renderDocumentToTerminal,
+  createDocumentState,
+  parseWebDocument,
   resolveInputUrl
 } from "@ismail-elkorchi/verge-browser";
 
 const target = resolveInputUrl("example.com");
-const document = parseHtml("<main><h1>Example</h1></main>");
-const page = renderDocumentToTerminal({
-  tree: document.tree,
-  requestUrl: target,
-  finalUrl: target,
-  status: 200,
-  statusText: "OK",
-  fetchedAtIso: new Date().toISOString(),
-  width: 80
-});
-console.log(page.lines.join("\n"));
+const document = parseWebDocument(
+  "<main><h1>Example</h1><a href='/docs'>Docs</a></main>",
+  { requestUrl: target, finalUrl: target }
+);
+const state = createDocumentState(document);
+console.log(document.headings[0]?.text, document.links[0]?.destination, state.focus);
 ```
+
+`WebDocumentSnapshotView` is the deliberate public content boundary: it preserves
+tree structure and exposes prebuilt semantic indexes for links, forms,
+headings, landmarks, replaced content, and source ranges. Verge's style,
+formatting-tree, fragment-tree, and terminal-projection contracts are internal
+until those abstractions have proven stable. Fixed-width rendered snapshots are
+not part of the library API.
 
 The npm package contains the full Node CLI and library. The JSR package exposes
 the permission-light URL and fetch-policy utilities for Deno. Library smoke
@@ -102,9 +106,10 @@ checks also run on Bun.
 ## Boundaries
 
 Verge is an HTML browser, not a Chromium replacement. It does not execute page
-JavaScript or attempt pixel layout. Its CSS profile covers responsive terminal
-flow and simple flex and grid arrangements, but not arbitrary positioning,
-font metrics, generated content, animation, or raster images. Client-rendered
+JavaScript or attempt pixel layout. Its CSS profile covers block/inline flow,
+lists, structured tables, generated text, and structural flex and grid
+contexts, but not complete flex/grid algorithms, arbitrary positioning,
+animation, web fonts, or raster image decoding. Client-rendered
 sites, anti-bot challenges, media, and unsupported form encodings may therefore
 be unavailable. Network access remains constrained by the package’s protocol,
 redirect, content-type, timeout, and size policies.
@@ -112,8 +117,10 @@ Interactive projection is capped at 256 forms per page, 2,000 controls per
 form, and 2,000 options per select to keep hostile documents responsive.
 
 On POSIX hosts, persisted cookies, history, and workspace data use a `0700`
-default profile directory and `0600` state files. Windows uses the current user
-profile directory ACL. Automatic cross-origin stylesheets are anonymous, and
+default profile directory and `0600` state files. A caller-supplied existing
+state directory must already deny group and other access. Windows uses the
+current user profile directory ACL. Cross-origin stylesheets neither receive
+nor mutate browser cookies, including across redirects, and
 page-initiated stylesheets and downloads never inherit the explicit-local-
 navigation capability. Links and forms also retain the public-network boundary
 and cannot manufacture `file:` or private-network navigation; local targets

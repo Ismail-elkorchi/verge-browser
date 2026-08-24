@@ -6,7 +6,7 @@ This package publishes two documented entrypoints with different scope.
 
 | Entrypoint | Intended use | Notes |
 | --- | --- | --- |
-| `@ismail-elkorchi/verge-browser` | npm/Node library primitives and packaged CLI | Includes the interactive `verge` binary plus the supported fetch, session, rendering, and host adapters |
+| `@ismail-elkorchi/verge-browser` | npm/Node library primitives and packaged CLI | Includes the interactive `verge` binary plus document, fetch, session, and host contracts |
 | `jsr:@ismail-elkorchi/verge-browser` | Utility-only Deno/JSR imports | Exposes safe URL and fetch-policy helpers, not the interactive CLI |
 
 ## JSR surface
@@ -30,15 +30,20 @@ Node/npm includes the supported library primitives and the packaged `verge` CLI 
 - command parsing and formatting
 - page, stream, and stylesheet fetch adapters
 - browser sessions, including caller-supplied redirect-aware cookie handling
-- CSS-aware session, paging, search, rendering, and terminal helpers
+- immutable `WebDocumentSnapshotView` parsing and typed document state/actions
+- CSS-aware browser sessions whose presentation remains browser-internal
 - runtime hosts (Node/Deno/Bun)
 - exported runtime and diagnostics types
 
-The root keeps the legacy `renderDocumentToTerminal()` and
-`PageSnapshot.rendered` adapters, but does not
-export the browser-internal `PageContent`, `PageBlock`, or `PageLayout`
-flatten-first contracts. This leaves room for a box-tree and fragment-tree
-renderer without expanding the stable surface prematurely.
+`PageSnapshot.document` is the one authoritative content representation. The
+package root deliberately does not expose fixed-width rendered snapshots or
+the internal style snapshot, formatting tree, fragment tree, and row
+projection. Interactive and one-shot CLI output both use those same internal
+structural stages.
+
+The document factories expose Verge-owned budget, transport-encoding, and
+cancellation options. The concrete snapshot constructor and HTML-parser result
+types are intentionally not root APIs.
 
 ## Behavioral boundary
 
