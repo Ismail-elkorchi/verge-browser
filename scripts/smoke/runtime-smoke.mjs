@@ -109,7 +109,6 @@ async function runSmoke(expectedRuntime) {
     },
     layoutContext: {
       viewport: { width: viewportWidth, height: viewportHeight },
-      rootFontMetrics: CSS_TEXT_MEASURER.defaultFontMetrics(),
       textMeasurer: CSS_TEXT_MEASURER,
       initialContainingBlock: cssRect(
         cssCoordinate(cssPx(0)), cssCoordinate(cssPx(0)), viewportWidth, viewportHeight

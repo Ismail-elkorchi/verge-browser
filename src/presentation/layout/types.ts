@@ -44,11 +44,9 @@ export interface LayoutBudgets {
 
 export interface LayoutContext {
   readonly viewport: CssSize;
-  readonly rootFontMetrics: UsedFontMetrics;
   readonly textMeasurer: CssTextMeasurer;
   readonly initialContainingBlock: CssRect;
   readonly budgets?: Partial<LayoutBudgets>;
-  readonly signal?: AbortSignal;
 }
 
 export type DocumentActionIdentity =
@@ -66,6 +64,13 @@ export interface LayoutPaintStyle {
   readonly strikethrough: boolean;
   readonly borderColor: CssColor | null;
   readonly borderStyle: "none" | "solid";
+}
+
+export interface InlineContinuationGeometry {
+  readonly contentRect: CssRect;
+  readonly paddingRect: CssRect;
+  readonly borderRect: CssRect;
+  readonly marginRect: CssRect;
 }
 
 export interface LayoutTextFragment {
@@ -123,6 +128,7 @@ export interface LayoutBoxFragment {
   readonly style: LayoutPaintStyle;
   readonly minContentContribution: CssPixelLength;
   readonly maxContentContribution: CssPixelLength;
+  readonly inlineContinuations?: readonly InlineContinuationGeometry[];
   readonly controlLabel?: string;
   readonly controlValue?: string;
   readonly controlText?: string;
@@ -161,18 +167,23 @@ export type LayoutOutcome =
       readonly budget: keyof LayoutBudgets;
       readonly limit: number;
     }
-  | { readonly status: "rejected"; readonly reason: "invalid-context" | "invalid-fixed-point-input" }
+  | {
+      readonly status: "rejected";
+      readonly reason: "invalid-context" | "invalid-fixed-point-input" | "invalid-budget";
+    }
   | { readonly status: "unsupported"; readonly feature: string };
 
 export interface BuildLayoutFragmentTreeInput {
   readonly formatting: FormattingTree;
   readonly context: LayoutContext;
   readonly searchIndex: TextSearchIndex;
+  readonly signal?: AbortSignal;
 }
 
 export interface LayoutFragmentTree {
   readonly formatting: FormattingTree;
   readonly context: LayoutContext;
+  readonly rootFontMetrics: UsedFontMetrics;
   readonly searchIndex: TextSearchIndex;
   readonly root: LayoutFragmentId;
   readonly lineBoxes: readonly LineBox[];

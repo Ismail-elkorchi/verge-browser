@@ -152,6 +152,32 @@ All notable changes are documented in this file.
   layout, line boxes, complete CSS layout, display-list construction, cell
   rasterization, resize, focused stress workloads, fragment heap release, and
   repeated-resize retention.
+- Bound terminal display-list commands, incremental paint units, retained cells,
+  cell-buffer rows and columns, hit-test regions, focus rectangles,
+  accessibility rectangles, document geometry, scroll anchors, and search cell
+  spans with exact typed truncation causes. Zero is a valid no-work terminal
+  budget and malformed caller limits are rejected.
+- Saturate fixed-point addition, subtraction, multiplication, division,
+  rectangle edges, intersections, and iterative unions before unsafe integer
+  intermediates can occur; preserve zero-area clipping and bounded work at both
+  safe-integer limits.
+- Preserve every extended grapheme during terminal snapping, keep wide clusters
+  atomic, make adjacent graphemes monotonic within one text command, and resolve
+  only cross-command collisions by paint order.
+- Treat replaced content, controls, `inline-block`, `inline-table`,
+  `inline-flex`, and `inline-grid` as atomic inline boxes; retain per-line
+  decoration geometry for splittable inline boxes; and remove forced-block
+  handling for inline formatting contexts.
+- Derive root font metrics from the computed root-element style and use the same
+  root value for descendant `rem` used values while applying the initial-font
+  rule to the root element's own `font-size`.
+- Add background-fill and side-specific border paint commands, explicit paint
+  phases, source-over alpha composition before terminal color quantization, and
+  separate box-derived pointer, focus, accessibility, scroll, document, and
+  text-search geometry contracts. Keep clipped border sides at their true box
+  edges, give split hit regions stable identities, retain source-order index
+  prefixes, and reject malformed CSS or terminal text metrics through typed
+  outcomes.
 
 ## [0.1.2] - 2026-03-07
 - Add the redesigned terminal UI with page-first navigation, help, and shell flows.

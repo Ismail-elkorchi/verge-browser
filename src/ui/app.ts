@@ -689,7 +689,7 @@ export function updateBrowser(
         documentWithScrollRow(current, terminalRender, terminalRender.cellBuffer.rows.length, viewportRows)
       ));
     case "movePageFocus": {
-      const targets = terminalRender.focusMap.targets.filter((target) => target.rects.length > 0);
+      const targets = terminalRender.focusMap.targets;
       if (targets.length === 0) return result(state);
       const currentIndex = targets.findIndex((target) =>
         actionId(target.action) === message.currentActionId
@@ -699,8 +699,14 @@ export function updateBrowser(
         : (currentIndex - 1 + targets.length) % targets.length;
       const target = targets[nextIndex];
       if (target === undefined) return result(state);
-      const top = Math.min(...target.rects.map((rect) => rect.row));
-      const bottom = Math.max(...target.rects.map((rect) => rect.row + rect.height));
+      const scrollAnchor = terminalRender.scrollAnchors.find((entry) => entry.documentNode === target.node);
+      let top = target.rects[0]?.row ?? scrollAnchor?.row ?? 0;
+      let bottom = top;
+      for (const rect of target.rects) {
+        top = Math.min(top, rect.row);
+        bottom = Math.max(bottom, rect.row + rect.height);
+      }
+      if (target.rects.length === 0) bottom = top + 1;
       const currentRow = documentScrollRow(document, terminalRender);
       const revealedRow = top < currentRow
         ? top

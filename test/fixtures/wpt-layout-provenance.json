@@ -110,6 +110,54 @@
       "behavior": "overflow clipping constrains visible paint geometry",
       "terminalAdjustment": "the cell rasterizer intersects CSS clips with the terminal viewport",
       "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/normal-flow/inline-block-000.xht",
+      "behavior": "an inline-block participates atomically in its containing line while laying out its inner block formatting context independently",
+      "terminalAdjustment": "the atomic margin box is asserted in fixed-point CSS pixels before terminal snapping",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/normal-flow/inline-table-003.xht",
+      "behavior": "an inline-table remains an atomic inline participant between surrounding text",
+      "terminalAdjustment": "only Verge's currently supported simple table layout is adapted",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-flexbox/inline-flexbox-wrap-vertically-width-calculation.html",
+      "behavior": "an inline flex container contributes one atomic inline size rather than forcing block placement",
+      "terminalAdjustment": "the current intrinsic flex-item basis is used and full flex sizing is not claimed",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/grid-model/display-inline-grid.html",
+      "behavior": "an inline grid container participates atomically in surrounding inline flow",
+      "terminalAdjustment": "the adaptation covers Verge's simple explicit-track grid slice",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/linebox/split-inline-borders.html",
+      "behavior": "a splittable inline box retains decoration geometry on each generated line fragment without empty continuations",
+      "terminalAdjustment": "background and supported solid-border paint commands are inspected before and after cell snapping",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-values/rem-unit-root-element.html",
+      "behavior": "rem in the root element's font size uses the initial font size while descendant rem units use the computed root font size",
+      "terminalAdjustment": "the terminal text-metrics adapter receives the resulting root CSS-pixel font size",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-backgrounds/background-clip-padding-box-001.html",
+      "behavior": "box backgrounds cover empty content and padding before borders and descendants paint",
+      "terminalAdjustment": "the supported background area is rasterized to complete terminal cells",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/paint/row-background-paint-remove-last-cell.html",
+      "behavior": "table, row-group, row, and cell backgrounds retain structural paint order",
+      "terminalAdjustment": "only the table background order in Verge's current table slice is adapted",
+      "license": "WPT 3-clause BSD"
     }
   ]
 }

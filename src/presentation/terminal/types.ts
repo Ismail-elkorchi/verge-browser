@@ -26,9 +26,18 @@ export interface TerminalCellMeasurer {
 }
 
 export interface TerminalPaintBudgets {
-  readonly maxCommands: number;
-  readonly maxPaintCells: number;
-  readonly maxSearchMatches: number;
+  readonly maxDisplayListCommands: number;
+  readonly maxGeneratedPaintUnits: number;
+  readonly maxRetainedPaintCells: number;
+  readonly maxRetainedCellBufferRows: number;
+  readonly maxRetainedCellBufferColumns: number;
+  readonly maxRetainedHitTestRegions: number;
+  readonly maxRetainedFocusRectangles: number;
+  readonly maxRetainedAccessibilityRectangles: number;
+  readonly maxRetainedDocumentRectangles: number;
+  readonly maxRetainedScrollAnchors: number;
+  readonly maxRetainedSearchCellSpans: number;
+  readonly maxLogicalSearchMatches: number;
 }
 
 export interface TerminalRenderContext {
@@ -41,7 +50,6 @@ export interface TerminalRenderContext {
   readonly colorDepth: 0 | 4 | 8 | 24;
   readonly cellMeasurer: TerminalCellMeasurer;
   readonly budgets?: Partial<TerminalPaintBudgets>;
-  readonly signal?: AbortSignal;
 }
 
 export interface TerminalStyle {
@@ -74,19 +82,28 @@ export interface TerminalTextPaintCommand extends TerminalPaintCommandBase {
   readonly text: string;
 }
 
-export interface TerminalBorderPaintCommand extends TerminalPaintCommandBase {
-  readonly kind: "border";
+export interface TerminalBackgroundPaintCommand extends TerminalPaintCommandBase {
+  readonly kind: "background";
+}
+
+export interface TerminalBorderSidePaintCommand extends TerminalPaintCommandBase {
+  readonly kind: "border-side";
+  readonly side: "top" | "right" | "bottom" | "left";
   readonly borderRect: CssRect;
-  readonly contentRect: CssRect;
   readonly borderWidths: CssEdges;
 }
 
-export type TerminalPaintCommand = TerminalTextPaintCommand | TerminalBorderPaintCommand;
+export type TerminalPaintCommand = TerminalBackgroundPaintCommand | TerminalBorderSidePaintCommand | TerminalTextPaintCommand;
 
 export type TerminalDisplayListOutcome =
   | { readonly status: "complete"; readonly commands: number }
-  | { readonly status: "truncated"; readonly commands: number; readonly budget: "maxCommands"; readonly limit: number }
-  | { readonly status: "rejected"; readonly reason: "invalid-context" };
+  | {
+      readonly status: "truncated";
+      readonly commands: number;
+      readonly budget: "maxDisplayListCommands";
+      readonly limit: number;
+    }
+  | { readonly status: "rejected"; readonly reason: "invalid-context" | "invalid-budget" };
 
 export interface TerminalDisplayList {
   readonly layout: LayoutFragmentTree;
@@ -137,8 +154,32 @@ export interface TerminalCellRow {
 
 export type TerminalCellBufferOutcome =
   | { readonly status: "complete"; readonly cells: number; readonly rows: number }
-  | { readonly status: "truncated"; readonly cells: number; readonly rows: number; readonly budget: "maxPaintCells"; readonly limit: number }
-  | { readonly status: "rejected"; readonly reason: "invalid-context" };
+  | {
+      readonly status: "truncated";
+      readonly cells: number;
+      readonly rows: number;
+      readonly truncations: readonly TerminalTruncation[];
+    }
+  | {
+      readonly status: "rejected";
+      readonly reason: "invalid-context" | "invalid-budget" | "invalid-cell-measurement";
+    };
+
+export type TerminalTruncation = {
+  readonly budget:
+    | "maxDisplayListCommands"
+    | "maxGeneratedPaintUnits"
+    | "maxRetainedPaintCells"
+    | "maxRetainedCellBufferRows"
+    | "maxRetainedCellBufferColumns"
+    | "maxRetainedHitTestRegions"
+    | "maxRetainedFocusRectangles"
+    | "maxRetainedAccessibilityRectangles"
+    | "maxRetainedDocumentRectangles"
+    | "maxRetainedScrollAnchors"
+    | "maxRetainedSearchCellSpans";
+  readonly limit: number;
+};
 
 export interface TerminalCellBuffer {
   readonly columns: number;
@@ -148,6 +189,7 @@ export interface TerminalCellBuffer {
 }
 
 export interface TerminalHitRegion {
+  readonly id: string;
   readonly action: DocumentActionIdentity;
   readonly layoutFragment: LayoutFragmentId;
   readonly rect: TerminalCellRect;
@@ -217,15 +259,32 @@ export interface TerminalRenderResult {
   readonly focusMap: TerminalFocusMap;
   readonly accessibilityBounds: readonly TerminalAccessibilityBound[];
   readonly scrollAnchors: readonly TerminalScrollAnchor[];
+  readonly truncations: readonly TerminalTruncation[];
   cellRectsForDocumentNode(node: DocumentNodeRef): readonly TerminalCellRect[];
   search(query: string): TerminalSearchResult;
+}
+
+export interface TerminalCellRasterizationResult {
+  readonly cellBuffer: TerminalCellBuffer;
+  readonly truncations: readonly TerminalTruncation[];
+}
+
+export interface TerminalIndexConstructionResult {
+  readonly hitTestIndex: TerminalHitTestIndex;
+  readonly focusMap: TerminalFocusMap;
+  readonly accessibilityBounds: readonly TerminalAccessibilityBound[];
+  readonly scrollAnchors: readonly TerminalScrollAnchor[];
+  readonly truncations: readonly TerminalTruncation[];
+  cellRectsForDocumentNode(node: DocumentNodeRef): readonly TerminalCellRect[];
 }
 
 export interface BuildTerminalDisplayListInput {
   readonly layout: LayoutFragmentTree;
   readonly context: TerminalRenderContext;
+  readonly signal?: AbortSignal;
 }
 
 export interface RasterizeTerminalDisplayListInput {
   readonly displayList: TerminalDisplayList;
+  readonly signal?: AbortSignal;
 }

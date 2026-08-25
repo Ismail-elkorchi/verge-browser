@@ -1,6 +1,13 @@
 import type { DocumentState, IndexedWebDocumentSnapshot } from "../document/index.js";
 import { buildFormattingTree, type FormattingBudgets, type FormattingTree } from "./formatting/index.js";
-import { buildLayoutFragmentTree, type LayoutBudgets, type LayoutContext, type LayoutFragmentTree } from "./layout/index.js";
+import {
+  buildLayoutFragmentTree,
+  cssMultiply,
+  cssPx,
+  type LayoutBudgets,
+  type LayoutContext,
+  type LayoutFragmentTree
+} from "./layout/index.js";
 import { buildTextSearchIndex, type TextSearchIndex } from "./search/index.js";
 import {
   resolveStyles, type MediaEnvironment, type StyleBudgets, type StyleDiagnostic,
@@ -27,6 +34,7 @@ export interface RenderDocumentInput {
   readonly layoutContext: LayoutContext;
   readonly terminalContext: TerminalRenderContext;
   readonly budgets?: RenderPipelineBudgets;
+  readonly signal?: AbortSignal;
 }
 
 /** Internal end-to-end render-pipeline result. These subsystem contracts are not root exports. */
@@ -39,8 +47,31 @@ export interface RenderPipelineResult {
   readonly terminal: TerminalRenderResult;
 }
 
+function coherentRenderingRequest(input: RenderDocumentInput): boolean {
+  try {
+    const mediaWidth = cssPx(input.mediaEnvironment.viewportWidthCssPx);
+    const mediaHeight = cssPx(input.mediaEnvironment.viewportHeightCssPx);
+    const terminalWidth = cssMultiply(input.terminalContext.cellWidthCssPx, input.terminalContext.columns);
+    const terminalHeight = cssMultiply(input.terminalContext.rowHeightCssPx, input.terminalContext.rows);
+    const initial = input.layoutContext.initialContainingBlock;
+    return mediaWidth === input.layoutContext.viewport.width
+      && mediaHeight === input.layoutContext.viewport.height
+      && terminalWidth === mediaWidth
+      && terminalHeight === mediaHeight
+      && initial.x === 0
+      && initial.y === 0
+      && initial.width === mediaWidth
+      && initial.height === mediaHeight;
+  } catch {
+    return false;
+  }
+}
+
 export function renderDocument(input: RenderDocumentInput): RenderPipelineResult {
-  input.terminalContext.signal?.throwIfAborted();
+  input.signal?.throwIfAborted();
+  if (!coherentRenderingRequest(input)) {
+    throw new RangeError("Media, layout, initial containing block, and terminal viewports must describe one rendering request.");
+  }
   const styles = resolveStyles({
     document: input.document,
     state: input.state,
@@ -48,31 +79,36 @@ export function renderDocument(input: RenderDocumentInput): RenderPipelineResult
     ...(input.styleDiagnostics === undefined ? {} : { initialDiagnostics: input.styleDiagnostics }),
     environment: input.mediaEnvironment,
     ...(input.budgets?.style === undefined ? {} : { budgets: input.budgets.style }),
-    ...(input.terminalContext.signal === undefined ? {} : { signal: input.terminalContext.signal })
+    ...(input.signal === undefined ? {} : { signal: input.signal })
   });
   const formatting = buildFormattingTree({
     document: input.document,
     state: input.state,
     styles,
     ...(input.budgets?.formatting === undefined ? {} : { budgets: input.budgets.formatting }),
-    ...(input.terminalContext.signal === undefined ? {} : { signal: input.terminalContext.signal })
+    ...(input.signal === undefined ? {} : { signal: input.signal })
   });
-  const textSearchIndex = buildTextSearchIndex(formatting, input.terminalContext.signal);
+  const textSearchIndex = buildTextSearchIndex(formatting, input.signal);
   const layout = buildLayoutFragmentTree({
     formatting,
     searchIndex: textSearchIndex,
     context: {
       ...input.layoutContext,
       ...(input.budgets?.layout === undefined ? {} : { budgets: input.budgets.layout })
-    }
+    },
+    ...(input.signal === undefined ? {} : { signal: input.signal })
   });
   const displayList = buildTerminalDisplayList({
     layout,
     context: {
       ...input.terminalContext,
       ...(input.budgets?.terminal === undefined ? {} : { budgets: input.budgets.terminal })
-    }
+    },
+    ...(input.signal === undefined ? {} : { signal: input.signal })
   });
-  const terminal = rasterizeTerminalDisplayList({ displayList });
+  const terminal = rasterizeTerminalDisplayList({
+    displayList,
+    ...(input.signal === undefined ? {} : { signal: input.signal })
+  });
   return Object.freeze({ styles, formatting, textSearchIndex, layout, displayList, terminal });
 }

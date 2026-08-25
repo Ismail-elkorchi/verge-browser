@@ -77,10 +77,18 @@ viewport width  = terminal columns × cell width in CSS pixels
 viewport height = terminal rows × row height in CSS pixels
 ```
 
-`LayoutContext` carries that viewport, the initial containing block, root font
-metrics (including ascent, descent, baseline, x-height, line gap, and `ch`
-advance), the CSS-pixel text measurer, budgets, and cancellation. Terminal rows,
-columns, color capability, and Unicode capability do not enter layout.
+`LayoutContext` carries that viewport, the initial containing block, the
+CSS-pixel text measurer, and layout budgets. Layout derives root font metrics
+(including ascent, descent, baseline, x-height, line gap, and `ch` advance)
+from the computed root-element font size after style resolution. The root
+element resolves `rem` in its own `font-size` against the initial font size;
+descendants resolve `rem` against that computed root size. One top-level
+cancellation signal is passed through style resolution, box generation, text
+search indexing, layout, display-list construction, and cell rasterization.
+Terminal rows, columns, color capability, and Unicode capability do not enter
+layout. Text metrics, advances, grapheme boundaries, and fixed-point inputs are
+validated at their subsystem boundaries; malformed values produce typed
+rejection rather than escaping as unsafe geometry.
 
 The UI derives one shared set of media and terminal preferences for interactive
 and one-shot rendering. `COLORFGBG` and the `VERGE_COLOR_SCHEME` override select
@@ -100,23 +108,53 @@ Each immutable line box records its CSS rectangle, baseline, ascent, descent,
 logical text fragments, and visual-order slots. Verge currently preserves
 logical text order and does not claim a Unicode bidi implementation.
 
+Replaced boxes, form controls, `inline-block`, `inline-table`, `inline-flex`,
+and `inline-grid` boxes are atomic inline boxes. Their inner formatting context
+is laid out independently and their resulting margin box participates once in
+the containing line box. Splittable inline boxes retain per-line continuation
+geometry for background and border painting.
+
 Work-budget exhaustion finalizes open ancestors and keeps a connected
 source-order layout-fragment prefix. Completed fragments are never cleared.
 
 ## Terminal contracts
 
-`TerminalDisplayList` contains ordered text and border paint commands. Commands
-retain clipping, source ranges, styles, action and semantic identities, and
-formatting/document/layout-fragment identities.
+`TerminalDisplayList` contains ordered background-fill, border-side, and text
+paint commands. A box's background and supported border sides precede its
+in-flow descendants; later siblings retain source order. Commands retain
+clipping, source ranges, styles, action and semantic identities, and
+formatting/document/layout-fragment identities. Border sides keep their actual
+box-edge coordinates before clipping, so a saturated or far-offscreen side is
+never moved onto the retained cell-buffer boundary.
 
 `TerminalCellBuffer` contains final rows, grapheme-owning cells, style spans,
-and identity-bearing cell spans. Its colors are actual values quantized to the
-terminal color depth. Later paint order wins a cell collision. The
-hit-test index and focus map use visible painted cells; accessibility bounds
-aggregate visible descendant geometry and every contributing layout fragment
-by semantic document node. Logical search
+and identity-bearing cell spans. Adjacent graphemes in one text command snap
+monotonically and never overwrite one another. A grapheme occupies at least one
+actual terminal cell, wide graphemes remain atomic, and larger CSS advances may
+produce cell gaps because a terminal cannot resize glyphs. Later paint commands
+win collisions. Source-over alpha composition occurs before terminal
+color-depth quantization.
+
+The hit-test index comes from clipped action-bearing content, padding, and
+border geometry; every retained region has a stable routing identity. The
+focus map comes from document semantics and may retain a
+focusable target with no current rectangles. Accessibility bounds aggregate
+visible layout geometry once per semantic document node and may be empty for an
+intentionally clipped node. Scroll anchors use layout positions. Only search
+cell spans depend on surviving text paint. Logical search
 matches are projected through layout text fragments and only then into cell
 spans, so match identity survives wrapping, resize, and cell-metric changes.
+
+Terminal work has independent limits for display-list commands, generated paint
+units, retained paint cells, cell-buffer rows and columns, hit-test regions,
+focus rectangles, accessibility rectangles, document rectangles, scroll
+anchors, and search cell spans. Zero is a valid no-work limit; negative,
+fractional, and unsafe supplied limits are rejected. Terminal truncation never
+changes the layout fragment tree, interactive mode reports the truncated state,
+and one-shot mode fails with the exact limits instead of emitting a partial,
+unbounded document. Accessibility bounds and scroll anchors retain document
+source-order prefixes; paint cells and hit-test regions retain paint-order
+prefixes.
 
 ## Invariants
 

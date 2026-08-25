@@ -5,7 +5,7 @@ import type { DocumentState } from "../document/index.js";
 import type { IndexedPageSnapshot } from "../app/types.js";
 import { renderDocument, type RenderPipelineResult } from "../presentation/pipeline.js";
 import {
-  cssCoordinate, cssLengthFromFixed, cssPixels, cssPx, cssRect,
+  cssCoordinate, cssLengthFromFixed, cssNonNegativeLength, cssPixels, cssPx, cssRect,
   type DocumentActionIdentity
 } from "../presentation/layout/index.js";
 import type { MediaEnvironment } from "../presentation/style/index.js";
@@ -118,10 +118,9 @@ export class RenderPipelineCache {
       ),
       layoutContext: {
         viewport: {
-          width: cssLengthFromFixed(viewportColumns * CELL_WIDTH),
-          height: cssLengthFromFixed(viewportRows * ROW_HEIGHT)
+          width: cssNonNegativeLength(cssLengthFromFixed(viewportColumns * CELL_WIDTH)),
+          height: cssNonNegativeLength(cssLengthFromFixed(viewportRows * ROW_HEIGHT))
         },
-        rootFontMetrics: CSS_TEXT_MEASURER.defaultFontMetrics(),
         textMeasurer: CSS_TEXT_MEASURER,
         initialContainingBlock: cssRect(
           cssCoordinate(cssPx(0)),
@@ -145,6 +144,40 @@ export class RenderPipelineCache {
     if (this.#entries.length > MAX_RENDER_PIPELINE_CACHE_ENTRIES) this.#entries.shift();
     return result;
   }
+}
+
+/** Exact typed causes when a rendering stage did not produce a complete result. */
+export function renderPipelineIncompleteCauses(result: RenderPipelineResult): readonly string[] {
+  const causes: string[] = [];
+  const stage = (
+    name: string,
+    outcome: { readonly status: string; readonly budget?: string; readonly limit?: number;
+      readonly reason?: string; readonly feature?: string }
+  ): void => {
+    if (outcome.status === "complete") return;
+    if (outcome.status === "truncated" && outcome.budget !== undefined && outcome.limit !== undefined) {
+      causes.push(`${name}.${outcome.budget}=${String(outcome.limit)}`);
+      return;
+    }
+    if (outcome.status === "rejected" && outcome.reason !== undefined) {
+      causes.push(`${name}.${outcome.reason}`);
+      return;
+    }
+    if (outcome.status === "unsupported" && outcome.feature !== undefined) {
+      causes.push(`${name}.unsupported:${outcome.feature}`);
+    }
+  };
+  stage("style", result.styles.outcome);
+  stage("box-tree", result.formatting.outcome);
+  stage("layout", result.layout.outcome);
+  if (result.displayList.outcome.status === "rejected") stage("display-list", result.displayList.outcome);
+  if (result.terminal.cellBuffer.outcome.status === "rejected") {
+    stage("cell-buffer", result.terminal.cellBuffer.outcome);
+  }
+  for (const truncation of result.terminal.truncations) {
+    causes.push(`terminal.${truncation.budget}=${String(truncation.limit)}`);
+  }
+  return Object.freeze(causes);
 }
 
 export type BrowserDocumentAction = {

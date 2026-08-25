@@ -17,7 +17,12 @@ import {
 } from "../../dist/presentation/layout/index.js";
 import { buildTextSearchIndex } from "../../dist/presentation/search/index.js";
 import { resolveStyles } from "../../dist/presentation/style/index.js";
-import { buildTerminalDisplayList, rasterizeTerminalDisplayList } from "../../dist/presentation/terminal/index.js";
+import {
+  buildTerminalDisplayList,
+  buildTerminalIndexes,
+  rasterizeTerminalCells,
+  rasterizeTerminalDisplayList
+} from "../../dist/presentation/terminal/index.js";
 import { terminalCellMeasurer, terminalCssTextMeasurer } from "../../dist/ui/terminal-measure.js";
 
 const SAMPLE_CASES = 60;
@@ -30,12 +35,13 @@ const LIMITS_MS = Object.freeze({
   documentIndexP95: 75,
   styleP95: 300,
   formattingP95: 150,
-  computedToUsedValuesP95: 75,
-  blockLayoutP95: 50,
-  lineBoxConstructionP95: 150,
+  usedValueHeavyLayoutP95: 75,
+  deepBlockFlowLayoutP95: 50,
+  manyInlineLineBoxesP95: 150,
   completeCssLayoutP95: 75,
   displayListP95: 25,
   cellRasterizationP95: 75,
+  indexConstructionP95: 75,
   resizeP95: 150,
   searchP95: 25,
   largeNestedTotal: 5_000,
@@ -44,7 +50,11 @@ const LIMITS_MS = Object.freeze({
   longUnbreakableText: 1_000,
   largeTable: 3_000,
   manyFlexItems: 500,
-  manyGridItems: 250
+  manyGridItems: 250,
+  emptyHugeHeightBox: 100,
+  hugeBorder: 100,
+  manyActionBearingBoxes: 5_000,
+  manySplitInlineBoxes: 5_000
 });
 const LIMITS_MEMORY_MIB = Object.freeze({
   hundredThousandNodePeakHeapGrowth: 384,
@@ -251,9 +261,10 @@ async function layoutFragmentMemory(formatting) {
 async function repeatedResizeMemory(formatting) {
   await collectGarbage();
   const before = memory();
+  const searchIndex = buildTextSearchIndex(formatting);
   for (let index = 0; index < 40; index += 1) {
     const columns = 40 + index * 2;
-    const layout = layoutFragments(formatting, columns);
+    const layout = layoutFragments(formatting, columns, searchIndex);
     cellBuffer(displayList(layout, columns));
   }
   await collectGarbage();
@@ -296,7 +307,6 @@ function layoutContext(columns, rows = 24) {
   const height = cssLengthFromFixed(rows * ROW_HEIGHT);
   return {
     viewport: { width, height },
-    rootFontMetrics: CSS_TEXT_MEASURER.defaultFontMetrics(),
     textMeasurer: CSS_TEXT_MEASURER,
     initialContainingBlock: cssRect(cssCoordinate(cssPx(0)), cssCoordinate(cssPx(0)), width, height)
   };
@@ -331,17 +341,26 @@ function cellBuffer(list) {
   return rasterizeTerminalDisplayList({ displayList: list });
 }
 
+function cellRasterization(list) {
+  return rasterizeTerminalCells({ displayList: list });
+}
+
+function terminalIndexes(list) {
+  return buildTerminalIndexes({ displayList: list });
+}
+
 const timings = {
   htmlParse: [],
   documentIndex: [],
   style: [],
   formatting: [],
-  computedToUsedValues: [],
-  blockLayout: [],
-  lineBoxConstruction: [],
+  usedValueHeavyLayout: [],
+  deepBlockFlowLayout: [],
+  manyInlineLineBoxes: [],
   completeCssLayout: [],
   displayList: [],
   cellRasterization: [],
+  indexConstruction: [],
   resize: [],
   search: []
 };
@@ -364,7 +383,9 @@ for (let index = 1; index <= SAMPLE_CASES; index += 1) {
   const searchIndex = buildTextSearchIndex(formatting);
   const layout = time(timings.completeCssLayout, () => layoutFragments(formatting, 80, searchIndex));
   const list = time(timings.displayList, () => displayList(layout, 80));
-  const terminal = time(timings.cellRasterization, () => cellBuffer(list));
+  time(timings.cellRasterization, () => cellRasterization(list));
+  time(timings.indexConstruction, () => terminalIndexes(list));
+  const terminal = cellBuffer(list);
   const resized = time(timings.resize, () => {
     const resizedLayout = layoutFragments(formatting, 120, searchIndex);
     return cellBuffer(displayList(resizedLayout, 120));
@@ -408,10 +429,18 @@ const inlineFormatting = formattingFixture(`<p>${Array.from(
   { length: 2_000 },
   (_, index) => `<span style="font-size:${String(12 + index % 8)}px;vertical-align:${index % 2 === 0 ? "baseline" : "super"}">word </span>`
 ).join("")}</p>`, "line-boxes");
+const usedValueSearchIndex = buildTextSearchIndex(usedValueFormatting);
+const blockSearchIndex = buildTextSearchIndex(blockFormatting);
+const inlineSearchIndex = buildTextSearchIndex(inlineFormatting);
+for (let warmup = 0; warmup < 2; warmup += 1) {
+  layoutFragments(usedValueFormatting, 100, usedValueSearchIndex);
+  layoutFragments(blockFormatting, 100, blockSearchIndex);
+  layoutFragments(inlineFormatting, 100, inlineSearchIndex);
+}
 for (let index = 0; index < 12; index += 1) {
-  time(timings.computedToUsedValues, () => layoutFragments(usedValueFormatting, 100));
-  time(timings.blockLayout, () => layoutFragments(blockFormatting, 100));
-  time(timings.lineBoxConstruction, () => layoutFragments(inlineFormatting, 100));
+  time(timings.usedValueHeavyLayout, () => layoutFragments(usedValueFormatting, 100, usedValueSearchIndex));
+  time(timings.deepBlockFlowLayout, () => layoutFragments(blockFormatting, 100, blockSearchIndex));
+  time(timings.manyInlineLineBoxes, () => layoutFragments(inlineFormatting, 100, inlineSearchIndex));
 }
 
 const workloadFormatting = {
@@ -422,17 +451,54 @@ const workloadFormatting = {
     { length: 10 }, (_, column) => `<td>${String(row)}-${String(column)}</td>`
   ).join("")}</tr>`).join("")}</table>`, "large-table"),
   manyFlexItems: formattingFixture(`<div style="display:flex;flex-wrap:wrap">${"<span>item</span>".repeat(1_000)}</div>`, "many-flex-items"),
-  manyGridItems: formattingFixture(`<div style="display:grid;grid-template-columns:1fr 1fr 1fr">${"<span>item</span>".repeat(1_000)}</div>`, "many-grid-items")
+  manyGridItems: formattingFixture(`<div style="display:grid;grid-template-columns:1fr 1fr 1fr">${"<span>item</span>".repeat(1_000)}</div>`, "many-grid-items"),
+  emptyHugeHeightBox: formattingFixture(`<div style="height:1000000000px"></div>`, "empty-huge-height-box"),
+  hugeBorder: formattingFixture(`<div style="height:1000000000px;border:1000000000px solid"></div>`, "huge-border"),
+  manyActionBearingBoxes: formattingFixture(`<main>${Array.from(
+    { length: 2_000 },
+    (_, index) => `<a href="/${String(index)}" style="display:inline-block;padding:1px">action ${String(index)}</a>`
+  ).join("")}</main>`, "many-action-bearing-boxes"),
+  manySplitInlineBoxes: formattingFixture(`<main>${Array.from(
+    { length: 1_000 },
+    (_, index) => `<span style="padding:1px;border:1px solid">split inline ${String(index)} across lines </span>`
+  ).join("")}</main>`, "many-split-inline-boxes")
 };
-const workloadMetrics = Object.fromEntries(Object.entries(workloadFormatting).map(([name, formatting]) => {
-  const start = nowNs();
-  const layout = layoutFragments(formatting, 100);
-  const terminal = cellBuffer(displayList(layout, 100));
-  if (layout.outcome.status === "rejected" || terminal.cellBuffer.outcome.status === "rejected") {
-    throw new Error(`${name} workload was rejected`);
+const workloadMetrics = {};
+const workloadStageMetrics = {};
+for (const [name, formatting] of Object.entries(workloadFormatting)) {
+  const searchIndex = buildTextSearchIndex(formatting);
+  for (let warmup = 0; warmup < 2; warmup += 1) {
+    const layout = layoutFragments(formatting, 100, searchIndex);
+    cellBuffer(displayList(layout, 100));
   }
-  return [name, durationMs(start)];
-}));
+  const samples = {
+    layoutFragmentConstruction: [],
+    displayListConstruction: [],
+    cellRasterization: [],
+    indexConstruction: [],
+    completeRendering: []
+  };
+  for (let sample = 0; sample < 7; sample += 1) {
+    const layout = time(samples.layoutFragmentConstruction, () => layoutFragments(formatting, 100, searchIndex));
+    const list = time(samples.displayListConstruction, () => displayList(layout, 100));
+    const cells = time(samples.cellRasterization, () => cellRasterization(list));
+    time(samples.indexConstruction, () => terminalIndexes(list));
+    const completeStarted = nowNs();
+    const completeLayout = layoutFragments(formatting, 100, searchIndex);
+    const terminal = cellBuffer(displayList(completeLayout, 100));
+    samples.completeRendering.push(durationMs(completeStarted));
+    if (layout.outcome.status === "rejected" || cells.cellBuffer.outcome.status === "rejected"
+      || terminal.cellBuffer.outcome.status === "rejected") {
+      throw new Error(`${name} workload was rejected`);
+    }
+  }
+  const stages = Object.fromEntries(Object.entries(samples).map(([stage, values]) => [stage, {
+    p50: percentile(values, 0.5),
+    p95: percentile(values, 0.95)
+  }]));
+  workloadStageMetrics[name] = stages;
+  workloadMetrics[name] = stages.completeRendering.p95;
+}
 
 const hundredThousandNodeHtml = `<main>${"<span>x</span>".repeat(50_000)}</main>`;
 const hundredThousandNodes = await documentMemory(
@@ -458,12 +524,13 @@ const metrics = {
   documentIndexP95: percentile(timings.documentIndex, 0.95),
   styleP95: percentile(timings.style, 0.95),
   formattingP95: percentile(timings.formatting, 0.95),
-  computedToUsedValuesP95: percentile(timings.computedToUsedValues, 0.95),
-  blockLayoutP95: percentile(timings.blockLayout, 0.95),
-  lineBoxConstructionP95: percentile(timings.lineBoxConstruction, 0.95),
+  usedValueHeavyLayoutP95: percentile(timings.usedValueHeavyLayout, 0.95),
+  deepBlockFlowLayoutP95: percentile(timings.deepBlockFlowLayout, 0.95),
+  manyInlineLineBoxesP95: percentile(timings.manyInlineLineBoxes, 0.95),
   completeCssLayoutP95: percentile(timings.completeCssLayout, 0.95),
   displayListP95: percentile(timings.displayList, 0.95),
   cellRasterizationP95: percentile(timings.cellRasterization, 0.95),
+  indexConstructionP95: percentile(timings.indexConstruction, 0.95),
   resizeP95: percentile(timings.resize, 0.95),
   searchP95: percentile(timings.search, 0.95),
   largeNestedTotal,
@@ -498,6 +565,7 @@ const report = {
   sampleCases: SAMPLE_CASES,
   nestedDepth,
   metricsMs: metrics,
+  stressWorkloadStageMetricsMs: workloadStageMetrics,
   limitsMs: LIMITS_MS,
   metricsMemoryMiB: memoryMetrics,
   limitsMemoryMiB: LIMITS_MEMORY_MIB,
@@ -512,8 +580,8 @@ const report = {
   },
   thresholdBasis: {
     existingControls: "PR #129 limits for parsing, indexing, style, formatting, resize, search, nested work, and lifecycle memory are unchanged.",
-    fixedPointControls: "New limits were calibrated from the final fixed-point pipeline run: 27.75ms computed-to-used values, 7.38ms block layout, 124.37ms line boxes, 8.77ms complete CSS layout, 0.24ms display-list construction, 16.75ms cell rasterization, and 8.84MiB repeated-resize retained heap.",
-    stressControls: "New stress limits were calibrated from 7.96ms deeply nested containing blocks, 3124.72ms many inline boxes, 478.55ms unbreakable text, 2067.25ms tables, 223.58ms flex items, and 64.49ms grid items."
+    fixedPointControls: "PR #130 fixed-point workload limits remain unchanged; cell rasterization and index construction are now measured independently.",
+    stressControls: "Every stress workload is warmed and reports p50 and p95 separately for layout fragment construction, display-list construction, cell rasterization, index construction, and complete rendering."
   },
   ok: failures.length === 0,
   failures

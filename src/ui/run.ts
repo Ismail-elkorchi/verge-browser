@@ -9,6 +9,7 @@ import type { TerminalSize } from "@ismail-elkorchi/terminal-ui/host";
 import type { BrowserServices } from "./services.js";
 import { createBrowserApp, createBrowserInitialState } from "./app.js";
 import { BrowserController } from "./browser-controller.js";
+import { renderDocumentForViewport, renderPipelineIncompleteCauses } from "./document-layout.js";
 import { browserView } from "./view.js";
 
 export interface BrowserTuiOptions {
@@ -108,6 +109,17 @@ export async function renderBrowserOnce(
 ): Promise<string> {
   const prepared = await prepareBrowserTui(initialTarget, options);
   try {
+    const selected = prepared.state.documents[prepared.state.activeDocumentIndex] ?? prepared.state.documents[0];
+    if (selected === undefined) throw new Error("One-shot rendering requires an open document.");
+    const pageColumns = prepared.state.sidePanel !== null && terminalSize.columns >= 100
+      ? terminalSize.columns - 41
+      : terminalSize.columns;
+    const viewportRows = Math.max(1, terminalSize.rows - (prepared.state.findBar === null ? 3 : 4));
+    const result = renderDocumentForViewport(selected, Math.max(1, pageColumns - 1), viewportRows);
+    const incomplete = renderPipelineIncompleteCauses(result);
+    if (incomplete.length > 0) {
+      throw new Error(`One-shot rendering was incomplete (${incomplete.join(", ")}).`);
+    }
     return renderFramePlain(renderElementFrame(
       browserView(prepared.state, { terminalSize }),
       terminalSize

@@ -1078,12 +1078,12 @@ function parseLength(
   });
 }
 
-function absoluteFontSize(value: CssLength, parentPx: number): CssLength | null {
+function absoluteFontSize(value: CssLength, parentPx: number, rootPx: number): CssLength | null {
   if (value.kind === "zero") return value;
   if (value.kind !== "length") return null;
   const pixels = value.unit === "px" ? value.value
     : value.unit === "em" || value.unit === "%" ? parentPx * value.value / (value.unit === "%" ? 100 : 1)
-      : value.unit === "rem" ? 16 * value.value
+      : value.unit === "rem" ? rootPx * value.value
         : value.unit === "ch" ? parentPx * 0.5 * value.value
           : null;
   return pixels === null || !Number.isFinite(pixels) || pixels < 0
@@ -1324,7 +1324,8 @@ function computeStyle(
   parent: ComputedStyle | null,
   candidates: ReadonlyMap<string, readonly CascadeCandidate[]> | undefined,
   diagnostics: DiagnosticCollector,
-  pseudo: PseudoElementIdentity | null = null
+  pseudo: PseudoElementIdentity | null = null,
+  rootFontSizePx = 16
 ): ComputedStyle {
   const replaced = document.replaced(node) !== null || document.control(node) !== null;
   let style = initialStyle(parent, replaced);
@@ -1450,7 +1451,7 @@ function computeStyle(
         : keywords[normalized] === undefined
           ? parseLength(normalized, false)
           : Object.freeze({ kind: "length", value: keywords[normalized], unit: "px" } as const);
-    const computed = specified === null ? null : absoluteFontSize(specified, parentPx);
+    const computed = specified === null ? null : absoluteFontSize(specified, parentPx, rootFontSizePx);
     if (computed === null) unsupported(fontSize);
     else style = { ...style, text: { ...style.text, fontSize: computed } };
   }
@@ -1879,6 +1880,7 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
   const styles = new Map<DocumentNodeRef, ComputedStyle>();
   const pseudos = new Map<string, ComputedStyle>();
   let computedNodes = 0;
+  let rootFontSizePx = 16;
   for (const ref of styleNodes.elements) {
     input.signal?.throwIfAborted();
     const parentNode = input.document.parent(ref);
@@ -1888,13 +1890,24 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
       ref,
       parentStyle,
       candidates.get(styleKey(ref)),
-      diagnostics
+      diagnostics,
+      null,
+      ref === input.document.documentElement ? 16 : rootFontSizePx
     );
     styles.set(ref, style);
+    if (ref === input.document.documentElement) rootFontSizePx = fontSizePixels(style);
     for (const pseudo of ["before", "after", "marker"] as const) {
       const pseudoCandidates = candidates.get(styleKey(ref, pseudo));
       if (pseudoCandidates === undefined) continue;
-      pseudos.set(styleKey(ref, pseudo), computeStyle(input.document, ref, style, pseudoCandidates, diagnostics, pseudo));
+      pseudos.set(styleKey(ref, pseudo), computeStyle(
+        input.document,
+        ref,
+        style,
+        pseudoCandidates,
+        diagnostics,
+        pseudo,
+        rootFontSizePx
+      ));
     }
     computedNodes += 1;
   }

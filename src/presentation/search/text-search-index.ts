@@ -1,10 +1,11 @@
 import type { DocumentNodeRef, DocumentSourceRange } from "../../document/index.js";
 import type {
-  FormattingFormControlNode,
   FormattingNode,
   FormattingNodeId,
   FormattingTree
 } from "../formatting/index.js";
+import { formattingNodeLogicalText } from "../formatting/index.js";
+import { transformTextWithSourceRanges, transformedSourceRange } from "../text/index.js";
 
 export type TextSearchMatchId = string & { readonly __textSearchMatchId: unique symbol };
 
@@ -41,69 +42,6 @@ interface TextSearchSegment {
   readonly contentStart: number;
   readonly contentEnd: number;
   readonly sourceRange: DocumentSourceRange | null;
-}
-
-interface MappedText {
-  readonly value: string;
-  readonly units: readonly { readonly start: number; readonly end: number }[];
-}
-
-function transformedText(
-  value: string,
-  transform: "none" | "uppercase" | "lowercase" | "capitalize"
-): MappedText {
-  let output = "";
-  const units: { readonly start: number; readonly end: number }[] = [];
-  let sourceOffset = 0;
-  let capitalizeNext = true;
-  for (const codePoint of value) {
-    let transformed = codePoint;
-    if (transform === "uppercase") transformed = codePoint.toUpperCase();
-    else if (transform === "lowercase") transformed = codePoint.toLowerCase();
-    else if (transform === "capitalize") {
-      if (capitalizeNext && /\p{L}/u.test(codePoint)) transformed = codePoint.toUpperCase();
-      capitalizeNext = /[\s\p{P}]/u.test(codePoint);
-    }
-    output += transformed;
-    for (let index = 0; index < transformed.length; index += 1) {
-      units.push({ start: sourceOffset, end: sourceOffset + codePoint.length });
-    }
-    sourceOffset += codePoint.length;
-  }
-  return { value: output, units };
-}
-
-function mappedRange(map: MappedText, start: number, end: number): readonly [number, number] {
-  const first = map.units[start];
-  const last = map.units[end - 1];
-  return first === undefined || last === undefined ? [start, end] : [first.start, last.end];
-}
-
-export function presentedControlText(
-  node: FormattingFormControlNode,
-  tree: FormattingTree
-): { readonly label: string; readonly value: string; readonly text: string } {
-  const control = node.control;
-  const state = tree.state.controls.get(control.node);
-  if (control.kind === "text" || control.kind === "textarea") {
-    const value = state?.values[0] ?? control.defaultValue;
-    return { label: control.label, value, text: `${control.label}: ${value || control.placeholder || ""}` };
-  }
-  if (control.kind === "checkbox" || control.kind === "radio") {
-    const checked = state?.checked ?? control.defaultChecked;
-    return { label: control.label, value: checked ? control.value : "", text: `${checked ? "[x]" : "[ ]"} ${control.label}` };
-  }
-  if (control.kind === "select") {
-    const values = state?.values ?? control.options
-      .filter((option) => option.defaultSelected)
-      .map((option) => option.value);
-    return { label: control.label, value: values.join(", "), text: `${control.label}: ${values.join(", ")}` };
-  }
-  if (control.kind === "submit" || control.kind === "reset") {
-    return { label: control.label, value: control.value, text: `[${control.label || control.value}]` };
-  }
-  if (control.kind === "hidden") return { label: "", value: control.defaultValue, text: "" };
-  return { label: control.label, value: "", text: `${control.label}: unsupported control` };
 }
 
 function foldedBoundaries(value: string, targets: readonly number[]): ReadonlyMap<number, number> {
@@ -253,12 +191,12 @@ export function buildTextSearchIndex(tree: FormattingTree, signal?: AbortSignal)
       ? tree.styles.style(node.styleNode)
       : tree.styles.pseudo(node.styleNode, node.pseudo) ?? tree.styles.style(node.styleNode);
     if (style?.visibility !== "visible") return;
-    const mapped = transformedText(raw, style.text.textTransform);
+    const mapped = transformTextWithSourceRanges(raw, style.text.textTransform);
     for (const match of mapped.value.matchAll(/\s+|\S+/gu)) {
       const value = match[0];
       const start = match.index;
       const end = start + value.length;
-      const [contentStart, contentEnd] = mappedRange(mapped, start, end);
+      const [contentStart, contentEnd] = transformedSourceRange(mapped, start, end);
       const segment = nodeSegment(node, contentStart, contentEnd);
       if (/^\s+$/u.test(value)) separator(segment);
       else append(value, segment);
@@ -278,20 +216,13 @@ export function buildTextSearchIndex(tree: FormattingTree, signal?: AbortSignal)
       continue;
     }
     if (node.outer === "block") separator(nodeSegment(node, 0, 0));
-    if (node.kind === "text-sequence" || node.kind === "generated-text" || node.kind === "marker") {
-      appendRenderedText(node, node.text);
+    const logicalText = formattingNodeLogicalText(node, tree);
+    if (logicalText !== null) {
+      appendRenderedText(node, logicalText);
       continue;
     }
     if (node.kind === "forced-line-break") {
       separator(nodeSegment(node, 0, 0));
-      continue;
-    }
-    if (node.kind === "form-control") {
-      appendRenderedText(node, presentedControlText(node, tree).text);
-      continue;
-    }
-    if (node.kind === "replaced-element" || node.kind === "image-fallback") {
-      appendRenderedText(node, node.fallbackText);
       continue;
     }
     pending.push({ phase: "exit", id: node.id });

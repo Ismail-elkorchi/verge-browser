@@ -63,7 +63,8 @@ import {
   actionId,
   documentContentBounds,
   renderDocumentForViewport,
-  documentScrollRow
+  documentScrollRow,
+  renderPipelineIncompleteCauses
 } from "./document-layout.js";
 import type {
   ActionPaletteOverlay,
@@ -656,12 +657,23 @@ function browserDocumentChildBounds(
     const rectangles = entry.controls.flatMap((control) => terminalRender.cellRectsForDocumentNode(control.node))
       .filter((rect) => rect.width > 0 && rect.height > 0);
     if (rectangles.length === 0) {
-      return { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 };
+      const anchor = entry.controls.map((control) =>
+        terminalRender.scrollAnchors.find((candidate) => candidate.documentNode === control.node)
+      ).find((candidate) => candidate !== undefined);
+      return anchor === undefined
+        ? { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 }
+        : { row: contentBounds.row + anchor.row, column: contentBounds.column, width: 1, height: 1 };
     }
-    const row = Math.min(...rectangles.map((rect) => rect.row));
-    const column = Math.min(...rectangles.map((rect) => rect.column));
-    const bottom = Math.max(...rectangles.map((rect) => rect.row + rect.height));
-    const edge = Math.max(...rectangles.map((rect) => rect.column + rect.width));
+    let row = rectangles[0]?.row ?? 0;
+    let column = rectangles[0]?.column ?? 0;
+    let bottom = row;
+    let edge = column;
+    for (const rect of rectangles) {
+      row = Math.min(row, rect.row);
+      column = Math.min(column, rect.column);
+      bottom = Math.max(bottom, rect.row + rect.height);
+      edge = Math.max(edge, rect.column + rect.width);
+    }
     return {
       row: contentBounds.row + row,
       column: contentBounds.column + column,
@@ -709,9 +721,9 @@ const browserDocumentComponent = defineComponent<
       minWidth: 0,
       minHeight: 0,
       preferredWidth: bounds.width,
-      preferredHeight: Math.max(
-        terminalRender.cellBuffer.rows.length,
-        ...childBounds.map((child) => child.row - bounds.row + child.height)
+      preferredHeight: childBounds.reduce(
+        (height, child) => Math.max(height, child.row - bounds.row + child.height),
+        terminalRender.cellBuffer.rows.length
       )
     };
   },
@@ -756,10 +768,13 @@ const browserDocumentComponent = defineComponent<
       Math.max(startIndex, visibleBounds.row + visibleBounds.height - contentBounds.row),
       terminalRender.cellBuffer.rows.length
     );
-    const visibleSemantic = terminalRender.accessibilityBounds.filter((entry) =>
-      document.source.snapshot.document.control(entry.documentNode) === null
-      && entry.rect.row < endIndexExclusive && entry.rect.row + entry.rect.height > startIndex
-    );
+    const visibleSemantic = terminalRender.accessibilityBounds.filter((entry) => {
+      if (document.source.snapshot.document.control(entry.documentNode) !== null) return false;
+      if (entry.rect.width === 0 || entry.rect.height === 0) {
+        return entry.rect.row >= startIndex && entry.rect.row < endIndexExclusive;
+      }
+      return entry.rect.row < endIndexExclusive && entry.rect.row + entry.rect.height > startIndex;
+    });
     return {
       id,
       role: "document",
@@ -793,21 +808,32 @@ const browserDocumentComponent = defineComponent<
     const document = model.document;
     const terminalRender = document.terminalRender;
     const contentBounds = documentContentBounds(bounds);
-    return terminalRender.focusMap.targets.flatMap((target) => {
-      if (target.rects.length === 0) return [];
-      const row = Math.min(...target.rects.map((rect) => rect.row));
-      const column = Math.min(...target.rects.map((rect) => rect.column));
-      const bottom = Math.max(...target.rects.map((rect) => rect.row + rect.height));
-      const edge = Math.max(...target.rects.map((rect) => rect.column + rect.width));
-      return [{
+    return terminalRender.focusMap.targets.map((target) => {
+      const anchor = terminalRender.scrollAnchors.find((entry) => entry.documentNode === target.node);
+      let row = target.rects[0]?.row ?? anchor?.row ?? 0;
+      let column = target.rects[0]?.column ?? 0;
+      let bottom = row;
+      let edge = column;
+      for (const rect of target.rects) {
+        row = Math.min(row, rect.row);
+        column = Math.min(column, rect.column);
+        bottom = Math.max(bottom, rect.row + rect.height);
+        edge = Math.max(edge, rect.column + rect.width);
+      }
+      if (target.rects.length === 0 && anchor !== undefined) {
+        bottom = row + 1;
+        edge = column + 1;
+      }
+      return {
         id: actionId(target.action),
         bounds: {
           row: contentBounds.row + row,
           column: contentBounds.column + column,
-          width: Math.max(1, Math.min(edge - column, contentBounds.width - column)),
-          height: Math.max(1, bottom - row)
+          width: target.rects.length === 0 && anchor === undefined
+            ? 0 : Math.max(1, Math.min(edge - column, contentBounds.width - column)),
+          height: target.rects.length === 0 && anchor === undefined ? 0 : Math.max(1, bottom - row)
         }
-      }];
+      };
     });
   },
   hitTargets({ model, bounds, viewport: visibleBounds }) {
@@ -823,7 +849,7 @@ const browserDocumentComponent = defineComponent<
         const placementActionId = actionId(placement.action);
         const columnIndex = Math.min(contentBounds.width - 1, placement.rect.column);
         return {
-          id: `activate:${placementActionId}:${placement.layoutFragment}`,
+          id: `activate:${placementActionId}:${placement.id}`,
           bounds: {
             row: contentBounds.row + placement.rect.row,
             column: contentBounds.column + columnIndex,
@@ -1259,11 +1285,13 @@ function baseView(state: BrowserTuiState, columns: number, rows: number): Elemen
   if (!selected) throw new Error("The browser view requires an open document.");
   const pageColumns = state.sidePanel !== null && columns >= 100 ? columns - 41 : columns;
   const viewportRows = Math.max(1, rows - (state.findBar === null ? 3 : 4));
-  const terminalRender = renderDocumentForViewport(
+  const renderPipeline = renderDocumentForViewport(
     selected,
     Math.max(1, pageColumns - 1),
     viewportRows
-  ).terminal;
+  );
+  const terminalRender = renderPipeline.terminal;
+  const incompleteRendering = renderPipelineIncompleteCauses(renderPipeline);
   const pagePanel = selected.snapshot.finalUrl === "about:newtab"
     ? newTabDashboard(state)
     : browserDocument(selected, terminalRender);
@@ -1313,7 +1341,9 @@ function baseView(state: BrowserTuiState, columns: number, rows: number): Elemen
       leading: [{
         id: "status",
         kind: "status",
-        text: selected.error ?? state.status?.text ?? selected.snapshot.finalUrl,
+        text: selected.error ?? state.status?.text ?? (incompleteRendering.length === 0
+          ? selected.snapshot.finalUrl
+          : `${selected.snapshot.finalUrl} — rendering incomplete (${incompleteRendering.join(", ")})`),
         status: selected.error !== null || state.status?.tone === "error"
           ? "error"
           : state.status?.tone === "success"

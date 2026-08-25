@@ -1,13 +1,15 @@
 import {
-  measureTerminalCellText,
+  segmentGraphemes,
   terminalTextWidth,
   type TextWidthProfile
 } from "@ismail-elkorchi/terminal-ui/text";
 
 import {
-  cssLengthFromFixed,
+  cssAdd,
+  cssMax,
   cssMultiply,
   cssPx,
+  cssSubtract,
   type CssPixelLength,
   type CssTextMeasurer,
   type UsedFontMetrics
@@ -25,11 +27,11 @@ export function terminalCellMeasurer(ambiguousWidth: 1 | 2 = 1): TerminalCellMea
       return terminalTextWidth(text, { widthProfile: profile });
     },
     graphemes(text) {
-      return measureTerminalCellText(text, { widthProfile: profile }).graphemes.map((segment) => ({
+      return segmentGraphemes(text).map((segment) => ({
         text: segment.text,
         startCodeUnit: segment.startOffset,
         endCodeUnit: segment.endOffsetExclusive,
-        cells: segment.cells
+        cells: terminalTextWidth(segment.text, { widthProfile: profile })
       }));
     }
   };
@@ -40,13 +42,14 @@ export function terminalCssTextMeasurer(
   rowHeightCssPx: CssPixelLength = cssPx(16),
   ambiguousWidth: 1 | 2 = 1
 ): CssTextMeasurer {
+  const profile = widthProfile(ambiguousWidth);
   const cells = terminalCellMeasurer(ambiguousWidth);
   const metrics = (fontSize: CssPixelLength): UsedFontMetrics => {
     const scale = fontSize / cssPx(16);
     const ascent = cssMultiply(cssPx(12), scale);
     const descent = cssMultiply(cssPx(4), scale);
-    const natural = ascent + descent;
-    const lineGap = cssLengthFromFixed(Math.max(0, rowHeightCssPx * scale - natural));
+    const natural = cssAdd(ascent, descent);
+    const lineGap = cssMax(cssPx(0), cssSubtract(cssMultiply(rowHeightCssPx, scale), natural));
     return Object.freeze({
       fontSize,
       ascent,
@@ -59,15 +62,18 @@ export function terminalCssTextMeasurer(
   };
   return {
     measure(text, fontSize) {
-      return cssMultiply(cellWidthCssPx, cells.width(text) * fontSize / cssPx(16));
+      return cssMultiply(cssMultiply(cellWidthCssPx, cells.width(text)), fontSize / cssPx(16));
     },
     graphemes(text, fontSize) {
       const scale = fontSize / cssPx(16);
-      return cells.graphemes(text).map((segment) => Object.freeze({
+      return segmentGraphemes(text).map((segment) => Object.freeze({
         text: segment.text,
-        startCodeUnit: segment.startCodeUnit,
-        endCodeUnit: segment.endCodeUnit,
-        advance: cssMultiply(cellWidthCssPx, segment.cells * scale)
+        startCodeUnit: segment.startOffset,
+        endCodeUnit: segment.endOffsetExclusive,
+        advance: cssMultiply(
+          cellWidthCssPx,
+          terminalTextWidth(segment.text, { widthProfile: profile }) * scale
+        )
       }));
     },
     fontMetrics: metrics,
