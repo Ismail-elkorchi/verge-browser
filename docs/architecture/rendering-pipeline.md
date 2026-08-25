@@ -1,9 +1,9 @@
 # Structural rendering pipeline
 
-Verge has one HTML presentation path. Network loading produces one immutable,
-indexed document graph; style resolution produces computed CSS values; box
+Verge has one HTML rendering path. Network loading produces one immutable,
+indexed document tree; style resolution produces a computed style map; box
 generation produces a `FormattingTree`; terminal layout produces a nested
-`FragmentTree`; and the CLI and interactive UI project the same fragments.
+`FragmentTree`; and the CLI and interactive UI consume the same terminal rows.
 
 The ownership boundaries are intentionally strict:
 
@@ -18,8 +18,8 @@ The ownership boundaries are intentionally strict:
   formatting contexts, generated boxes, and source-to-formatting identity.
 - `src/presentation/terminal/` owns used-value conversion, terminal-cell
   measurement, layout, fragmentation, clipping, hit geometry, search geometry,
-  accessibility projection, and row projection.
-- `src/reader/` owns the deliberately flattened reading projection. It is not a
+  accessibility bounds, and terminal rows.
+- `src/reader/` owns the deliberately flattened reader document. It is not a
   rendering fallback.
 - `src/ui/` owns browser chrome and maps document actions and terminal fragments
   to general terminal-ui controls.
@@ -43,7 +43,7 @@ bookmarks, persistence, and browser chrome remain application responsibilities.
   reconstructs hierarchy from flattened text.
 - Fragment identities derive from stable formatting identities; a
   resize changes geometry, not document or formatting identity.
-- Terminal rows are a final projection of fragments and are never the source of
+- Terminal rows are derived from fragments and are never the source of
   links, forms, outline entries, focus targets, or accessibility semantics.
 - Budget, cancellation, unsupported, rejected, and truncated states are typed
   subsystem outcomes. Control flow never depends on diagnostic prose.

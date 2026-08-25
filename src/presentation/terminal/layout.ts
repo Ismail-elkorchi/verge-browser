@@ -237,6 +237,7 @@ class FragmentBuilder {
   readonly #hitRegions: TerminalHitRegion[] = [];
   readonly #anchors: TerminalScrollAnchor[] = [];
   readonly #accessibility: TerminalAccessibilityNode[] = [];
+  readonly #semanticGeometryHints = new Map<DocumentNodeRef, SemanticGeometry>();
   readonly #fragmentOrdinals = new Map<string, number>();
   readonly #decorationCache = new Map<FormattingNodeId, {
     readonly underline: boolean;
@@ -288,18 +289,13 @@ class FragmentBuilder {
     const descendantProvidesAction = frozen.kind === "container"
       && frozen.action !== null
       && this.#hitRegions.some((entry) => entry.action.node === frozen.action?.node);
-    if (frozen.action !== null && !descendantProvidesAction && visibleRect.width > 0 && visibleRect.height > 0) {
+    const actionOwnsSource = frozen.action !== null && frozen.source === frozen.action.node;
+    const formattingNode = this.#formatting.node(frozen.formatting);
+    const descendantDefinesGeometry = descendantProvidesAction
+      && (actionOwnsSource || !formattingNode.appliesBoxStyle);
+    if (frozen.action !== null && !descendantDefinesGeometry
+      && visibleRect.width > 0 && visibleRect.height > 0) {
       this.#hitRegions.push(Object.freeze({ action: frozen.action, fragment: frozen.id, rect: visibleRect }));
-    }
-    if (frozen.semantic !== null && frozen.source !== null && visibleRect.width > 0 && visibleRect.height > 0) {
-      this.#accessibility.push(Object.freeze({
-        source: frozen.source,
-        fragment: frozen.id,
-        role: frozen.semantic.role,
-        name: frozen.semantic.accessibleName,
-        description: frozen.semantic.accessibleDescription,
-        rect: visibleRect
-      }));
     }
     return frozen;
   }
@@ -434,78 +430,52 @@ class FragmentBuilder {
     const fragment = this.#containerFragment(node, box, intersection(clip, box), []);
     if (node.source !== null && node.semantic !== null && !node.semantic.accessibilityHidden
       && this.#computed(node)?.visibility === "visible") {
-      this.#accessibility.push(Object.freeze({
-        source: node.source,
-        fragment: fragment.id,
-        role: node.semantic.role,
-        name: node.semantic.accessibleName,
-        description: node.semantic.accessibleDescription,
-        rect: box
-      }));
+      this.#semanticGeometryHints.set(node.source, { fragment: fragment.id, rect: box });
     }
     return { fragment: fragment.id, rect: box };
   }
 
-  #projectUnboxedAccessibility(): void {
-    const existing = new Set(this.#accessibility.map((entry) => entry.source));
-    const relevant = new Set<DocumentNodeRef>();
-    const direct = new Map<DocumentNodeRef, SemanticGeometry>();
+  #buildDocumentSemanticGeometry(): void {
+    const geometry = new Map<DocumentNodeRef, SemanticGeometry>();
+    const include = (source: DocumentNodeRef, value: SemanticGeometry): void => {
+      let current: DocumentNodeRef | null = source;
+      while (current !== null) {
+        const existing = geometry.get(current);
+        geometry.set(current, existing === undefined
+          ? value
+          : { fragment: existing.fragment, rect: union([existing.rect, value.rect], existing.rect) });
+        current = this.#formatting.document.parent(current)?.ref ?? null;
+      }
+    };
     for (const fragment of this.#fragments.values()) {
       if (fragment.source === null) continue;
+      const formattingNode = this.#formatting.node(fragment.formatting);
+      if (this.#computed(formattingNode)?.visibility !== "visible") continue;
       const visible = intersection(fragment.rect, fragment.clip);
       if (visible.width <= 0 || visible.height <= 0) continue;
-      const current = direct.get(fragment.source);
-      direct.set(fragment.source, current === undefined
-        ? { fragment: fragment.id, rect: visible }
-        : { fragment: current.fragment, rect: union([current.rect, visible], current.rect) });
-      let source: DocumentNodeRef | null = fragment.source;
-      while (source !== null && !relevant.has(source)) {
-        relevant.add(source);
-        source = this.#formatting.document.parent(source)?.ref ?? null;
-      }
+      include(fragment.source, { fragment: fragment.id, rect: visible });
     }
-    const childCounts = new Map<DocumentNodeRef, number>();
-    for (const source of relevant) {
-      childCounts.set(source, this.#formatting.document.node(source).children
-        .filter((child) => relevant.has(child)).length);
-    }
-    const pending = [...relevant].filter((source) => childCounts.get(source) === 0);
-    const geometry = new Map(direct);
-    while (pending.length > 0) {
-      const source = pending.pop();
-      if (source === undefined) continue;
-      const current = geometry.get(source);
-      if (current !== undefined && !existing.has(source)
-        && this.#formatting.document.node(source).kind === "element") {
-        const style = this.#formatting.styles.style(source);
-        const semantic = this.#formatting.document.semantic(source);
-        if (style.display.box === "contents" && style.visibility === "visible"
-          && semantic !== null && !semantic.accessibilityHidden) {
-          this.#accessibility.push(Object.freeze({
-            source,
-            fragment: current.fragment,
-            role: semantic.role,
-            name: semantic.accessibleName,
-            description: semantic.accessibleDescription,
-            rect: current.rect
-          }));
-          existing.add(source);
-        }
-      }
-      const parent = this.#formatting.document.parent(source)?.ref ?? null;
-      if (parent === null || !relevant.has(parent)) continue;
-      if (current !== undefined) {
-        const parentGeometry = geometry.get(parent);
-        geometry.set(parent, parentGeometry === undefined
-          ? current
-          : {
-              fragment: parentGeometry.fragment,
-              rect: union([parentGeometry.rect, current.rect], parentGeometry.rect)
-            });
-      }
-      const remaining = (childCounts.get(parent) ?? 1) - 1;
-      childCounts.set(parent, remaining);
-      if (remaining === 0) pending.push(parent);
+    for (const [source, value] of this.#semanticGeometryHints) include(source, value);
+    for (const [source, value] of geometry) {
+      if (this.#formatting.document.node(source).kind !== "element") continue;
+      const style = this.#formatting.styles.style(source);
+      const semantic = this.#formatting.document.semantic(source);
+      if (style.display.box === "none" || style.visibility !== "visible"
+        || semantic === null || semantic.accessibilityHidden) continue;
+      this.#accessibility.push(Object.freeze({
+        source,
+        fragment: value.fragment,
+        role: semantic.role,
+        name: semantic.accessibleName,
+        description: semantic.accessibleDescription,
+        rect: value.rect
+      }));
+      this.#anchors.push(Object.freeze({
+        id: `anchor:${source}`,
+        source,
+        fragment: value.fragment,
+        row: value.rect.row
+      }));
     }
   }
 
@@ -528,14 +498,6 @@ class FragmentBuilder {
       action: visible ? this.#action(node) : null,
       semantic
     }, true);
-    if (node.source !== null && semantic !== null && box.height > 0) {
-      this.#anchors.push(Object.freeze({
-        id: `anchor:${node.source}`,
-        source: node.source,
-        fragment: fragment.id,
-        row: box.row
-      }));
-    }
     if (visible) this.#paintBorder(node, fragment);
     return fragment;
   }
@@ -1668,7 +1630,7 @@ class FragmentBuilder {
       0
     );
     const rows = this.#rows(rootResult.rect.height);
-    this.#projectUnboxedAccessibility();
+    this.#buildDocumentSemanticGeometry();
     const focusByNode = new Map<DocumentNodeRef, { action: TerminalAction; fragments: FragmentId[]; rects: TerminalRect[] }>();
     for (const hit of this.#hitRegions) {
       const current = focusByNode.get(hit.action.node) ?? { action: hit.action, fragments: [], rects: [] };
@@ -1898,7 +1860,7 @@ class ImmutableFragmentTree implements FragmentTree {
           projected.set(entry, current);
         }
       }
-      for (const [entry, projection] of [...projected].sort((left, right) =>
+      for (const [entry, mappedRange] of [...projected].sort((left, right) =>
         left[0].row - right[0].row
         || left[0].fragment.startCodeUnit - right[0].fragment.startCodeUnit)) {
         const fragment = entry.fragment;
@@ -1908,18 +1870,18 @@ class ImmutableFragmentTree implements FragmentTree {
         const rowLength = fragment.endCodeUnit - fragment.startCodeUnit;
         const exact = contentLength === rowLength && fragment.contentStartCodeUnit !== null;
         const startCodeUnit = exact
-          ? fragment.startCodeUnit + projection.contentStart - fragment.contentStartCodeUnit
+          ? fragment.startCodeUnit + mappedRange.contentStart - fragment.contentStartCodeUnit
           : fragment.startCodeUnit;
         const endCodeUnit = exact
-          ? fragment.startCodeUnit + projection.contentEnd - fragment.contentStartCodeUnit
+          ? fragment.startCodeUnit + mappedRange.contentEnd - fragment.contentStartCodeUnit
           : fragment.endCodeUnit;
-        const sourceRange = Number.isFinite(projection.sourceStart)
-          && Number.isFinite(projection.sourceEnd)
-          && projection.sourceProvenance !== null
+        const sourceRange = Number.isFinite(mappedRange.sourceStart)
+          && Number.isFinite(mappedRange.sourceEnd)
+          && mappedRange.sourceProvenance !== null
           ? Object.freeze({
-              start: projection.sourceStart,
-              end: projection.sourceEnd,
-              provenance: projection.sourceProvenance
+              start: mappedRange.sourceStart,
+              end: mappedRange.sourceEnd,
+              provenance: mappedRange.sourceProvenance
             })
           : null;
         matchRanges.push(Object.freeze({

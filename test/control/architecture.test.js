@@ -45,6 +45,13 @@ test("legacy flat renderer contracts and files are absent", async () => {
   }
 });
 
+test("rendering internals use precise domain contracts rather than generic aliases", async () => {
+  const forbidden = /\b(?:DocumentPresentation|PresentationTree|TerminalProjection|RenderedRepresentation|SearchProjection|ProjectionResult|ViewModel|RenderData|LayoutData)\b/u;
+  for (const [path, text] of await files(await sourcePaths())) {
+    assert.doesNotMatch(text, forbidden, `${path} contains an imprecise rendering contract`);
+  }
+});
+
 test("the document barrel exposes no concrete snapshot or parser implementation", async () => {
   const declaration = await source("dist/document/index.d.ts");
   assert.doesNotMatch(
@@ -62,4 +69,8 @@ test("the root API does not publish document construction, editing, or mutable s
   for (const [path, text] of await files(await sourcePaths())) {
     assert.doesNotMatch(text, /\b(?:DocumentEdit|applySourceEdits|applyEdits)\b/u, `${path} retains source editing`);
   }
+  assert.doesNotMatch(
+    declaration,
+    /\b(?:StyleSnapshot|FormattingTree|FragmentTree|RenderPipelineResult|ReaderDocument)\b/u
+  );
 });

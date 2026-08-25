@@ -4,7 +4,7 @@ import {
   parseWebDocumentBytes,
   parseWebDocumentStream
 } from "../../dist/document/index.js";
-import { presentDocument } from "../../dist/presentation/pipeline.js";
+import { renderDocument } from "../../dist/presentation/pipeline.js";
 import { terminalTextMeasurer } from "../../dist/ui/terminal-measure.js";
 
 function parseArgs(argv) {
@@ -81,7 +81,7 @@ async function runSmoke(expectedRuntime) {
   const fromBytes = parseWebDocumentBytes(bytes, context);
   const fromStream = await parseWebDocumentStream(createHtmlStream(html), context);
   const payloads = [fromText, fromBytes, fromStream].map(documentPayload);
-  const presentation = presentDocument({
+  const renderPipeline = renderDocument({
     document: fromText,
     state: createDocumentState(fromText),
     resources: [],
@@ -101,15 +101,15 @@ async function runSmoke(expectedRuntime) {
     parseStream: fromStream.node(fromStream.root).kind === "document",
     determinism: JSON.stringify(payloads[0]) === JSON.stringify(payloads[1])
       && JSON.stringify(payloads[0]) === JSON.stringify(payloads[2]),
-    style: presentation.styles.outcome.status === "complete",
-    formatting: presentation.formatting.outcome.status === "complete",
-    fragments: presentation.fragments.outcome.status === "complete",
-    render: presentation.fragments.rows.some((row) => row.text.includes("Smoke"))
+    style: renderPipeline.styles.outcome.status === "complete",
+    formatting: renderPipeline.formatting.outcome.status === "complete",
+    fragments: renderPipeline.fragments.outcome.status === "complete",
+    render: renderPipeline.fragments.rows.some((row) => row.text.includes("Smoke"))
   };
   const stablePayload = {
     document: payloads[0],
-    rows: presentation.fragments.rows.map((row) => row.text),
-    focus: presentation.fragments.focusTargets.map((target) => target.action.kind)
+    rows: renderPipeline.fragments.rows.map((row) => row.text),
+    focus: renderPipeline.fragments.focusTargets.map((target) => target.action.kind)
   };
   return {
     runtime,

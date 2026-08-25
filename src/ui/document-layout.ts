@@ -3,32 +3,32 @@ import type { Rect } from "@ismail-elkorchi/terminal-ui/renderer";
 import type { DocumentForm, DocumentFormControl, DocumentLink, DocumentNodeRef } from "../document/index.js";
 import type { DocumentState } from "../document/index.js";
 import type { IndexedPageSnapshot } from "../app/types.js";
-import { presentDocument, type DocumentPresentation } from "../presentation/pipeline.js";
+import { renderDocument, type RenderPipelineResult } from "../presentation/pipeline.js";
 import type { FragmentTree, TerminalAction } from "../presentation/terminal/index.js";
 import type { BrowserDocumentState } from "./model.js";
 import { terminalTextMeasurer } from "./terminal-measure.js";
 
 const MAX_DOCUMENT_COLUMNS = 120;
-const MAX_PRESENTATION_CACHE_ENTRIES = 4;
+const MAX_RENDER_PIPELINE_CACHE_ENTRIES = 4;
 const TERMINAL_MEASURER = terminalTextMeasurer();
 
-interface CachedPresentation {
+interface CachedRenderPipeline {
   readonly key: string;
   readonly snapshot: IndexedPageSnapshot;
   readonly state: DocumentState;
-  readonly presentation: DocumentPresentation;
+  readonly result: RenderPipelineResult;
 }
 
-/** Explicit, bounded UI-owned cache for viewport-derived presentation work. */
-export class DocumentPresentationCache {
-  readonly #entries: CachedPresentation[] = [];
+/** Explicit, bounded UI-owned cache for viewport-derived render-pipeline work. */
+export class RenderPipelineCache {
+  readonly #entries: CachedRenderPipeline[] = [];
 
   public get(
     snapshot: IndexedPageSnapshot,
     state: DocumentState,
     columns: number,
     rows: number
-  ): DocumentPresentation {
+  ): RenderPipelineResult {
     const viewportColumns = documentContentColumns(columns);
     const viewportRows = Math.max(1, Math.floor(rows));
     const key = `${String(viewportColumns)}x${String(viewportRows)}`;
@@ -39,10 +39,10 @@ export class DocumentPresentationCache {
       const existing = this.#entries.splice(existingIndex, 1)[0];
       if (existing !== undefined) {
         this.#entries.push(existing);
-        return existing.presentation;
+        return existing.result;
       }
     }
-    const presentation = presentDocument({
+    const result = renderDocument({
       document: snapshot.document,
       state,
       resources: snapshot.stylesheets,
@@ -57,9 +57,9 @@ export class DocumentPresentationCache {
         ambiguousWidth: 1
       }
     });
-    this.#entries.push({ key, snapshot, state, presentation });
-    if (this.#entries.length > MAX_PRESENTATION_CACHE_ENTRIES) this.#entries.shift();
-    return presentation;
+    this.#entries.push({ key, snapshot, state, result });
+    if (this.#entries.length > MAX_RENDER_PIPELINE_CACHE_ENTRIES) this.#entries.shift();
+    return result;
   }
 }
 
@@ -87,12 +87,12 @@ export function documentContentColumns(columns: number): number {
   return Math.max(1, Math.min(MAX_DOCUMENT_COLUMNS, Math.floor(columns)));
 }
 
-export function documentLayout(
+export function renderDocumentForViewport(
   document: BrowserDocumentState,
   columns: number,
   viewportRows = 24
-): DocumentPresentation {
-  return document.presentationCache.get(document.snapshot, document.documentState, columns, viewportRows);
+): RenderPipelineResult {
+  return document.renderPipelineCache.get(document.snapshot, document.documentState, columns, viewportRows);
 }
 
 export function documentContentBounds(bounds: Rect): Rect {
@@ -111,6 +111,10 @@ function rowsForSource(layout: FragmentTree, source: DocumentNodeRef | null): re
   for (const fragment of layout.forSource(source)) {
     const end = Math.min(layout.rows.length, fragment.rect.row + fragment.rect.height);
     for (let row = fragment.rect.row; row < end; row += 1) rows.add(row);
+  }
+  if (rows.size === 0) {
+    const anchor = layout.scrollAnchors.find((entry) => entry.source === source);
+    if (anchor !== undefined) rows.add(anchor.row);
   }
   return [...rows].sort((left, right) => left - right);
 }

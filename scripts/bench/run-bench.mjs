@@ -56,7 +56,7 @@ function createBenchmarkHtml(index) {
     .card { border:1px solid var(--edge); padding-inline:1ch; }
     @media (max-width:50rem) { .cards { grid-template-columns:1fr; } }
   </style></head><body><main><h1>Case ${String(index)}</h1>
-    <p>Deterministic structural presentation benchmark with links, lists, tables, and wrapping.</p>
+    <p>Deterministic structural rendering benchmark with links, lists, tables, and wrapping.</p>
     <section class="cards"><article class="card"><h2>Summary</h2><p>Responsive case.</p></article>
     <article class="card"><h2>Details</h2><p>Custom properties.</p></article></section>
     <ul>${listItems}</ul><table><thead><tr><th>Row</th><th>Value</th></tr></thead><tbody>${tableRows}</tbody></table>

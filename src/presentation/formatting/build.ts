@@ -101,6 +101,19 @@ function principalDisplay(
 
 class FormattingBudgetExhausted extends Error {}
 
+const ANONYMOUS_CONTAINER_KINDS = new Set<FormattingContainerNode["kind"]>([
+  "anonymous-block",
+  "anonymous-inline",
+  "table-wrapper",
+  "table",
+  "table-column-group",
+  "table-body-group",
+  "table-row",
+  "table-cell",
+  "flex-item",
+  "grid-item"
+]);
+
 class FormattingBuilder {
   readonly #input: BuildFormattingTreeInput;
   readonly #document: IndexedWebDocumentSnapshot;
@@ -113,9 +126,11 @@ class FormattingBuilder {
   readonly #ordinalBySource = new Map<string, number>();
   readonly #listOrdinals = new Map<DocumentNodeRef, number>();
   readonly #indexedListParents = new Set<DocumentNodeRef>();
+  readonly #storedIds: FormattingNodeId[] = [];
   #anonymous = 0;
   #textCodeUnits = 0;
   #truncated: keyof FormattingBudgets | null = null;
+  #contentStopped = false;
 
   public constructor(input: BuildFormattingTreeInput) {
     this.#input = input;
@@ -132,48 +147,115 @@ class FormattingBuilder {
     return formatId(`format:${identity}:${String(ordinal)}`);
   }
 
-  #store<T extends FormattingNode>(node: T, root = false): T {
-    if (!root && this.#nodes.size >= this.#budgets.maxFormattingNodes - 1) {
-      this.#truncated ??= "maxFormattingNodes";
+  #markTruncated(budget: keyof FormattingBudgets): void {
+    this.#truncated ??= budget;
+    this.#contentStopped = true;
+  }
+
+  #contentIsStopped(): boolean {
+    return this.#contentStopped;
+  }
+
+  #reserveSlot(node: FormattingNode, anonymous: boolean): void {
+    if (this.#nodes.size >= this.#budgets.maxFormattingNodes) {
+      this.#markTruncated("maxFormattingNodes");
       throw new FormattingBudgetExhausted();
     }
+    if (anonymous && this.#anonymous >= this.#budgets.maxAnonymousWrappers) {
+      this.#markTruncated("maxAnonymousWrappers");
+      throw new FormattingBudgetExhausted();
+    }
+    if (anonymous) this.#anonymous += 1;
+    this.#nodes.set(node.id, node);
+    this.#storedIds.push(node.id);
+  }
+
+  #store<T extends FormattingNode>(node: T): T {
+    this.#reserveSlot(node, false);
     Object.freeze(node.children);
     const frozen = Object.freeze(node) as T;
     this.#nodes.set(node.id, frozen);
-    if (node.source !== null) {
-      const entries = this.#sourceIndex.get(node.source) ?? [];
-      entries.push(node.id);
-      this.#sourceIndex.set(node.source, entries);
-    }
     return frozen;
   }
 
-  #container(
+  #reserveContainer(
     kind: FormattingContainerNode["kind"],
     source: DocumentNodeRef | null,
     styleNode: DocumentNodeRef | null,
-    children: readonly FormattingNodeId[],
     outer: "block" | "inline",
     pseudo: PseudoElementIdentity | null = null,
-    root = false,
-    appliesBoxStyle = !root,
-    semanticOwner = appliesBoxStyle
+    appliesBoxStyle = true,
+    anonymous = false
   ): FormattingContainerNode {
     const documentNode = source === null ? null : this.#document.node(source);
-    return this.#store({
+    const open: FormattingContainerNode = {
       id: this.#id(source, kind, pseudo),
       kind,
       source,
       styleNode,
       pseudo,
       sourceRange: pseudo === null ? documentNode?.sourceRange ?? null : null,
-      children: [...children],
-      semantic: source === null || pseudo !== null || !semanticOwner
+      children: [],
+      semantic: source === null || pseudo !== null || !appliesBoxStyle
         ? null
         : this.#document.semantic(source),
       outer,
       appliesBoxStyle
-    }, root);
+    };
+    this.#reserveSlot(open, anonymous);
+    return open;
+  }
+
+  #finalizeContainer(
+    open: FormattingContainerNode,
+    children: readonly FormattingNodeId[]
+  ): FormattingContainerNode {
+    const finalized = Object.freeze({
+      ...open,
+      children: Object.freeze([...children])
+    });
+    this.#nodes.set(open.id, finalized);
+    return finalized;
+  }
+
+  #discardSubtrees(roots: readonly FormattingNodeId[]): void {
+    const pending = [...roots];
+    const discarded = new Set<FormattingNodeId>();
+    while (pending.length > 0) {
+      const id = pending.pop();
+      if (id === undefined || discarded.has(id)) continue;
+      discarded.add(id);
+      const node = this.#nodes.get(id);
+      if (node === undefined) continue;
+      pending.push(...node.children);
+      if (node.source === null
+        && ANONYMOUS_CONTAINER_KINDS.has(node.kind as FormattingContainerNode["kind"])) this.#anonymous -= 1;
+      this.#nodes.delete(id);
+    }
+  }
+
+  #transformConnectedPrefix(
+    children: readonly FormattingNode[],
+    transform: (retained: readonly FormattingNode[]) => readonly FormattingNodeId[]
+  ): readonly FormattingNodeId[] {
+    const retained = [...children];
+    let remainingAttempts = retained.length + 1;
+    while (remainingAttempts > 0) {
+      remainingAttempts -= 1;
+      const storedCheckpoint = this.#storedIds.length;
+      const anonymousCheckpoint = this.#anonymous;
+      try {
+        return transform(retained);
+      } catch (error) {
+        if (!(error instanceof FormattingBudgetExhausted)) throw error;
+        for (const id of this.#storedIds.splice(storedCheckpoint)) this.#nodes.delete(id);
+        this.#anonymous = anonymousCheckpoint;
+        const removed = retained.pop();
+        if (removed === undefined) return [];
+        this.#discardSubtrees([removed.id]);
+      }
+    }
+    return [];
   }
 
   #anonymousContainer(
@@ -182,12 +264,10 @@ class FormattingBuilder {
     children: readonly FormattingNodeId[],
     outer: "block" | "inline"
   ): FormattingContainerNode {
-    this.#anonymous += 1;
-    if (this.#anonymous > this.#budgets.maxAnonymousWrappers) {
-      this.#truncated ??= "maxAnonymousWrappers";
-      throw new FormattingBudgetExhausted();
-    }
-    return this.#container(kind, null, styleNode, children, outer, null, false, false);
+    return this.#finalizeContainer(
+      this.#reserveContainer(kind, null, styleNode, outer, null, false, true),
+      children
+    );
   }
 
   #text(
@@ -199,13 +279,21 @@ class FormattingBuilder {
   ): FormattingTextNode | null {
     const remaining = this.#budgets.maxTextCodeUnits - this.#textCodeUnits;
     if (remaining <= 0) {
-      this.#truncated ??= "maxTextCodeUnits";
+      this.#markTruncated("maxTextCodeUnits");
       return null;
     }
-    const retained = text.slice(0, remaining);
+    let retainedEnd = Math.min(text.length, remaining);
+    if (retainedEnd > 0 && retainedEnd < text.length) {
+      const before = text.charCodeAt(retainedEnd - 1);
+      const after = text.charCodeAt(retainedEnd);
+      if (before >= 0xD800 && before <= 0xDBFF && after >= 0xDC00 && after <= 0xDFFF) {
+        retainedEnd -= 1;
+      }
+    }
+    const retained = text.slice(0, retainedEnd);
     this.#textCodeUnits += retained.length;
-    if (retained.length !== text.length) this.#truncated ??= "maxTextCodeUnits";
-    const documentNode = source === null ? null : this.#document.node(source);
+    if (retained.length !== text.length) this.#markTruncated("maxTextCodeUnits");
+    if (retained.length === 0 && text.length > 0) return null;
     const computed = pseudo === null
       ? this.#styles.style(styleNode)
       : this.#styles.pseudo(styleNode, pseudo) ?? this.#styles.style(styleNode);
@@ -215,7 +303,9 @@ class FormattingBuilder {
       source,
       styleNode,
       pseudo,
-      sourceRange: kind === "text-sequence" ? documentNode?.sourceRange ?? null : null,
+      sourceRange: kind === "text-sequence" && source !== null
+        ? this.#document.textSourceRange(source, 0, retained.length)
+        : null,
       children: [],
       semantic: null,
       outer: "inline",
@@ -297,17 +387,13 @@ class FormattingBuilder {
   #generated(source: DocumentNodeRef, identity: "before" | "after", text: string): FormattingNode | null {
     const pseudoStyle = this.#styles.pseudo(source, identity);
     if (pseudoStyle === null || pseudoStyle.display.box === "none") return null;
-    const generated = this.#text("generated-text", source, source, text, identity);
     const display = pseudoStyle.display;
-    if (generated === null || !principalDisplay(display)) return generated;
-    return this.#container(
-      "pseudo-box",
-      source,
-      source,
-      [generated.id],
-      display.outer,
-      identity
-    );
+    const open = principalDisplay(display)
+      ? this.#reserveContainer("pseudo-box", source, source, display.outer, identity)
+      : null;
+    const generated = this.#text("generated-text", source, source, text, identity);
+    if (open === null) return generated;
+    return this.#finalizeContainer(open, generated === null ? [] : [generated.id]);
   }
 
   #listOrdinal(source: DocumentNodeRef): number {
@@ -332,16 +418,31 @@ class FormattingBuilder {
     const result: FormattingNode[] = [];
     const pseudoBefore = this.#styles.pseudo(source, "before")?.generatedContent;
     if (pseudoBefore !== null && pseudoBefore !== undefined) {
-      const generated = this.#generated(source, "before", pseudoBefore);
-      if (generated !== null) result.push(generated);
+      try {
+        const generated = this.#generated(source, "before", pseudoBefore);
+        if (generated !== null) result.push(generated);
+      } catch (error) {
+        if (!(error instanceof FormattingBudgetExhausted)) throw error;
+      }
     }
-    for (const child of this.#document.node(source).children) {
-      result.push(...this.#buildDocumentNode(child, source, depth + 1));
+    if (!this.#contentStopped) {
+      for (const child of this.#document.node(source).children) {
+        try {
+          result.push(...this.#buildDocumentNode(child, source, depth + 1));
+        } catch (error) {
+          if (!(error instanceof FormattingBudgetExhausted)) throw error;
+        }
+        if (this.#contentIsStopped()) break;
+      }
     }
     const pseudoAfter = this.#styles.pseudo(source, "after")?.generatedContent;
-    if (pseudoAfter !== null && pseudoAfter !== undefined) {
-      const generated = this.#generated(source, "after", pseudoAfter);
-      if (generated !== null) result.push(generated);
+    if (!this.#contentStopped && pseudoAfter !== null && pseudoAfter !== undefined) {
+      try {
+        const generated = this.#generated(source, "after", pseudoAfter);
+        if (generated !== null) result.push(generated);
+      } catch (error) {
+        if (!(error instanceof FormattingBudgetExhausted)) throw error;
+      }
     }
     return result;
   }
@@ -371,34 +472,44 @@ class FormattingBuilder {
 
   #inlineContinuations(
     source: DocumentNodeRef,
-    children: readonly FormattingNode[]
+    children: readonly FormattingNode[],
+    first: FormattingContainerNode
   ): readonly FormattingNode[] {
-    const output: FormattingNode[] = [];
+    const segments: ({ readonly kind: "inline"; readonly children: readonly FormattingNodeId[] }
+      | { readonly kind: "block"; readonly node: FormattingNode })[] = [];
     let inlineRun: FormattingNodeId[] = [];
-    let semanticOwner = true;
-    const continuation = (): void => {
-      output.push(this.#container(
-        "inline-container",
-        source,
-        source,
-        inlineRun,
-        "inline",
-        null,
-        false,
-        true,
-        semanticOwner
-      ));
-      semanticOwner = false;
+    const flush = (): void => {
+      if (inlineRun.length === 0) return;
+      segments.push({ kind: "inline", children: inlineRun });
       inlineRun = [];
     };
     for (const child of children) {
       if (inlineLevel(child)) inlineRun.push(child.id);
       else {
-        continuation();
-        output.push(child);
+        flush();
+        segments.push({ kind: "block", node: child });
       }
     }
-    continuation();
+    flush();
+    const continuationCount = segments.filter((segment) => segment.kind === "inline").length;
+    if (continuationCount === 0) {
+      this.#nodes.delete(first.id);
+      return segments.flatMap((segment) => segment.kind === "block" ? [segment.node] : []);
+    }
+    const continuations = [first];
+    for (let index = 1; index < continuationCount; index += 1) {
+      continuations.push(this.#reserveContainer("inline-container", source, source, "inline"));
+    }
+    let continuationIndex = 0;
+    const output: FormattingNode[] = [];
+    for (const segment of segments) {
+      if (segment.kind === "block") output.push(segment.node);
+      else {
+        const open = continuations[continuationIndex];
+        if (open !== undefined) output.push(this.#finalizeContainer(open, segment.children));
+        continuationIndex += 1;
+      }
+    }
     return output;
   }
 
@@ -567,7 +678,6 @@ class FormattingBuilder {
     if (semantic?.behavior === "replaced" || display.replaced) return [this.#replaced(source, style)];
     const internal = internalKind(display);
     if (internal === "table-column") return [this.#column(source, style)];
-    const rawChildren = this.#rawChildren(source, depth);
     const outer = display.outer;
     let kind: FormattingContainerNode["kind"];
     if (internal !== null) kind = internal as FormattingContainerNode["kind"];
@@ -577,53 +687,67 @@ class FormattingBuilder {
     else if (display.inner === "grid") kind = "grid-container";
     else kind = outer === "block" ? "block-container" : "inline-container";
 
-    let children: readonly FormattingNodeId[];
-    if (kind === "flex-container" || kind === "grid-container") {
-      children = this.#independentFormattingItems(
-        rawChildren,
-        kind === "flex-container" ? "flex-item" : "grid-item"
-      );
-    } else if (kind === "table" || kind === "table-column-group" || kind === "table-row" || kind === "table-header-group"
-      || kind === "table-body-group" || kind === "table-footer-group") {
-      children = this.#tableFixup(rawChildren, kind, source);
-    } else {
-      const fixedChildren = this.#tableFixup(rawChildren, kind, source)
+    const open = this.#reserveContainer(kind, source, source, outer, null, kind !== "table");
+    const wrapper = kind === "table"
+      ? this.#reserveContainer("table-wrapper", source, source, outer)
+      : null;
+    let marker: FormattingNode | null = null;
+    if (kind === "list-item") {
+      const pseudoStyle = this.#styles.pseudo(source, "marker") ?? style;
+      try {
+        marker = this.#text(
+          "marker",
+          source,
+          source,
+          pseudoStyle.generatedContent ?? markerText(pseudoStyle.listStyleType, this.#listOrdinal(source)),
+          "marker"
+        );
+      } catch (error) {
+        if (!(error instanceof FormattingBudgetExhausted)) throw error;
+      }
+    }
+    const rawChildren = this.#contentStopped ? [] : this.#rawChildren(source, depth);
+    let children = this.#transformConnectedPrefix(rawChildren, (retained) => {
+      if (kind === "flex-container" || kind === "grid-container") {
+        return this.#independentFormattingItems(
+          retained,
+          kind === "flex-container" ? "flex-item" : "grid-item"
+        );
+      }
+      if (kind === "table" || kind === "table-column-group" || kind === "table-row" || kind === "table-header-group"
+        || kind === "table-body-group" || kind === "table-footer-group") {
+        return this.#tableFixup(retained, kind, source);
+      }
+      const fixedChildren = this.#tableFixup(retained, kind, source)
         .map((id) => this.#nodes.get(id))
         .filter((node): node is FormattingNode => node !== undefined);
       if (kind === "inline-container" && display.inner === "flow"
         && fixedChildren.some((child) => !inlineLevel(child))) {
-        return [...this.#inlineContinuations(source, fixedChildren)];
+        return this.#inlineContinuations(source, fixedChildren, open).map((node) => node.id);
       }
-      children = this.#mixedFlow(fixedChildren, source);
-    }
+      return this.#mixedFlow(fixedChildren, source);
+    });
 
-    if (kind === "list-item") {
-      const pseudoStyle = this.#styles.pseudo(source, "marker") ?? style;
-      const marker = this.#text(
-        "marker",
-        source,
-        source,
-        pseudoStyle.generatedContent ?? markerText(pseudoStyle.listStyleType, this.#listOrdinal(source)),
-        "marker"
-      );
-      if (marker !== null) children = [marker.id, ...children];
+    if (!this.#nodes.has(open.id) || children.includes(open.id)) {
+      return children
+        .map((id) => this.#nodes.get(id))
+        .filter((node): node is FormattingNode => node !== undefined);
     }
+    if (marker !== null) children = [marker.id, ...children];
 
-    const container = this.#container(kind, source, source, children, outer, null, false, kind !== "table");
+    const container = this.#finalizeContainer(open, children);
     if (kind !== "table") return [container];
-    return [this.#container("table-wrapper", source, source, [container.id], outer)];
+    if (wrapper === null) throw new Error("Missing reserved table wrapper");
+    return [this.#finalizeContainer(wrapper, [container.id])];
   }
 
   #buildDocumentNode(source: DocumentNodeRef, parentStyleNode: DocumentNodeRef, depth: number): FormattingNode[] {
     this.#input.signal?.throwIfAborted();
     if (depth > this.#budgets.maxDepth) {
-      this.#truncated ??= "maxDepth";
+      this.#markTruncated("maxDepth");
       return [];
     }
-    if (this.#nodes.size >= this.#budgets.maxFormattingNodes - 1) {
-      this.#truncated ??= "maxFormattingNodes";
-      return [];
-    }
+    if (this.#contentStopped) return [];
     const node = this.#document.node(source);
     if (node.kind === "text") {
       const text = this.#text("text-sequence", source, parentStyleNode, node.value);
@@ -634,8 +758,16 @@ class FormattingBuilder {
   }
 
   public build(): FormattingTree {
+    const openRoot = this.#reserveContainer(
+      "root",
+      null,
+      this.#document.documentElement,
+      "block",
+      null,
+      false
+    );
     if (this.#styles.document !== this.#document) {
-      const rejected = this.#container("root", null, null, [], "block", null, true);
+      const rejected = this.#finalizeContainer(openRoot, []);
       return new ImmutableFormattingTree(
         this.#document,
         this.#state,
@@ -659,9 +791,9 @@ class FormattingBuilder {
         if (!(error instanceof FormattingBudgetExhausted)) throw error;
         break;
       }
-      if (this.#truncated === "maxFormattingNodes") break;
+      if (this.#contentStopped) break;
     }
-    const root = this.#container("root", null, this.#document.documentElement, rootChildren, "block", null, true);
+    const root = this.#finalizeContainer(openRoot, rootChildren);
     const reachable = new Set<FormattingNodeId>();
     const pending = [root.id];
     while (pending.length > 0) {

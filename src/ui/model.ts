@@ -36,7 +36,7 @@ import type { TextEditBuffer } from "@ismail-elkorchi/terminal-ui/text";
 import type { BookmarkEntry, DownloadRecord, HistoryEntry } from "../app/storage.js";
 import type { IndexedPageSnapshot } from "../app/types.js";
 import type { DocumentNodeRef, DocumentState } from "../document/index.js";
-import type { DocumentPresentationCache } from "./document-layout.js";
+import type { RenderPipelineCache } from "./document-layout.js";
 
 export type PickerKind = "links" | "outline" | "recall";
 export type DetailKind = "help" | "diagnostics" | "reader" | "cookies";
@@ -85,7 +85,7 @@ export interface BrowserDocumentState {
   readonly id: string;
   readonly snapshot: IndexedPageSnapshot;
   readonly documentState: DocumentState;
-  readonly presentationCache: DocumentPresentationCache;
+  readonly renderPipelineCache: RenderPipelineCache;
   readonly scrollAnchor: {
     readonly source: DocumentNodeRef | null;
     readonly rowOffset: number;

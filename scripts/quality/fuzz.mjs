@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { createDocumentState, parseWebDocument } from "../../dist/document/index.js";
-import { presentDocument } from "../../dist/presentation/pipeline.js";
+import { renderDocument } from "../../dist/presentation/pipeline.js";
 import { terminalTextMeasurer } from "../../dist/ui/terminal-measure.js";
 
 const PROFILES = Object.freeze({
@@ -142,7 +142,7 @@ function evaluate(html) {
     requestUrl: "https://fuzz.example/",
     finalUrl: "https://fuzz.example/"
   });
-  const presentation = presentDocument({
+  const renderPipeline = renderDocument({
     document,
     state: createDocumentState(document),
     resources: [],
@@ -151,28 +151,28 @@ function evaluate(html) {
     profile: PROFILE
   });
   const formatting = treePayload(
-    presentation.formatting,
-    presentation.formatting.root,
-    (id) => presentation.formatting.node(id),
-    (id) => presentation.formatting.children(id)
+    renderPipeline.formatting,
+    renderPipeline.formatting.root,
+    (id) => renderPipeline.formatting.node(id),
+    (id) => renderPipeline.formatting.children(id)
   );
   const fragments = treePayload(
-    presentation.fragments,
-    presentation.fragments.root,
-    (id) => presentation.fragments.fragment(id),
-    (id) => presentation.fragments.children(id)
+    renderPipeline.fragments,
+    renderPipeline.fragments.root,
+    (id) => renderPipeline.fragments.fragment(id),
+    (id) => renderPipeline.fragments.children(id)
   );
   return {
     diagnostics: document.diagnostics.map(({ id }) => id),
     title: document.title,
     links: document.links.map(({ node, destination }) => ({ node, destination })),
-    styleOutcome: presentation.styles.outcome,
-    formattingOutcome: presentation.formatting.outcome,
-    fragmentOutcome: presentation.fragments.outcome,
+    styleOutcome: renderPipeline.styles.outcome,
+    formattingOutcome: renderPipeline.formatting.outcome,
+    fragmentOutcome: renderPipeline.fragments.outcome,
     formatting,
     fragments,
-    rows: presentation.fragments.rows.map((row) => row.text),
-    actions: presentation.fragments.focusTargets.map(({ node, action }) => ({ node, action }))
+    rows: renderPipeline.fragments.rows.map((row) => row.text),
+    actions: renderPipeline.fragments.focusTargets.map(({ node, action }) => ({ node, action }))
   };
 }
 

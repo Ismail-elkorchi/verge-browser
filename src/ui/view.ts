@@ -63,7 +63,7 @@ import type {
 import {
   actionId,
   documentContentBounds,
-  documentLayout,
+  renderDocumentForViewport,
   documentScrollRow
 } from "./document-layout.js";
 import type {
@@ -1265,7 +1265,7 @@ function baseView(state: BrowserTuiState, columns: number, rows: number): Elemen
   if (!selected) throw new Error("The browser view requires an open document.");
   const pageColumns = state.sidePanel !== null && columns >= 100 ? columns - 41 : columns;
   const viewportRows = Math.max(1, rows - (state.findBar === null ? 3 : 4));
-  const layout = documentLayout(
+  const layout = renderDocumentForViewport(
     selected,
     Math.max(1, pageColumns - 1),
     viewportRows

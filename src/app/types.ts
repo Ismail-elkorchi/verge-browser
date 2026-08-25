@@ -91,7 +91,7 @@ export interface PageDiagnostics {
   readonly triageIds: readonly string[];
 }
 
-/** Result of one navigation. Its document is immutable; presentation is derived per viewport. */
+/** Result of one navigation. Its document is immutable; rendering is derived per viewport. */
 export interface PageSnapshot {
   readonly requestUrl: string;
   readonly finalUrl: string;
@@ -106,7 +106,7 @@ export interface PageSnapshot {
   readonly diagnostics: PageDiagnostics;
 }
 
-/** @internal Browser-owned snapshot with indexes required by presentation and UI subsystems. */
+/** @internal Browser-owned snapshot with indexes required by rendering and UI subsystems. */
 export interface IndexedPageSnapshot extends Omit<PageSnapshot, "document"> {
   readonly document: IndexedWebDocumentSnapshot;
 }

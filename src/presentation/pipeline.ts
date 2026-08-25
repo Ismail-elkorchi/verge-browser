@@ -10,13 +10,13 @@ import {
   type TerminalViewport
 } from "./terminal/index.js";
 
-export interface PresentationBudgets {
+export interface RenderPipelineBudgets {
   readonly style?: Partial<StyleBudgets>;
   readonly formatting?: Partial<FormattingBudgets>;
   readonly fragments?: Partial<FragmentBudgets>;
 }
 
-export interface PresentDocumentInput {
+export interface RenderDocumentInput {
   readonly document: IndexedWebDocumentSnapshot;
   readonly state: DocumentState;
   readonly resources: readonly StylesheetResource[];
@@ -24,18 +24,18 @@ export interface PresentDocumentInput {
   readonly viewport: TerminalViewport;
   readonly measurer: TerminalTextMeasurer;
   readonly profile: TerminalProfile;
-  readonly budgets?: PresentationBudgets;
+  readonly budgets?: RenderPipelineBudgets;
   readonly signal?: AbortSignal;
 }
 
-/** Internal end-to-end presentation result. These subsystem contracts are not root exports. */
-export interface DocumentPresentation {
+/** Internal end-to-end render-pipeline result. These subsystem contracts are not root exports. */
+export interface RenderPipelineResult {
   readonly styles: StyleSnapshot;
   readonly formatting: FormattingTree;
   readonly fragments: FragmentTree;
 }
 
-export function presentDocument(input: PresentDocumentInput): DocumentPresentation {
+export function renderDocument(input: RenderDocumentInput): RenderPipelineResult {
   input.signal?.throwIfAborted();
   const styles = resolveStyles({
     document: input.document,

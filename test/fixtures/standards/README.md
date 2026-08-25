@@ -1,7 +1,7 @@
 # Standards-derived rendering fixtures
 
 The focused cases in `document.test.js`, `style.test.js`, `formatting.test.js`,
-and `terminal-presentation.test.js` are original compact fixtures derived from
+and `terminal-rendering.test.js` are original compact fixtures derived from
 the normative behavior covered by these pinned Web Platform Test areas:
 
 - CSS Display: `css/css-display/display-*` and `run-in/*` concepts at

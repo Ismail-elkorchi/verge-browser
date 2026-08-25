@@ -73,6 +73,63 @@ function structuralShape(tree, id) {
   ];
 }
 
+function documentRefs(document) {
+  const output = [];
+  const pending = [document.root];
+  while (pending.length > 0) {
+    const ref = pending.pop();
+    output.push(ref);
+    pending.push(...document.node(ref).children);
+  }
+  return output;
+}
+
+function assertConnected(tree) {
+  const reachable = nodes(tree);
+  const ids = new Set(reachable.map((node) => node.id));
+  const incoming = new Map(reachable.map((node) => [node.id, 0]));
+  for (const node of reachable) {
+    assert.equal(Object.isFrozen(node), true);
+    assert.equal(Object.isFrozen(node.children), true);
+    for (const child of node.children) {
+      assert.ok(ids.has(child), `Unreachable child ${child}`);
+      incoming.set(child, (incoming.get(child) ?? 0) + 1);
+      assert.equal(tree.parent(child)?.id, node.id);
+    }
+  }
+  assert.equal(incoming.get(tree.root), 0);
+  for (const node of reachable) {
+    if (node.id !== tree.root) assert.equal(incoming.get(node.id), 1, `${node.id} must have one parent`);
+  }
+  assert.equal(tree.outcome.nodes, reachable.length);
+  for (const ref of documentRefs(tree.document)) {
+    for (const node of tree.forSource(ref)) assert.ok(ids.has(node.id), `Source index exposed ${node.id}`);
+  }
+}
+
+function retainedText(tree) {
+  const output = [];
+  const visit = (id) => {
+    const node = tree.node(id);
+    if ("text" in node) output.push(node.text);
+    for (const child of node.children) visit(child);
+  };
+  visit(tree.root);
+  return output;
+}
+
+function hasUnpairedSurrogate(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xD800 && unit <= 0xDBFF) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xDC00 && next <= 0xDFFF)) return true;
+      index += 1;
+    } else if (unit >= 0xDC00 && unit <= 0xDFFF) return true;
+  }
+  return false;
+}
+
 function principalShape(document, tree, name) {
   const source = sourceNamed(document, name);
   const node = tree.forSource(source).find((candidate) => candidate.appliesBoxStyle && candidate.pseudo === null);
@@ -154,6 +211,29 @@ test("nested inline boxes split into ordered continuations around block descenda
       }
     ]
   });
+});
+
+test("split inline boxes omit empty continuations and keep every continuation tied to its document node", () => {
+  for (const html of [
+    `<a href="/next"><div>block</div></a>`,
+    `<a href="/next"><div>block</div>tail</a>`,
+    `<a href="/next">lead<div>block</div></a>`,
+    `<a href="/next"><div>one</div><div>two</div></a>`,
+    `<a href="/next"><span>lead<em>nested<div>block</div>tail</em>end</span></a>`,
+    `<span role="button">lead<div>block</div>tail</span>`
+  ]) {
+    const { document, formatting } = formatted(html);
+    const semantic = documentRefs(document).find((ref) => {
+      const role = document.semantic(ref)?.role;
+      return role === "link" || role === "button";
+    });
+    assert.ok(semantic);
+    const continuations = formatting.forSource(semantic)
+      .filter((node) => node.kind === "inline-container");
+    assert.ok(continuations.every((node) => node.children.length > 0));
+    assert.ok(continuations.every((node) => node.semantic?.role === document.semantic(semantic)?.role));
+    assertConnected(formatting);
+  }
 });
 
 test("generated pseudo boxes retain their computed display participation", () => {
@@ -306,11 +386,120 @@ test("standalone HTML controls generate control boxes instead of disappearing", 
   assert.equal(formatting.forSource(control.node)[0]?.kind, "form-control");
 });
 
-test("formatting budgets return typed truncation without reconstructing flat content", () => {
-  const { formatting } = formatted(`<div>${"<span>x</span>".repeat(100)}</div>`, { maxFormattingNodes: 12 });
+test("formatting-node exhaustion inside the only html subtree retains a connected visible prefix", () => {
+  const { formatting } = formatted(`<p>first</p><p>second</p>`, { maxFormattingNodes: 5 });
+  assert.deepEqual(formatting.outcome, {
+    status: "truncated", nodes: 5, budget: "maxFormattingNodes", limit: 5
+  });
+  assert.deepEqual(retainedText(formatting), ["first"]);
+  assertConnected(formatting);
+});
+
+test("formatting-node exhaustion several elements deep finalizes every open ancestor", () => {
+  const { formatting } = formatted(
+    `<main><section><article><div><p>first</p><p>second</p></div></article></section></main>`,
+    { maxFormattingNodes: 9 }
+  );
   assert.equal(formatting.outcome.status, "truncated");
   assert.equal(formatting.outcome.budget, "maxFormattingNodes");
-  assert.ok(nodes(formatting).length <= 12);
+  assert.deepEqual(retainedText(formatting), ["first"]);
+  assertConnected(formatting);
+});
+
+test("anonymous-block exhaustion retains the completed source-order prefix", () => {
+  const { formatting } = formatted(
+    `<div><p>first</p>tail<section>second</section>end</div>`,
+    { maxAnonymousWrappers: 1 }
+  );
+  assert.equal(formatting.outcome.status, "truncated");
+  assert.equal(formatting.outcome.budget, "maxAnonymousWrappers");
+  assert.deepEqual(retainedText(formatting), ["first"]);
+  assertConnected(formatting);
+});
+
+test("anonymous table repair exhaustion retains earlier completed boxes", () => {
+  const { formatting } = formatted(
+    `<style>x-cell{display:table-cell}</style><div><p>first</p><x-cell>second</x-cell><p>third</p></div>`,
+    { maxAnonymousWrappers: 2 }
+  );
+  assert.equal(formatting.outcome.status, "truncated");
+  assert.equal(formatting.outcome.budget, "maxAnonymousWrappers");
+  assert.deepEqual(retainedText(formatting), ["first"]);
+  assertConnected(formatting);
+});
+
+test("flex and grid anonymous-item exhaustion keeps the first completed item", () => {
+  for (const display of ["flex", "grid"]) {
+    const { formatting } = formatted(
+      `<style>.items{display:${display}}</style><div class="items">first<span>second</span>tail</div>`,
+      { maxAnonymousWrappers: 1 }
+    );
+    assert.equal(formatting.outcome.status, "truncated");
+    assert.equal(formatting.outcome.budget, "maxAnonymousWrappers");
+    assert.deepEqual(retainedText(formatting), ["first"]);
+    assertConnected(formatting);
+  }
+});
+
+test("formatting budgets are deterministic and monotonically extend the retained prefix", () => {
+  const html = `<main><section><article><p>first</p><p>second</p><p>third</p></article></section></main>`;
+  let previous = [];
+  for (let limit = 1; limit <= 16; limit += 1) {
+    const left = formatted(html, { maxFormattingNodes: limit }).formatting;
+    const right = formatted(html, { maxFormattingNodes: limit }).formatting;
+    assert.deepEqual(structuralShape(left, left.root), structuralShape(right, right.root));
+    const current = retainedText(left);
+    assert.deepEqual(current.slice(0, previous.length), previous);
+    previous = current;
+    assertConnected(left);
+  }
+
+  const anonymousHtml = `<div><p>first</p>tail<section>second</section>end</div>`;
+  previous = [];
+  for (let limit = 1; limit <= 5; limit += 1) {
+    const left = formatted(anonymousHtml, { maxAnonymousWrappers: limit }).formatting;
+    const right = formatted(anonymousHtml, { maxAnonymousWrappers: limit }).formatting;
+    assert.deepEqual(structuralShape(left, left.root), structuralShape(right, right.root));
+    const current = retainedText(left);
+    assert.deepEqual(current.slice(0, previous.length), previous);
+    previous = current;
+    assertConnected(left);
+  }
+});
+
+test("text-code-unit truncation never splits a supplementary Unicode scalar", () => {
+  const html = `<p>A😀B𐐷C</p>`;
+  const expectations = new Map([
+    [1, "A"],
+    [2, "A"],
+    [3, "A😀"],
+    [4, "A😀B"],
+    [5, "A😀B"],
+    [6, "A😀B𐐷"],
+    [7, "A😀B𐐷C"]
+  ]);
+  for (const [limit, expected] of expectations) {
+    const first = formatted(html, { maxTextCodeUnits: limit }).formatting;
+    const second = formatted(html, { maxTextCodeUnits: limit }).formatting;
+    const textBoxes = nodes(first).filter((node) => node.kind === "text-sequence");
+    assert.equal(textBoxes.map((node) => node.text).join(""), expected);
+    assert.ok(textBoxes.every((node) => !hasUnpairedSurrogate(node.text)));
+    for (const node of textBoxes) {
+      assert.ok(node.sourceRange);
+      assert.equal(first.document.sourceText.slice(node.sourceRange.start, node.sourceRange.end), node.text);
+    }
+    assert.deepEqual(structuralShape(first, first.root), structuralShape(second, second.root));
+    assert.deepEqual(
+      textBoxes.map((node) => node.sourceRange),
+      nodes(second).filter((node) => node.kind === "text-sequence").map((node) => node.sourceRange)
+    );
+    assert.ok(textBoxes.reduce((total, node) => total + node.text.length, 0) <= limit);
+    if (limit < 7) {
+      assert.equal(first.outcome.status, "truncated");
+      assert.equal(first.outcome.budget, "maxTextCodeUnits");
+    }
+    assertConnected(first);
+  }
 });
 
 test("author-style truncation cannot suppress retained document content", () => {

@@ -18,7 +18,7 @@ export interface ReaderTableRow {
   readonly cells: readonly ReaderTableCell[];
 }
 
-export interface ReaderProjection {
+export interface ReaderDocument {
   readonly document: IndexedWebDocumentSnapshot;
   readonly title: string;
   readonly blocks: readonly ReaderBlock[];

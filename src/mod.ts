@@ -2,7 +2,7 @@
  * Public npm/Node entrypoint for Verge Browser.
  *
  * The package exposes navigation, transport safety, and Verge's immutable web
- * document boundary. Style, formatting, fragmentation, and terminal projection
+ * document boundary. Style, box generation, fragmentation, and terminal rows
  * remain internal while their contracts mature.
  *
  * ```ts

@@ -51,12 +51,12 @@ All notable changes are documented in this file.
   navigation when tabs close, separate cancelable navigation from profile I/O,
   time out stalled download responses, and release failed, discarded, or
   pre-parse streaming resources.
-- Bound interactive form projection and replace repeated radio-group, option,
+- Bound interactive form indexing and replace repeated radio-group, option,
   and label scans with linear work on large documents.
 - Validate the Node host on current macOS and Windows runners in addition to
   Linux.
 - **Breaking:** Replace the flatten-first renderer with immutable document,
-  computed-style, formatting-tree, terminal-fragment, and reader-projection
+  computed-style-map, box-tree, terminal-fragment-tree, and reader-document
   stages. `PageSnapshot.document` is now the sole authoritative content model.
 - **Breaking:** Expose only the read-only `WebDocumentSnapshot` structure through
   navigation results. Document factories, dynamic state/actions, semantic
@@ -73,7 +73,7 @@ All notable changes are documented in this file.
   boxes from computed `display`; support suppression, contents, anonymous flow
   and table wrappers, lists, structured tables, controls, replaced fallbacks,
   flex/grid contexts, nested terminal fragments, source-aware wrapping, hit
-  geometry, focus, scrolling, search, accessibility, and reader projection.
+  geometry, focus, scrolling, search, accessibility bounds, and reader documents.
 - Give anonymous and generated boxes explicit box-style and semantic ownership,
   exclude blank cells inside wrapped action unions from pointer geometry, and
   fail closed for unknown media types. Preserve semantic and accessibility
@@ -87,10 +87,15 @@ All notable changes are documented in this file.
 - Generate contiguous anonymous text items for flex/grid, discard collapsed
   whitespace-only item runs, split inline continuations around block children,
   and preserve source order through anonymous table repair.
+- Reserve open box-tree ancestors before descending, retain connected
+  source-order prefixes across formatting-node and anonymous-wrapper budget
+  exhaustion, keep UTF-16 text budgets Unicode-scalar-safe, and aggregate one
+  document-semantic geometry entry across split inline and `display: contents`
+  boxes.
 - Build viewport-independent visible-text matches before fragmentation, then
-  project each stable match onto one or more wrapped terminal fragments.
+  map each stable match onto one or more wrapped terminal fragments.
 - Remove browser source-editing APIs and the retained parser graph; the indexed
-  Verge document graph is the sole authoritative structural representation.
+  Verge document tree is the sole authoritative document structure.
 - Preserve normal prose and links inside forms while replacing only control
   fragments with terminal controls; index explicit form ownership once; and
   model details disclosure as a typed document action.
@@ -107,7 +112,7 @@ All notable changes are documented in this file.
   and post-close garbage collection.
 - Keep template contents inert during style/resource/layout indexing, preserve
   foreign-namespace element casing, index standalone controls and radio groups,
-  retain generic/custom-element prose in the separate reader projection, and
+  retain generic/custom-element prose in the separate reader document, and
   persist scroll positions through durable element/source locators rather than
   snapshot-local node-reference strings.
 - **Breaking:** Replace persisted workspace `scrollAnchor.source` strings with

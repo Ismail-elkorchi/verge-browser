@@ -92,7 +92,7 @@ await session.close();
 `WebDocumentSnapshot` is the single deliberate read-only document type exposed
 through navigation results. Document construction, dynamic state, semantic
 indexes, concrete implementations, style resolution, formatting, fragments,
-and terminal projection remain internal while their contracts mature.
+and terminal cell rows remain internal while their contracts mature.
 Fixed-width rendered snapshots are not part of the library API.
 
 The npm package contains the full Node CLI and library. The JSR package exposes
@@ -109,7 +109,7 @@ animation, web fonts, or raster image decoding. Client-rendered
 sites, anti-bot challenges, media, and unsupported form encodings may therefore
 be unavailable. Network access remains constrained by the package’s protocol,
 redirect, content-type, timeout, and size policies.
-Interactive projection is capped at 256 forms per page, 2,000 controls per
+Interactive form indexing is capped at 256 forms per page, 2,000 controls per
 form, and 2,000 options per select to keep hostile documents responsive.
 
 On POSIX hosts, persisted cookies, history, and workspace data use a `0700`

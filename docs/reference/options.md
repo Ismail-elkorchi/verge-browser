@@ -111,12 +111,12 @@
 - Browser sessions retain source for buffered and streamed HTML. Document
   construction, dynamic state, and the concrete snapshot implementation are
   internal browser subsystems rather than root package APIs.
-- Presentation is derived for the current viewport. There is no pre-rendered,
+- The render pipeline runs for the current viewport. There is no pre-rendered,
   fixed-width field on the snapshot.
 - `stylesheets` contains the bounded resources attached to the document;
   `styleDiagnostics` contains stylesheet collection/load failures.
 - `diagnostics.stylesheetLoadIssueCount` counts those load failures. Cascade
-  diagnostics remain part of the browser diagnostics presentation because
+  diagnostics remain part of the browser diagnostics because
   they depend on the active style environment.
 - `responseFields` preserves ordered response field lines as `HttpFields`.
 - Interactive extraction considers at most 256 forms per page, 2,000 controls

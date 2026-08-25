@@ -17,7 +17,7 @@ const profile = {
   ambiguousWidth: 1
 };
 
-function formatting(html) {
+function formatting(html, budgets) {
   const document = parseWebDocument(html, {
     requestUrl: "https://example.test/",
     finalUrl: "https://example.test/"
@@ -35,7 +35,7 @@ function formatting(html) {
       reducedMotion: true
     }
   });
-  return buildFormattingTree({ document, state, styles });
+  return buildFormattingTree({ document, state, styles, ...(budgets ? { budgets } : {}) });
 }
 
 function fragments(tree, columns, rows = 24) {
@@ -57,6 +57,37 @@ function nodesByKind(tree, kind) {
     pending.push(...node.children);
   }
   return result;
+}
+
+function documentDescendsFrom(document, source, ancestor) {
+  let current = source;
+  while (current !== null) {
+    if (current === ancestor) return true;
+    current = document.parent(current)?.ref ?? null;
+  }
+  return false;
+}
+
+function visibleUnion(layout, source) {
+  const values = [];
+  const pending = [layout.root];
+  while (pending.length > 0) {
+    const fragment = layout.fragment(pending.pop());
+    pending.push(...fragment.children);
+    if (fragment.source === null
+      || !documentDescendsFrom(layout.formatting.document, fragment.source, source)) continue;
+    const row = Math.max(fragment.rect.row, fragment.clip.row);
+    const column = Math.max(fragment.rect.column, fragment.clip.column);
+    const bottom = Math.min(fragment.rect.row + fragment.rect.height, fragment.clip.row + fragment.clip.height);
+    const edge = Math.min(fragment.rect.column + fragment.rect.width, fragment.clip.column + fragment.clip.width);
+    if (bottom > row && edge > column) values.push({ row, column, bottom, edge });
+  }
+  assert.ok(values.length > 0);
+  const row = Math.min(...values.map((value) => value.row));
+  const column = Math.min(...values.map((value) => value.column));
+  const bottom = Math.max(...values.map((value) => value.bottom));
+  const edge = Math.max(...values.map((value) => value.edge));
+  return { row, column, width: edge - column, height: bottom - row };
 }
 
 test("fragment identities survive resize while text source ranges track wrapping", () => {
@@ -233,7 +264,7 @@ test("the supported visually-clipped pattern leaves terminal paint and hit geome
   assert.ok(layout.accessibility.some((entry) => entry.role === "link" && entry.name === "Skip to main"));
 });
 
-test("aria-hidden content remains visual but leaves the accessibility projection", () => {
+test("aria-hidden content remains visual but leaves the accessibility bounds", () => {
   const tree = formatting(`<p aria-hidden="true">Visible prose <a href="/next">and link</a></p>`);
   const layout = fragments(tree, 30);
   assert.match(layout.rows.map((row) => row.text).join("\n"), /Visible prose and link/u);
@@ -277,6 +308,72 @@ test("accessibility semantics belong to one principal formatting box per source"
   assert.equal(new Set(sources).size, sources.length);
   assert.equal(layout.accessibility.filter((entry) => entry.role === "listitem").length, 1);
   assert.equal(layout.accessibility.filter((entry) => entry.role === "table").length, 1);
+});
+
+test("split inline semantics aggregate one document-node geometry across every visible box", () => {
+  const cases = [
+    `<a href="/next"><div>block</div></a>`,
+    `<a href="/next"><div>block</div>tail</a>`,
+    `<a href="/next">lead<div>block</div></a>`,
+    `<a href="/next"><div>one</div><div>two</div></a>`,
+    `<a href="/next"><span>lead<em>nested<div>block</div>tail</em>end</span></a>`,
+    `<span role="button">lead<div>block</div>tail</span>`
+  ];
+  for (const html of cases) {
+    const tree = formatting(html);
+    const source = (() => {
+      const pending = [tree.document.root];
+      while (pending.length > 0) {
+        const ref = pending.pop();
+        const role = tree.document.semantic(ref)?.role;
+        if (role === "link" || role === "button") return ref;
+        pending.push(...tree.document.node(ref).children);
+      }
+      return null;
+    })();
+    assert.ok(source);
+    for (const columns of [40, 9]) {
+      const layout = fragments(tree, columns);
+      const accessibility = layout.accessibility.filter((entry) => entry.source === source);
+      assert.equal(accessibility.length, 1);
+      assert.deepEqual(accessibility[0].rect, visibleUnion(layout, source));
+      const focus = layout.focusTargets.filter((entry) => entry.node === source);
+      if (tree.document.link(source) !== null) {
+        assert.equal(focus.length, 1);
+        assert.ok(focus[0].rects.length > 0);
+        assert.ok(focus[0].rects.every((rect) => layout.hitTest(rect.row, rect.column)?.action.node === source));
+        assert.ok(layout.hitRegions.some((entry) => entry.action.node === source));
+      } else assert.equal(focus.length, 0);
+      assert.ok(layout.scrollAnchors.some((entry) => entry.source === source));
+    }
+  }
+});
+
+test("a link containing only block boxes remains one keyboard and pointer action after resize", () => {
+  const tree = formatting(`<a href="/next"><div>first block</div><div>second block</div></a>`);
+  const link = tree.document.links[0];
+  assert.ok(link);
+  assert.equal(tree.forSource(link.node).length, 0);
+  for (const columns of [30, 8]) {
+    const layout = fragments(tree, columns);
+    const focus = layout.focusTargets.filter((entry) => entry.node === link.node);
+    assert.equal(focus.length, 1);
+    assert.equal(focus[0].action.kind, "link");
+    assert.equal(focus[0].action.destination, "https://example.test/next");
+    assert.ok(focus[0].rects.length >= 2);
+    for (const region of layout.hitRegions.filter((entry) => entry.action.node === link.node)) {
+      assert.equal(layout.hitTest(region.rect.row, region.rect.column)?.action.node, link.node);
+    }
+    assert.equal(layout.accessibility.filter((entry) => entry.source === link.node).length, 1);
+  }
+});
+
+test("formatting truncation keeps the earliest completed visible text in terminal output", () => {
+  const tree = formatting(`<p>first</p><p>second</p>`, { maxFormattingNodes: 5 });
+  const layout = fragments(tree, 30);
+  assert.equal(tree.outcome.status, "truncated");
+  assert.match(layout.rows.map((row) => row.text).join("\n"), /first/u);
+  assert.doesNotMatch(layout.rows.map((row) => row.text).join("\n"), /second/u);
 });
 
 test("details summaries expose typed focus and pointer actions", () => {
@@ -491,7 +588,7 @@ test("anonymous grid items do not duplicate principal box styles and retain item
   assert.ok(found.get("grid-item").rect.column >= found.get("grid-container").rect.column + 6);
 });
 
-test("terminal row projection lets later paint order win overlapping cells", () => {
+test("terminal cell rows let later paint order win overlapping cells", () => {
   const tree = formatting(`<style>
     .grid { display:grid; width:4ch; grid-template-columns:4ch 4ch }
     .first, .second { grid-column:1 }

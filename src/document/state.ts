@@ -60,7 +60,7 @@ function immutableControlState(state: DocumentControlState): DocumentControlStat
   });
 }
 
-/** @internal Captures dynamic state for an immutable presentation snapshot. */
+/** @internal Captures dynamic state for an immutable render-pipeline snapshot. */
 export function snapshotDocumentState(state: DocumentState): DocumentState {
   return Object.freeze({
     controls: new ImmutableMap(

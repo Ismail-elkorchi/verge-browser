@@ -2,7 +2,7 @@ import type { DocumentNodeRef, WebDocumentNode, IndexedWebDocumentSnapshot } fro
 import type {
   ReaderBlock,
   ReaderBudgets,
-  ReaderProjection,
+  ReaderDocument,
   ReaderTableCell,
   ReaderTableRow
 } from "./types.js";
@@ -53,10 +53,10 @@ function listItemText(document: IndexedWebDocumentSnapshot, ref: DocumentNodeRef
   return parts.join("").replace(/\s+/gu, " ").trim();
 }
 
-export function projectReaderDocument(
+export function buildReaderDocument(
   document: IndexedWebDocumentSnapshot,
   options: { readonly budgets?: Partial<ReaderBudgets>; readonly signal?: AbortSignal } = {}
-): ReaderProjection {
+): ReaderDocument {
   const limits = budgets(options.budgets);
   const blocks: ReaderBlock[] = [];
   let indexedNodes = 0;
@@ -279,9 +279,9 @@ export function projectReaderDocument(
   });
 }
 
-export function readerLines(projection: ReaderProjection): readonly string[] {
-  const lines: string[] = [projection.title, ""];
-  for (const block of projection.blocks) {
+export function readerDocumentLines(document: ReaderDocument): readonly string[] {
+  const lines: string[] = [document.title, ""];
+  for (const block of document.blocks) {
     if (block.kind === "heading") lines.push(`${"#".repeat(block.level)} ${block.text}`, "");
     else if (block.kind === "list-item") lines.push(`${"  ".repeat(block.depth)}${block.marker} ${block.text}`);
     else if (block.kind === "quotation") lines.push(`> ${block.text}`, "");
@@ -293,5 +293,5 @@ export function readerLines(projection: ReaderProjection): readonly string[] {
       lines.push("");
     } else lines.push(block.text, "");
   }
-  return Object.freeze(lines.length > 2 ? lines : [projection.title, "", "No readable content."]);
+  return Object.freeze(lines.length > 2 ? lines : [document.title, "", "No readable content."]);
 }

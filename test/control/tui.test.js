@@ -11,7 +11,7 @@ import { HttpFields } from "@ismail-elkorchi/http-client";
 
 import { BrowserSession } from "../../dist/app/session.js";
 import { BrowserStore } from "../../dist/app/storage.js";
-import { documentLayout, documentScrollRow, scrollToSource } from "../../dist/ui/document-layout.js";
+import { documentScrollRow, renderDocumentForViewport, scrollToSource } from "../../dist/ui/document-layout.js";
 import { prepareBrowserTui, renderBrowserOnce } from "../../dist/ui/run.js";
 
 function response(requestUrl, html) {
@@ -110,7 +110,7 @@ test("interactive browser renders fragment rows and preserves a link focus ident
   try {
     const document = runtime.state().documents[0];
     assert.equal(document.snapshot.document.title, "Index");
-    assert.equal(documentLayout(document, 71, 21), documentLayout(document, 71, 21));
+    assert.equal(renderDocumentForViewport(document, 71, 21), renderDocumentForViewport(document, 71, 21));
     assert.match(renderFramePlain(runtime.frame()), /Next page with a wrapping label/u);
     const linkId = `link:${document.snapshot.document.links[0].node}`;
     for (let count = 0; count < 20 && !runtime.frame().focusPath?.includes(linkId); count += 1) {
@@ -144,7 +144,7 @@ test("terminal control focus reveals offscreen fragment geometry through the pag
     await runtime.handleInput(key("arrowDown"));
     assert.ok(runtime.frame().focusPath?.includes(query.node));
     const current = runtime.state().documents[0];
-    const layout = documentLayout(current, 71, 21).fragments;
+    const layout = renderDocumentForViewport(current, 71, 21).fragments;
     assert.ok(documentScrollRow(current, layout) > 0);
     assert.match(renderFramePlain(runtime.frame()), /Query/u);
     await runtime.handleInput(key("tab"));
@@ -163,7 +163,7 @@ test("outline node references resolve through container fragment geometry", asyn
     const document = runtime.state().documents[0];
     const heading = document.snapshot.document.headings.find((entry) => entry.text === "Forms");
     assert.ok(heading);
-    const layout = documentLayout(document, 79, 24).fragments;
+    const layout = renderDocumentForViewport(document, 79, 24).fragments;
     const anchored = scrollToSource(document, heading.node);
     assert.ok(documentScrollRow(anchored, layout) > 20);
   } finally {
@@ -186,7 +186,7 @@ test("summary activation updates document state and reveals details through the 
     await runtime.dispatch({ kind: "activateActionAt", actionId: `disclosure:${disclosure.node}` });
     const opened = runtime.state().documents[0];
     assert.equal(opened.documentState.open.has(disclosure.node), true);
-    assert.match(documentLayout(opened, 80).fragments.rows.map((row) => row.text).join("\n"), /Secret text/u);
+    assert.match(renderDocumentForViewport(opened, 80).fragments.rows.map((row) => row.text).join("\n"), /Secret text/u);
   } finally {
     await runtime.dispose();
     await prepared.controller.close();
@@ -258,16 +258,16 @@ test("interactive find keeps one logical match while resize reprojects its highl
     const narrowSearch = narrowDocument.search;
     assert.equal(narrowSearch?.matches.length, 1);
     const matchId = narrowSearch.matches[0].id;
-    const narrowProjection = documentLayout(narrowDocument, 23, 16).fragments.search(query);
-    assert.equal(narrowProjection.matches[0]?.id, matchId);
-    assert.ok(new Set(narrowProjection.matches[0].ranges.map((range) => range.row)).size > 1);
+    const narrowSearchResult = renderDocumentForViewport(narrowDocument, 23, 16).fragments.search(query);
+    assert.equal(narrowSearchResult.matches[0]?.id, matchId);
+    assert.ok(new Set(narrowSearchResult.matches[0].ranges.map((range) => range.row)).size > 1);
 
     await runtime.resize({ columns: 80, rows: 24 });
     const wideDocument = runtime.state().documents[0];
     assert.equal(wideDocument.search?.matches[0]?.id, matchId);
-    const wideProjection = documentLayout(wideDocument, 79, 20).fragments.search(query);
-    assert.equal(wideProjection.matches[0]?.id, matchId);
-    assert.equal(new Set(wideProjection.matches[0].ranges.map((range) => range.row)).size, 1);
+    const wideSearchResult = renderDocumentForViewport(wideDocument, 79, 20).fragments.search(query);
+    assert.equal(wideSearchResult.matches[0]?.id, matchId);
+    assert.equal(new Set(wideSearchResult.matches[0].ranges.map((range) => range.row)).size, 1);
   } finally {
     await runtime.dispose();
     await prepared.controller.close();
@@ -322,7 +322,7 @@ test("terminal-ui form controls update document state and submit through semanti
     const query = form.controls.find((control) => control.name === "q");
     const language = form.controls.find((control) => control.name === "lang");
     const submit = form.controls.find((control) => control.kind === "submit");
-    assert.ok(documentLayout(initial, 80).fragments.focusTargets.some((target) => target.node === query.node));
+    assert.ok(renderDocumentForViewport(initial, 80).fragments.focusTargets.some((target) => target.node === query.node));
     await runtime.dispatch({
       kind: "formText",
       controlId: query.node,
@@ -376,7 +376,7 @@ test("standalone controls use the same terminal-ui editing path without inventin
     const control = initial.snapshot.document.controls[0];
     assert.ok(control);
     assert.equal(control.form, null);
-    assert.ok(documentLayout(initial, 80).fragments.focusTargets.some((target) => target.node === control.node));
+    assert.ok(renderDocumentForViewport(initial, 80).fragments.focusTargets.some((target) => target.node === control.node));
     await runtime.dispatch({
       kind: "formText",
       controlId: control.node,
@@ -434,8 +434,8 @@ test("one-shot output and the interactive view consume the same fragment row tex
   assert.match(output, /Second page/u);
   const { runtime, prepared } = await preparedFixture({ terminalSize: { columns: 80, rows: 24 } });
   try {
-    const presentation = documentLayout(runtime.state().documents[0], 79).fragments;
-    assert.ok(presentation.rows.some((row) => row.text.includes("Index")));
+    const fragments = renderDocumentForViewport(runtime.state().documents[0], 79).fragments;
+    assert.ok(fragments.rows.some((row) => row.text.includes("Index")));
     assert.match(renderFramePlain(runtime.frame()), /Index/u);
   } finally {
     await runtime.dispose();

@@ -31,14 +31,14 @@ Node/npm includes the supported library primitives and the packaged `verge` CLI 
 - page, stream, and stylesheet fetch adapters
 - browser sessions, including caller-supplied redirect-aware cookie handling
 - immutable `WebDocumentSnapshot` values returned by browser navigation
-- CSS-aware browser sessions whose presentation remains browser-internal
+- CSS-aware browser sessions whose render pipeline remains browser-internal
 - runtime hosts (Node/Deno/Bun)
 - exported runtime and diagnostics types
 
-`PageSnapshot.document` is the one authoritative content representation. The
+`PageSnapshot.document` is the one authoritative document snapshot. The
 package root deliberately does not expose fixed-width rendered snapshots or
-the internal style snapshot, formatting tree, fragment tree, and row
-projection. Interactive and one-shot CLI output both use those same internal
+the internal computed style map, box tree, fragment tree, and terminal rows.
+Interactive and one-shot CLI output both use those same internal
 structural stages.
 
 The package root exposes one read-only `WebDocumentSnapshot` interface through

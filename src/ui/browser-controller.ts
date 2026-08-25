@@ -31,14 +31,14 @@ import {
   type DocumentNodeRef,
   type DocumentState
 } from "../document/index.js";
-import { projectReaderDocument, readerLines as projectReaderLines } from "../reader/index.js";
+import { buildReaderDocument, readerDocumentLines } from "../reader/index.js";
 import {
   DEFAULT_SEARCH_URL_TEMPLATE,
   resolveInputUrl,
   resolveOmniboxInput
 } from "../app/url.js";
 import type { BrowserServices } from "./services.js";
-import { DocumentPresentationCache } from "./document-layout.js";
+import { RenderPipelineCache } from "./document-layout.js";
 import type {
   BrowserDocumentState,
   BrowserTuiState,
@@ -70,7 +70,7 @@ function excerpt(lines: readonly string[]): string {
 }
 
 function readerLines(snapshot: IndexedPageSnapshot): readonly string[] {
-  return projectReaderLines(projectReaderDocument(snapshot.document));
+  return readerDocumentLines(buildReaderDocument(snapshot.document));
 }
 
 function diagnosticsLines(snapshot: IndexedPageSnapshot): readonly string[] {
@@ -648,8 +648,8 @@ export class BrowserController {
 
   async #persist(snapshot: IndexedPageSnapshot): Promise<void> {
     if (snapshot.finalUrl.startsWith("about:")) return;
-    const projection = projectReaderDocument(snapshot.document);
-    const lines = projectReaderLines(projection);
+    const readerDocument = buildReaderDocument(snapshot.document);
+    const lines = readerDocumentLines(readerDocument);
     await this.#store.recordPage(
       snapshot.finalUrl,
       snapshot.document.title,
@@ -700,7 +700,7 @@ export class BrowserController {
       snapshot,
       scrollAnchor: restoredScrollAnchor(snapshot, storedAnchor) ?? firstAnchor,
       documentState: createDocumentState(snapshot.document),
-      presentationCache: new DocumentPresentationCache(),
+      renderPipelineCache: new RenderPipelineCache(),
       search: null,
       formEditors: {},
       savedViews: {},

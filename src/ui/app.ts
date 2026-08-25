@@ -47,8 +47,8 @@ import type { BrowserController } from "./browser-controller.js";
 import {
   actionById,
   actionId,
-  DocumentPresentationCache,
-  documentLayout,
+  RenderPipelineCache,
+  renderDocumentForViewport,
   documentScrollRow,
   documentWithScrollRow,
   scrollToSource
@@ -256,7 +256,7 @@ function pageFromSnapshot(
       ?? { source: snapshot.document.body ?? snapshot.document.documentElement, rowOffset: 0 },
     search: restored?.search ?? null,
     documentState: createDocumentState(snapshot.document),
-    presentationCache: new DocumentPresentationCache(),
+    renderPipelineCache: new RenderPipelineCache(),
     formEditors: {},
     savedViews,
     loading: false,
@@ -279,7 +279,7 @@ function focusedControlActionId(
 }
 
 function pageText(document: BrowserDocumentState, columns: number): string {
-  return documentLayout(document, columns).fragments.rows.map((row) => row.text).join("\n");
+  return renderDocumentForViewport(document, columns).fragments.rows.map((row) => row.text).join("\n");
 }
 
 function navigationMessage(
@@ -378,7 +378,7 @@ function searchDocument(
       firstRow: null
     };
   }
-  const result = documentLayout(document, columns).fragments.search(boundedQuery);
+  const result = renderDocumentForViewport(document, columns).fragments.search(boundedQuery);
   const projected = result.matches.slice(0, MAX_PAGE_SEARCH_MATCHES);
   const matches = projected.map((match) => ({
     id: match.id,
@@ -400,7 +400,7 @@ function applySearch(state: BrowserTuiState, query: string, columns: number): Br
   const { search, firstRow } = searchDocument(document, query, columns);
   const updated = firstRow === null
     ? { ...document, search }
-    : documentWithScrollRow({ ...document, search }, documentLayout(document, columns).fragments, firstRow);
+    : documentWithScrollRow({ ...document, search }, renderDocumentForViewport(document, columns).fragments, firstRow);
   return {
     ...updateDocument(state, document.id, () => updated),
     status: search.matches.length === 0
@@ -420,7 +420,7 @@ function moveSearch(
   const activeMatchIndex = (search.activeMatchIndex + delta + search.matches.length) % search.matches.length;
   const match = search.matches[activeMatchIndex];
   if (match === undefined) return document;
-  const layout = documentLayout(document, columns).fragments;
+  const layout = renderDocumentForViewport(document, columns).fragments;
   const row = layout.search(search.query).matches.find((candidate) => candidate.id === match.id)?.ranges[0]?.row;
   const updated = { ...document, search: { ...search, activeMatchIndex } };
   return row === undefined ? updated : documentWithScrollRow(updated, layout, row);
@@ -665,7 +665,7 @@ export function updateBrowser(
   const document = activeDocument(state);
   const columns = contentColumns(state, context.terminalSize.columns);
   const viewportRows = Math.max(1, context.terminalSize.rows - (state.findBar === null ? 3 : 4));
-  const layout = documentLayout(document, columns, viewportRows).fragments;
+  const layout = renderDocumentForViewport(document, columns, viewportRows).fragments;
   switch (message.kind) {
     case "quit":
       return { state, exit: { reason: "quit" } };
@@ -1021,12 +1021,12 @@ export function updateBrowser(
     case "tabsTransition": {
       const selected = state.documents[state.activeDocumentIndex];
       if (!selected) return result(state);
-      const presentation = tabsReducer(
+      const tabState = tabsReducer(
         { activeId: selected.id, selectedId: selected.id },
         message.transition,
         { tabs: state.documents, activation: "automatic" }
       );
-      const nextIndex = state.documents.findIndex((entry) => entry.id === presentation.selectedId);
+      const nextIndex = state.documents.findIndex((entry) => entry.id === tabState.selectedId);
       return nextIndex < 0
         ? result(state)
         : updateBrowser(controller, state, { kind: "selectDocument", index: nextIndex }, context);
