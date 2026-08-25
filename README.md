@@ -62,8 +62,8 @@ overwritten.
 
 ## Plain output
 
-`--once` loads one target, projects the same terminal fragments used by the
-interactive page view to plain text, and exits without terminal control
+`--once` loads one target, consumes the same terminal display list and cell
+buffer used by the interactive page view, and exits without terminal control
 sequences:
 
 ```sh

@@ -59,22 +59,23 @@ const DEFAULT_STYLE_BUDGETS: StyleBudgets = Object.freeze({
 const SUPPORTED_PROPERTIES = new Set([
   "display", "visibility", "white-space", "color", "background", "background-color",
   "font-weight", "font-style", "text-decoration", "text-decoration-line", "text-transform",
-  "text-align", "text-indent",
+  "font-size", "line-height", "vertical-align", "text-align", "text-indent",
   "list-style", "list-style-type", "margin", "margin-top", "margin-right",
   "margin-bottom", "margin-left", "margin-block", "margin-block-start", "margin-block-end",
   "margin-inline", "margin-inline-start", "margin-inline-end", "padding", "padding-top",
   "padding-right", "padding-bottom", "padding-left", "padding-block", "padding-block-start",
   "padding-block-end", "padding-inline", "padding-inline-start", "padding-inline-end",
-  "width", "min-width", "max-width", "height", "min-height", "gap",
+  "width", "min-width", "max-width", "height", "min-height", "max-height", "box-sizing", "gap",
   "row-gap", "column-gap", "flex-direction", "flex-wrap", "justify-content", "align-items",
-  "grid-template-columns", "grid-column", "border", "border-width", "border-style",
+  "grid-template-columns", "grid-column", "border", "border-width", "border-top-width",
+  "border-right-width", "border-bottom-width", "border-left-width", "border-style",
   "border-color", "overflow", "overflow-x", "overflow-y",
   "position", "clip", "clip-path",
   "content"
 ]);
 
 const INHERITED_PROPERTIES = new Set([
-  "visibility", "white-space", "color", "font-weight", "font-style", "text-transform",
+  "visibility", "white-space", "color", "font-weight", "font-style", "font-size", "line-height", "text-transform",
   "text-align", "text-indent", "list-style", "list-style-type"
 ]);
 
@@ -390,28 +391,33 @@ function mediaLengthPx(value: string): number | null {
 
 function mediaFeature(feature: string, input: ResolveStylesInput): boolean | null {
   const normalized = feature.replaceAll(/\/\*[\s\S]*?\*\//gu, "").trim().toLowerCase();
-  if (normalized === "prefers-reduced-motion" || normalized === "prefers-reduced-motion: reduce") {
+  if (normalized === "prefers-reduced-motion" || /^prefers-reduced-motion\s*:\s*reduce$/u.test(normalized)) {
     return input.environment.reducedMotion;
   }
-  if (normalized === "prefers-color-scheme: dark") return input.environment.prefersColorScheme === "dark";
-  if (normalized === "prefers-color-scheme: light") return input.environment.prefersColorScheme === "light";
-  if (normalized === "hover:hover" || normalized === "hover: hover") return false;
+  if (/^prefers-reduced-motion\s*:\s*no-preference$/u.test(normalized)) return !input.environment.reducedMotion;
+  if (/^prefers-color-scheme\s*:\s*dark$/u.test(normalized)) return input.environment.prefersColorScheme === "dark";
+  if (/^prefers-color-scheme\s*:\s*light$/u.test(normalized)) return input.environment.prefersColorScheme === "light";
+  if (normalized === "hover:hover" || normalized === "hover: hover") return input.environment.hover === "hover";
+  if (normalized === "hover:none" || normalized === "hover: none") return input.environment.hover === "none";
+  if (normalized === "pointer:fine" || normalized === "pointer: fine") return input.environment.pointer === "fine";
+  if (normalized === "pointer:coarse" || normalized === "pointer: coarse") return input.environment.pointer === "coarse";
+  if (normalized === "pointer:none" || normalized === "pointer: none") return input.environment.pointer === "none";
   const legacy = /^(min-width|max-width|width)\s*:\s*(.+)$/u.exec(normalized);
   if (legacy?.[1] !== undefined && legacy[2] !== undefined) {
     const boundary = mediaLengthPx(legacy[2]);
     if (boundary === null) return null;
-    if (legacy[1] === "min-width") return input.environment.viewportWidthPx >= boundary;
-    if (legacy[1] === "max-width") return input.environment.viewportWidthPx <= boundary;
-    return input.environment.viewportWidthPx === boundary;
+    if (legacy[1] === "min-width") return input.environment.viewportWidthCssPx >= boundary;
+    if (legacy[1] === "max-width") return input.environment.viewportWidthCssPx <= boundary;
+    return input.environment.viewportWidthCssPx === boundary;
   }
   const range = /^width\s*(<=|>=|<|>)\s*(.+)$/u.exec(normalized);
   if (range?.[1] !== undefined && range[2] !== undefined) {
     const boundary = mediaLengthPx(range[2]);
     if (boundary === null) return null;
-    if (range[1] === "<=") return input.environment.viewportWidthPx <= boundary;
-    if (range[1] === ">=") return input.environment.viewportWidthPx >= boundary;
-    if (range[1] === "<") return input.environment.viewportWidthPx < boundary;
-    return input.environment.viewportWidthPx > boundary;
+    if (range[1] === "<=") return input.environment.viewportWidthCssPx <= boundary;
+    if (range[1] === ">=") return input.environment.viewportWidthCssPx >= boundary;
+    if (range[1] === "<") return input.environment.viewportWidthCssPx < boundary;
+    return input.environment.viewportWidthCssPx > boundary;
   }
   return null;
 }
@@ -950,7 +956,10 @@ function initialStyle(parent: ComputedStyle | null, replaced: boolean): Computed
       textTransform: parent?.text.textTransform ?? "none",
       whiteSpace: parent?.text.whiteSpace ?? "normal",
       textAlign: parent?.text.textAlign ?? "left",
-      textIndent: parent?.text.textIndent ?? ZERO
+      textIndent: parent?.text.textIndent ?? ZERO,
+      fontSize: parent?.text.fontSize ?? Object.freeze({ kind: "length", value: 16, unit: "px" }),
+      lineHeight: parent?.text.lineHeight ?? Object.freeze({ kind: "normal" }),
+      verticalAlign: Object.freeze({ kind: "keyword", value: "baseline" })
     },
     box: {
       margin: edges(),
@@ -960,10 +969,12 @@ function initialStyle(parent: ComputedStyle | null, replaced: boolean): Computed
       maxWidth: NONE,
       height: AUTO,
       minHeight: AUTO,
+      maxHeight: NONE,
+      boxSizing: "content-box",
       rowGap: ZERO,
       columnGap: ZERO,
       borderStyle: "none",
-      borderWidth: MEDIUM_BORDER,
+      borderWidths: edges(MEDIUM_BORDER),
       borderColor: null,
       flexDirection: "row",
       flexWrap: "nowrap",
@@ -1067,6 +1078,32 @@ function parseLength(
   });
 }
 
+function absoluteFontSize(value: CssLength, parentPx: number): CssLength | null {
+  if (value.kind === "zero") return value;
+  if (value.kind !== "length") return null;
+  const pixels = value.unit === "px" ? value.value
+    : value.unit === "em" || value.unit === "%" ? parentPx * value.value / (value.unit === "%" ? 100 : 1)
+      : value.unit === "rem" ? 16 * value.value
+        : value.unit === "ch" ? parentPx * 0.5 * value.value
+          : null;
+  return pixels === null || !Number.isFinite(pixels) || pixels < 0
+    ? null
+    : Object.freeze({ kind: "length", value: pixels, unit: "px" });
+}
+
+function fontSizePixels(style: ComputedStyle | null): number {
+  const size = style?.text.fontSize;
+  return size?.kind === "length" && size.unit === "px" ? size.value : 16;
+}
+
+function parseBorderWidth(value: string): CssLength | null {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "thin") return Object.freeze({ kind: "length", value: 1, unit: "px" });
+  if (normalized === "medium") return MEDIUM_BORDER;
+  if (normalized === "thick") return Object.freeze({ kind: "length", value: 5, unit: "px" });
+  return parseLength(normalized, false);
+}
+
 function immutableComputedStyle(style: ComputedStyle): ComputedStyle {
   const color = (value: CssColor | null): CssColor | null => value === null
     ? null
@@ -1084,6 +1121,7 @@ function immutableComputedStyle(style: ComputedStyle): ComputedStyle {
       ...style.box,
       margin: edge(style.box.margin),
       padding: edge(style.box.padding),
+      borderWidths: edge(style.box.borderWidths),
       borderColor: color(style.box.borderColor),
       legacyClip: Object.freeze(style.box.legacyClip.kind === "auto"
         ? { kind: "auto" }
@@ -1395,6 +1433,70 @@ function computeStyle(
       style = { ...style, text: { ...style.text, fontStyle: normalized } };
     } else unsupported(fontStyle);
   }
+  const fontSize = value("font-size");
+  if (fontSize !== null) {
+    const parentPx = fontSizePixels(parent);
+    const wide = cssWide(fontSize.value);
+    const keywords: Readonly<Record<string, number>> = {
+      "xx-small": 9, "x-small": 10, small: 13, medium: 16, large: 18,
+      "x-large": 24, "xx-large": 32, "xxx-large": 48,
+      smaller: parentPx / 1.2, larger: parentPx * 1.2
+    };
+    const normalized = fontSize.value.trim().toLowerCase();
+    const specified = wide === "inherit" || wide === "unset"
+      ? parent?.text.fontSize ?? Object.freeze({ kind: "length", value: 16, unit: "px" } as const)
+      : wide === "initial"
+        ? Object.freeze({ kind: "length", value: 16, unit: "px" } as const)
+        : keywords[normalized] === undefined
+          ? parseLength(normalized, false)
+          : Object.freeze({ kind: "length", value: keywords[normalized], unit: "px" } as const);
+    const computed = specified === null ? null : absoluteFontSize(specified, parentPx);
+    if (computed === null) unsupported(fontSize);
+    else style = { ...style, text: { ...style.text, fontSize: computed } };
+  }
+  const lineHeight = value("line-height");
+  if (lineHeight !== null) {
+    const wide = cssWide(lineHeight.value);
+    const normalized = lineHeight.value.trim().toLowerCase();
+    const inherited = parent?.text.lineHeight ?? Object.freeze({ kind: "normal" } as const);
+    let computed: ComputedStyle["text"]["lineHeight"] | null = null;
+    if (wide === "inherit" || wide === "unset") computed = inherited;
+    else if (wide === "initial" || normalized === "normal") computed = Object.freeze({ kind: "normal" });
+    else if (/^(?:\d+(?:\.\d+)?|\.\d+)$/u.test(normalized)) {
+      const number = Number(normalized);
+      if (Number.isFinite(number)) computed = Object.freeze({ kind: "number", value: number });
+    } else {
+      const parsed = parseLength(normalized, false);
+      if (parsed !== null) {
+        const absolute = parsed.kind === "length" && parsed.unit === "%"
+          ? Object.freeze({ kind: "length", value: fontSizePixels(style) * parsed.value / 100, unit: "px" } as const)
+          : parsed.kind === "length" && parsed.unit === "em"
+            ? Object.freeze({ kind: "length", value: fontSizePixels(style) * parsed.value, unit: "px" } as const)
+            : parsed;
+        computed = Object.freeze({ kind: "length", value: absolute });
+      }
+    }
+    if (computed === null) unsupported(lineHeight);
+    else style = { ...style, text: { ...style.text, lineHeight: computed } };
+  }
+  const verticalAlign = value("vertical-align");
+  if (verticalAlign !== null) {
+    const wide = cssWide(verticalAlign.value);
+    const normalized = verticalAlign.value.trim().toLowerCase();
+    const keywords = ["baseline", "sub", "super", "top", "text-top", "middle", "bottom", "text-bottom"] as const;
+    const computed = wide === "inherit"
+      ? parent?.text.verticalAlign ?? Object.freeze({ kind: "keyword", value: "baseline" } as const)
+      : wide === "initial" || wide === "unset"
+        ? Object.freeze({ kind: "keyword", value: "baseline" } as const)
+        : keywords.includes(normalized as typeof keywords[number])
+          ? Object.freeze({ kind: "keyword", value: normalized as typeof keywords[number] } as const)
+          : (() => {
+              const length = parseLength(normalized, false, true);
+              return length === null ? null : Object.freeze({ kind: "length", value: length } as const);
+            })();
+    if (computed === null) unsupported(verticalAlign);
+    else style = { ...style, text: { ...style.text, verticalAlign: computed } };
+  }
   const decoration = value(["text-decoration-line", "text-decoration"]);
   if (decoration !== null) {
     const wide = cssWide(decoration.value);
@@ -1449,13 +1551,13 @@ function computeStyle(
   const dimensionSpecs = [
     ["width", "width", true, false], ["min-width", "minWidth", true, false],
     ["max-width", "maxWidth", true, true], ["height", "height", true, false],
-    ["min-height", "minHeight", true, false]
+    ["min-height", "minHeight", true, false], ["max-height", "maxHeight", true, true]
   ] as const;
   for (const [property, field, allowAuto, allowNone] of dimensionSpecs) {
     const entry = value(property);
     if (entry === null) continue;
     const wide = cssWide(entry.value);
-    const initial = field === "maxWidth" ? NONE : AUTO;
+    const initial = field === "maxWidth" || field === "maxHeight" ? NONE : AUTO;
     const length = wide === "inherit"
       ? parent?.box[field] ?? initial
       : wide === "initial" || wide === "unset"
@@ -1463,6 +1565,18 @@ function computeStyle(
         : parseLength(entry.value, allowAuto, false, allowNone);
     if (length === null) unsupported(entry);
     else style = { ...style, box: { ...style.box, [field]: length } };
+  }
+  const boxSizing = value("box-sizing");
+  if (boxSizing !== null) {
+    const wide = cssWide(boxSizing.value);
+    const computed = wide === "inherit"
+      ? parent?.box.boxSizing ?? "content-box"
+      : wide === "initial" || wide === "unset"
+        ? "content-box"
+        : boxSizing.value.trim().toLowerCase();
+    if (computed === "content-box" || computed === "border-box") {
+      style = { ...style, box: { ...style.box, boxSizing: computed } };
+    } else unsupported(boxSizing);
   }
   const columnGap = value(["column-gap", "gap"]);
   const rowGap = value(["row-gap", "gap"]);
@@ -1565,28 +1679,43 @@ function computeStyle(
   const borderStyle = value(["border-style", "border"]);
   if (borderStyle !== null) {
     const wide = cssWide(borderStyle.value);
-    const computed = wide === "inherit"
+    const normalized = borderStyle.value.trim().toLowerCase();
+    const computed: ComputedStyle["box"]["borderStyle"] | null = wide === "inherit"
       ? parent?.box.borderStyle ?? "none"
       : wide === "initial" || wide === "unset"
         ? "none"
-        : !/\b(?:none|hidden)\b/u.test(borderStyle.value)
-          && /\b(?:solid|double|dashed|dotted|groove|ridge|inset|outset)\b/u.test(borderStyle.value)
+        : /\bsolid\b/u.test(normalized)
           ? "solid"
-          : "none";
-    style = { ...style, box: { ...style.box, borderStyle: computed } };
+          : /\b(?:double|dashed|dotted|groove|ridge|inset|outset)\b/u.test(normalized)
+            ? null
+            : "none";
+    if (computed === null) unsupported(borderStyle);
+    else style = { ...style, box: { ...style.box, borderStyle: computed } };
   }
-  const borderWidth = value(["border-width", "border"]);
-  if (borderWidth !== null) {
-    const wide = cssWide(borderWidth.value);
-    const token = wide === null
-      ? borderWidth.value.split(/\s+/u).find((part) => parseLength(part, false) !== null)
-      : undefined;
-    const width = wide === "inherit"
-      ? parent?.box.borderWidth ?? MEDIUM_BORDER
-      : wide === "initial" || wide === "unset"
-        ? MEDIUM_BORDER
-        : token === undefined ? null : parseLength(token, false);
-    if (width !== null) style = { ...style, box: { ...style.box, borderWidth: width } };
+  const borderWidthSides = [
+    ["border-top-width", "top", 0], ["border-right-width", "right", 1],
+    ["border-bottom-width", "bottom", 2], ["border-left-width", "left", 3]
+  ] as const;
+  for (const [property, side, index] of borderWidthSides) {
+    const entry = value([property, "border-width", "border"]);
+    if (entry === null) continue;
+    const wide = cssWide(entry.value);
+    let width: CssLength | null;
+    if (wide === "inherit") width = parent?.box.borderWidths[side] ?? MEDIUM_BORDER;
+    else if (wide === "initial" || wide === "unset") width = MEDIUM_BORDER;
+    else if (entry.property === "border") {
+      const token = entry.value.split(/\s+/u).find((part) => parseBorderWidth(part) !== null);
+      width = token === undefined ? MEDIUM_BORDER : parseBorderWidth(token);
+    } else if (entry.property === "border-width") {
+      const parts = entry.value.trim().split(/\s+/u);
+      const expanded = fourSides(parts);
+      width = expanded === null ? null : parseBorderWidth(expanded[index]);
+    } else width = parseBorderWidth(entry.value);
+    if (width === null) unsupported({ ...entry, property });
+    else style = {
+      ...style,
+      box: { ...style.box, borderWidths: { ...style.box.borderWidths, [side]: width } }
+    };
   }
   const borderColor = value(["border-color", "border"]);
   if (borderColor !== null) {
@@ -1717,11 +1846,15 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
   const mediaType: unknown = input.environment.mediaType;
   const colorScheme: unknown = input.environment.prefersColorScheme;
   const reducedMotion: unknown = input.environment.reducedMotion;
-  if (!Number.isFinite(input.environment.viewportWidthPx) || input.environment.viewportWidthPx <= 0
-    || !Number.isFinite(input.environment.viewportHeightPx) || input.environment.viewportHeightPx <= 0
+  const hover: unknown = input.environment.hover;
+  const pointer: unknown = input.environment.pointer;
+  if (!Number.isFinite(input.environment.viewportWidthCssPx) || input.environment.viewportWidthCssPx <= 0
+    || !Number.isFinite(input.environment.viewportHeightCssPx) || input.environment.viewportHeightCssPx <= 0
     || mediaType !== "screen"
     || (colorScheme !== "light" && colorScheme !== "dark")
-    || typeof reducedMotion !== "boolean") {
+    || typeof reducedMotion !== "boolean"
+    || (hover !== "none" && hover !== "hover")
+    || (pointer !== "none" && pointer !== "coarse" && pointer !== "fine")) {
     return new ImmutableStyleSnapshot(input, new Map(), new Map(), [], 0, {
       status: "rejected", reason: "invalid-environment"
     });

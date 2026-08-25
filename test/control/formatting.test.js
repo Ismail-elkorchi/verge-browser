@@ -6,11 +6,13 @@ import { buildFormattingTree } from "../../dist/presentation/formatting/index.js
 import { resolveStyles } from "../../dist/presentation/style/index.js";
 
 const environment = {
-  viewportWidthPx: 800,
-  viewportHeightPx: 600,
+  viewportWidthCssPx: 800,
+  viewportHeightCssPx: 600,
   mediaType: "screen",
   prefersColorScheme: "dark",
-  reducedMotion: true
+  reducedMotion: true,
+  hover: "hover",
+  pointer: "fine"
 };
 
 function formatted(html, budgets, styleBudgets) {

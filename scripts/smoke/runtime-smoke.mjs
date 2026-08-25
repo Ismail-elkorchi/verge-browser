@@ -5,7 +5,18 @@ import {
   parseWebDocumentStream
 } from "../../dist/document/index.js";
 import { renderDocument } from "../../dist/presentation/pipeline.js";
-import { terminalTextMeasurer } from "../../dist/ui/terminal-measure.js";
+import {
+  cssCoordinate,
+  cssLengthFromFixed,
+  cssPixels,
+  cssPx,
+  cssRect
+} from "../../dist/presentation/layout/index.js";
+import { terminalCellMeasurer, terminalCssTextMeasurer } from "../../dist/ui/terminal-measure.js";
+
+const CELL_WIDTH = cssPx(8);
+const ROW_HEIGHT = cssPx(16);
+const CSS_TEXT_MEASURER = terminalCssTextMeasurer(CELL_WIDTH, ROW_HEIGHT);
 
 function parseArgs(argv) {
   let runtime = "node";
@@ -81,18 +92,38 @@ async function runSmoke(expectedRuntime) {
   const fromBytes = parseWebDocumentBytes(bytes, context);
   const fromStream = await parseWebDocumentStream(createHtmlStream(html), context);
   const payloads = [fromText, fromBytes, fromStream].map(documentPayload);
+  const viewportWidth = cssLengthFromFixed(40 * CELL_WIDTH);
+  const viewportHeight = cssLengthFromFixed(12 * ROW_HEIGHT);
   const renderPipeline = renderDocument({
     document: fromText,
     state: createDocumentState(fromText),
     resources: [],
-    viewport: { columns: 40, rows: 12 },
-    measurer: terminalTextMeasurer(),
-    profile: {
-      cellWidthPx: 8,
-      rowHeightPx: 16,
+    mediaEnvironment: {
+      viewportWidthCssPx: cssPixels(viewportWidth),
+      viewportHeightCssPx: cssPixels(viewportHeight),
+      mediaType: "screen",
+      prefersColorScheme: "dark",
+      reducedMotion: false,
+      hover: "hover",
+      pointer: "fine"
+    },
+    layoutContext: {
+      viewport: { width: viewportWidth, height: viewportHeight },
+      rootFontMetrics: CSS_TEXT_MEASURER.defaultFontMetrics(),
+      textMeasurer: CSS_TEXT_MEASURER,
+      initialContainingBlock: cssRect(
+        cssCoordinate(cssPx(0)), cssCoordinate(cssPx(0)), viewportWidth, viewportHeight
+      )
+    },
+    terminalContext: {
+      columns: 40,
+      rows: 12,
+      cellWidthCssPx: CELL_WIDTH,
+      rowHeightCssPx: ROW_HEIGHT,
       colorDepth: 24,
       unicode: true,
-      ambiguousWidth: 1
+      ambiguousWidth: 1,
+      cellMeasurer: terminalCellMeasurer()
     }
   });
   const checks = {
@@ -103,13 +134,15 @@ async function runSmoke(expectedRuntime) {
       && JSON.stringify(payloads[0]) === JSON.stringify(payloads[2]),
     style: renderPipeline.styles.outcome.status === "complete",
     formatting: renderPipeline.formatting.outcome.status === "complete",
-    fragments: renderPipeline.fragments.outcome.status === "complete",
-    render: renderPipeline.fragments.rows.some((row) => row.text.includes("Smoke"))
+    layout: renderPipeline.layout.outcome.status === "complete",
+    displayList: renderPipeline.displayList.outcome.status === "complete",
+    cellBuffer: renderPipeline.terminal.cellBuffer.outcome.status === "complete",
+    render: renderPipeline.terminal.cellBuffer.rows.some((row) => row.text.includes("Smoke"))
   };
   const stablePayload = {
     document: payloads[0],
-    rows: renderPipeline.fragments.rows.map((row) => row.text),
-    focus: renderPipeline.fragments.focusTargets.map((target) => target.action.kind)
+    rows: renderPipeline.terminal.cellBuffer.rows.map((row) => row.text),
+    focus: renderPipeline.terminal.focusMap.targets.map((target) => target.action.kind)
   };
   return {
     runtime,

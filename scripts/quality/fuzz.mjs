@@ -2,7 +2,14 @@ import { createHash } from "node:crypto";
 
 import { createDocumentState, parseWebDocument } from "../../dist/document/index.js";
 import { renderDocument } from "../../dist/presentation/pipeline.js";
-import { terminalTextMeasurer } from "../../dist/ui/terminal-measure.js";
+import {
+  cssCoordinate,
+  cssLengthFromFixed,
+  cssPixels,
+  cssPx,
+  cssRect
+} from "../../dist/presentation/layout/index.js";
+import { terminalCellMeasurer, terminalCssTextMeasurer } from "../../dist/ui/terminal-measure.js";
 
 const PROFILES = Object.freeze({
   ci: Object.freeze({ firstSeed: 20260226, caseCount: 128, maxDepth: 5, sectionCount: 8 }),
@@ -23,12 +30,18 @@ const WORDS = Object.freeze([
   "lambda", "mu", "nu", "xi", "omicron", "pi", "rho", "sigma", "tau", "upsilon", "phi",
   "chi", "psi", "omega", "界", "é"
 ]);
-const PROFILE = Object.freeze({
-  cellWidthPx: 8,
-  rowHeightPx: 16,
+const CELL_WIDTH = cssPx(8);
+const ROW_HEIGHT = cssPx(16);
+const CSS_TEXT_MEASURER = terminalCssTextMeasurer(CELL_WIDTH, ROW_HEIGHT);
+const TERMINAL_CONTEXT = Object.freeze({
+  columns: 80,
+  rows: 24,
+  cellWidthCssPx: CELL_WIDTH,
+  rowHeightCssPx: ROW_HEIGHT,
   colorDepth: 24,
   unicode: true,
-  ambiguousWidth: 1
+  ambiguousWidth: 1,
+  cellMeasurer: terminalCellMeasurer()
 });
 
 function parseProfile(argv) {
@@ -142,13 +155,30 @@ function evaluate(html) {
     requestUrl: "https://fuzz.example/",
     finalUrl: "https://fuzz.example/"
   });
+  const viewportWidth = cssLengthFromFixed(TERMINAL_CONTEXT.columns * CELL_WIDTH);
+  const viewportHeight = cssLengthFromFixed(TERMINAL_CONTEXT.rows * ROW_HEIGHT);
   const renderPipeline = renderDocument({
     document,
     state: createDocumentState(document),
     resources: [],
-    viewport: { columns: 80, rows: 24 },
-    measurer: terminalTextMeasurer(),
-    profile: PROFILE
+    mediaEnvironment: {
+      viewportWidthCssPx: cssPixels(viewportWidth),
+      viewportHeightCssPx: cssPixels(viewportHeight),
+      mediaType: "screen",
+      prefersColorScheme: "dark",
+      reducedMotion: false,
+      hover: "hover",
+      pointer: "fine"
+    },
+    layoutContext: {
+      viewport: { width: viewportWidth, height: viewportHeight },
+      rootFontMetrics: CSS_TEXT_MEASURER.defaultFontMetrics(),
+      textMeasurer: CSS_TEXT_MEASURER,
+      initialContainingBlock: cssRect(
+        cssCoordinate(cssPx(0)), cssCoordinate(cssPx(0)), viewportWidth, viewportHeight
+      )
+    },
+    terminalContext: TERMINAL_CONTEXT
   });
   const formatting = treePayload(
     renderPipeline.formatting,
@@ -156,11 +186,11 @@ function evaluate(html) {
     (id) => renderPipeline.formatting.node(id),
     (id) => renderPipeline.formatting.children(id)
   );
-  const fragments = treePayload(
-    renderPipeline.fragments,
-    renderPipeline.fragments.root,
-    (id) => renderPipeline.fragments.fragment(id),
-    (id) => renderPipeline.fragments.children(id)
+  const layoutFragments = treePayload(
+    renderPipeline.layout,
+    renderPipeline.layout.root,
+    (id) => renderPipeline.layout.fragment(id),
+    (id) => renderPipeline.layout.children(id)
   );
   return {
     diagnostics: document.diagnostics.map(({ id }) => id),
@@ -168,11 +198,13 @@ function evaluate(html) {
     links: document.links.map(({ node, destination }) => ({ node, destination })),
     styleOutcome: renderPipeline.styles.outcome,
     formattingOutcome: renderPipeline.formatting.outcome,
-    fragmentOutcome: renderPipeline.fragments.outcome,
+    layoutOutcome: renderPipeline.layout.outcome,
+    displayListOutcome: renderPipeline.displayList.outcome,
+    cellBufferOutcome: renderPipeline.terminal.cellBuffer.outcome,
     formatting,
-    fragments,
-    rows: renderPipeline.fragments.rows.map((row) => row.text),
-    actions: renderPipeline.fragments.focusTargets.map(({ node, action }) => ({ node, action }))
+    layoutFragments,
+    rows: renderPipeline.terminal.cellBuffer.rows.map((row) => row.text),
+    actions: renderPipeline.terminal.focusMap.targets.map(({ node, action }) => ({ node, action }))
   };
 }
 

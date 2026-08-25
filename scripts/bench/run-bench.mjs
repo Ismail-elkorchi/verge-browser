@@ -8,27 +8,43 @@ import { BrowserSession } from "../../dist/app/session.js";
 import { createDocumentState } from "../../dist/document/index.js";
 import { createIndexedWebDocumentSnapshot } from "../../dist/document/snapshot.js";
 import { buildFormattingTree } from "../../dist/presentation/formatting/index.js";
+import {
+  buildLayoutFragmentTree,
+  cssCoordinate,
+  cssLengthFromFixed,
+  cssPx,
+  cssRect
+} from "../../dist/presentation/layout/index.js";
+import { buildTextSearchIndex } from "../../dist/presentation/search/index.js";
 import { resolveStyles } from "../../dist/presentation/style/index.js";
-import { buildFragmentTree } from "../../dist/presentation/terminal/index.js";
-import { terminalTextMeasurer } from "../../dist/ui/terminal-measure.js";
+import { buildTerminalDisplayList, rasterizeTerminalDisplayList } from "../../dist/presentation/terminal/index.js";
+import { terminalCellMeasurer, terminalCssTextMeasurer } from "../../dist/ui/terminal-measure.js";
 
 const SAMPLE_CASES = 60;
-const PROFILE = Object.freeze({
-  cellWidthPx: 8,
-  rowHeightPx: 16,
-  colorDepth: 24,
-  unicode: true,
-  ambiguousWidth: 1
-});
+const CELL_WIDTH = cssPx(8);
+const ROW_HEIGHT = cssPx(16);
+const CSS_TEXT_MEASURER = terminalCssTextMeasurer(CELL_WIDTH, ROW_HEIGHT);
+const CELL_MEASURER = terminalCellMeasurer();
 const LIMITS_MS = Object.freeze({
   htmlParseP95: 75,
   documentIndexP95: 75,
   styleP95: 300,
   formattingP95: 150,
-  fragmentationP95: 150,
+  computedToUsedValuesP95: 75,
+  blockLayoutP95: 50,
+  lineBoxConstructionP95: 150,
+  completeCssLayoutP95: 75,
+  displayListP95: 25,
+  cellRasterizationP95: 75,
   resizeP95: 150,
   searchP95: 25,
-  largeNestedTotal: 5_000
+  largeNestedTotal: 5_000,
+  deeplyNestedContainingBlocks: 50,
+  manyInlineTextBoxes: 4_000,
+  longUnbreakableText: 1_000,
+  largeTable: 3_000,
+  manyFlexItems: 500,
+  manyGridItems: 250
 });
 const LIMITS_MEMORY_MIB = Object.freeze({
   hundredThousandNodePeakHeapGrowth: 384,
@@ -37,7 +53,10 @@ const LIMITS_MEMORY_MIB = Object.freeze({
   largeSourceAttributeRetainedHeap: 256,
   peakRssGrowth: 768,
   repeatedTabRetainedHeap: 64,
-  closedSessionRetainedHeap: 32
+  closedSessionRetainedHeap: 32,
+  layoutFragmentPeakHeapGrowth: 128,
+  layoutFragmentRetainedHeap: 32,
+  repeatedResizeRetainedHeap: 64
 });
 
 function createBenchmarkHtml(index) {
@@ -205,28 +224,111 @@ async function sessionLifecycleMemory() {
   };
 }
 
+async function layoutFragmentMemory(formatting) {
+  await collectGarbage();
+  const before = memory();
+  const retainedLayouts = [];
+  const peak = (() => {
+    const layout = layoutFragments(formatting, 100);
+    if (layout.outcome.status === "rejected") throw new Error("layout memory fixture was rejected");
+    retainedLayouts.push(layout);
+    return memory();
+  })();
+  await collectGarbage();
+  const retained = memory();
+  const releasedLayout = new WeakRef(retainedLayouts[0]);
+  retainedLayouts.length = 0;
+  await collectGarbage();
+  const released = memory();
+  return {
+    peakHeapGrowth: mebibytes(Math.max(0, peak.heapUsed - before.heapUsed)),
+    retainedHeap: mebibytes(Math.max(0, released.heapUsed - before.heapUsed)),
+    liveHeap: mebibytes(Math.max(0, retained.heapUsed - before.heapUsed)),
+    released: releasedLayout.deref() === undefined
+  };
+}
+
+async function repeatedResizeMemory(formatting) {
+  await collectGarbage();
+  const before = memory();
+  for (let index = 0; index < 40; index += 1) {
+    const columns = 40 + index * 2;
+    const layout = layoutFragments(formatting, columns);
+    cellBuffer(displayList(layout, columns));
+  }
+  await collectGarbage();
+  return mebibytes(Math.max(0, memory().heapUsed - before.heapUsed));
+}
+
 function styles(document, state) {
   return resolveStyles({
     document,
     state,
     resources: [],
     environment: {
-      viewportWidthPx: 640,
-      viewportHeightPx: 384,
+      viewportWidthCssPx: 640,
+      viewportHeightCssPx: 384,
       mediaType: "screen",
       prefersColorScheme: "dark",
-      reducedMotion: true
+      reducedMotion: false,
+      hover: "hover",
+      pointer: "fine"
     }
   });
 }
 
-function fragments(formatting, columns) {
-  return buildFragmentTree({
-    formatting,
-    viewport: { columns, rows: 24 },
-    measurer: terminalTextMeasurer(),
-    profile: PROFILE
+function formattingFixture(html, name) {
+  const document = createIndexedWebDocumentSnapshot(parse(html, {
+    scriptingMode: "disabled",
+    captureSpans: true,
+    sourceRetention: "text",
+    trace: "none"
+  }), {
+    requestUrl: `https://bench.example/${name}`,
+    finalUrl: `https://bench.example/${name}`
   });
+  const state = createDocumentState(document);
+  return buildFormattingTree({ document, state, styles: styles(document, state) });
+}
+
+function layoutContext(columns, rows = 24) {
+  const width = cssLengthFromFixed(columns * CELL_WIDTH);
+  const height = cssLengthFromFixed(rows * ROW_HEIGHT);
+  return {
+    viewport: { width, height },
+    rootFontMetrics: CSS_TEXT_MEASURER.defaultFontMetrics(),
+    textMeasurer: CSS_TEXT_MEASURER,
+    initialContainingBlock: cssRect(cssCoordinate(cssPx(0)), cssCoordinate(cssPx(0)), width, height)
+  };
+}
+
+function terminalContext(columns, rows = 24) {
+  return {
+    columns,
+    rows,
+    cellWidthCssPx: CELL_WIDTH,
+    rowHeightCssPx: ROW_HEIGHT,
+    colorDepth: 24,
+    unicode: true,
+    ambiguousWidth: 1,
+    cellMeasurer: CELL_MEASURER
+  };
+}
+
+function layoutFragments(formatting, columns, searchIndex = buildTextSearchIndex(formatting)) {
+  return buildLayoutFragmentTree({
+    formatting,
+    searchIndex,
+    context: layoutContext(columns)
+  });
+}
+
+function displayList(layout, columns) {
+  return buildTerminalDisplayList({ layout, context: terminalContext(columns) });
+}
+
+function cellBuffer(list) {
+  return rasterizeTerminalDisplayList({ displayList: list });
 }
 
 const timings = {
@@ -234,7 +336,12 @@ const timings = {
   documentIndex: [],
   style: [],
   formatting: [],
-  fragmentation: [],
+  computedToUsedValues: [],
+  blockLayout: [],
+  lineBoxConstruction: [],
+  completeCssLayout: [],
+  displayList: [],
+  cellRasterization: [],
   resize: [],
   search: []
 };
@@ -254,12 +361,18 @@ for (let index = 1; index <= SAMPLE_CASES; index += 1) {
   const state = createDocumentState(document);
   const style = time(timings.style, () => styles(document, state));
   const formatting = time(timings.formatting, () => buildFormattingTree({ document, state, styles: style }));
-  const layout = time(timings.fragmentation, () => fragments(formatting, 80));
-  const resized = time(timings.resize, () => fragments(formatting, 120));
-  const matches = time(timings.search, () => layout.search("value"));
+  const searchIndex = buildTextSearchIndex(formatting);
+  const layout = time(timings.completeCssLayout, () => layoutFragments(formatting, 80, searchIndex));
+  const list = time(timings.displayList, () => displayList(layout, 80));
+  const terminal = time(timings.cellRasterization, () => cellBuffer(list));
+  const resized = time(timings.resize, () => {
+    const resizedLayout = layoutFragments(formatting, 120, searchIndex);
+    return cellBuffer(displayList(resizedLayout, 120));
+  });
+  const matches = time(timings.search, () => terminal.search("value"));
   if (style.outcome.status === "rejected" || formatting.outcome.status === "rejected"
-    || layout.outcome.status === "rejected" || resized.outcome.status === "rejected"
-    || layout.fragment(layout.root).kind !== "container" || matches.truncated) {
+    || layout.outcome.status === "rejected" || resized.cellBuffer.outcome.status === "rejected"
+    || layout.fragment(layout.root).kind !== "box" || matches.truncated) {
     throw new Error(`benchmark case ${String(index)} produced an invalid structural outcome`);
   }
 }
@@ -279,10 +392,47 @@ const nestedDocument = createIndexedWebDocumentSnapshot(parse(nestedHtml, {
 const nestedState = createDocumentState(nestedDocument);
 const nestedStyle = styles(nestedDocument, nestedState);
 const nestedFormatting = buildFormattingTree({ document: nestedDocument, state: nestedState, styles: nestedStyle });
-const nestedFragments = fragments(nestedFormatting, 80);
-const nestedSearch = nestedFragments.search("needle");
+const nestedLayout = layoutFragments(nestedFormatting, 80);
+const nestedTerminal = cellBuffer(displayList(nestedLayout, 80));
+const nestedSearch = nestedTerminal.search("needle");
 const largeNestedTotal = durationMs(nestedStarted);
 if (nestedSearch.ranges.length !== 1) throw new Error("large nested benchmark lost searchable content");
+
+const usedValueFormatting = formattingFixture(`<main>${Array.from(
+  { length: 1_000 },
+  (_, index) => `<div style="width:${String(20 + index % 70)}%;min-width:2ch;max-width:40ch;
+    margin:${String(index % 5 - 2)}px auto;padding:2%;box-sizing:${index % 2 === 0 ? "content-box" : "border-box"}"></div>`
+).join("")}</main>`, "computed-to-used-values");
+const blockFormatting = formattingFixture(`<main>${"<div style='margin:1px 0;padding:1%'>".repeat(200)}block${"</div>".repeat(200)}</main>`, "block-layout");
+const inlineFormatting = formattingFixture(`<p>${Array.from(
+  { length: 2_000 },
+  (_, index) => `<span style="font-size:${String(12 + index % 8)}px;vertical-align:${index % 2 === 0 ? "baseline" : "super"}">word </span>`
+).join("")}</p>`, "line-boxes");
+for (let index = 0; index < 12; index += 1) {
+  time(timings.computedToUsedValues, () => layoutFragments(usedValueFormatting, 100));
+  time(timings.blockLayout, () => layoutFragments(blockFormatting, 100));
+  time(timings.lineBoxConstruction, () => layoutFragments(inlineFormatting, 100));
+}
+
+const workloadFormatting = {
+  deeplyNestedContainingBlocks: formattingFixture(`<main>${"<div style='width:99%'>".repeat(300)}deep${"</div>".repeat(300)}</main>`, "deep-containing-blocks"),
+  manyInlineTextBoxes: inlineFormatting,
+  longUnbreakableText: formattingFixture(`<p>${"x".repeat(100_000)}</p>`, "long-unbreakable-text"),
+  largeTable: formattingFixture(`<table>${Array.from({ length: 200 }, (_, row) => `<tr>${Array.from(
+    { length: 10 }, (_, column) => `<td>${String(row)}-${String(column)}</td>`
+  ).join("")}</tr>`).join("")}</table>`, "large-table"),
+  manyFlexItems: formattingFixture(`<div style="display:flex;flex-wrap:wrap">${"<span>item</span>".repeat(1_000)}</div>`, "many-flex-items"),
+  manyGridItems: formattingFixture(`<div style="display:grid;grid-template-columns:1fr 1fr 1fr">${"<span>item</span>".repeat(1_000)}</div>`, "many-grid-items")
+};
+const workloadMetrics = Object.fromEntries(Object.entries(workloadFormatting).map(([name, formatting]) => {
+  const start = nowNs();
+  const layout = layoutFragments(formatting, 100);
+  const terminal = cellBuffer(displayList(layout, 100));
+  if (layout.outcome.status === "rejected" || terminal.cellBuffer.outcome.status === "rejected") {
+    throw new Error(`${name} workload was rejected`);
+  }
+  return [name, durationMs(start)];
+}));
 
 const hundredThousandNodeHtml = `<main>${"<span>x</span>".repeat(50_000)}</main>`;
 const hundredThousandNodes = await documentMemory(
@@ -300,16 +450,24 @@ const largeSourceAttributes = await documentMemory(
   20_000
 );
 const lifecycle = await sessionLifecycleMemory();
+const layoutFragmentsMemory = await layoutFragmentMemory(inlineFormatting);
+const repeatedResizeRetainedHeap = await repeatedResizeMemory(inlineFormatting);
 
 const metrics = {
   htmlParseP95: percentile(timings.htmlParse, 0.95),
   documentIndexP95: percentile(timings.documentIndex, 0.95),
   styleP95: percentile(timings.style, 0.95),
   formattingP95: percentile(timings.formatting, 0.95),
-  fragmentationP95: percentile(timings.fragmentation, 0.95),
+  computedToUsedValuesP95: percentile(timings.computedToUsedValues, 0.95),
+  blockLayoutP95: percentile(timings.blockLayout, 0.95),
+  lineBoxConstructionP95: percentile(timings.lineBoxConstruction, 0.95),
+  completeCssLayoutP95: percentile(timings.completeCssLayout, 0.95),
+  displayListP95: percentile(timings.displayList, 0.95),
+  cellRasterizationP95: percentile(timings.cellRasterization, 0.95),
   resizeP95: percentile(timings.resize, 0.95),
   searchP95: percentile(timings.search, 0.95),
-  largeNestedTotal
+  largeNestedTotal,
+  ...workloadMetrics
 };
 const memoryMetrics = {
   hundredThousandNodePeakHeapGrowth: hundredThousandNodes.peakHeapGrowth,
@@ -318,7 +476,10 @@ const memoryMetrics = {
   largeSourceAttributeRetainedHeap: largeSourceAttributes.retainedHeap,
   peakRssGrowth: Math.max(hundredThousandNodes.rssGrowth, largeSourceAttributes.rssGrowth),
   repeatedTabRetainedHeap: lifecycle.repeatedTabRetainedHeap,
-  closedSessionRetainedHeap: lifecycle.closedSessionRetainedHeap
+  closedSessionRetainedHeap: lifecycle.closedSessionRetainedHeap,
+  layoutFragmentPeakHeapGrowth: layoutFragmentsMemory.peakHeapGrowth,
+  layoutFragmentRetainedHeap: layoutFragmentsMemory.retainedHeap,
+  repeatedResizeRetainedHeap
 };
 const failures = Object.entries(LIMITS_MS)
   .filter(([name, limit]) => metrics[name] > limit)
@@ -330,6 +491,7 @@ if (!lifecycle.closedSessionCollected) failures.push("closed BrowserSession reta
 if (!hundredThousandNodes.released || !largeSourceAttributes.released) {
   failures.push("a released large document remained reachable after forced GC");
 }
+if (!layoutFragmentsMemory.released) failures.push("released layout fragments remained reachable after forced GC");
 const report = {
   suite: "structural-pipeline-bench",
   timestamp: new Date().toISOString(),
@@ -341,6 +503,18 @@ const report = {
   limitsMemoryMiB: LIMITS_MEMORY_MIB,
   closedSessionCollected: lifecycle.closedSessionCollected,
   releasedLargeDocumentsCollected: hundredThousandNodes.released && largeSourceAttributes.released,
+  releasedLayoutFragmentsCollected: layoutFragmentsMemory.released,
+  reviewedPr129BaselineMs: {
+    fragmentationP95: 7.148973,
+    resizeP95: 5.855096,
+    searchP95: 0.342621,
+    largeNestedTotal: 118.338073
+  },
+  thresholdBasis: {
+    existingControls: "PR #129 limits for parsing, indexing, style, formatting, resize, search, nested work, and lifecycle memory are unchanged.",
+    fixedPointControls: "New limits were calibrated from the final fixed-point pipeline run: 27.75ms computed-to-used values, 7.38ms block layout, 124.37ms line boxes, 8.77ms complete CSS layout, 0.24ms display-list construction, 16.75ms cell rasterization, and 8.84MiB repeated-resize retained heap.",
+    stressControls: "New stress limits were calibrated from 7.96ms deeply nested containing blocks, 3124.72ms many inline boxes, 478.55ms unbreakable text, 2067.25ms tables, 223.58ms flex items, and 64.49ms grid items."
+  },
   ok: failures.length === 0,
   failures
 };

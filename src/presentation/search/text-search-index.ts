@@ -6,9 +6,9 @@ import type {
   FormattingTree
 } from "../formatting/index.js";
 
-export type VisibleTextMatchId = string & { readonly __visibleTextMatchId: unique symbol };
+export type TextSearchMatchId = string & { readonly __textSearchMatchId: unique symbol };
 
-export interface VisibleTextMatchSlice {
+export interface TextSearchMatchSlice {
   readonly formatting: FormattingNodeId;
   readonly source: DocumentNodeRef | null;
   readonly sourceRange: DocumentSourceRange | null;
@@ -16,24 +16,24 @@ export interface VisibleTextMatchSlice {
   readonly contentEnd: number;
 }
 
-export interface VisibleTextMatch {
-  readonly id: VisibleTextMatchId;
+export interface TextSearchMatch {
+  readonly id: TextSearchMatchId;
   readonly start: number;
   readonly end: number;
-  readonly slices: readonly VisibleTextMatchSlice[];
+  readonly slices: readonly TextSearchMatchSlice[];
 }
 
-export interface VisibleTextSearchResult {
-  readonly matches: readonly VisibleTextMatch[];
+export interface TextSearchResult {
+  readonly matches: readonly TextSearchMatch[];
   readonly truncated: boolean;
 }
 
-export interface VisibleTextIndex {
+export interface TextSearchIndex {
   readonly text: string;
-  search(query: string, limit: number): VisibleTextSearchResult;
+  search(query: string, limit: number): TextSearchResult;
 }
 
-interface VisibleTextSegment {
+interface TextSearchSegment {
   readonly start: number;
   readonly end: number;
   readonly formatting: FormattingNodeId | null;
@@ -134,17 +134,17 @@ function foldedBoundaries(value: string, targets: readonly number[]): ReadonlyMa
   return result;
 }
 
-class ImmutableVisibleTextIndex implements VisibleTextIndex {
+class ImmutableTextSearchIndex implements TextSearchIndex {
   readonly text: string;
-  readonly #segments: readonly VisibleTextSegment[];
+  readonly #segments: readonly TextSearchSegment[];
 
-  public constructor(text: string, segments: readonly VisibleTextSegment[]) {
+  public constructor(text: string, segments: readonly TextSearchSegment[]) {
     this.text = text;
     this.#segments = Object.freeze(segments.map((segment) => Object.freeze(segment)));
     Object.freeze(this);
   }
 
-  public search(query: string, limit: number): VisibleTextSearchResult {
+  public search(query: string, limit: number): TextSearchResult {
     const needle = query.toLowerCase().replace(/\s+/gu, " ").trim().slice(0, 1_024);
     if (needle.length === 0) return Object.freeze({ matches: Object.freeze([]), truncated: false });
     const haystack = this.text.toLowerCase();
@@ -164,10 +164,10 @@ class ImmutableVisibleTextIndex implements VisibleTextIndex {
     const targets = [...new Set(foldedMatches.flatMap((match) => [match.start, match.end]))]
       .sort((left, right) => left - right);
     const boundaries = foldedBoundaries(this.text, targets);
-    const matches = foldedMatches.map((folded): VisibleTextMatch => {
+    const matches = foldedMatches.map((folded): TextSearchMatch => {
       const start = boundaries.get(folded.start) ?? 0;
       const end = boundaries.get(folded.end) ?? this.text.length;
-      const slices: VisibleTextMatchSlice[] = [];
+      const slices: TextSearchMatchSlice[] = [];
       for (const segment of this.#segments) {
         if (segment.formatting === null || start >= segment.end || end <= segment.start) continue;
         const overlapStart = Math.max(start, segment.start);
@@ -198,7 +198,7 @@ class ImmutableVisibleTextIndex implements VisibleTextIndex {
         }));
       }
       return Object.freeze({
-        id: `visible:${String(start)}:${String(end)}` as VisibleTextMatchId,
+        id: `text-search:${String(start)}:${String(end)}` as TextSearchMatchId,
         start,
         end,
         slices: Object.freeze(slices)
@@ -208,14 +208,14 @@ class ImmutableVisibleTextIndex implements VisibleTextIndex {
   }
 }
 
-export function buildVisibleTextIndex(tree: FormattingTree, signal?: AbortSignal): VisibleTextIndex {
+export function buildTextSearchIndex(tree: FormattingTree, signal?: AbortSignal): TextSearchIndex {
   const parts: string[] = [];
-  const segments: VisibleTextSegment[] = [];
+  const segments: TextSearchSegment[] = [];
   let length = 0;
-  let pendingSeparator: Omit<VisibleTextSegment, "start" | "end"> | null = null;
+  let pendingSeparator: Omit<TextSearchSegment, "start" | "end"> | null = null;
   const append = (
     value: string,
-    segment: Omit<VisibleTextSegment, "start" | "end">
+    segment: Omit<TextSearchSegment, "start" | "end">
   ): void => {
     if (value.length === 0) return;
     if (pendingSeparator !== null && length > 0) {
@@ -228,14 +228,14 @@ export function buildVisibleTextIndex(tree: FormattingTree, signal?: AbortSignal
     segments.push({ ...segment, start: length, end: length + value.length });
     length += value.length;
   };
-  const separator = (segment: Omit<VisibleTextSegment, "start" | "end">): void => {
+  const separator = (segment: Omit<TextSearchSegment, "start" | "end">): void => {
     if (length > 0) pendingSeparator = segment;
   };
   const nodeSegment = (
     node: FormattingNode,
     contentStart: number,
     contentEnd: number
-  ): Omit<VisibleTextSegment, "start" | "end"> => {
+  ): Omit<TextSearchSegment, "start" | "end"> => {
     let sourceRange = node.sourceRange;
     if (node.kind === "text-sequence" && node.source !== null) {
       sourceRange = tree.document.textSourceRange(node.source, contentStart, contentEnd);
@@ -300,5 +300,5 @@ export function buildVisibleTextIndex(tree: FormattingTree, signal?: AbortSignal
       if (child !== undefined) pending.push({ phase: "enter", id: child });
     }
   }
-  return new ImmutableVisibleTextIndex(parts.join(""), segments);
+  return new ImmutableTextSearchIndex(parts.join(""), segments);
 }

@@ -1,104 +1,117 @@
+import type { DocumentNodeRef, DocumentSemanticEntry, DocumentSourceRange } from "../../document/index.js";
+import type { FormattingNodeId } from "../formatting/index.js";
 import type {
-  DocumentNodeRef,
-  DocumentSemanticEntry,
-  DocumentSourceRange
-} from "../../document/index.js";
-import type { FormattingNodeId, FormattingTree } from "../formatting/index.js";
-import type { CssColor } from "../style/index.js";
-import type { VisibleTextMatchId } from "./visible-text.js";
+  CssEdges, CssPixelLength, CssRect, DocumentActionIdentity, LayoutFragmentId,
+  LayoutFragmentTree, LayoutPaintStyle
+} from "../layout/index.js";
+import type { TextSearchMatchId } from "../search/index.js";
 
-export type FragmentId = string & { readonly __fragmentId: unique symbol };
-
-export interface TerminalRect {
+export interface TerminalCellRect {
   readonly row: number;
   readonly column: number;
   readonly width: number;
   readonly height: number;
 }
 
-export interface TerminalGrapheme {
+export interface TerminalCellGrapheme {
   readonly text: string;
   readonly startCodeUnit: number;
   readonly endCodeUnit: number;
   readonly cells: number;
 }
 
-export interface TerminalTextMeasurer {
+export interface TerminalCellMeasurer {
   width(text: string): number;
-  graphemes(text: string): readonly TerminalGrapheme[];
+  graphemes(text: string): readonly TerminalCellGrapheme[];
 }
 
-export interface TerminalProfile {
-  readonly cellWidthPx: number;
-  readonly rowHeightPx: number;
-  readonly colorDepth: 0 | 4 | 8 | 24;
-  readonly unicode: boolean;
-  readonly ambiguousWidth: 1 | 2;
+export interface TerminalPaintBudgets {
+  readonly maxCommands: number;
+  readonly maxPaintCells: number;
+  readonly maxSearchMatches: number;
 }
 
-export interface TerminalViewport {
+export interface TerminalRenderContext {
   readonly columns: number;
   readonly rows: number;
+  readonly cellWidthCssPx: CssPixelLength;
+  readonly rowHeightCssPx: CssPixelLength;
+  readonly unicode: boolean;
+  readonly ambiguousWidth: 1 | 2;
+  readonly colorDepth: 0 | 4 | 8 | 24;
+  readonly cellMeasurer: TerminalCellMeasurer;
+  readonly budgets?: Partial<TerminalPaintBudgets>;
+  readonly signal?: AbortSignal;
 }
 
-export interface TerminalStyleRun {
-  readonly foreground: CssColor | null;
-  readonly background: CssColor | null;
+export interface TerminalStyle {
+  readonly foreground: LayoutPaintStyle["foreground"];
+  readonly background: LayoutPaintStyle["background"];
   readonly bold: boolean;
   readonly italic: boolean;
   readonly underline: boolean;
   readonly strikethrough: boolean;
 }
 
-export type TerminalAction =
-  | { readonly kind: "link"; readonly node: DocumentNodeRef; readonly destination: string }
-  | { readonly kind: "form-control"; readonly node: DocumentNodeRef; readonly form: DocumentNodeRef | null }
-  | { readonly kind: "disclosure"; readonly node: DocumentNodeRef; readonly open: boolean };
-
-interface FragmentBase {
-  readonly id: FragmentId;
-  readonly kind: "container" | "text" | "control" | "replaced";
-  readonly formatting: FormattingNodeId;
-  readonly source: DocumentNodeRef | null;
+interface TerminalPaintCommandBase {
+  readonly id: string;
+  readonly layoutFragment: LayoutFragmentId;
+  readonly formattingNode: FormattingNodeId;
+  readonly documentNode: DocumentNodeRef | null;
   readonly sourceRange: DocumentSourceRange | null;
   readonly contentStartCodeUnit: number | null;
   readonly contentEndCodeUnit: number | null;
-  readonly rect: TerminalRect;
-  readonly clip: TerminalRect;
-  readonly children: readonly FragmentId[];
-  readonly visualOrder: number;
+  readonly rect: CssRect;
+  readonly clipRect: CssRect;
   readonly paintOrder: number;
-  readonly action: TerminalAction | null;
+  readonly action: DocumentActionIdentity | null;
   readonly semantic: DocumentSemanticEntry | null;
+  readonly style: LayoutPaintStyle;
 }
 
-export interface ContainerFragment extends FragmentBase {
-  readonly kind: "container";
-}
-
-export interface TextFragment extends FragmentBase {
+export interface TerminalTextPaintCommand extends TerminalPaintCommandBase {
   readonly kind: "text";
   readonly text: string;
-  readonly style: TerminalStyleRun;
 }
 
-export interface ControlFragment extends FragmentBase {
-  readonly kind: "control";
-  readonly label: string;
-  readonly value: string;
+export interface TerminalBorderPaintCommand extends TerminalPaintCommandBase {
+  readonly kind: "border";
+  readonly borderRect: CssRect;
+  readonly contentRect: CssRect;
+  readonly borderWidths: CssEdges;
 }
 
-export interface ReplacedFragment extends FragmentBase {
-  readonly kind: "replaced";
-  readonly fallbackText: string;
+export type TerminalPaintCommand = TerminalTextPaintCommand | TerminalBorderPaintCommand;
+
+export type TerminalDisplayListOutcome =
+  | { readonly status: "complete"; readonly commands: number }
+  | { readonly status: "truncated"; readonly commands: number; readonly budget: "maxCommands"; readonly limit: number }
+  | { readonly status: "rejected"; readonly reason: "invalid-context" };
+
+export interface TerminalDisplayList {
+  readonly layout: LayoutFragmentTree;
+  readonly context: TerminalRenderContext;
+  readonly commands: readonly TerminalPaintCommand[];
+  readonly outcome: TerminalDisplayListOutcome;
 }
 
-export type TerminalFragment = ContainerFragment | TextFragment | ControlFragment | ReplacedFragment;
+export interface TerminalCell {
+  readonly column: number;
+  readonly text: string;
+  readonly width: number;
+  readonly style: TerminalStyle;
+  readonly command: string;
+  readonly layoutFragment: LayoutFragmentId;
+  readonly formattingNode: FormattingNodeId;
+  readonly documentNode: DocumentNodeRef | null;
+  readonly paintOrder: number;
+}
 
-export interface TerminalRowFragment {
-  readonly fragment: FragmentId;
-  readonly formatting: FormattingNodeId;
-  readonly source: DocumentNodeRef | null;
+export interface TerminalCellSpan {
+  readonly command: string;
+  readonly layoutFragment: LayoutFragmentId;
+  readonly formattingNode: FormattingNodeId;
+  readonly documentNode: DocumentNodeRef | null;
   readonly sourceRange: DocumentSourceRange | null;
   readonly contentStartCodeUnit: number | null;
   readonly contentEndCodeUnit: number | null;
@@ -108,61 +121,84 @@ export interface TerminalRowFragment {
   readonly width: number;
 }
 
-export interface TerminalRowStyleRun {
+export interface TerminalCellStyleSpan {
   readonly startCodeUnit: number;
   readonly endCodeUnit: number;
-  readonly style: TerminalStyleRun;
+  readonly style: TerminalStyle;
 }
 
-export interface TerminalRow {
+export interface TerminalCellRow {
   readonly row: number;
   readonly text: string;
-  readonly fragments: readonly TerminalRowFragment[];
-  readonly styles: readonly TerminalRowStyleRun[];
+  readonly cells: readonly TerminalCell[];
+  readonly spans: readonly TerminalCellSpan[];
+  readonly styles: readonly TerminalCellStyleSpan[];
+}
+
+export type TerminalCellBufferOutcome =
+  | { readonly status: "complete"; readonly cells: number; readonly rows: number }
+  | { readonly status: "truncated"; readonly cells: number; readonly rows: number; readonly budget: "maxPaintCells"; readonly limit: number }
+  | { readonly status: "rejected"; readonly reason: "invalid-context" };
+
+export interface TerminalCellBuffer {
+  readonly columns: number;
+  readonly viewportRows: number;
+  readonly rows: readonly TerminalCellRow[];
+  readonly outcome: TerminalCellBufferOutcome;
 }
 
 export interface TerminalHitRegion {
-  readonly action: TerminalAction;
-  readonly fragment: FragmentId;
-  readonly rect: TerminalRect;
+  readonly action: DocumentActionIdentity;
+  readonly layoutFragment: LayoutFragmentId;
+  readonly rect: TerminalCellRect;
+}
+
+export interface TerminalHitTestIndex {
+  readonly regions: readonly TerminalHitRegion[];
+  at(row: number, column: number): TerminalHitRegion | null;
 }
 
 export interface TerminalFocusTarget {
   readonly node: DocumentNodeRef;
-  readonly action: TerminalAction;
-  readonly fragments: readonly FragmentId[];
-  readonly rects: readonly TerminalRect[];
+  readonly action: DocumentActionIdentity;
+  readonly layoutFragments: readonly LayoutFragmentId[];
+  readonly rects: readonly TerminalCellRect[];
   readonly label: string;
+}
+
+export interface TerminalFocusMap {
+  readonly targets: readonly TerminalFocusTarget[];
+  forNode(node: DocumentNodeRef): TerminalFocusTarget | null;
 }
 
 export interface TerminalScrollAnchor {
   readonly id: string;
-  readonly source: DocumentNodeRef;
-  readonly fragment: FragmentId;
+  readonly documentNode: DocumentNodeRef;
+  readonly layoutFragment: LayoutFragmentId;
   readonly row: number;
 }
 
-export interface TerminalAccessibilityNode {
-  readonly source: DocumentNodeRef;
-  readonly fragment: FragmentId;
+export interface TerminalAccessibilityBound {
+  readonly documentNode: DocumentNodeRef;
+  readonly layoutFragments: readonly LayoutFragmentId[];
   readonly role: DocumentSemanticEntry["role"];
   readonly name: string;
   readonly description: string;
-  readonly rect: TerminalRect;
+  readonly rect: TerminalCellRect;
 }
 
 export interface TerminalSearchRange {
-  readonly match: VisibleTextMatchId;
+  readonly match: TextSearchMatchId;
   readonly row: number;
   readonly startCodeUnit: number;
   readonly endCodeUnit: number;
-  readonly fragment: FragmentId | null;
-  readonly source: DocumentNodeRef | null;
+  readonly layoutFragment: LayoutFragmentId | null;
+  readonly documentNode: DocumentNodeRef | null;
   readonly sourceRange: DocumentSourceRange | null;
 }
 
 export interface TerminalSearchMatch {
-  readonly id: VisibleTextMatchId;
+  readonly id: TextSearchMatchId;
   readonly ranges: readonly TerminalSearchRange[];
 }
 
@@ -173,49 +209,23 @@ export interface TerminalSearchResult {
   readonly truncated: boolean;
 }
 
-export interface FragmentBudgets {
-  readonly maxFragments: number;
-  readonly maxRows: number;
-  readonly maxPaintCells: number;
-  readonly maxDepth: number;
-  readonly maxSearchMatches: number;
-}
-
-export type FragmentOutcome =
-  | { readonly status: "complete"; readonly fragments: number; readonly rows: number }
-  | {
-      readonly status: "truncated";
-      readonly fragments: number;
-      readonly rows: number;
-      readonly budget: keyof FragmentBudgets;
-      readonly limit: number;
-    }
-  | { readonly status: "rejected"; readonly reason: "invalid-viewport" | "invalid-profile" };
-
-export interface BuildFragmentTreeInput {
-  readonly formatting: FormattingTree;
-  readonly viewport: TerminalViewport;
-  readonly measurer: TerminalTextMeasurer;
-  readonly profile: TerminalProfile;
-  readonly budgets?: Partial<FragmentBudgets>;
-  readonly signal?: AbortSignal;
-}
-
-export interface FragmentTree {
-  readonly formatting: FormattingTree;
-  readonly viewport: TerminalViewport;
-  readonly profile: TerminalProfile;
-  readonly root: FragmentId;
-  readonly rows: readonly TerminalRow[];
-  readonly hitRegions: readonly TerminalHitRegion[];
-  readonly focusTargets: readonly TerminalFocusTarget[];
+export interface TerminalRenderResult {
+  readonly layout: LayoutFragmentTree;
+  readonly displayList: TerminalDisplayList;
+  readonly cellBuffer: TerminalCellBuffer;
+  readonly hitTestIndex: TerminalHitTestIndex;
+  readonly focusMap: TerminalFocusMap;
+  readonly accessibilityBounds: readonly TerminalAccessibilityBound[];
   readonly scrollAnchors: readonly TerminalScrollAnchor[];
-  readonly accessibility: readonly TerminalAccessibilityNode[];
-  readonly outcome: FragmentOutcome;
-  fragment(id: FragmentId): TerminalFragment;
-  parent(id: FragmentId): TerminalFragment | null;
-  children(id: FragmentId): readonly TerminalFragment[];
-  forSource(source: DocumentNodeRef): readonly TerminalFragment[];
-  hitTest(row: number, column: number): TerminalHitRegion | null;
+  cellRectsForDocumentNode(node: DocumentNodeRef): readonly TerminalCellRect[];
   search(query: string): TerminalSearchResult;
+}
+
+export interface BuildTerminalDisplayListInput {
+  readonly layout: LayoutFragmentTree;
+  readonly context: TerminalRenderContext;
+}
+
+export interface RasterizeTerminalDisplayListInput {
+  readonly displayList: TerminalDisplayList;
 }
