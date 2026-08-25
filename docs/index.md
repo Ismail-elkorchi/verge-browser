@@ -20,3 +20,4 @@ library examples and defines the package's runtime boundaries.
 - [Options](./reference/options.md)
 - [Error model](./reference/error-model.md)
 - [Rendering architecture and ownership](./architecture/rendering-pipeline.md)
+- [Unicode text layout](./architecture/unicode-text.md)

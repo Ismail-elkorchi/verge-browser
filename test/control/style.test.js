@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createDocumentState, parseWebDocument } from "../../dist/document/index.js";
+import { applyDocumentAction, createDocumentState, parseWebDocument } from "../../dist/document/index.js";
 import { resolveStyles } from "../../dist/presentation/style/index.js";
 
 const environment = {
@@ -68,6 +68,66 @@ test("text alignment and indentation remain typed inherited CSS values", () => {
   const child = styles.style(named(document, "span"));
   assert.equal(child.text.textAlign, "right");
   assert.deepEqual(child.text.textIndent, { kind: "length", value: 2, unit: "ch" });
+});
+
+test("HTML directionality and CSS bidi properties remain distinct computed-value inputs", () => {
+  const { document, styles } = setup(`<main dir="rtl" style="direction:ltr">
+    <p id="inherited" style="text-align:start">text</p>
+    <bdi id="isolate">עברית</bdi>
+    <bdo id="override" dir="rtl">Latin</bdo>
+    <p id="properties" style="direction:rtl;unicode-bidi:isolate-override;text-align:end;
+      line-break:anywhere;word-break:keep-all;overflow-wrap:anywhere;hyphens:none">text</p>
+  </main>`);
+  const styleById = (id) => styles.style(document.elementById(id));
+  assert.equal(styleById("inherited").text.direction, "ltr");
+  assert.equal(styleById("inherited").text.textAlign, "start");
+  assert.equal(styleById("isolate").text.direction, "rtl");
+  assert.equal(styleById("isolate").text.unicodeBidi, "isolate");
+  assert.equal(styleById("override").text.unicodeBidi, "bidi-override");
+  assert.deepEqual(
+    {
+      direction: styleById("properties").text.direction,
+      unicodeBidi: styleById("properties").text.unicodeBidi,
+      textAlign: styleById("properties").text.textAlign,
+      lineBreak: styleById("properties").text.lineBreak,
+      wordBreak: styleById("properties").text.wordBreak,
+      overflowWrap: styleById("properties").text.overflowWrap,
+      hyphens: styleById("properties").text.hyphens
+    },
+    {
+      direction: "rtl", unicodeBidi: "isolate-override", textAlign: "end",
+      lineBreak: "anywhere", wordBreak: "keep-all", overflowWrap: "anywhere", hyphens: "none"
+    }
+  );
+});
+
+test("tab-size remains an inherited computed number for CSS tab-stop resolution", () => {
+  const { document, styles } = setup(`<main style="tab-size:4"><pre>one\ttwo</pre></main>`);
+  const main = named(document, "main");
+  const pre = named(document, "pre");
+  assert.equal(styles.style(main).text.tabSize, 4);
+  assert.equal(styles.style(pre).text.tabSize, 4);
+});
+
+test("dir=auto control direction follows current document state during style resolution", () => {
+  const { document, styles } = setup(
+    `<input id="control" dir="auto" value="עברית">`,
+    (state, snapshot) => applyDocumentAction(snapshot, state, {
+      kind: "set-control-value",
+      target: snapshot.elementById("control"),
+      value: "Latin"
+    })
+  );
+  assert.equal(styles.style(document.elementById("control")).text.direction, "ltr");
+});
+
+test("unsupported CSS text tailoring values produce typed diagnostics instead of approximations", () => {
+  const { document, styles } = setup(`<p style="line-break:strict;hyphens:auto">text</p>`);
+  const paragraph = styles.style(named(document, "p"));
+  assert.equal(paragraph.text.lineBreak, "auto");
+  assert.equal(paragraph.text.hyphens, "manual");
+  assert.ok(styles.diagnostics.some((entry) => entry.code === "value-unsupported" && /line-break/u.test(entry.detail)));
+  assert.ok(styles.diagnostics.some((entry) => entry.code === "value-unsupported" && /hyphens/u.test(entry.detail)));
 });
 
 test("display computation separates outer and inner values and covers suppression and internal roles", () => {

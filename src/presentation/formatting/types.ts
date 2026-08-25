@@ -20,6 +20,7 @@ export type FormattingNodeKind =
   | "inline-container"
   | "text-sequence"
   | "forced-line-break"
+  | "line-break-opportunity"
   | "anonymous-block"
   | "anonymous-inline"
   | "list-item"
@@ -89,7 +90,7 @@ export interface FormattingTextNode extends FormattingNodeBase {
 }
 
 export interface FormattingBreakNode extends FormattingNodeBase {
-  readonly kind: "forced-line-break";
+  readonly kind: "forced-line-break" | "line-break-opportunity";
 }
 
 export interface FormattingReplacedNode extends FormattingNodeBase {

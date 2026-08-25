@@ -1,0 +1,116 @@
+{
+  "repository": "https://github.com/web-platform-tests/wpt",
+  "commit": "ef1cea845d70fb84127ff0e1aff2eeda7064f682",
+  "license": "WPT 3-clause BSD license; Verge uses independently written focused behavioral adaptations and copies no WPT source.",
+  "unicodeVersion": "17.0.0",
+  "adaptations": [
+    {
+      "source": "css/CSS2/text/bidi-span-001.html",
+      "behavior": "one bidi paragraph and visual run order span inline element boundaries",
+      "terminalAdjustment": "visual text commands and fixed-point line fragments are asserted instead of shaped browser glyphs",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/text/text-align-bidi-001.xht",
+      "behavior": "line alignment and bidi reordering are separate used-value steps",
+      "terminalAdjustment": "start and end positions are asserted in CSS pixels before terminal snapping",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-text/text-align/text-align-start-001.html",
+      "behavior": "text-align start follows the used paragraph direction",
+      "terminalAdjustment": "only horizontal writing is adapted",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-text/text-align/text-align-end-001.html",
+      "behavior": "text-align end follows the used paragraph direction",
+      "terminalAdjustment": "only horizontal writing is adapted",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-text/bidi/bidi-lines-001.html",
+      "behavior": "UAX #9 line resets and reordering run after logical line selection",
+      "terminalAdjustment": "the terminal display list consumes visual runs while search remains logical",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/text/white-space-collapsing-bidi-001.xht",
+      "behavior": "CSS white-space processing precedes bidi paragraph construction",
+      "terminalAdjustment": "source-linked logical text units are inspected directly",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-text/line-break/line-break-anywhere-and-white-space-001.html",
+      "behavior": "line-break anywhere remains constrained to extended grapheme-cluster boundaries",
+      "terminalAdjustment": "terminal glyph width does not redefine Unicode boundaries",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-text/overflow-wrap/overflow-wrap-anywhere-001.html",
+      "behavior": "overflow-wrap anywhere introduces emergency opportunities without splitting clusters",
+      "terminalAdjustment": "line selection uses fixed-point CSS-pixel advances",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-text/overflow-wrap/overflow-wrap-break-word-001.html",
+      "behavior": "the standardized legacy break-word behavior is retained as CSS line tailoring",
+      "terminalAdjustment": "intrinsic sizing differences outside Verge's supported slice are not claimed",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-text/overflow-wrap/overflow-wrap-normal-keep-all-001.html",
+      "behavior": "word-break keep-all suppresses default CJK opportunities where specified",
+      "terminalAdjustment": "Unicode 17 line-break classes supply the script-independent property data",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-text/overflow-wrap/overflow-wrap-cluster-001.html",
+      "behavior": "emergency wrapping never splits an extended grapheme cluster",
+      "terminalAdjustment": "wide terminal clusters remain one atomic paint unit",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/text/bidi-flag-emoji.html",
+      "behavior": "regional-indicator pairs remain one grapheme cluster during bidi layout",
+      "terminalAdjustment": "terminal width is applied only after the visual run is fixed",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/bidi-text/direction-001.xht",
+      "behavior": "CSS direction establishes the paragraph base direction without changing logical source order",
+      "terminalAdjustment": "the used direction is asserted through visual line runs in horizontal writing mode",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/bidi-text/unicode-bidi-001.xht",
+      "behavior": "unicode-bidi embeddings and overrides insert structural bidi controls around inline content",
+      "terminalAdjustment": "structural controls exist only in the bidi item stream and never alter author text",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/generated-content/bidi-generated-content-001.xht",
+      "behavior": "generated content participates in the containing bidi paragraph",
+      "terminalAdjustment": "generated ranges retain pseudo-element and formatting-node identity",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-text/hyphens/hyphens-manual-inline-010.html",
+      "behavior": "manual soft hyphens paint only when their selected opportunity ends a line",
+      "terminalAdjustment": "the inserted hyphen is a source-linked visual text cluster",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-text/white-space/nowrap-wbr-and-space-crash.html",
+      "behavior": "wbr contributes a structural break opportunity without contributing logical search text",
+      "terminalAdjustment": "the test asserts retained logical match identity as well as bounded layout",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-text/tab-size/tab-size-inheritance-001.html",
+      "behavior": "tab-size is inherited and determines preserved tab stops during line selection",
+      "terminalAdjustment": "tab stops are resolved in fixed-point CSS pixels before terminal snapping",
+      "license": "WPT 3-clause BSD"
+    }
+  ]
+}

@@ -3,7 +3,8 @@ import {
   cssCoordinateDifference,
   cssMax,
   cssPx,
-  type LayoutFragment
+  type LayoutFragment,
+  type LayoutFragmentId
 } from "../layout/index.js";
 import type {
   BuildTerminalDisplayListInput,
@@ -63,12 +64,10 @@ export function validTerminalRenderContext(input: BuildTerminalDisplayListInput[
     && (depth === 0 || depth === 4 || depth === 8 || depth === 24)
     && typeof input.unicode === "boolean"
     && (ambiguous === 1 || ambiguous === 2)
-    && typeof input.cellMeasurer.width === "function"
-    && typeof input.cellMeasurer.graphemes === "function";
+    && typeof input.cellMeasurer.width === "function";
 }
 
 function commandGroup(fragment: LayoutFragment): readonly Omit<TerminalPaintCommand, "paintOrder">[] {
-  if (!fragment.style.visible) return [];
   const common = {
     layoutFragment: fragment.id,
     formattingNode: fragment.formattingNode,
@@ -82,7 +81,7 @@ function commandGroup(fragment: LayoutFragment): readonly Omit<TerminalPaintComm
     style: fragment.style
   } as const;
   const commands: Omit<TerminalPaintCommand, "paintOrder">[] = [];
-  if (fragment.kind !== "text") {
+  if (fragment.style.visible && fragment.kind !== "text") {
     const boxes = fragment.inlineContinuations ?? [{
       contentRect: fragment.contentRect,
       paddingRect: fragment.paddingRect,
@@ -123,16 +122,17 @@ function commandGroup(fragment: LayoutFragment): readonly Omit<TerminalPaintComm
       }
     }
   }
-  const text = fragment.kind === "text" ? fragment.text
+  const text = fragment.kind === "text" ? fragment.visualText
     : fragment.kind === "control" ? fragment.controlText ?? ""
       : fragment.kind === "replaced" ? fragment.replacedText ?? "" : "";
-  if (text.length > 0) {
+  if (fragment.style.visible && text.length > 0) {
     commands.push(Object.freeze({
       ...common,
       id: `terminal-paint:text:${fragment.id}`,
       kind: "text",
       rect: fragment.contentRect,
-      text
+      text,
+      clusters: fragment.visualClusters ?? Object.freeze([])
     }));
   }
   return commands;
@@ -152,13 +152,29 @@ export function buildTerminalDisplayList(input: BuildTerminalDisplayListInput): 
     });
   }
   const commands: TerminalPaintCommand[] = [];
+  const lineForFragment = new Map<LayoutFragmentId, number>();
+  const visualLineFragments = new Map<number, readonly LayoutFragmentId[]>();
+  const visualLineCursor = new Map<number, number>();
+  for (const [lineIndex, line] of input.layout.lineBoxes.entries()) {
+    visualLineFragments.set(lineIndex, line.visualOrder);
+    for (const fragment of line.fragments) lineForFragment.set(fragment, lineIndex);
+  }
+  const visualFragment = (fragment: LayoutFragment): LayoutFragment => {
+    const lineIndex = lineForFragment.get(fragment.id);
+    if (lineIndex === undefined) return fragment;
+    const visual = visualLineFragments.get(lineIndex) ?? [];
+    const cursor = visualLineCursor.get(lineIndex) ?? 0;
+    const visualId = visual[cursor];
+    visualLineCursor.set(lineIndex, cursor + 1);
+    return visualId === undefined ? fragment : input.layout.fragment(visualId);
+  };
   const pending = [input.layout.root];
   let truncated = false;
   while (pending.length > 0) {
     input.signal?.throwIfAborted();
     const id = pending.pop();
     if (id === undefined) continue;
-    const fragment = input.layout.fragment(id);
+    const fragment = visualFragment(input.layout.fragment(id));
     const group = commandGroup(fragment);
     if (commands.length + group.length > budgets.maxDisplayListCommands) {
       truncated = true;

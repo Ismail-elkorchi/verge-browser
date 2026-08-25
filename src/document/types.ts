@@ -118,7 +118,29 @@ export interface DocumentSemanticEntry {
   readonly accessibleDescription: string;
   /** Excluded from semantic/accessibility projections; this does not itself suppress CSS boxes. */
   readonly accessibilityHidden: boolean;
-  readonly behavior: "normal" | "forced-break" | "replaced" | "form-control";
+  readonly behavior: "normal" | "forced-break" | "break-opportunity" | "replaced" | "form-control";
+}
+
+export type DocumentDirection = "ltr" | "rtl";
+export type HtmlDirectionMode = "ltr" | "rtl" | "auto";
+export type DocumentDirectionSource = "document-default" | "explicit" | "auto-first-strong" | "inherited" | "telephone-input";
+export type RenderedTextKind = "accessible-name" | "alternative-text" | "control-value" | "label" | "placeholder" | "title";
+
+export interface RenderedTextDirection {
+  readonly kind: RenderedTextKind;
+  readonly value: string;
+  readonly direction: DocumentDirection;
+}
+
+/** HTML directionality is indexed separately from CSS computed `direction`. */
+export interface DocumentDirectionality {
+  readonly node: DocumentNodeRef;
+  readonly direction: DocumentDirection;
+  readonly htmlMode: HtmlDirectionMode | null;
+  readonly source: DocumentDirectionSource;
+  readonly isolates: boolean;
+  readonly overrides: boolean;
+  readonly renderedText: readonly RenderedTextDirection[];
 }
 
 export interface DocumentLink {
@@ -393,4 +415,6 @@ export interface IndexedWebDocumentSnapshot extends WebDocumentSnapshot {
   heading(ref: DocumentNodeRef): DocumentHeading | null;
   replaced(ref: DocumentNodeRef): DocumentReplacedContent | null;
   disclosure(ref: DocumentNodeRef): DocumentDisclosure | null;
+  directionality(ref: DocumentNodeRef): DocumentDirectionality;
+  directionForRenderedText(ref: DocumentNodeRef, value: string): DocumentDirection;
 }

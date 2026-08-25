@@ -5,7 +5,7 @@ import type {
   FormattingTree
 } from "../formatting/index.js";
 import { formattingNodeLogicalText } from "../formatting/index.js";
-import { transformTextWithSourceRanges, transformedSourceRange } from "../text/index.js";
+import { processCssText, type ProcessedCssText } from "../text/index.js";
 
 export type TextSearchMatchId = string & { readonly __textSearchMatchId: unique symbol };
 
@@ -32,6 +32,7 @@ export interface TextSearchResult {
 export interface TextSearchIndex {
   readonly text: string;
   search(query: string, limit: number): TextSearchResult;
+  processedText(formatting: FormattingNodeId): ProcessedCssText | null;
 }
 
 interface TextSearchSegment {
@@ -75,11 +76,21 @@ function foldedBoundaries(value: string, targets: readonly number[]): ReadonlyMa
 class ImmutableTextSearchIndex implements TextSearchIndex {
   readonly text: string;
   readonly #segments: readonly TextSearchSegment[];
+  readonly #processedText: ReadonlyMap<FormattingNodeId, ProcessedCssText>;
 
-  public constructor(text: string, segments: readonly TextSearchSegment[]) {
+  public constructor(
+    text: string,
+    segments: readonly TextSearchSegment[],
+    processedText: ReadonlyMap<FormattingNodeId, ProcessedCssText>
+  ) {
     this.text = text;
     this.#segments = Object.freeze(segments.map((segment) => Object.freeze(segment)));
+    this.#processedText = new Map(processedText);
     Object.freeze(this);
+  }
+
+  public processedText(formatting: FormattingNodeId): ProcessedCssText | null {
+    return this.#processedText.get(formatting) ?? null;
   }
 
   public search(query: string, limit: number): TextSearchResult {
@@ -149,7 +160,9 @@ class ImmutableTextSearchIndex implements TextSearchIndex {
 export function buildTextSearchIndex(tree: FormattingTree, signal?: AbortSignal): TextSearchIndex {
   const parts: string[] = [];
   const segments: TextSearchSegment[] = [];
+  const processedText = new Map<FormattingNodeId, ProcessedCssText>();
   let length = 0;
+  let collapsibleSpacePending = false;
   let pendingSeparator: Omit<TextSearchSegment, "start" | "end"> | null = null;
   const append = (
     value: string,
@@ -190,16 +203,26 @@ export function buildTextSearchIndex(tree: FormattingTree, signal?: AbortSignal)
     const style = node.styleNode === null ? null : node.pseudo === null
       ? tree.styles.style(node.styleNode)
       : tree.styles.pseudo(node.styleNode, node.pseudo) ?? tree.styles.style(node.styleNode);
-    if (style?.visibility !== "visible") return;
-    const mapped = transformTextWithSourceRanges(raw, style.text.textTransform);
-    for (const match of mapped.value.matchAll(/\s+|\S+/gu)) {
-      const value = match[0];
-      const start = match.index;
-      const end = start + value.length;
-      const [contentStart, contentEnd] = transformedSourceRange(mapped, start, end);
-      const segment = nodeSegment(node, contentStart, contentEnd);
-      if (/^\s+$/u.test(value)) separator(segment);
-      else append(value, segment);
+    if (style === null) return;
+    const whiteSpace = node.kind === "text-sequence" || node.kind === "generated-text" || node.kind === "marker"
+      ? node.whiteSpace : style.text.whiteSpace;
+    const processed = processCssText(
+      raw,
+      style.text.textTransform,
+      whiteSpace,
+      collapsibleSpacePending,
+      {},
+      signal
+    );
+    if (processed.outcome.status !== "complete") throw new RangeError("Logical search text exceeded its grapheme-cluster budget.");
+    processedText.set(node.id, processed);
+    collapsibleSpacePending = processed.collapsibleSpacePending;
+    if (style.visibility !== "visible") return;
+    for (const unit of processed.units) {
+      const segment = nodeSegment(node, unit.contentStartCodeUnit, unit.contentEndCodeUnit);
+      if (unit.kind === "soft-hyphen") continue;
+      if (unit.kind === "forced-break" || unit.kind === "tab" || unit.collapsibleSpace) separator(segment);
+      else append(unit.text, segment);
     }
   };
   const pending: ({ readonly phase: "enter"; readonly id: FormattingNodeId }
@@ -212,10 +235,16 @@ export function buildTextSearchIndex(tree: FormattingTree, signal?: AbortSignal)
     if (entry === undefined) continue;
     const node = tree.node(entry.id);
     if (entry.phase === "exit") {
-      if (node.outer === "block") separator(nodeSegment(node, 0, 0));
+      if (node.outer === "block") {
+        separator(nodeSegment(node, 0, 0));
+        collapsibleSpacePending = false;
+      }
       continue;
     }
-    if (node.outer === "block") separator(nodeSegment(node, 0, 0));
+    if (node.outer === "block") {
+      separator(nodeSegment(node, 0, 0));
+      collapsibleSpacePending = false;
+    }
     const logicalText = formattingNodeLogicalText(node, tree);
     if (logicalText !== null) {
       appendRenderedText(node, logicalText);
@@ -223,6 +252,7 @@ export function buildTextSearchIndex(tree: FormattingTree, signal?: AbortSignal)
     }
     if (node.kind === "forced-line-break") {
       separator(nodeSegment(node, 0, 0));
+      collapsibleSpacePending = false;
       continue;
     }
     pending.push({ phase: "exit", id: node.id });
@@ -231,5 +261,5 @@ export function buildTextSearchIndex(tree: FormattingTree, signal?: AbortSignal)
       if (child !== undefined) pending.push({ phase: "enter", id: child });
     }
   }
-  return new ImmutableTextSearchIndex(parts.join(""), segments);
+  return new ImmutableTextSearchIndex(parts.join(""), segments, processedText);
 }

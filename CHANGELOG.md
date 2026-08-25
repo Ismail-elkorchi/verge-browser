@@ -4,6 +4,23 @@ All notable changes are documented in this file.
 
 ## Unreleased
 
+- Pin Unicode 17.0.0 property data and conformance fixtures; add internal UAX
+  #9 bidi paragraphs and embedding levels, UAX #14 line-break maps, and UAX #29
+  extended grapheme clusters with deterministic offline generation checks.
+- Index HTML directionality; compute CSS `direction`, `unicode-bidi`, logical
+  alignment, line-breaking, overflow wrapping, manual hyphenation, and inherited
+  tab-size values;
+  build one logical inline-item stream across inline boxes before selecting
+  source-linked visual runs and immutable line boxes.
+- Make the terminal display list consume visual text clusters with exact logical
+  and source ranges. The cell rasterizer no longer segments, line-breaks, or
+  reorders text, while logical search IDs remain stable across bidi reordering,
+  wrapping, resize, and terminal cell metrics.
+- Bound bidi paragraphs, embedding depth, bidi items and runs, grapheme
+  clusters, break opportunities, visual runs, and line fragments; keep all
+  scans cancellable; and make per-line reordering allocate only for the selected
+  line instead of the complete bidi paragraph.
+
 - Use `@ismail-elkorchi/html-parser@0.2.1` from the public npm registry,
   preserve parser resource metadata, bound text extraction, and avoid duplicate
   buffering while parsing streamed responses.

@@ -195,24 +195,26 @@ export function cssIntersection(left: CssRect, right: CssRect): CssRect {
 }
 
 export function cssUnion(rectangles: Iterable<CssRect>, fallback: CssRect): CssRect {
-  let x = fallback.x;
-  let y = fallback.y;
-  let edge = cssCoordinateAdd(fallback.x, fallback.width);
-  let bottom = cssCoordinateAdd(fallback.y, fallback.height);
+  let x: number = fallback.x;
+  let y: number = fallback.y;
+  let edge: number = saturatedAdd(fallback.x, fallback.width);
+  let bottom: number = saturatedAdd(fallback.y, fallback.height);
   let initialized = false;
   for (const rectangle of rectangles) {
+    const rectangleEdge = saturatedAdd(rectangle.x, rectangle.width);
+    const rectangleBottom = saturatedAdd(rectangle.y, rectangle.height);
     if (!initialized) {
       x = rectangle.x;
       y = rectangle.y;
-      edge = cssCoordinateAdd(rectangle.x, rectangle.width);
-      bottom = cssCoordinateAdd(rectangle.y, rectangle.height);
+      edge = rectangleEdge;
+      bottom = rectangleBottom;
       initialized = true;
       continue;
     }
-    x = cssCoordinateFromFixed(Math.min(x, rectangle.x));
-    y = cssCoordinateFromFixed(Math.min(y, rectangle.y));
-    edge = cssCoordinateFromFixed(Math.max(edge, cssCoordinateAdd(rectangle.x, rectangle.width)));
-    bottom = cssCoordinateFromFixed(Math.max(bottom, cssCoordinateAdd(rectangle.y, rectangle.height)));
+    if (rectangle.x < x) x = rectangle.x;
+    if (rectangle.y < y) y = rectangle.y;
+    if (rectangleEdge > edge) edge = rectangleEdge;
+    if (rectangleBottom > bottom) bottom = rectangleBottom;
   }
   if (!initialized) return fallback;
   return cssRect(

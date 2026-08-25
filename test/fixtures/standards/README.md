@@ -24,3 +24,9 @@ provenance and repeatability.
 The sibling `pages/` directory contains original, recorded local fixtures for
 common article/form and dashboard/table structures. They have no external
 runtime dependency and are maintained under this repository's MIT license.
+
+Unicode 17.0.0 property inputs, conformance fixtures, checksums, and the Unicode
+license are stored under `../unicode/17.0.0/`. Focused bidi and CSS Text WPT
+adaptations are recorded in `../wpt-text-provenance.json` at the pinned WPT
+commit. Generated tables are checked deterministically from those offline
+sources during qualification.

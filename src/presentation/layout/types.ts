@@ -6,17 +6,11 @@ import type {
 import type { FormattingNodeId, FormattingTree } from "../formatting/index.js";
 import type { TextSearchIndex, TextSearchMatchId } from "../search/index.js";
 import type { CssColor, PseudoElementIdentity } from "../style/index.js";
+import type { BidiLevel } from "../text/index.js";
 import type { CssPixelLength, CssRect, CssSize } from "./fixed.js";
 
 export type LayoutFragmentId = string & { readonly __layoutFragmentId: unique symbol };
 export type LineBoxId = string & { readonly __lineBoxId: unique symbol };
-
-export interface LayoutGrapheme {
-  readonly text: string;
-  readonly startCodeUnit: number;
-  readonly endCodeUnit: number;
-  readonly advance: CssPixelLength;
-}
 
 export interface UsedFontMetrics {
   readonly fontSize: CssPixelLength;
@@ -30,7 +24,6 @@ export interface UsedFontMetrics {
 
 export interface CssTextMeasurer {
   measure(text: string, fontSize: CssPixelLength): CssPixelLength;
-  graphemes(text: string, fontSize: CssPixelLength): readonly LayoutGrapheme[];
   fontMetrics(fontSize: CssPixelLength): UsedFontMetrics;
   defaultFontMetrics(): UsedFontMetrics;
 }
@@ -39,6 +32,14 @@ export interface LayoutBudgets {
   readonly maxFragments: number;
   readonly maxLineBoxes: number;
   readonly maxTextFragments: number;
+  readonly maxLineFragments: number;
+  readonly maxCodePointsPerBidiParagraph: number;
+  readonly maxBidiItems: number;
+  readonly maxBidiEmbeddingDepth: number;
+  readonly maxBidiRuns: number;
+  readonly maxGraphemeClusters: number;
+  readonly maxBreakOpportunities: number;
+  readonly maxVisualRuns: number;
   readonly maxDepth: number;
 }
 
@@ -73,6 +74,16 @@ export interface InlineContinuationGeometry {
   readonly marginRect: CssRect;
 }
 
+export interface LayoutTextCluster {
+  readonly text: string;
+  readonly visualStartCodeUnit: number;
+  readonly visualEndCodeUnit: number;
+  readonly contentStartCodeUnit: number;
+  readonly contentEndCodeUnit: number;
+  readonly sourceRange: DocumentSourceRange | null;
+  readonly advance: CssPixelLength;
+}
+
 export interface LayoutTextFragment {
   readonly id: LayoutFragmentId;
   readonly kind: "text";
@@ -83,6 +94,10 @@ export interface LayoutTextFragment {
   readonly contentStartCodeUnit: number;
   readonly contentEndCodeUnit: number;
   readonly text: string;
+  readonly visualText: string;
+  readonly visualClusters: readonly LayoutTextCluster[];
+  readonly bidiParagraph: number;
+  readonly embeddingLevel: number;
   readonly contentRect: CssRect;
   readonly paddingRect: CssRect;
   readonly borderRect: CssRect;
@@ -133,6 +148,7 @@ export interface LayoutBoxFragment {
   readonly controlValue?: string;
   readonly controlText?: string;
   readonly replacedText?: string;
+  readonly visualClusters?: readonly LayoutTextCluster[];
 }
 
 export type LayoutFragment = LayoutTextFragment | LayoutBoxFragment;
@@ -144,9 +160,26 @@ export interface LineBox {
   readonly baseline: CssPixelLength;
   readonly ascent: CssPixelLength;
   readonly descent: CssPixelLength;
+  readonly usedInlineAdvance: CssPixelLength;
   readonly fragments: readonly LayoutFragmentId[];
   readonly textFragments: readonly LayoutFragmentId[];
   readonly visualOrder: readonly LayoutFragmentId[];
+  readonly logicalItemStart: number;
+  readonly logicalItemEnd: number;
+  readonly embeddingLevels: readonly (BidiLevel | null)[];
+  readonly sourceRanges: readonly DocumentSourceRange[];
+  readonly actions: readonly DocumentActionIdentity[];
+  readonly semantics: readonly DocumentSemanticEntry[];
+  readonly breakCause: "end-of-paragraph" | "forced" | "wrap";
+  readonly visualRuns: readonly LayoutVisualRun[];
+}
+
+export interface LayoutVisualRun {
+  readonly embeddingLevel: number;
+  readonly direction: "ltr" | "rtl";
+  readonly logicalItemStart: number;
+  readonly logicalItemEnd: number;
+  readonly fragments: readonly LayoutFragmentId[];
 }
 
 export interface LayoutSearchSpan {

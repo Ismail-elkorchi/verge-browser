@@ -35,7 +35,7 @@
   "scripts": {
     "build": "node scripts/build/clean-dist.mjs && tsc -p tsconfig.build.json",
     "check": "npm run check:core && npm run smoke:node && npm run test:fuzz",
-    "check:core": "npm run lint && npm run typecheck && npm test && npm run smoke:cli",
+    "check:core": "npm run lint && npm run typecheck && npm run unicode:check && npm test && npm run smoke:cli",
     "examples:run": "npm run build && node examples/run-all.mjs",
     "audit:dependencies": "npm audit --audit-level=high",
     "jsr:check": "deno check --no-lock --sloppy-imports jsr/mod.ts && deno doc --lint --no-lock --sloppy-imports jsr/mod.ts && deno test --doc --no-lock --sloppy-imports jsr/mod.ts",
@@ -55,7 +55,9 @@
     "test:bench": "npm run build && node --expose-gc scripts/bench/run-bench.mjs",
     "test:fuzz": "npm run build && node scripts/quality/fuzz.mjs --profile=ci",
     "test:fuzz:release": "npm run build && node scripts/quality/fuzz.mjs --profile=release",
-    "typecheck": "tsc --noEmit -p tsconfig.build.json"
+    "typecheck": "tsc --noEmit -p tsconfig.build.json",
+    "unicode:check": "node scripts/unicode/generate-unicode-data.mjs --check",
+    "unicode:generate": "node scripts/unicode/generate-unicode-data.mjs"
   },
   "dependencies": {
     "@ismail-elkorchi/css-parser": "0.2.0",

@@ -2,7 +2,7 @@ import type { DocumentNodeRef, DocumentSemanticEntry, DocumentSourceRange } from
 import type { FormattingNodeId } from "../formatting/index.js";
 import type {
   CssEdges, CssPixelLength, CssRect, DocumentActionIdentity, LayoutFragmentId,
-  LayoutFragmentTree, LayoutPaintStyle
+  LayoutFragmentTree, LayoutPaintStyle, LayoutTextCluster
 } from "../layout/index.js";
 import type { TextSearchMatchId } from "../search/index.js";
 
@@ -13,16 +13,8 @@ export interface TerminalCellRect {
   readonly height: number;
 }
 
-export interface TerminalCellGrapheme {
-  readonly text: string;
-  readonly startCodeUnit: number;
-  readonly endCodeUnit: number;
-  readonly cells: number;
-}
-
 export interface TerminalCellMeasurer {
   width(text: string): number;
-  graphemes(text: string): readonly TerminalCellGrapheme[];
 }
 
 export interface TerminalPaintBudgets {
@@ -80,7 +72,10 @@ interface TerminalPaintCommandBase {
 export interface TerminalTextPaintCommand extends TerminalPaintCommandBase {
   readonly kind: "text";
   readonly text: string;
+  readonly clusters: readonly TerminalPaintTextCluster[];
 }
+
+export type TerminalPaintTextCluster = LayoutTextCluster;
 
 export interface TerminalBackgroundPaintCommand extends TerminalPaintCommandBase {
   readonly kind: "background";

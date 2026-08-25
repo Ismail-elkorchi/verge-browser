@@ -1,8 +1,7 @@
-import type { DocumentNodeRef } from "../../document/index.js";
+import type { DocumentNodeRef, DocumentSourceRange } from "../../document/index.js";
 import {
   cssCoordinateAdd,
   cssIntersection,
-  cssMultiply,
   type CssRect,
   type LayoutFragment,
   type LayoutFragmentId
@@ -45,6 +44,9 @@ interface PaintUnit {
   readonly text: string;
   readonly startCodeUnit: number;
   readonly endCodeUnit: number;
+  readonly contentStartCodeUnit: number | null;
+  readonly contentEndCodeUnit: number | null;
+  readonly sourceRange: DocumentSourceRange | null;
   readonly visible: boolean;
 }
 
@@ -194,10 +196,26 @@ function textClip(command: Extract<TerminalPaintCommand, { readonly kind: "text"
   return snapCssRect(command.clipRect, command.clipRect, list, budgets);
 }
 
+interface PaintUnitGenerationState {
+  readonly limit: number;
+  generated: number;
+  truncated: boolean;
+}
+
+function reservePaintUnit(state: PaintUnitGenerationState): boolean {
+  if (state.generated >= state.limit) {
+    state.truncated = true;
+    return false;
+  }
+  state.generated += 1;
+  return true;
+}
+
 function* textUnits(
   command: Extract<TerminalPaintCommand, { readonly kind: "text" }>,
   list: TerminalDisplayList,
   budgets: TerminalPaintBudgets,
+  generation: PaintUnitGenerationState,
   signal: AbortSignal | undefined
 ): Generator<PaintUnit> {
   const clip = textClip(command, list, budgets);
@@ -205,59 +223,64 @@ function* textUnits(
   const row = Math.floor(command.rect.y / list.context.rowHeightCssPx);
   const rowVisible = row >= clip.row && row < safeAdd(clip.row, clip.height);
   const clipEdge = safeAdd(clip.column, clip.width);
-  const graphemes = list.context.cellMeasurer.graphemes(command.text);
-  let measuredCells = 0;
   let previousCodeUnit = 0;
-  for (const grapheme of graphemes) {
+  let cssCursor = command.rect.x;
+  let previousEnd = Math.floor(command.rect.x / list.context.cellWidthCssPx);
+  for (const grapheme of command.clusters) {
+    if (!reservePaintUnit(generation)) return;
     signal?.throwIfAborted();
-    if (!Number.isSafeInteger(grapheme.startCodeUnit)
-      || !Number.isSafeInteger(grapheme.endCodeUnit)
-      || grapheme.startCodeUnit !== previousCodeUnit
-      || grapheme.endCodeUnit <= grapheme.startCodeUnit
-      || grapheme.endCodeUnit > command.text.length
-      || grapheme.text !== command.text.slice(grapheme.startCodeUnit, grapheme.endCodeUnit)
-      || !Number.isSafeInteger(grapheme.cells)
-      || grapheme.cells < 0) {
+    const cells = list.context.cellMeasurer.width(grapheme.text);
+    if (!Number.isSafeInteger(grapheme.visualStartCodeUnit)
+      || !Number.isSafeInteger(grapheme.visualEndCodeUnit)
+      || grapheme.visualStartCodeUnit !== previousCodeUnit
+      || grapheme.visualEndCodeUnit <= grapheme.visualStartCodeUnit
+      || grapheme.visualEndCodeUnit > command.text.length
+      || grapheme.text !== command.text.slice(grapheme.visualStartCodeUnit, grapheme.visualEndCodeUnit)
+      || !Number.isSafeInteger(grapheme.contentStartCodeUnit)
+      || !Number.isSafeInteger(grapheme.contentEndCodeUnit)
+      || grapheme.contentStartCodeUnit < 0
+      || grapheme.contentEndCodeUnit < grapheme.contentStartCodeUnit
+      || !Number.isSafeInteger(grapheme.advance)
+      || grapheme.advance < 0
+      || !Number.isSafeInteger(cells)
+      || cells < 0) {
       throw new InvalidTerminalCellMeasurement();
     }
-    previousCodeUnit = grapheme.endCodeUnit;
-    measuredCells = safeAdd(measuredCells, Math.max(1, grapheme.cells));
-  }
-  if (previousCodeUnit !== command.text.length) throw new InvalidTerminalCellMeasurement();
-  let consumedCells = 0;
-  let previousEnd = Math.floor(command.rect.x / list.context.cellWidthCssPx);
-  for (const grapheme of graphemes) {
-    signal?.throwIfAborted();
-    const width = Math.max(1, grapheme.cells);
-    const ratio = measuredCells === 0 ? 0 : consumedCells / measuredCells;
-    const cssStart = cssCoordinateAdd(command.rect.x, cssMultiply(command.rect.width, ratio));
-    const desiredStart = Math.floor(cssStart / list.context.cellWidthCssPx);
+    previousCodeUnit = grapheme.visualEndCodeUnit;
+    const width = Math.max(1, cells);
+    const desiredStart = Math.floor(cssCursor / list.context.cellWidthCssPx);
     const column = Math.max(previousEnd, desiredStart);
     const end = safeAdd(column, width);
-    consumedCells = safeAdd(consumedCells, width);
     previousEnd = end;
+    cssCursor = cssCoordinateAdd(cssCursor, grapheme.advance);
     yield Object.freeze({
       command,
       row,
       column,
       width,
       text: grapheme.text,
-      startCodeUnit: grapheme.startCodeUnit,
-      endCodeUnit: grapheme.endCodeUnit,
+      startCodeUnit: grapheme.visualStartCodeUnit,
+      endCodeUnit: grapheme.visualEndCodeUnit,
+      contentStartCodeUnit: grapheme.contentStartCodeUnit,
+      contentEndCodeUnit: grapheme.contentEndCodeUnit,
+      sourceRange: grapheme.sourceRange,
       visible: rowVisible && column >= clip.column && end <= clipEdge
     });
   }
+  if (previousCodeUnit !== command.text.length) throw new InvalidTerminalCellMeasurement();
 }
 
 function* backgroundUnits(
   command: Extract<TerminalPaintCommand, { readonly kind: "background" }>,
   list: TerminalDisplayList,
   budgets: TerminalPaintBudgets,
+  generation: PaintUnitGenerationState,
   signal: AbortSignal | undefined
 ): Generator<PaintUnit> {
   const box = snapCssRect(command.rect, command.clipRect, list, budgets);
   for (let row = box.row; row < safeAdd(box.row, box.height); row += 1) {
     for (let column = box.column; column < safeAdd(box.column, box.width); column += 1) {
+      if (!reservePaintUnit(generation)) return;
       signal?.throwIfAborted();
       yield Object.freeze({
         command,
@@ -267,6 +290,9 @@ function* backgroundUnits(
         text: " ",
         startCodeUnit: 0,
         endCodeUnit: 0,
+        contentStartCodeUnit: null,
+        contentEndCodeUnit: null,
+        sourceRange: null,
         visible: true
       });
     }
@@ -301,6 +327,7 @@ function* borderUnits(
   command: Extract<TerminalPaintCommand, { readonly kind: "border-side" }>,
   list: TerminalDisplayList,
   budgets: TerminalPaintBudgets,
+  generation: PaintUnitGenerationState,
   signal: AbortSignal | undefined
 ): Generator<PaintUnit> {
   const whole = snapUnclippedCssRect(command.borderRect, list);
@@ -310,12 +337,13 @@ function* borderUnits(
   const bottom = safeAdd(whole.row, whole.height) - 1;
   const left = whole.column;
   const right = safeAdd(whole.column, whole.width) - 1;
-  const emit = function* (row: number, column: number): Generator<PaintUnit> {
+  const emit = (row: number, column: number): PaintUnit | null => {
     if (row < clipped.row || row >= safeAdd(clipped.row, clipped.height)
-      || column < clipped.column || column >= safeAdd(clipped.column, clipped.width)) return;
+      || column < clipped.column || column >= safeAdd(clipped.column, clipped.width)) return null;
+    if (!reservePaintUnit(generation)) return null;
     signal?.throwIfAborted();
     const glyph = borderGlyph(command, whole, row, column, list.context.unicode);
-    yield Object.freeze({
+    return Object.freeze({
       command,
       row,
       column,
@@ -323,6 +351,9 @@ function* borderUnits(
       text: glyph,
       startCodeUnit: 0,
       endCodeUnit: 0,
+      contentStartCodeUnit: null,
+      contentEndCodeUnit: null,
+      sourceRange: null,
       visible: true
     });
   };
@@ -331,25 +362,34 @@ function* borderUnits(
     if (row < clipped.row || row >= safeAdd(clipped.row, clipped.height)) return;
     const firstColumn = Math.max(left, clipped.column);
     const lastColumn = Math.min(right, safeAdd(clipped.column, clipped.width) - 1);
-    for (let column = firstColumn; column <= lastColumn; column += 1) yield* emit(row, column);
+    for (let column = firstColumn; column <= lastColumn; column += 1) {
+      const unit = emit(row, column);
+      if (unit !== null) yield unit;
+      if (generation.truncated) return;
+    }
     return;
   }
   const column = command.side === "left" ? left : right;
   if (column < clipped.column || column >= safeAdd(clipped.column, clipped.width)) return;
   const firstRow = Math.max(top, clipped.row);
   const lastRow = Math.min(bottom, safeAdd(clipped.row, clipped.height) - 1);
-  for (let row = firstRow; row <= lastRow; row += 1) yield* emit(row, column);
+  for (let row = firstRow; row <= lastRow; row += 1) {
+    const unit = emit(row, column);
+    if (unit !== null) yield unit;
+    if (generation.truncated) return;
+  }
 }
 
 function unitsFor(
   command: TerminalPaintCommand,
   list: TerminalDisplayList,
   budgets: TerminalPaintBudgets,
+  generation: PaintUnitGenerationState,
   signal: AbortSignal | undefined
 ): Generator<PaintUnit> {
-  if (command.kind === "text") return textUnits(command, list, budgets, signal);
-  if (command.kind === "background") return backgroundUnits(command, list, budgets, signal);
-  return borderUnits(command, list, budgets, signal);
+  if (command.kind === "text") return textUnits(command, list, budgets, generation, signal);
+  if (command.kind === "background") return backgroundUnits(command, list, budgets, generation, signal);
+  return borderUnits(command, list, budgets, generation, signal);
 }
 
 const ANSI_16 = Object.freeze([
@@ -887,13 +927,12 @@ function rasterizeTerminalCellsUnchecked(input: RasterizeTerminalDisplayListInpu
   let paintStopped = false;
   for (const command of list.commands) {
     input.signal?.throwIfAborted();
-    for (const unit of unitsFor(command, list, budgets, input.signal)) {
-      if (generatedUnits >= budgets.maxGeneratedPaintUnits) {
-        addTruncation(truncations, "maxGeneratedPaintUnits", budgets.maxGeneratedPaintUnits);
-        paintStopped = true;
-        break;
-      }
-      generatedUnits += 1;
+    const generation: PaintUnitGenerationState = {
+      limit: Math.max(0, budgets.maxGeneratedPaintUnits - generatedUnits),
+      generated: 0,
+      truncated: false
+    };
+    for (const unit of unitsFor(command, list, budgets, generation, input.signal)) {
       if (!unit.visible || unit.row < 0 || unit.row >= budgets.maxRetainedCellBufferRows
         || unit.column < 0 || safeAdd(unit.column, unit.width) > budgets.maxRetainedCellBufferColumns) continue;
       const collided = new Set<PaintedUnit>();
@@ -926,6 +965,11 @@ function rasterizeTerminalCellsUnchecked(input: RasterizeTerminalDisplayListInpu
         actualStyle: actualStyle(command, under, list.context.colorDepth)
       });
       for (const key of positions) ownerByPosition.set(key, painted);
+    }
+    generatedUnits += generation.generated;
+    if (!paintStopped && generation.truncated) {
+      addTruncation(truncations, "maxGeneratedPaintUnits", budgets.maxGeneratedPaintUnits);
+      paintStopped = true;
     }
     if (paintStopped) break;
   }
@@ -977,27 +1021,14 @@ function rasterizeTerminalCellsUnchecked(input: RasterizeTerminalDisplayListInpu
         paintOrder: command.paintOrder
       }));
       if (command.kind === "text") {
-        let sourceRange = command.sourceRange;
-        if (sourceRange !== null && sourceRange.end - sourceRange.start === command.text.length) {
-          sourceRange = Object.freeze({
-            start: sourceRange.start + unit.startCodeUnit,
-            end: sourceRange.start + unit.endCodeUnit,
-            provenance: sourceRange.provenance
-          });
-        }
-        const exactContentRange = command.contentStartCodeUnit !== null
-          && command.contentEndCodeUnit !== null
-          && command.contentEndCodeUnit - command.contentStartCodeUnit === command.text.length;
         const span: TerminalCellSpan = Object.freeze({
           command: command.id,
           layoutFragment: command.layoutFragment,
           formattingNode: command.formattingNode,
           documentNode: command.documentNode,
-          sourceRange,
-          contentStartCodeUnit: command.contentStartCodeUnit === null ? null
-            : exactContentRange ? command.contentStartCodeUnit + unit.startCodeUnit : command.contentStartCodeUnit,
-          contentEndCodeUnit: command.contentEndCodeUnit === null ? null
-            : exactContentRange ? command.contentStartCodeUnit + unit.endCodeUnit : command.contentEndCodeUnit,
+          sourceRange: unit.sourceRange,
+          contentStartCodeUnit: unit.contentStartCodeUnit,
+          contentEndCodeUnit: unit.contentEndCodeUnit,
           startCodeUnit,
           endCodeUnit,
           column: unit.column,

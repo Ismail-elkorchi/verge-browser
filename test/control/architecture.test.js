@@ -92,15 +92,38 @@ test("rendering cancellation and text ownership have one precise boundary", asyn
   const terminalTypes = await source("src/presentation/terminal/types.ts");
   const search = await source("src/presentation/search/text-search-index.ts");
   const formattingText = await source("src/presentation/formatting/control-display-text.ts");
-  const sharedText = await source("src/presentation/text/text-transform.ts");
+  const sharedText = await source("src/presentation/text/css-text.ts");
   assert.match(pipeline, /interface RenderDocumentInput[\s\S]*signal\?: AbortSignal/u);
   assert.doesNotMatch(layoutTypes, /interface LayoutContext\s*\{[^}]*\bsignal/u);
   assert.doesNotMatch(terminalTypes, /interface TerminalRenderContext\s*\{[^}]*\bsignal/u);
   assert.doesNotMatch(search, /FormattingFormControlNode|controlDisplayText/u);
   assert.match(search, /formattingNodeLogicalText/u);
   assert.match(formattingText, /controlDisplayText/u);
-  assert.match(search, /transformTextWithSourceRanges/u);
+  assert.match(search, /processCssText/u);
   assert.match(sharedText, /transformTextWithSourceRanges/u);
+  assert.doesNotMatch(search, /matchAll\(\/\\s\+\|\\S\+/u);
+});
+
+test("Unicode text analysis has one pinned internal ownership path", async () => {
+  const document = await source("src/document/snapshot.ts");
+  const style = await source("src/presentation/style/types.ts");
+  const layout = await source("src/presentation/layout/layout.ts");
+  const displayList = await source("src/presentation/terminal/display-list.ts");
+  const rasterizer = await source("src/presentation/terminal/rasterizer.ts");
+  const generated = await source("src/presentation/text/generated/unicode-17.ts");
+  const rootDeclaration = await source("dist/mod.d.ts");
+  assert.match(document, /DocumentDirectionality/u);
+  assert.match(document, /bidiClass/u);
+  assert.match(style, /readonly direction: "ltr" \| "rtl"/u);
+  assert.match(style, /readonly unicodeBidi:/u);
+  assert.match(layout, /resolveBidiParagraphs/u);
+  assert.match(layout, /buildLineBreakMap/u);
+  assert.match(layout, /bidiVisualOrderForLine/u);
+  assert.match(displayList, /lineBoxes/u);
+  assert.match(displayList, /visualOrder/u);
+  assert.doesNotMatch(rasterizer, /segmentGraphemeClusters|resolveBidi|buildLineBreakMap|bidiClass/u);
+  assert.match(generated, /UNICODE_VERSION = "17\.0\.0"/u);
+  assert.doesNotMatch(rootDeclaration, /\b(?:BidiParagraph|BidiRun|LineBreakMap|GraphemeClusterStream|ProcessedCssText)\b/u);
 });
 
 test("the document barrel exposes no concrete snapshot or parser implementation", async () => {
