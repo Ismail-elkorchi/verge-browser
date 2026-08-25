@@ -1205,14 +1205,27 @@ class LayoutBuilder {
   ): LayoutResult {
     const style = this.#computed(node);
     const visible = style?.visibility === "visible";
-    const overflowRectangles = function* (builder: LayoutBuilder): Generator<CssRect> {
-      yield borderRect;
-      for (const id of children) {
-        const overflow = builder.#fragments.get(id)?.overflowRect;
-        if (overflow !== undefined) yield overflow;
-      }
-    };
-    const overflowRect = cssUnion(overflowRectangles(this), borderRect);
+    const onlyChild = children.length === 1 && children[0] !== undefined
+      ? this.#fragments.get(children[0]) : undefined;
+    const overflowRect = children.length === 0 ? borderRect
+      : onlyChild !== undefined ? cssUnion([borderRect, onlyChild.overflowRect], borderRect)
+        : cssUnion((function* (builder: LayoutBuilder): Generator<CssRect> {
+            yield borderRect;
+            for (const id of children) {
+              const overflow = builder.#fragments.get(id)?.overflowRect;
+              if (overflow !== undefined) yield overflow;
+            }
+          })(this), borderRect);
+    const minContentContribution = onlyChild?.minContentContribution ?? (children.length === 0 ? ZERO
+      : children.reduce<CssPixelLength>(
+          (maximum, child) => cssMax(maximum, this.#fragments.get(child)?.minContentContribution ?? ZERO),
+          ZERO
+        ));
+    const maxContentContribution = onlyChild?.maxContentContribution ?? (children.length === 0 ? ZERO
+      : children.reduce<CssPixelLength>(
+          (total, child) => cssAdd(total, this.#fragments.get(child)?.maxContentContribution ?? ZERO),
+          ZERO
+        ));
     const fragment = this.#store<LayoutBoxFragment>({
       id: reservedId ?? this.#newId(node.id),
       kind: "box",
@@ -1237,15 +1250,8 @@ class LayoutBuilder {
       action: visible ? this.#action(node) : null,
       semantic: visible && node.semantic?.accessibilityHidden !== true ? node.semantic : null,
       style: this.#paintStyle(node),
-      minContentContribution: children.reduce<CssPixelLength>(
-        (maximum, id) => cssMax(maximum, this.#fragments.get(id)?.minContentContribution ?? ZERO),
-        ZERO
-      ),
-      maxContentContribution: children.reduce<CssPixelLength>(
-        (total, id) => cssAdd(total, this.#fragments.get(id)?.maxContentContribution ?? ZERO),
-        ZERO
-      )
-      ,
+      minContentContribution,
+      maxContentContribution,
       ...(inlineContinuations.length === 0
         ? {}
         : { inlineContinuations: Object.freeze(inlineContinuations.map((entry) => Object.freeze(entry))) })
@@ -1291,6 +1297,25 @@ class LayoutBuilder {
     decoration: { readonly margin: CssSignedEdges; readonly padding: CssEdges; readonly border: CssEdges },
     children: readonly LayoutFragmentId[]
   ): readonly InlineContinuationGeometry[] {
+    const undecorated = emptyEdges(decoration.margin)
+      && emptyEdges(decoration.padding)
+      && emptyEdges(decoration.border);
+    const onlyChild = children.length === 1 && children[0] !== undefined
+      ? this.#fragments.get(children[0]) : undefined;
+    const directRectangle = onlyChild === undefined ? undefined
+      : onlyChild.kind !== "text" && onlyChild.inlineContinuations !== undefined
+        ? onlyChild.inlineContinuations.length === 1 ? onlyChild.inlineContinuations[0]?.marginRect : undefined
+        : onlyChild.kind === "text" || onlyChild.kind === "control" || onlyChild.kind === "replaced"
+          || onlyChild.children.length === 0 ? onlyChild.marginRect : undefined;
+    if (undecorated && directRectangle !== undefined
+      && (directRectangle.width > 0 || directRectangle.height > 0)) {
+      return [Object.freeze({
+        contentRect: directRectangle,
+        paddingRect: directRectangle,
+        borderRect: directRectangle,
+        marginRect: directRectangle
+      })];
+    }
     const lineContent: CssRect[] = [];
     for (const rectangle of this.#inlineLeafRectangles(children)) {
       const previous = lineContent.at(-1);
@@ -1298,9 +1323,6 @@ class LayoutBuilder {
         lineContent[lineContent.length - 1] = cssUnion([previous, rectangle], previous);
       } else lineContent.push(rectangle);
     }
-    const undecorated = emptyEdges(decoration.margin)
-      && emptyEdges(decoration.padding)
-      && emptyEdges(decoration.border);
     if (undecorated) return lineContent.map((contentRect) => Object.freeze({
       contentRect,
       paddingRect: contentRect,
@@ -1989,22 +2011,11 @@ class LayoutBuilder {
       && left.y === right.y
       && left.width === right.width
       && left.height === right.height;
-    const order: LayoutFragmentId[] = [];
-    const pending = [root];
-    while (pending.length > 0) {
-      const id = pending.pop();
-      if (id === undefined) continue;
+    // Inline decorations are registered after their descendants, so insertion
+    // order is already the required bottom-up continuation-finalization order.
+    for (const [id, decoration] of this.#inlineDecorations) {
       const fragment = this.#fragments.get(id);
-      if (fragment === undefined) continue;
-      order.push(id);
-      for (const child of fragment.children) pending.push(child);
-    }
-    for (let index = order.length - 1; index >= 0; index -= 1) {
-      const id = order[index];
-      if (id === undefined) continue;
-      const decoration = this.#inlineDecorations.get(id);
-      const fragment = this.#fragments.get(id);
-      if (decoration === undefined || fragment === undefined || fragment.kind === "text") continue;
+      if (fragment === undefined || fragment.kind === "text") continue;
       const continuations = this.#inlineContinuationGeometry(decoration, fragment.children);
       const contentRect = this.#unionContinuationRectangles(continuations, "contentRect", fragment.contentRect);
       const undecorated = emptyEdges(decoration.margin)
@@ -2141,8 +2152,7 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
     this.root = root;
     const complete = outcome.status === "complete";
     const reachable = new Set<LayoutFragmentId>();
-    if (complete) for (const id of fragments.keys()) reachable.add(id);
-    else {
+    if (!complete) {
       const pending = [root];
       while (pending.length > 0) {
         const id = pending.pop();
@@ -2155,19 +2165,19 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
     }
     const immutableFragments = new Map<LayoutFragmentId, LayoutFragment>();
     for (const [id, fragment] of fragments) {
-      if (!reachable.has(id)) continue;
+      if (!complete && !reachable.has(id)) continue;
       immutableFragments.set(id, Object.freeze(fragment));
     }
     this.#fragments = immutableFragments;
     const retainedFormatting = new Map<FormattingNodeId, readonly LayoutFragmentId[]>();
     for (const [node, ids] of formattingIndex) {
-      const retained = ids.filter((id) => reachable.has(id));
+      const retained = complete ? ids : ids.filter((id) => reachable.has(id));
       if (retained.length > 0) retainedFormatting.set(node, Object.freeze(retained));
     }
     this.#formattingIndex = retainedFormatting;
     const retainedDocument = new Map<DocumentNodeRef, readonly LayoutFragmentId[]>();
     for (const [node, ids] of documentIndex) {
-      const retained = ids.filter((id) => reachable.has(id));
+      const retained = complete ? ids : ids.filter((id) => reachable.has(id));
       if (retained.length > 0) retainedDocument.set(node, Object.freeze(retained));
     }
     this.#documentIndex = retainedDocument;
@@ -2175,7 +2185,7 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
       && line.fragments.every((id) => reachable.has(id)));
     this.lineBoxes = Object.freeze(retainedLines);
     this.outcome = Object.freeze(outcome.status === "complete"
-      ? { ...outcome, fragments: reachable.size, lineBoxes: retainedLines.length }
+      ? { ...outcome, fragments: immutableFragments.size, lineBoxes: retainedLines.length }
       : outcome.status === "truncated"
         ? { ...outcome, fragments: reachable.size, lineBoxes: retainedLines.length }
         : outcome);
