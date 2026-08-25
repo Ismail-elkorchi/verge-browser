@@ -1,14 +1,15 @@
 import type { DocumentNodeRef, DocumentSourceRange } from "../../document/index.js";
 import type {
-  FormattingFormControlNode,
   FormattingNode,
   FormattingNodeId,
   FormattingTree
 } from "../formatting/index.js";
+import { formattingNodeLogicalText } from "../formatting/index.js";
+import { transformTextWithSourceRanges, transformedSourceRange } from "../text/index.js";
 
-export type VisibleTextMatchId = string & { readonly __visibleTextMatchId: unique symbol };
+export type TextSearchMatchId = string & { readonly __textSearchMatchId: unique symbol };
 
-export interface VisibleTextMatchSlice {
+export interface TextSearchMatchSlice {
   readonly formatting: FormattingNodeId;
   readonly source: DocumentNodeRef | null;
   readonly sourceRange: DocumentSourceRange | null;
@@ -16,24 +17,24 @@ export interface VisibleTextMatchSlice {
   readonly contentEnd: number;
 }
 
-export interface VisibleTextMatch {
-  readonly id: VisibleTextMatchId;
+export interface TextSearchMatch {
+  readonly id: TextSearchMatchId;
   readonly start: number;
   readonly end: number;
-  readonly slices: readonly VisibleTextMatchSlice[];
+  readonly slices: readonly TextSearchMatchSlice[];
 }
 
-export interface VisibleTextSearchResult {
-  readonly matches: readonly VisibleTextMatch[];
+export interface TextSearchResult {
+  readonly matches: readonly TextSearchMatch[];
   readonly truncated: boolean;
 }
 
-export interface VisibleTextIndex {
+export interface TextSearchIndex {
   readonly text: string;
-  search(query: string, limit: number): VisibleTextSearchResult;
+  search(query: string, limit: number): TextSearchResult;
 }
 
-interface VisibleTextSegment {
+interface TextSearchSegment {
   readonly start: number;
   readonly end: number;
   readonly formatting: FormattingNodeId | null;
@@ -41,69 +42,6 @@ interface VisibleTextSegment {
   readonly contentStart: number;
   readonly contentEnd: number;
   readonly sourceRange: DocumentSourceRange | null;
-}
-
-interface MappedText {
-  readonly value: string;
-  readonly units: readonly { readonly start: number; readonly end: number }[];
-}
-
-function transformedText(
-  value: string,
-  transform: "none" | "uppercase" | "lowercase" | "capitalize"
-): MappedText {
-  let output = "";
-  const units: { readonly start: number; readonly end: number }[] = [];
-  let sourceOffset = 0;
-  let capitalizeNext = true;
-  for (const codePoint of value) {
-    let transformed = codePoint;
-    if (transform === "uppercase") transformed = codePoint.toUpperCase();
-    else if (transform === "lowercase") transformed = codePoint.toLowerCase();
-    else if (transform === "capitalize") {
-      if (capitalizeNext && /\p{L}/u.test(codePoint)) transformed = codePoint.toUpperCase();
-      capitalizeNext = /[\s\p{P}]/u.test(codePoint);
-    }
-    output += transformed;
-    for (let index = 0; index < transformed.length; index += 1) {
-      units.push({ start: sourceOffset, end: sourceOffset + codePoint.length });
-    }
-    sourceOffset += codePoint.length;
-  }
-  return { value: output, units };
-}
-
-function mappedRange(map: MappedText, start: number, end: number): readonly [number, number] {
-  const first = map.units[start];
-  const last = map.units[end - 1];
-  return first === undefined || last === undefined ? [start, end] : [first.start, last.end];
-}
-
-export function presentedControlText(
-  node: FormattingFormControlNode,
-  tree: FormattingTree
-): { readonly label: string; readonly value: string; readonly text: string } {
-  const control = node.control;
-  const state = tree.state.controls.get(control.node);
-  if (control.kind === "text" || control.kind === "textarea") {
-    const value = state?.values[0] ?? control.defaultValue;
-    return { label: control.label, value, text: `${control.label}: ${value || control.placeholder || ""}` };
-  }
-  if (control.kind === "checkbox" || control.kind === "radio") {
-    const checked = state?.checked ?? control.defaultChecked;
-    return { label: control.label, value: checked ? control.value : "", text: `${checked ? "[x]" : "[ ]"} ${control.label}` };
-  }
-  if (control.kind === "select") {
-    const values = state?.values ?? control.options
-      .filter((option) => option.defaultSelected)
-      .map((option) => option.value);
-    return { label: control.label, value: values.join(", "), text: `${control.label}: ${values.join(", ")}` };
-  }
-  if (control.kind === "submit" || control.kind === "reset") {
-    return { label: control.label, value: control.value, text: `[${control.label || control.value}]` };
-  }
-  if (control.kind === "hidden") return { label: "", value: control.defaultValue, text: "" };
-  return { label: control.label, value: "", text: `${control.label}: unsupported control` };
 }
 
 function foldedBoundaries(value: string, targets: readonly number[]): ReadonlyMap<number, number> {
@@ -134,17 +72,17 @@ function foldedBoundaries(value: string, targets: readonly number[]): ReadonlyMa
   return result;
 }
 
-class ImmutableVisibleTextIndex implements VisibleTextIndex {
+class ImmutableTextSearchIndex implements TextSearchIndex {
   readonly text: string;
-  readonly #segments: readonly VisibleTextSegment[];
+  readonly #segments: readonly TextSearchSegment[];
 
-  public constructor(text: string, segments: readonly VisibleTextSegment[]) {
+  public constructor(text: string, segments: readonly TextSearchSegment[]) {
     this.text = text;
     this.#segments = Object.freeze(segments.map((segment) => Object.freeze(segment)));
     Object.freeze(this);
   }
 
-  public search(query: string, limit: number): VisibleTextSearchResult {
+  public search(query: string, limit: number): TextSearchResult {
     const needle = query.toLowerCase().replace(/\s+/gu, " ").trim().slice(0, 1_024);
     if (needle.length === 0) return Object.freeze({ matches: Object.freeze([]), truncated: false });
     const haystack = this.text.toLowerCase();
@@ -164,10 +102,10 @@ class ImmutableVisibleTextIndex implements VisibleTextIndex {
     const targets = [...new Set(foldedMatches.flatMap((match) => [match.start, match.end]))]
       .sort((left, right) => left - right);
     const boundaries = foldedBoundaries(this.text, targets);
-    const matches = foldedMatches.map((folded): VisibleTextMatch => {
+    const matches = foldedMatches.map((folded): TextSearchMatch => {
       const start = boundaries.get(folded.start) ?? 0;
       const end = boundaries.get(folded.end) ?? this.text.length;
-      const slices: VisibleTextMatchSlice[] = [];
+      const slices: TextSearchMatchSlice[] = [];
       for (const segment of this.#segments) {
         if (segment.formatting === null || start >= segment.end || end <= segment.start) continue;
         const overlapStart = Math.max(start, segment.start);
@@ -198,7 +136,7 @@ class ImmutableVisibleTextIndex implements VisibleTextIndex {
         }));
       }
       return Object.freeze({
-        id: `visible:${String(start)}:${String(end)}` as VisibleTextMatchId,
+        id: `text-search:${String(start)}:${String(end)}` as TextSearchMatchId,
         start,
         end,
         slices: Object.freeze(slices)
@@ -208,14 +146,14 @@ class ImmutableVisibleTextIndex implements VisibleTextIndex {
   }
 }
 
-export function buildVisibleTextIndex(tree: FormattingTree, signal?: AbortSignal): VisibleTextIndex {
+export function buildTextSearchIndex(tree: FormattingTree, signal?: AbortSignal): TextSearchIndex {
   const parts: string[] = [];
-  const segments: VisibleTextSegment[] = [];
+  const segments: TextSearchSegment[] = [];
   let length = 0;
-  let pendingSeparator: Omit<VisibleTextSegment, "start" | "end"> | null = null;
+  let pendingSeparator: Omit<TextSearchSegment, "start" | "end"> | null = null;
   const append = (
     value: string,
-    segment: Omit<VisibleTextSegment, "start" | "end">
+    segment: Omit<TextSearchSegment, "start" | "end">
   ): void => {
     if (value.length === 0) return;
     if (pendingSeparator !== null && length > 0) {
@@ -228,14 +166,14 @@ export function buildVisibleTextIndex(tree: FormattingTree, signal?: AbortSignal
     segments.push({ ...segment, start: length, end: length + value.length });
     length += value.length;
   };
-  const separator = (segment: Omit<VisibleTextSegment, "start" | "end">): void => {
+  const separator = (segment: Omit<TextSearchSegment, "start" | "end">): void => {
     if (length > 0) pendingSeparator = segment;
   };
   const nodeSegment = (
     node: FormattingNode,
     contentStart: number,
     contentEnd: number
-  ): Omit<VisibleTextSegment, "start" | "end"> => {
+  ): Omit<TextSearchSegment, "start" | "end"> => {
     let sourceRange = node.sourceRange;
     if (node.kind === "text-sequence" && node.source !== null) {
       sourceRange = tree.document.textSourceRange(node.source, contentStart, contentEnd);
@@ -253,12 +191,12 @@ export function buildVisibleTextIndex(tree: FormattingTree, signal?: AbortSignal
       ? tree.styles.style(node.styleNode)
       : tree.styles.pseudo(node.styleNode, node.pseudo) ?? tree.styles.style(node.styleNode);
     if (style?.visibility !== "visible") return;
-    const mapped = transformedText(raw, style.text.textTransform);
+    const mapped = transformTextWithSourceRanges(raw, style.text.textTransform);
     for (const match of mapped.value.matchAll(/\s+|\S+/gu)) {
       const value = match[0];
       const start = match.index;
       const end = start + value.length;
-      const [contentStart, contentEnd] = mappedRange(mapped, start, end);
+      const [contentStart, contentEnd] = transformedSourceRange(mapped, start, end);
       const segment = nodeSegment(node, contentStart, contentEnd);
       if (/^\s+$/u.test(value)) separator(segment);
       else append(value, segment);
@@ -278,20 +216,13 @@ export function buildVisibleTextIndex(tree: FormattingTree, signal?: AbortSignal
       continue;
     }
     if (node.outer === "block") separator(nodeSegment(node, 0, 0));
-    if (node.kind === "text-sequence" || node.kind === "generated-text" || node.kind === "marker") {
-      appendRenderedText(node, node.text);
+    const logicalText = formattingNodeLogicalText(node, tree);
+    if (logicalText !== null) {
+      appendRenderedText(node, logicalText);
       continue;
     }
     if (node.kind === "forced-line-break") {
       separator(nodeSegment(node, 0, 0));
-      continue;
-    }
-    if (node.kind === "form-control") {
-      appendRenderedText(node, presentedControlText(node, tree).text);
-      continue;
-    }
-    if (node.kind === "replaced-element" || node.kind === "image-fallback") {
-      appendRenderedText(node, node.fallbackText);
       continue;
     }
     pending.push({ phase: "exit", id: node.id });
@@ -300,5 +231,5 @@ export function buildVisibleTextIndex(tree: FormattingTree, signal?: AbortSignal
       if (child !== undefined) pending.push({ phase: "enter", id: child });
     }
   }
-  return new ImmutableVisibleTextIndex(parts.join(""), segments);
+  return new ImmutableTextSearchIndex(parts.join(""), segments);
 }

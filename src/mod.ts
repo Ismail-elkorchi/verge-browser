@@ -2,8 +2,8 @@
  * Public npm/Node entrypoint for Verge Browser.
  *
  * The package exposes navigation, transport safety, and Verge's immutable web
- * document boundary. Style, box generation, fragmentation, and terminal rows
- * remain internal while their contracts mature.
+ * document boundary. The computed style map, box tree, layout fragment tree,
+ * terminal display list, and terminal cell buffer remain internal.
  *
  * ```ts
  * import { BrowserSession } from "@ismail-elkorchi/verge-browser";

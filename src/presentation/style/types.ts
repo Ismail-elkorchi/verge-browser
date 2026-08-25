@@ -56,6 +56,15 @@ export type ComputedDisplay =
 
 export type ComputedWhiteSpace = "normal" | "nowrap" | "pre" | "pre-wrap" | "pre-line" | "break-spaces";
 
+export type ComputedLineHeight =
+  | { readonly kind: "normal" }
+  | { readonly kind: "number"; readonly value: number }
+  | { readonly kind: "length"; readonly value: CssLength };
+
+export type ComputedVerticalAlign =
+  | { readonly kind: "keyword"; readonly value: "baseline" | "sub" | "super" | "top" | "text-top" | "middle" | "bottom" | "text-bottom" }
+  | { readonly kind: "length"; readonly value: CssLength };
+
 export interface ComputedTextStyle {
   readonly color: CssColor | null;
   readonly background: CssColor | null;
@@ -67,6 +76,10 @@ export interface ComputedTextStyle {
   readonly whiteSpace: ComputedWhiteSpace;
   readonly textAlign: "left" | "center" | "right";
   readonly textIndent: CssLength;
+  /** Absolute computed font size. */
+  readonly fontSize: CssLength;
+  readonly lineHeight: ComputedLineHeight;
+  readonly verticalAlign: ComputedVerticalAlign;
 }
 
 export interface ComputedBoxStyle {
@@ -77,10 +90,12 @@ export interface ComputedBoxStyle {
   readonly maxWidth: CssLength;
   readonly height: CssLength;
   readonly minHeight: CssLength;
+  readonly maxHeight: CssLength;
+  readonly boxSizing: "content-box" | "border-box";
   readonly rowGap: CssLength;
   readonly columnGap: CssLength;
   readonly borderStyle: "none" | "solid";
-  readonly borderWidth: CssLength;
+  readonly borderWidths: CssEdges;
   readonly borderColor: CssColor | null;
   readonly flexDirection: "row" | "row-reverse" | "column" | "column-reverse";
   readonly flexWrap: "nowrap" | "wrap" | "wrap-reverse";
@@ -176,12 +191,14 @@ export type StyleOutcome =
   | { readonly status: "rejected"; readonly reason: "invalid-environment" | "invalid-document" }
   | { readonly status: "unsupported"; readonly feature: string };
 
-export interface StyleEnvironment {
-  readonly viewportWidthPx: number;
-  readonly viewportHeightPx: number;
+export interface MediaEnvironment {
+  readonly viewportWidthCssPx: number;
+  readonly viewportHeightCssPx: number;
   readonly mediaType: "screen";
   readonly prefersColorScheme: "light" | "dark";
   readonly reducedMotion: boolean;
+  readonly hover: "none" | "hover";
+  readonly pointer: "none" | "coarse" | "fine";
 }
 
 export interface ResolveStylesInput {
@@ -189,14 +206,14 @@ export interface ResolveStylesInput {
   readonly state: DocumentState;
   readonly resources: readonly StylesheetResource[];
   readonly initialDiagnostics?: readonly StyleDiagnostic[];
-  readonly environment: StyleEnvironment;
+  readonly environment: MediaEnvironment;
   readonly budgets?: Partial<StyleBudgets>;
   readonly signal?: AbortSignal;
 }
 
 export interface StyleSnapshot {
   readonly document: IndexedWebDocumentSnapshot;
-  readonly environment: StyleEnvironment;
+  readonly environment: MediaEnvironment;
   readonly diagnostics: readonly StyleDiagnostic[];
   readonly stylesheetCount: number;
   readonly outcome: StyleOutcome;

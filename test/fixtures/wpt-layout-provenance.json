@@ -1,0 +1,163 @@
+{
+  "repository": "https://github.com/web-platform-tests/wpt",
+  "commit": "ef1cea845d70fb84127ff0e1aff2eeda7064f682",
+  "license": "WPT 3-clause BSD license; the Verge tests are independently written behavioral adaptations and copy no WPT source.",
+  "adaptations": [
+    {
+      "source": "css/css-sizing/box-sizing-content-box-001.xht",
+      "behavior": "content-box dimensions exclude padding and border",
+      "terminalAdjustment": "geometry is asserted in 26.6 CSS pixels before cell snapping",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-sizing/box-sizing-border-box-001.xht",
+      "behavior": "border-box dimensions include padding and border",
+      "terminalAdjustment": "terminal border glyph selection is outside the geometry assertion",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/normal-flow/auto-margins-used-values.html",
+      "behavior": "automatic horizontal margins and over-constrained block widths resolve as used values",
+      "terminalAdjustment": "the containing block and resulting box rectangles are asserted in CSS pixels",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/normal-flow/margin-collapse-through-zero-height-block.html",
+      "behavior": "adjoining positive and negative margins collapse through an empty in-flow block",
+      "terminalAdjustment": "only CSS-pixel fragment positions are compared",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/margin-padding-clear/margin-collapse-001.xht",
+      "behavior": "adjacent vertical margins collapse to the largest positive plus most-negative margin",
+      "terminalAdjustment": "the terminal user-agent stylesheet is reset in each focused fixture",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/normal-flow/margin-collapse-min-height-001.html",
+      "behavior": "a nonzero minimum height prevents an empty block's margins from collapsing through it",
+      "terminalAdjustment": "the assertion inspects layout-fragment rectangles before rasterization",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/normal-flow/margin-collapse-through-percentage-padding.html",
+      "behavior": "percentage padding participates in the block box and prevents margin collapse",
+      "terminalAdjustment": "percentage padding is resolved against containing-block width",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/normal-flow/containing-block-percent-margin-top.html",
+      "behavior": "vertical percentage margins resolve against containing-block width",
+      "terminalAdjustment": "no terminal row-height basis is used",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-sizing/percentage-height-replaced-content-in-auto-cb.html",
+      "behavior": "percentage height remains auto against an indefinite containing height",
+      "terminalAdjustment": "the adapted fixture uses an ordinary block to isolate definiteness",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/normal-flow/max-height-001.xht",
+      "behavior": "maximum height constrains the used content height after automatic sizing",
+      "terminalAdjustment": "overflow remains inspectable in CSS-pixel geometry",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/visudet/line-height-201.html",
+      "behavior": "line-height determines line-box height around inline content",
+      "terminalAdjustment": "font metrics come from the CSS-pixel terminal text-metrics adapter",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/linebox/line-box-height-001.xht",
+      "behavior": "line-box ascent and descent enclose participating inline boxes",
+      "terminalAdjustment": "the immutable line-box metrics are asserted before cell snapping",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/linebox/vertical-align-baseline-001.xht",
+      "behavior": "inline participants align against a shared baseline",
+      "terminalAdjustment": "the terminal text adapter supplies deterministic CSS-pixel font metrics",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-inline/parsing/vertical-align-computed.html",
+      "behavior": "vertical-align retains a typed computed value for layout",
+      "terminalAdjustment": "only the implemented baseline, super, sub, middle, top, and bottom slice is adapted",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-inline/br-line-height.html",
+      "behavior": "forced breaks terminate the current line box",
+      "terminalAdjustment": "each resulting CSS line is rasterized to terminal cells only after layout",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/text/white-space-collapsing-001.xht",
+      "behavior": "collapsible white space forms one logical separator",
+      "terminalAdjustment": "logical source ranges remain attached through terminal wrapping",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/generated-content/before-after-001.xht",
+      "behavior": "generated before and after text participates in inline layout and paint order",
+      "terminalAdjustment": "generated text carries pseudo-element identity into layout fragments",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-overflow/clip-001.html",
+      "behavior": "overflow clipping constrains visible paint geometry",
+      "terminalAdjustment": "the cell rasterizer intersects CSS clips with the terminal viewport",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/normal-flow/inline-block-000.xht",
+      "behavior": "an inline-block participates atomically in its containing line while laying out its inner block formatting context independently",
+      "terminalAdjustment": "the atomic margin box is asserted in fixed-point CSS pixels before terminal snapping",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/normal-flow/inline-table-003.xht",
+      "behavior": "an inline-table remains an atomic inline participant between surrounding text",
+      "terminalAdjustment": "only Verge's currently supported simple table layout is adapted",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-flexbox/inline-flexbox-wrap-vertically-width-calculation.html",
+      "behavior": "an inline flex container contributes one atomic inline size rather than forcing block placement",
+      "terminalAdjustment": "the current intrinsic flex-item basis is used and full flex sizing is not claimed",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/grid-model/display-inline-grid.html",
+      "behavior": "an inline grid container participates atomically in surrounding inline flow",
+      "terminalAdjustment": "the adaptation covers Verge's simple explicit-track grid slice",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/linebox/split-inline-borders.html",
+      "behavior": "a splittable inline box retains decoration geometry on each generated line fragment without empty continuations",
+      "terminalAdjustment": "background and supported solid-border paint commands are inspected before and after cell snapping",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-values/rem-unit-root-element.html",
+      "behavior": "rem in the root element's font size uses the initial font size while descendant rem units use the computed root font size",
+      "terminalAdjustment": "the terminal text-metrics adapter receives the resulting root CSS-pixel font size",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-backgrounds/background-clip-padding-box-001.html",
+      "behavior": "box backgrounds cover empty content and padding before borders and descendants paint",
+      "terminalAdjustment": "the supported background area is rasterized to complete terminal cells",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/paint/row-background-paint-remove-last-cell.html",
+      "behavior": "table, row-group, row, and cell backgrounds retain structural paint order",
+      "terminalAdjustment": "only the table background order in Verge's current table slice is adapted",
+      "license": "WPT 3-clause BSD"
+    }
+  ]
+}

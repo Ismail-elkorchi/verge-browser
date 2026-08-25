@@ -79,9 +79,18 @@ recall <query>
 
 ## `--once`
 
-`--once` loads one target and projects the same terminal fragments used by the
-interactive page view to plain text. It does not enter raw terminal mode or emit
-terminal control sequences.
+`--once` loads one target and consumes the same terminal display list and cell
+buffer used by the interactive page view. It does not enter raw terminal mode
+or emit terminal control sequences.
+
+Both modes derive the same rendering preferences from the terminal environment.
+`VERGE_COLOR_SCHEME=light|dark` overrides `COLORFGBG`,
+`VERGE_REDUCED_MOTION=reduce` enables reduced-motion media queries,
+`VERGE_UNICODE=0` selects ASCII borders, and `VERGE_AMBIGUOUS_WIDTH=2` selects
+wide East Asian ambiguous characters. `VERGE_POINTER=none|coarse|fine` and
+`VERGE_HOVER=none|hover` set interaction media features. `NO_COLOR`,
+`COLORTERM`, and `TERM` determine the terminal color depth used for actual cell
+colors.
 
 ## Browser boundary
 

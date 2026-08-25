@@ -4,13 +4,78 @@ import type { DocumentForm, DocumentFormControl, DocumentLink, DocumentNodeRef }
 import type { DocumentState } from "../document/index.js";
 import type { IndexedPageSnapshot } from "../app/types.js";
 import { renderDocument, type RenderPipelineResult } from "../presentation/pipeline.js";
-import type { FragmentTree, TerminalAction } from "../presentation/terminal/index.js";
+import {
+  cssCoordinate, cssLengthFromFixed, cssNonNegativeLength, cssPixels, cssPx, cssRect,
+  type DocumentActionIdentity
+} from "../presentation/layout/index.js";
+import type { MediaEnvironment } from "../presentation/style/index.js";
+import type { TerminalRenderResult } from "../presentation/terminal/index.js";
 import type { BrowserDocumentState } from "./model.js";
-import { terminalTextMeasurer } from "./terminal-measure.js";
+import { terminalCellMeasurer, terminalCssTextMeasurer } from "./terminal-measure.js";
 
 const MAX_DOCUMENT_COLUMNS = 120;
 const MAX_RENDER_PIPELINE_CACHE_ENTRIES = 4;
-const TERMINAL_MEASURER = terminalTextMeasurer();
+const CELL_WIDTH = cssPx(8);
+const ROW_HEIGHT = cssPx(16);
+
+export interface BrowserRenderPreferences {
+  readonly colorScheme: "light" | "dark";
+  readonly reducedMotion: boolean;
+  readonly unicode: boolean;
+  readonly ambiguousWidth: 1 | 2;
+  readonly colorDepth: 0 | 4 | 8 | 24;
+  readonly hover: "none" | "hover";
+  readonly pointer: "none" | "coarse" | "fine";
+}
+
+/** Derives the shared interactive and one-shot rendering preferences from the terminal environment. */
+export function browserRenderPreferences(
+  environment: Readonly<Record<string, string | undefined>> =
+    (globalThis as { readonly process?: { readonly env?: Readonly<Record<string, string | undefined>> } })
+      .process?.env ?? {}
+): BrowserRenderPreferences {
+  const requestedScheme = environment.VERGE_COLOR_SCHEME?.trim().toLowerCase();
+  const colorFgbg = environment.COLORFGBG?.split(/[;:]/u).at(-1);
+  const background = colorFgbg === undefined ? Number.NaN : Number.parseInt(colorFgbg, 10);
+  const colorScheme = requestedScheme === "light" || requestedScheme === "dark"
+    ? requestedScheme
+    : Number.isFinite(background) && background >= 7 ? "light" : "dark";
+  const reducedMotion = /^(?:1|true|reduce)$/iu.test(environment.VERGE_REDUCED_MOTION?.trim() ?? "");
+  const unicode = environment.VERGE_UNICODE !== "0" && environment.TERM !== "dumb";
+  const ambiguousWidth = environment.VERGE_AMBIGUOUS_WIDTH === "2" ? 2 : 1;
+  const colorDepth = environment.NO_COLOR !== undefined ? 0
+    : /^(?:truecolor|24bit)$/iu.test(environment.COLORTERM ?? "") ? 24
+      : /(?:256color)/iu.test(environment.TERM ?? "") ? 8 : 4;
+  const requestedPointer = environment.VERGE_POINTER?.trim().toLowerCase();
+  const pointer = requestedPointer === "none" || requestedPointer === "coarse" || requestedPointer === "fine"
+    ? requestedPointer : "fine";
+  const hover = environment.VERGE_HOVER === "none" || pointer === "none" ? "none" : "hover";
+  return Object.freeze({ colorScheme, reducedMotion, unicode, ambiguousWidth, colorDepth, hover, pointer });
+}
+
+const SHARED_RENDER_PREFERENCES = browserRenderPreferences();
+const TERMINAL_CELL_MEASURER = terminalCellMeasurer(SHARED_RENDER_PREFERENCES.ambiguousWidth);
+const CSS_TEXT_MEASURER = terminalCssTextMeasurer(
+  CELL_WIDTH,
+  ROW_HEIGHT,
+  SHARED_RENDER_PREFERENCES.ambiguousWidth
+);
+
+export function browserMediaEnvironment(
+  widthCssPx: number,
+  heightCssPx: number,
+  preferences: BrowserRenderPreferences = SHARED_RENDER_PREFERENCES
+): MediaEnvironment {
+  return Object.freeze({
+    viewportWidthCssPx: widthCssPx,
+    viewportHeightCssPx: heightCssPx,
+    mediaType: "screen",
+    prefersColorScheme: preferences.colorScheme,
+    reducedMotion: preferences.reducedMotion,
+    hover: preferences.hover,
+    pointer: preferences.pointer
+  });
+}
 
 interface CachedRenderPipeline {
   readonly key: string;
@@ -47,20 +112,72 @@ export class RenderPipelineCache {
       state,
       resources: snapshot.stylesheets,
       styleDiagnostics: snapshot.styleDiagnostics,
-      viewport: { columns: viewportColumns, rows: viewportRows },
-      measurer: TERMINAL_MEASURER,
-      profile: {
-        cellWidthPx: 8,
-        rowHeightPx: 16,
-        colorDepth: 24,
-        unicode: true,
-        ambiguousWidth: 1
+      mediaEnvironment: browserMediaEnvironment(
+        cssPixels(cssLengthFromFixed(viewportColumns * CELL_WIDTH)),
+        cssPixels(cssLengthFromFixed(viewportRows * ROW_HEIGHT))
+      ),
+      layoutContext: {
+        viewport: {
+          width: cssNonNegativeLength(cssLengthFromFixed(viewportColumns * CELL_WIDTH)),
+          height: cssNonNegativeLength(cssLengthFromFixed(viewportRows * ROW_HEIGHT))
+        },
+        textMeasurer: CSS_TEXT_MEASURER,
+        initialContainingBlock: cssRect(
+          cssCoordinate(cssPx(0)),
+          cssCoordinate(cssPx(0)),
+          cssLengthFromFixed(viewportColumns * CELL_WIDTH),
+          cssLengthFromFixed(viewportRows * ROW_HEIGHT)
+        )
+      },
+      terminalContext: {
+        columns: viewportColumns,
+        rows: viewportRows,
+        cellWidthCssPx: CELL_WIDTH,
+        rowHeightCssPx: ROW_HEIGHT,
+        colorDepth: SHARED_RENDER_PREFERENCES.colorDepth,
+        unicode: SHARED_RENDER_PREFERENCES.unicode,
+        ambiguousWidth: SHARED_RENDER_PREFERENCES.ambiguousWidth,
+        cellMeasurer: TERMINAL_CELL_MEASURER
       }
     });
     this.#entries.push({ key, snapshot, state, result });
     if (this.#entries.length > MAX_RENDER_PIPELINE_CACHE_ENTRIES) this.#entries.shift();
     return result;
   }
+}
+
+/** Exact typed causes when a rendering stage did not produce a complete result. */
+export function renderPipelineIncompleteCauses(result: RenderPipelineResult): readonly string[] {
+  const causes: string[] = [];
+  const stage = (
+    name: string,
+    outcome: { readonly status: string; readonly budget?: string; readonly limit?: number;
+      readonly reason?: string; readonly feature?: string }
+  ): void => {
+    if (outcome.status === "complete") return;
+    if (outcome.status === "truncated" && outcome.budget !== undefined && outcome.limit !== undefined) {
+      causes.push(`${name}.${outcome.budget}=${String(outcome.limit)}`);
+      return;
+    }
+    if (outcome.status === "rejected" && outcome.reason !== undefined) {
+      causes.push(`${name}.${outcome.reason}`);
+      return;
+    }
+    if (outcome.status === "unsupported" && outcome.feature !== undefined) {
+      causes.push(`${name}.unsupported:${outcome.feature}`);
+    }
+  };
+  stage("style", result.styles.outcome);
+  stage("box-tree", result.formatting.outcome);
+  stage("layout", result.layout.outcome);
+  if (result.displayList.outcome.status === "rejected") stage("display-list", result.displayList.outcome);
+  if (result.terminal.cellBuffer.outcome.status === "rejected") {
+    stage("cell-buffer", result.terminal.cellBuffer.outcome);
+  }
+  for (const truncation of result.terminal.truncations) {
+    causes.push(`terminal.${truncation.budget}=${String(truncation.limit)}`);
+  }
+  return Object.freeze(causes);
 }
 
 export type BrowserDocumentAction = {
@@ -105,48 +222,48 @@ export function documentContentBounds(bounds: Rect): Rect {
   };
 }
 
-function rowsForSource(layout: FragmentTree, source: DocumentNodeRef | null): readonly number[] {
+function rowsForSource(render: TerminalRenderResult, source: DocumentNodeRef | null): readonly number[] {
   if (source === null) return [];
   const rows = new Set<number>();
-  for (const fragment of layout.forSource(source)) {
-    const end = Math.min(layout.rows.length, fragment.rect.row + fragment.rect.height);
-    for (let row = fragment.rect.row; row < end; row += 1) rows.add(row);
+  for (const rect of render.cellRectsForDocumentNode(source)) {
+    const end = Math.min(render.cellBuffer.rows.length, rect.row + rect.height);
+    for (let row = rect.row; row < end; row += 1) rows.add(row);
   }
   if (rows.size === 0) {
-    const anchor = layout.scrollAnchors.find((entry) => entry.source === source);
+    const anchor = render.scrollAnchors.find((entry) => entry.documentNode === source);
     if (anchor !== undefined) rows.add(anchor.row);
   }
   return [...rows].sort((left, right) => left - right);
 }
 
-export function documentScrollRow(document: BrowserDocumentState, layout: FragmentTree): number {
+export function documentScrollRow(document: BrowserDocumentState, render: TerminalRenderResult): number {
   if (document.scrollAnchor.source === null) {
     return Math.max(
       0,
-      Math.min(Math.max(0, layout.rows.length - 1), document.scrollAnchor.rowOffset)
+      Math.min(Math.max(0, render.cellBuffer.rows.length - 1), document.scrollAnchor.rowOffset)
     );
   }
-  const rows = rowsForSource(layout, document.scrollAnchor.source);
+  const rows = rowsForSource(render, document.scrollAnchor.source);
   if (rows.length === 0) return 0;
   return rows[Math.min(document.scrollAnchor.rowOffset, rows.length - 1)] ?? 0;
 }
 
 export function documentWithScrollRow(
   document: BrowserDocumentState,
-  layout: FragmentTree,
+  render: TerminalRenderResult,
   requestedRow: number,
   viewportRows = 1
 ): BrowserDocumentState {
-  if (layout.rows.length === 0) return document;
+  if (render.cellBuffer.rows.length === 0) return document;
   const normalizedViewportRows = Math.max(1, Math.floor(viewportRows));
   const rowIndex = Math.max(
     0,
-    Math.min(Math.max(0, layout.rows.length - normalizedViewportRows), Math.floor(requestedRow))
+    Math.min(Math.max(0, render.cellBuffer.rows.length - normalizedViewportRows), Math.floor(requestedRow))
   );
-  const row = layout.rows[rowIndex];
-  const source = row?.fragments.find((fragment) => fragment.source !== null)?.source ?? null;
+  const row = render.cellBuffer.rows[rowIndex];
+  const source = row?.spans.find((span) => span.documentNode !== null)?.documentNode ?? null;
   if (source === null) return { ...document, scrollAnchor: { source: null, rowOffset: rowIndex } };
-  const matchingRows = rowsForSource(layout, source);
+  const matchingRows = rowsForSource(render, source);
   return {
     ...document,
     scrollAnchor: {
@@ -194,7 +311,7 @@ export function actionById(
   return undefined;
 }
 
-export function actionId(action: TerminalAction): string {
+export function actionId(action: DocumentActionIdentity): string {
   if (action.kind === "link") return `link:${action.node}`;
   if (action.kind === "form-control") return `control:${action.node}`;
   return `disclosure:${action.node}`;

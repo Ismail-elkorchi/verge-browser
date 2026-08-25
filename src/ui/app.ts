@@ -279,7 +279,7 @@ function focusedControlActionId(
 }
 
 function pageText(document: BrowserDocumentState, columns: number): string {
-  return renderDocumentForViewport(document, columns).fragments.rows.map((row) => row.text).join("\n");
+  return renderDocumentForViewport(document, columns).terminal.cellBuffer.rows.map((row) => row.text).join("\n");
 }
 
 function navigationMessage(
@@ -378,11 +378,11 @@ function searchDocument(
       firstRow: null
     };
   }
-  const result = renderDocumentForViewport(document, columns).fragments.search(boundedQuery);
+  const result = renderDocumentForViewport(document, columns).terminal.search(boundedQuery);
   const projected = result.matches.slice(0, MAX_PAGE_SEARCH_MATCHES);
   const matches = projected.map((match) => ({
     id: match.id,
-    sources: Object.freeze([...new Set(match.ranges.map((range) => range.source))])
+    sources: Object.freeze([...new Set(match.ranges.map((range) => range.documentNode))])
   }));
   return {
     search: {
@@ -400,7 +400,7 @@ function applySearch(state: BrowserTuiState, query: string, columns: number): Br
   const { search, firstRow } = searchDocument(document, query, columns);
   const updated = firstRow === null
     ? { ...document, search }
-    : documentWithScrollRow({ ...document, search }, renderDocumentForViewport(document, columns).fragments, firstRow);
+    : documentWithScrollRow({ ...document, search }, renderDocumentForViewport(document, columns).terminal, firstRow);
   return {
     ...updateDocument(state, document.id, () => updated),
     status: search.matches.length === 0
@@ -420,10 +420,10 @@ function moveSearch(
   const activeMatchIndex = (search.activeMatchIndex + delta + search.matches.length) % search.matches.length;
   const match = search.matches[activeMatchIndex];
   if (match === undefined) return document;
-  const layout = renderDocumentForViewport(document, columns).fragments;
-  const row = layout.search(search.query).matches.find((candidate) => candidate.id === match.id)?.ranges[0]?.row;
+  const terminalRender = renderDocumentForViewport(document, columns).terminal;
+  const row = terminalRender.search(search.query).matches.find((candidate) => candidate.id === match.id)?.ranges[0]?.row;
   const updated = { ...document, search: { ...search, activeMatchIndex } };
-  return row === undefined ? updated : documentWithScrollRow(updated, layout, row);
+  return row === undefined ? updated : documentWithScrollRow(updated, terminalRender, row);
 }
 
 function controlById(
@@ -665,7 +665,7 @@ export function updateBrowser(
   const document = activeDocument(state);
   const columns = contentColumns(state, context.terminalSize.columns);
   const viewportRows = Math.max(1, context.terminalSize.rows - (state.findBar === null ? 3 : 4));
-  const layout = renderDocumentForViewport(document, columns, viewportRows).fragments;
+  const terminalRender = renderDocumentForViewport(document, columns, viewportRows).terminal;
   switch (message.kind) {
     case "quit":
       return { state, exit: { reason: "quit" } };
@@ -676,20 +676,20 @@ export function updateBrowser(
         return result({ ...state, overlay: { ...state.overlay, scrollRow: Math.max(0, state.overlay.scrollRow + message.rows) } });
       }
       return result(updateDocument(state, document.id, (current) =>
-        documentWithScrollRow(current, layout, documentScrollRow(current, layout) + message.rows, viewportRows)
+        documentWithScrollRow(current, terminalRender, documentScrollRow(current, terminalRender) + message.rows, viewportRows)
       ));
     case "scrollTo":
       return result(updateDocument(state, document.id, (current) =>
-        documentWithScrollRow(current, layout, message.row, viewportRows)
+        documentWithScrollRow(current, terminalRender, message.row, viewportRows)
       ));
     case "scrollTop":
-      return result(updateDocument(state, document.id, (current) => documentWithScrollRow(current, layout, 0, viewportRows)));
+      return result(updateDocument(state, document.id, (current) => documentWithScrollRow(current, terminalRender, 0, viewportRows)));
     case "scrollBottom":
       return result(updateDocument(state, document.id, (current) =>
-        documentWithScrollRow(current, layout, layout.rows.length, viewportRows)
+        documentWithScrollRow(current, terminalRender, terminalRender.cellBuffer.rows.length, viewportRows)
       ));
     case "movePageFocus": {
-      const targets = layout.focusTargets.filter((target) => target.rects.length > 0);
+      const targets = terminalRender.focusMap.targets;
       if (targets.length === 0) return result(state);
       const currentIndex = targets.findIndex((target) =>
         actionId(target.action) === message.currentActionId
@@ -699,15 +699,21 @@ export function updateBrowser(
         : (currentIndex - 1 + targets.length) % targets.length;
       const target = targets[nextIndex];
       if (target === undefined) return result(state);
-      const top = Math.min(...target.rects.map((rect) => rect.row));
-      const bottom = Math.max(...target.rects.map((rect) => rect.row + rect.height));
-      const currentRow = documentScrollRow(document, layout);
+      const scrollAnchor = terminalRender.scrollAnchors.find((entry) => entry.documentNode === target.node);
+      let top = target.rects[0]?.row ?? scrollAnchor?.row ?? 0;
+      let bottom = top;
+      for (const rect of target.rects) {
+        top = Math.min(top, rect.row);
+        bottom = Math.max(bottom, rect.row + rect.height);
+      }
+      if (target.rects.length === 0) bottom = top + 1;
+      const currentRow = documentScrollRow(document, terminalRender);
       const revealedRow = top < currentRow
         ? top
         : bottom > currentRow + viewportRows
           ? bottom - viewportRows
           : currentRow;
-      const updated = documentWithScrollRow(document, layout, revealedRow, viewportRows);
+      const updated = documentWithScrollRow(document, terminalRender, revealedRow, viewportRows);
       return result(updateDocument(state, document.id, () => updated), {
         focus: target.action.kind === "form-control"
           ? { kind: "element", elementId: target.action.node }

@@ -56,8 +56,9 @@ All notable changes are documented in this file.
 - Validate the Node host on current macOS and Windows runners in addition to
   Linux.
 - **Breaking:** Replace the flatten-first renderer with immutable document,
-  computed-style-map, box-tree, terminal-fragment-tree, and reader-document
-  stages. `PageSnapshot.document` is now the sole authoritative content model.
+  computed-style-map, box-tree, fixed-point layout-fragment-tree, terminal
+  display-list, terminal cell-buffer, and reader-document stages.
+  `PageSnapshot.document` is now the sole authoritative content model.
 - **Breaking:** Expose only the read-only `WebDocumentSnapshot` structure through
   navigation results. Document factories, dynamic state/actions, semantic
   indexes, and the concrete snapshot implementation remain internal.
@@ -72,7 +73,7 @@ All notable changes are documented in this file.
   indexes; generate
   boxes from computed `display`; support suppression, contents, anonymous flow
   and table wrappers, lists, structured tables, controls, replaced fallbacks,
-  flex/grid contexts, nested terminal fragments, source-aware wrapping, hit
+  flex/grid formatting contexts, layout fragments, source-aware line boxes, hit
   geometry, focus, scrolling, search, accessibility bounds, and reader documents.
 - Give anonymous and generated boxes explicit box-style and semantic ownership,
   exclude blank cells inside wrapped action unions from pointer geometry, and
@@ -82,8 +83,9 @@ All notable changes are documented in this file.
 - Keep baseline user-agent, initial, and inherited styles total for every
   retained element when author selector work is truncated; formatting no longer
   suppresses content because author-style work ran out.
-- Preserve completed terminal fragments, rows, hit geometry, anchors, and
-  accessibility entries when fragment, row, or paint budgets truncate a page.
+- Preserve connected source-order layout-fragment prefixes when layout budgets
+  truncate a page, and preserve completed cells and indexes when paint budgets
+  truncate terminal rasterization.
 - Generate contiguous anonymous text items for flex/grid, discard collapsed
   whitespace-only item runs, split inline continuations around block children,
   and preserve source order through anonymous table repair.
@@ -92,8 +94,9 @@ All notable changes are documented in this file.
   exhaustion, keep UTF-16 text budgets Unicode-scalar-safe, and aggregate one
   document-semantic geometry entry across split inline and `display: contents`
   boxes.
-- Build viewport-independent visible-text matches before fragmentation, then
-  map each stable match onto one or more wrapped terminal fragments.
+- Build a viewport-independent `TextSearchIndex` from the box tree, map stable
+  logical matches onto layout text fragments, and map those spans to cells only
+  during terminal rasterization.
 - Remove browser source-editing APIs and the retained parser graph; the indexed
   Verge document tree is the sole authoritative document structure.
 - Preserve normal prose and links inside forms while replacing only control
@@ -101,11 +104,13 @@ All notable changes are documented in this file.
   model details disclosure as a typed document action.
 - Reject page-initiated redirects that cross into local files before committing
   a document or stylesheet and release stream readers on completion and failure.
-- Freeze style, fragment, geometry, search, and accessibility values at their
+- Freeze style, layout-fragment, display-list, cell-buffer, search, and
+  accessibility values at their
   subsystem boundaries; validate terminal and style environments as typed
   inputs; and represent CSS `max-width: none` and negative margins without
   terminal-unit shortcuts in computed style.
-- Drive interactive and one-shot output from the same terminal fragment path,
+- Drive interactive and one-shot output from the same terminal display list and
+  cell rasterizer,
   and enforce document/style/formatting import boundaries plus deterministic
   structural fuzz and per-stage performance controls, including retained heap,
   peak RSS, 100,000-node documents, large attributes, repeated tab lifecycle,
@@ -124,9 +129,55 @@ All notable changes are documented in this file.
   cliffs on large documents; keep document cloning and index propagation
   stack-safe at extreme parser-supported nesting depths.
 - Make structural page actions a keyboard-navigable group, reveal offscreen
-  control fragments before focusing their terminal-ui controls, retain
+  control layout fragments before focusing their terminal-ui controls, retain
   absolute scroll anchors for rows without a source node, and keep Tab/Shift+Tab
   traversal within form controls.
+- Add deterministic 26.6 fixed-point CSS-pixel geometry, separate media, layout,
+  and terminal render contexts, layout-owned font metrics, content/padding/
+  border/margin rectangles, definite percentage sizing, `box-sizing`,
+  `max-height`, side-specific border widths, font size, line height, and vertical
+  alignment.
+- Move normal block flow, margin collapse, explicit line-box construction,
+  controls and replaced boxes, and the supported table, flex, and grid geometry
+  out of the terminal subsystem. Delete the former cell-native layout engine.
+- Derive a `TerminalDisplayList` from layout fragments and make its cell
+  rasterizer the sole source of terminal text, borders, paint-order collision
+  handling, hit testing, focus geometry, accessibility bounds, scroll anchors,
+  and search highlights.
+- Pin focused CSS layout tests to WPT commit
+  `ef1cea845d70fb84127ff0e1aff2eeda7064f682` with source paths, behavioral
+  adaptation notes, terminal-user-agent adjustments, and license provenance.
+- Keep every pre-existing performance threshold unchanged and add measured,
+  independently reported controls for computed-to-used resolution, block
+  layout, line boxes, complete CSS layout, display-list construction, cell
+  rasterization, resize, focused stress workloads, fragment heap release, and
+  repeated-resize retention.
+- Bound terminal display-list commands, incremental paint units, retained cells,
+  cell-buffer rows and columns, hit-test regions, focus rectangles,
+  accessibility rectangles, document geometry, scroll anchors, and search cell
+  spans with exact typed truncation causes. Zero is a valid no-work terminal
+  budget and malformed caller limits are rejected.
+- Saturate fixed-point addition, subtraction, multiplication, division,
+  rectangle edges, intersections, and iterative unions before unsafe integer
+  intermediates can occur; preserve zero-area clipping and bounded work at both
+  safe-integer limits.
+- Preserve every extended grapheme during terminal snapping, keep wide clusters
+  atomic, make adjacent graphemes monotonic within one text command, and resolve
+  only cross-command collisions by paint order.
+- Treat replaced content, controls, `inline-block`, `inline-table`,
+  `inline-flex`, and `inline-grid` as atomic inline boxes; retain per-line
+  decoration geometry for splittable inline boxes; and remove forced-block
+  handling for inline formatting contexts.
+- Derive root font metrics from the computed root-element style and use the same
+  root value for descendant `rem` used values while applying the initial-font
+  rule to the root element's own `font-size`.
+- Add background-fill and side-specific border paint commands, explicit paint
+  phases, source-over alpha composition before terminal color quantization, and
+  separate box-derived pointer, focus, accessibility, scroll, document, and
+  text-search geometry contracts. Keep clipped border sides at their true box
+  edges, give split hit regions stable identities, retain source-order index
+  prefixes, and reject malformed CSS or terminal text metrics through typed
+  outcomes.
 
 ## [0.1.2] - 2026-03-07
 - Add the redesigned terminal UI with page-first navigation, help, and shell flows.

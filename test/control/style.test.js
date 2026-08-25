@@ -5,20 +5,28 @@ import { createDocumentState, parseWebDocument } from "../../dist/document/index
 import { resolveStyles } from "../../dist/presentation/style/index.js";
 
 const environment = {
-  viewportWidthPx: 800,
-  viewportHeightPx: 600,
+  viewportWidthCssPx: 800,
+  viewportHeightCssPx: 600,
   mediaType: "screen",
   prefersColorScheme: "dark",
-  reducedMotion: true
+  reducedMotion: true,
+  hover: "hover",
+  pointer: "fine"
 };
 
-function setup(html, updateState = (state) => state, budgets) {
+function setup(html, updateState = (state) => state, budgets, mediaEnvironment = environment) {
   const document = parseWebDocument(html, {
     requestUrl: "https://example.test/",
     finalUrl: "https://example.test/"
   });
   const state = updateState(createDocumentState(document), document);
-  const styles = resolveStyles({ document, state, resources: [], environment, ...(budgets ? { budgets } : {}) });
+  const styles = resolveStyles({
+    document,
+    state,
+    resources: [],
+    environment: mediaEnvironment,
+    ...(budgets ? { budgets } : {})
+  });
   return { document, state, styles };
 }
 
@@ -161,7 +169,7 @@ test("flex wrapping and alignment retain typed computed values and CSS-wide sema
   assert.equal(child.box.alignItems, "stretch");
 });
 
-test("position and clipping values remain typed until terminal used-value resolution", () => {
+test("position and clipping values remain typed until layout used-value resolution", () => {
   const { document, styles } = setup(`<style>
     #legacy { position:absolute; clip:rect(0, 0, 0, 0) }
     #modern { position:fixed; clip-path:inset(50%) }
@@ -208,6 +216,27 @@ test("computed CSS values are immutable and preserve supported sizing-domain dis
   ));
 });
 
+test("sizing and inline-layout properties retain typed computed values", () => {
+  const { document, styles } = setup(`<div id="parent" style="font-size:20px">
+    <span id="child" style="font-size:150%;line-height:1.5;vertical-align:super;
+      max-height:40px;box-sizing:border-box;border-width:1px 2px 3px 4px">x</span>
+  </div>`);
+  const child = document.elementById("child");
+  assert.ok(child);
+  const computed = styles.style(child);
+  assert.deepEqual(computed.text.fontSize, { kind: "length", value: 30, unit: "px" });
+  assert.deepEqual(computed.text.lineHeight, { kind: "number", value: 1.5 });
+  assert.deepEqual(computed.text.verticalAlign, { kind: "keyword", value: "super" });
+  assert.deepEqual(computed.box.maxHeight, { kind: "length", value: 40, unit: "px" });
+  assert.equal(computed.box.boxSizing, "border-box");
+  assert.deepEqual(computed.box.borderWidths, {
+    top: { kind: "length", value: 1, unit: "px" },
+    right: { kind: "length", value: 2, unit: "px" },
+    bottom: { kind: "length", value: 3, unit: "px" },
+    left: { kind: "length", value: 4, unit: "px" }
+  });
+});
+
 test("invalid runtime style environments produce a typed rejected outcome", () => {
   const document = parseWebDocument("<p>Text</p>", {
     requestUrl: "https://example.test/",
@@ -234,6 +263,25 @@ test("unknown media types fail closed instead of applying to the terminal screen
   assert.ok(styles.diagnostics.some((entry) =>
     entry.code === "stylesheet-media" && entry.detail.includes("speech")
   ));
+});
+
+test("media queries consume color, motion, hover, and pointer preferences", () => {
+  const html = `<style>
+    @media (prefers-color-scheme:dark) and (prefers-reduced-motion:reduce) { p { color:red } }
+    @media (hover:none) and (pointer:coarse) { p { font-style:italic } }
+    @media (prefers-reduced-motion:no-preference) { p { font-weight:700 } }
+  </style><p>paragraph</p>`;
+  const reduced = setup(html, undefined, undefined, {
+    ...environment,
+    hover: "none",
+    pointer: "coarse"
+  });
+  const reducedParagraph = reduced.styles.style(named(reduced.document, "p"));
+  assert.deepEqual(reducedParagraph.text.color, { r: 255, g: 0, b: 0, a: 1 });
+  assert.equal(reducedParagraph.text.fontStyle, "italic");
+  assert.equal(reducedParagraph.text.fontWeight, 400);
+  const noPreference = setup(html, undefined, undefined, { ...environment, reducedMotion: false });
+  assert.equal(noPreference.styles.style(named(noPreference.document, "p")).text.fontWeight, 700);
 });
 
 test("dynamic pseudo-class state participates in selector matching", () => {

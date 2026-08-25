@@ -55,16 +55,16 @@ import type {
   DocumentNodeRef
 } from "../document/index.js";
 import type {
-  FragmentTree,
-  TerminalFragment,
-  TerminalRow,
-  TerminalStyleRun
+  TerminalCellRow,
+  TerminalRenderResult,
+  TerminalStyle as ActualTerminalStyle
 } from "../presentation/terminal/index.js";
 import {
   actionId,
   documentContentBounds,
   renderDocumentForViewport,
-  documentScrollRow
+  documentScrollRow,
+  renderPipelineIncompleteCauses
 } from "./document-layout.js";
 import type {
   ActionPaletteOverlay,
@@ -77,14 +77,14 @@ import type {
   PickerOverlay
 } from "./model.js";
 import { browserMenuItems, formComboboxPageSize, linkMenuItems } from "./model.js";
-import { terminalTextMeasurer } from "./terminal-measure.js";
+import { terminalCellMeasurer } from "./terminal-measure.js";
 
-const TERMINAL_MEASURER = terminalTextMeasurer();
+const TERMINAL_CELL_MEASURER = terminalCellMeasurer();
 
-interface BrowserDocumentViewModel {
+interface BrowserDocumentComponentModel {
   readonly id: string;
   readonly source: BrowserDocumentState;
-  readonly layout: FragmentTree;
+  readonly terminalRender: TerminalRenderResult;
   readonly finalUrl: string;
   readonly search: BrowserDocumentState["search"];
   readonly searchRangesByRow: ReadonlyMap<number, readonly {
@@ -102,7 +102,7 @@ interface BrowserControlGroup {
 }
 
 interface BrowserDocumentComponentOptions {
-  readonly document: BrowserDocumentViewModel;
+  readonly document: BrowserDocumentComponentModel;
 }
 
 interface BrowserControlComponentOptions {
@@ -168,7 +168,7 @@ function labelledBrowserControl(
   });
 }
 
-function terminalStyle(style: TerminalStyleRun | undefined): TerminalStyle {
+function terminalStyle(style: ActualTerminalStyle | undefined): TerminalStyle {
   if (style === undefined) return {};
   return {
     ...(style.foreground === null
@@ -199,8 +199,8 @@ function terminalStyle(style: TerminalStyleRun | undefined): TerminalStyle {
 }
 
 function rowSegments(
-  document: BrowserDocumentViewModel,
-  layoutRow: TerminalRow,
+  document: BrowserDocumentComponentModel,
+  cellRow: TerminalCellRow,
   rowIndex: number,
   focusedActionId: string | undefined
 ): readonly RenderSpan[] {
@@ -209,16 +209,11 @@ function rowSegments(
     readonly start: number;
     readonly end: number;
   } & ({ readonly kind: "link"; readonly destination: string } | { readonly kind: "disclosure" });
-  const rowText = layoutRow.text;
+  const rowText = cellRow.text;
   const snapshot = document.source.snapshot.document;
-  const actionForFragment = (fragment: TerminalFragment): TerminalFragment | null => {
-    let current: TerminalFragment | null = fragment;
-    while (current !== null && current.action === null) current = document.layout.parent(current.id);
-    return current;
-  };
-  const inlineActions = layoutRow.fragments.flatMap((entry): InlineRowAction[] => {
-    const owner = actionForFragment(document.layout.fragment(entry.fragment));
-    const action = owner?.action;
+  const commandById = new Map(document.terminalRender.displayList.commands.map((command) => [command.id, command]));
+  const inlineActions = cellRow.spans.flatMap((entry): InlineRowAction[] => {
+    const action = commandById.get(entry.command)?.action;
     if (action === undefined || action === null || action.kind === "form-control") return [];
     const range = {
       id: actionId(action),
@@ -241,13 +236,13 @@ function rowSegments(
     boundaries.add(range.start);
     boundaries.add(range.end);
   }
-  for (const run of layoutRow.styles) {
+  for (const run of cellRow.styles) {
     boundaries.add(run.startCodeUnit);
     boundaries.add(run.endCodeUnit);
   }
-  for (const fragment of layoutRow.fragments) {
-    boundaries.add(fragment.startCodeUnit);
-    boundaries.add(fragment.endCodeUnit);
+  for (const span of cellRow.spans) {
+    boundaries.add(span.startCodeUnit);
+    boundaries.add(span.endCodeUnit);
   }
   const positions = [...boundaries].sort((left, right) => left - right);
   const spans: RenderSpan[] = [];
@@ -259,17 +254,17 @@ function rowSegments(
     const search = searchRanges.find((range) => range.start <= start && range.end >= end);
     const authored = Object.assign(
       {},
-      ...layoutRow.styles
+      ...cellRow.styles
         .filter((run) =>
           run.startCodeUnit <= start && run.endCodeUnit >= end
         )
         .map((run) => terminalStyle(run.style))
     ) as TerminalStyle;
-    const isControlText = layoutRow.fragments.some((fragment) =>
-      fragment.startCodeUnit <= start
-      && fragment.endCodeUnit >= end
-      && fragment.source !== null
-      && snapshot.control(fragment.source) !== null
+    const isControlText = cellRow.spans.some((span) =>
+      span.startCodeUnit <= start
+      && span.endCodeUnit >= end
+      && span.documentNode !== null
+      && snapshot.control(span.documentNode) !== null
     );
     const style: TerminalStyle = {
       ...(inlineAction?.kind !== "link"
@@ -288,7 +283,7 @@ function rowSegments(
     };
     spans.push({
       text: isControlText
-        ? " ".repeat(TERMINAL_MEASURER.width(rowText.slice(start, end)))
+        ? " ".repeat(TERMINAL_CELL_MEASURER.width(rowText.slice(start, end)))
         : rowText.slice(start, end),
       style,
       ...(inlineAction?.kind !== "link" ? {} : { link: { href: inlineAction.destination } })
@@ -326,7 +321,7 @@ function controlGroups(controls: readonly DocumentFormControl[]): readonly Brows
   return groups;
 }
 
-function formControlValues(document: BrowserDocumentViewModel, control: DocumentFormControl): readonly string[] {
+function formControlValues(document: BrowserDocumentComponentModel, control: DocumentFormControl): readonly string[] {
   const explicit = document.source.documentState.controls.get(control.node)?.values;
   if (explicit !== undefined) return explicit;
   if (control.kind === "hidden" || control.kind === "text" || control.kind === "textarea") return [control.defaultValue];
@@ -336,7 +331,7 @@ function formControlValues(document: BrowserDocumentViewModel, control: Document
 }
 
 function formControlSelections(
-  document: BrowserDocumentViewModel,
+  document: BrowserDocumentComponentModel,
   control: Extract<DocumentFormControl, { readonly kind: "select" }>
 ): ReadonlySet<DocumentNodeRef> {
   const explicit = document.source.documentState.controls.get(control.node)?.selected;
@@ -383,7 +378,7 @@ function multiChoiceAction(
 }
 
 function inlineFormControl(
-  document: BrowserDocumentViewModel,
+  document: BrowserDocumentComponentModel,
   control: DocumentFormControl,
   formId: DocumentNodeRef | null
 ): Element<BrowserTuiMessage> | null {
@@ -615,7 +610,7 @@ function inlineFormControl(
 }
 
 function inlineControlGroup(
-  document: BrowserDocumentViewModel,
+  document: BrowserDocumentComponentModel,
   group: BrowserControlGroup
 ): Element<BrowserTuiMessage> | null {
   const first = group.controls[0];
@@ -647,11 +642,11 @@ function inlineControlGroup(
 }
 
 function browserDocumentChildBounds(
-  document: BrowserDocumentViewModel,
+  document: BrowserDocumentComponentModel,
   bounds: Rect,
   childCount: number
 ): readonly Rect[] {
-  const layout = document.layout;
+  const terminalRender = document.terminalRender;
   const contentBounds = documentContentBounds(bounds);
   const entries = document.controlGroups;
   return Array.from({ length: childCount }, (_, index) => {
@@ -659,15 +654,26 @@ function browserDocumentChildBounds(
     if (!entry) {
       return { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 };
     }
-    const fragments = entry.controls.flatMap((control) => layout.forSource(control.node))
-      .filter((fragment) => fragment.rect.width > 0 && fragment.rect.height > 0);
-    if (fragments.length === 0) {
-      return { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 };
+    const rectangles = entry.controls.flatMap((control) => terminalRender.cellRectsForDocumentNode(control.node))
+      .filter((rect) => rect.width > 0 && rect.height > 0);
+    if (rectangles.length === 0) {
+      const anchor = entry.controls.map((control) =>
+        terminalRender.scrollAnchors.find((candidate) => candidate.documentNode === control.node)
+      ).find((candidate) => candidate !== undefined);
+      return anchor === undefined
+        ? { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 }
+        : { row: contentBounds.row + anchor.row, column: contentBounds.column, width: 1, height: 1 };
     }
-    const row = Math.min(...fragments.map((fragment) => fragment.rect.row));
-    const column = Math.min(...fragments.map((fragment) => fragment.rect.column));
-    const bottom = Math.max(...fragments.map((fragment) => fragment.rect.row + fragment.rect.height));
-    const edge = Math.max(...fragments.map((fragment) => fragment.rect.column + fragment.rect.width));
+    let row = rectangles[0]?.row ?? 0;
+    let column = rectangles[0]?.column ?? 0;
+    let bottom = row;
+    let edge = column;
+    for (const rect of rectangles) {
+      row = Math.min(row, rect.row);
+      column = Math.min(column, rect.column);
+      bottom = Math.max(bottom, rect.row + rect.height);
+      edge = Math.max(edge, rect.column + rect.width);
+    }
     return {
       row: contentBounds.row + row,
       column: contentBounds.column + column,
@@ -704,7 +710,7 @@ const browserDocumentComponent = defineComponent<
       width: constraints.width,
       height: constraints.height
     };
-    const layout = model.document.layout;
+    const terminalRender = model.document.terminalRender;
     const childCount = slots.count("controls");
     const childBounds = browserDocumentChildBounds(
       model.document,
@@ -715,9 +721,9 @@ const browserDocumentComponent = defineComponent<
       minWidth: 0,
       minHeight: 0,
       preferredWidth: bounds.width,
-      preferredHeight: Math.max(
-        layout.rows.length,
-        ...childBounds.map((child) => child.row - bounds.row + child.height)
+      preferredHeight: childBounds.reduce(
+        (height, child) => Math.max(height, child.row - bounds.row + child.height),
+        terminalRender.cellBuffer.rows.length
       )
     };
   },
@@ -733,39 +739,42 @@ const browserDocumentComponent = defineComponent<
   renderBeforeChildren({ model, bounds, viewport: visibleBounds, target, focusedTargetId }) {
     if (bounds.width <= 0 || bounds.height <= 0) return;
     const document = model.document;
-    const layout = document.layout;
+    const terminalRender = document.terminalRender;
     const contentBounds = documentContentBounds(bounds);
     const startIndex = Math.max(0, visibleBounds.row - contentBounds.row);
     const endIndexExclusive = Math.min(
-      layout.rows.length,
+      terminalRender.cellBuffer.rows.length,
       visibleBounds.row + visibleBounds.height - contentBounds.row
     );
     for (let rowIndex = startIndex; rowIndex < endIndexExclusive; rowIndex += 1) {
-      const layoutRow = layout.rows[rowIndex];
-      if (!layoutRow) continue;
+      const cellRow = terminalRender.cellBuffer.rows[rowIndex];
+      if (!cellRow) continue;
       target.write(
         contentBounds.row + rowIndex,
         contentBounds.column,
-        rowSegments(document, layoutRow, rowIndex, focusedTargetId)
+        rowSegments(document, cellRow, rowIndex, focusedTargetId)
       );
     }
   },
   accessibility({ id, model, bounds, viewport: visibleBounds, focusedTargetId, slots }) {
     const document = model.document;
-    const layout = document.layout;
+    const terminalRender = document.terminalRender;
     const contentBounds = documentContentBounds(bounds);
     const startIndex = Math.min(
       Math.max(0, visibleBounds.row - contentBounds.row),
-      layout.rows.length
+      terminalRender.cellBuffer.rows.length
     );
     const endIndexExclusive = Math.min(
       Math.max(startIndex, visibleBounds.row + visibleBounds.height - contentBounds.row),
-      layout.rows.length
+      terminalRender.cellBuffer.rows.length
     );
-    const visibleSemantic = layout.accessibility.filter((entry) =>
-      document.source.snapshot.document.control(entry.source) === null
-      && entry.rect.row < endIndexExclusive && entry.rect.row + entry.rect.height > startIndex
-    );
+    const visibleSemantic = terminalRender.accessibilityBounds.filter((entry) => {
+      if (document.source.snapshot.document.control(entry.documentNode) !== null) return false;
+      if (entry.rect.width === 0 || entry.rect.height === 0) {
+        return entry.rect.row >= startIndex && entry.rect.row < endIndexExclusive;
+      }
+      return entry.rect.row < endIndexExclusive && entry.rect.row + entry.rect.height > startIndex;
+    });
     return {
       id,
       role: "document",
@@ -774,19 +783,19 @@ const browserDocumentComponent = defineComponent<
       window: {
         startIndex,
         endIndexExclusive,
-        totalCount: layout.rows.length,
+        totalCount: terminalRender.cellBuffer.rows.length,
         omittedBefore: startIndex,
-        omittedAfter: layout.rows.length - endIndexExclusive
+        omittedAfter: terminalRender.cellBuffer.rows.length - endIndexExclusive
       },
       children: [
         ...visibleSemantic.map((entry) => ({
-          id: `semantic:${entry.source}`,
+          id: `semantic:${entry.documentNode}`,
           role: entry.role === "heading" ? "heading" as const : entry.role === "link" ? "link" as const : "text" as const,
           label: entry.name,
           description: entry.description,
-          ...(focusedTargetId === `link:${entry.source}`
-            || focusedTargetId === `control:${entry.source}`
-            || focusedTargetId === `disclosure:${entry.source}`
+          ...(focusedTargetId === `link:${entry.documentNode}`
+            || focusedTargetId === `control:${entry.documentNode}`
+            || focusedTargetId === `disclosure:${entry.documentNode}`
             ? { focused: true }
             : {})
         })),
@@ -797,31 +806,42 @@ const browserDocumentComponent = defineComponent<
   focusTargets({ model, bounds }) {
     if (bounds.width <= 0 || bounds.height <= 0) return [];
     const document = model.document;
-    const layout = document.layout;
+    const terminalRender = document.terminalRender;
     const contentBounds = documentContentBounds(bounds);
-    return layout.focusTargets.flatMap((target) => {
-      if (target.rects.length === 0) return [];
-      const row = Math.min(...target.rects.map((rect) => rect.row));
-      const column = Math.min(...target.rects.map((rect) => rect.column));
-      const bottom = Math.max(...target.rects.map((rect) => rect.row + rect.height));
-      const edge = Math.max(...target.rects.map((rect) => rect.column + rect.width));
-      return [{
+    return terminalRender.focusMap.targets.map((target) => {
+      const anchor = terminalRender.scrollAnchors.find((entry) => entry.documentNode === target.node);
+      let row = target.rects[0]?.row ?? anchor?.row ?? 0;
+      let column = target.rects[0]?.column ?? 0;
+      let bottom = row;
+      let edge = column;
+      for (const rect of target.rects) {
+        row = Math.min(row, rect.row);
+        column = Math.min(column, rect.column);
+        bottom = Math.max(bottom, rect.row + rect.height);
+        edge = Math.max(edge, rect.column + rect.width);
+      }
+      if (target.rects.length === 0 && anchor !== undefined) {
+        bottom = row + 1;
+        edge = column + 1;
+      }
+      return {
         id: actionId(target.action),
         bounds: {
           row: contentBounds.row + row,
           column: contentBounds.column + column,
-          width: Math.max(1, Math.min(edge - column, contentBounds.width - column)),
-          height: Math.max(1, bottom - row)
+          width: target.rects.length === 0 && anchor === undefined
+            ? 0 : Math.max(1, Math.min(edge - column, contentBounds.width - column)),
+          height: target.rects.length === 0 && anchor === undefined ? 0 : Math.max(1, bottom - row)
         }
-      }];
+      };
     });
   },
   hitTargets({ model, bounds, viewport: visibleBounds }) {
     if (bounds.width <= 0 || bounds.height <= 0) return [];
     const document = model.document;
-    const layout = document.layout;
+    const terminalRender = document.terminalRender;
     const contentBounds = documentContentBounds(bounds);
-    return layout.hitRegions
+    return terminalRender.hitTestIndex.regions
       .filter((placement) => placement.action.kind !== "form-control"
         && contentBounds.row + placement.rect.row < visibleBounds.row + visibleBounds.height
         && contentBounds.row + placement.rect.row + placement.rect.height > visibleBounds.row)
@@ -829,7 +849,7 @@ const browserDocumentComponent = defineComponent<
         const placementActionId = actionId(placement.action);
         const columnIndex = Math.min(contentBounds.width - 1, placement.rect.column);
         return {
-          id: `activate:${placementActionId}:${placement.fragment}`,
+          id: `activate:${placementActionId}:${placement.id}`,
           bounds: {
             row: contentBounds.row + placement.rect.row,
             column: contentBounds.column + columnIndex,
@@ -867,10 +887,10 @@ const browserDocumentComponent = defineComponent<
 
 function browserDocument(
   document: BrowserDocumentState,
-  layout: FragmentTree
+  terminalRender: TerminalRenderResult
 ): Element<BrowserTuiMessage> {
-  const scrollRow = documentScrollRow(document, layout);
-  const model = browserDocumentViewModel(document, layout);
+  const scrollRow = documentScrollRow(document, terminalRender);
+  const model = browserDocumentComponentModel(document, terminalRender);
   const children = model.controlGroups.flatMap((group) => {
     const element = inlineControlGroup(model, group);
     return element === null ? [] : [element];
@@ -896,10 +916,10 @@ function browserDocument(
   });
 }
 
-function browserDocumentViewModel(
+function browserDocumentComponentModel(
   document: BrowserDocumentState,
-  layout: FragmentTree
-): BrowserDocumentViewModel {
+  terminalRender: TerminalRenderResult
+): BrowserDocumentComponentModel {
   const searchRangesByRow = new Map<number, {
     readonly match: string;
     readonly start: number;
@@ -907,7 +927,7 @@ function browserDocumentViewModel(
   }[]>();
   if (document.search !== null) {
     const retained = new Set(document.search.matches.map((match) => match.id));
-    for (const match of layout.search(document.search.query).matches) {
+    for (const match of terminalRender.search(document.search.query).matches) {
       if (!retained.has(match.id)) continue;
       for (const range of match.ranges) {
         const entries = searchRangesByRow.get(range.row) ?? [];
@@ -919,7 +939,7 @@ function browserDocumentViewModel(
   return {
     id: document.id,
     source: document,
-    layout,
+    terminalRender,
     finalUrl: document.snapshot.finalUrl,
     search: document.search,
     searchRangesByRow,
@@ -1265,14 +1285,16 @@ function baseView(state: BrowserTuiState, columns: number, rows: number): Elemen
   if (!selected) throw new Error("The browser view requires an open document.");
   const pageColumns = state.sidePanel !== null && columns >= 100 ? columns - 41 : columns;
   const viewportRows = Math.max(1, rows - (state.findBar === null ? 3 : 4));
-  const layout = renderDocumentForViewport(
+  const renderPipeline = renderDocumentForViewport(
     selected,
     Math.max(1, pageColumns - 1),
     viewportRows
-  ).fragments;
+  );
+  const terminalRender = renderPipeline.terminal;
+  const incompleteRendering = renderPipelineIncompleteCauses(renderPipeline);
   const pagePanel = selected.snapshot.finalUrl === "about:newtab"
     ? newTabDashboard(state)
-    : browserDocument(selected, layout);
+    : browserDocument(selected, terminalRender);
   const body = state.sidePanel !== null
     ? columns >= 100
       ? splitPane([pagePanel, sidePanel(state)], {
@@ -1319,7 +1341,9 @@ function baseView(state: BrowserTuiState, columns: number, rows: number): Elemen
       leading: [{
         id: "status",
         kind: "status",
-        text: selected.error ?? state.status?.text ?? selected.snapshot.finalUrl,
+        text: selected.error ?? state.status?.text ?? (incompleteRendering.length === 0
+          ? selected.snapshot.finalUrl
+          : `${selected.snapshot.finalUrl} — rendering incomplete (${incompleteRendering.join(", ")})`),
         status: selected.error !== null || state.status?.tone === "error"
           ? "error"
           : state.status?.tone === "success"
@@ -1329,7 +1353,7 @@ function baseView(state: BrowserTuiState, columns: number, rows: number): Elemen
       trailing: [{
         id: "position",
         kind: "text",
-        text: `${String(documentScrollRow(selected, layout) + 1)}/${String(Math.max(1, layout.rows.length))}`
+        text: `${String(documentScrollRow(selected, terminalRender) + 1)}/${String(Math.max(1, terminalRender.cellBuffer.rows.length))}`
       }]
     })
   ], {
