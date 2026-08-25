@@ -377,22 +377,26 @@ function interactionIndexes(
     const sorted = [...units].sort((left, right) => left.row - right.row || left.column - right.column);
     let start = sorted[0];
     let width = start?.width ?? 0;
-    for (let index = 1; index <= sorted.length; index += 1) {
+    const appendRegion = (): void => {
+      if (start === undefined || start.command.action === null) return;
+      hitRegions.push(Object.freeze({
+        action: start.command.action,
+        layoutFragment: start.command.layoutFragment,
+        rect: cellRect(start.row, start.column, width, 1)
+      }));
+    };
+    for (let index = 1; index < sorted.length; index += 1) {
       const next = sorted[index];
-      if (start !== undefined && next !== undefined && next.row === start.row && next.column === start.column + width) {
+      if (start !== undefined && next !== undefined
+        && next.row === start.row && next.column === start.column + width) {
         width += next.width;
         continue;
       }
-      if (start !== undefined && start.command.action !== null) {
-        hitRegions.push(Object.freeze({
-          action: start.command.action,
-          layoutFragment: start.command.layoutFragment,
-          rect: cellRect(start.row, start.column, width, 1)
-        }));
-      }
+      appendRegion();
       start = next;
       width = next?.width ?? 0;
     }
+    appendRegion();
   }
   const focusByNode = new Map<DocumentNodeRef, { action: NonNullable<TerminalPaintCommand["action"]>; fragments: LayoutFragmentId[]; rects: TerminalCellRect[] }>();
   for (const hit of hitRegions) {
