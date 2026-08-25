@@ -4,8 +4,8 @@ import {
   parseStream
 } from "@ismail-elkorchi/html-parser";
 
-import { createWebDocumentSnapshot } from "./snapshot.js";
-import type { DocumentIndexLimits, WebDocumentSnapshotView } from "./types.js";
+import { createIndexedWebDocumentSnapshot } from "./snapshot.js";
+import type { DocumentIndexLimits, IndexedWebDocumentSnapshot } from "./types.js";
 
 export interface WebDocumentParseContext {
   readonly requestUrl: string;
@@ -53,8 +53,8 @@ export function parseWebDocument(
   html: string,
   context: WebDocumentParseContext,
   options: WebDocumentParseOptions = {}
-): WebDocumentSnapshotView {
-  return createWebDocumentSnapshot(parse(html, { ...options, ...structuralParseOptions }), {
+): IndexedWebDocumentSnapshot {
+  return createIndexedWebDocumentSnapshot(parse(html, { ...options, ...structuralParseOptions }), {
     requestUrl: context.requestUrl,
     finalUrl: context.finalUrl,
     ...(context.indexLimits === undefined ? {} : { limits: context.indexLimits })
@@ -65,8 +65,8 @@ export function parseWebDocumentBytes(
   bytes: Uint8Array,
   context: WebDocumentParseContext,
   options: WebDocumentBytesOptions = {}
-): WebDocumentSnapshotView {
-  return createWebDocumentSnapshot(parseBytes(bytes, { ...options, ...structuralParseOptions }), {
+): IndexedWebDocumentSnapshot {
+  return createIndexedWebDocumentSnapshot(parseBytes(bytes, { ...options, ...structuralParseOptions }), {
     requestUrl: context.requestUrl,
     finalUrl: context.finalUrl,
     ...(context.indexLimits === undefined ? {} : { limits: context.indexLimits })
@@ -77,9 +77,9 @@ export async function parseWebDocumentStream(
   stream: ReadableStream<Uint8Array>,
   context: WebDocumentParseContext,
   options: WebDocumentStreamOptions = {}
-): Promise<WebDocumentSnapshotView> {
+): Promise<IndexedWebDocumentSnapshot> {
   const parsed = await parseStream(stream, { ...options, ...structuralParseOptions });
-  return createWebDocumentSnapshot(parsed, {
+  return createIndexedWebDocumentSnapshot(parsed, {
     requestUrl: context.requestUrl,
     finalUrl: context.finalUrl,
     ...(context.indexLimits === undefined ? {} : { limits: context.indexLimits })

@@ -19,7 +19,7 @@ const session = new BrowserSession({
     status: 200,
     statusText: "OK",
     contentType: "text/html; charset=utf-8",
-    html: "<main><a href='/docs'>Docs</a><p>Audit target</p></main>",
+    html: "<title>Audit target</title><main><a href='/docs'>Docs</a><p>Audit target</p></main>",
     responseFields: new HttpFields([
       { name: "content-type", value: "text/html; charset=utf-8" }
     ]),
@@ -42,13 +42,13 @@ try {
   const audit = {
     status: snapshot.status,
     parseErrorCount: snapshot.diagnostics.parseErrorCount,
-    linkCount: snapshot.document.links.length,
+    title: snapshot.document.title,
     triageIds: snapshot.diagnostics.triageIds
   };
 
   console.log(audit.status);
   console.log(audit.parseErrorCount);
-  console.log(audit.linkCount);
+  console.log(audit.title);
   console.log(audit.triageIds.length > 0);
 } finally {
   await session.close();
@@ -59,7 +59,7 @@ try {
 ```txt
 200
 0
-1
+Audit target
 true
 ```
 
@@ -68,7 +68,9 @@ true
   not comparable to normal page audits.
 - Audit consumers treat `triageIds` as stable policy verdicts instead of
   deterministic hints for review.
-- Link counts are read before resolving relative URLs against the final page.
+- A consumer expects internal semantic indexes to be part of the root API;
+  use the browser UI for link/form interaction and the read-only document tree
+  only for deliberate structural inspection.
 
 ## Related reference
 - [API overview](../reference/api-overview.md)

@@ -129,20 +129,10 @@ try {
     `import {
   BrowserSession,
   fetchPage,
-  parseWebDocument,
   type PageSnapshot,
-  type WebDocumentParseOptions,
-  type WebDocumentSnapshotView
+  type WebDocumentSnapshot
 } from "@ismail-elkorchi/verge-browser";
 
-const parseOptions: WebDocumentParseOptions = {
-  budgets: { maxInputBytes: 1024, maxNodes: 100 }
-};
-const document: WebDocumentSnapshotView = parseWebDocument(
-  "<main><h1>Typed consumer</h1></main>",
-  { requestUrl: "https://example.test/", finalUrl: "https://example.test/" },
-  parseOptions
-);
 const session = new BrowserSession({
   defaultParseMode: "text",
   loader: async (requestUrl) => {
@@ -151,7 +141,8 @@ const session = new BrowserSession({
   }
 });
 const snapshot: PageSnapshot = await session.open("https://example.test/");
-if (document.root.length === 0 || snapshot.document.root.length === 0) throw new Error("invalid document");
+const document: WebDocumentSnapshot = snapshot.document;
+if (document.root.length === 0) throw new Error("invalid document");
 await session.close();
 `,
     "utf8"
@@ -177,23 +168,10 @@ await session.close();
     `import {
   BrowserSession,
   PageNetworkClient,
-  fetchPage,
-  parseWebDocument
+  fetchPage
 } from "@ismail-elkorchi/verge-browser";
-
-const document = parseWebDocument(
-  "<main><h1>Packed consumer</h1><p>Public document.</p><a href='/next'>Next</a></main>",
-  { requestUrl: "https://example.test/", finalUrl: "https://example.test/" }
-);
 const networkClient = new PageNetworkClient();
 await networkClient.close();
-if (
-  document.node(document.root).kind !== "document" ||
-  document.sourceMetadata.inputKind !== "text" ||
-  document.links[0]?.destination !== "https://example.test/next"
-) {
-  throw new Error("parseWebDocument did not return the documented semantic snapshot");
-}
 const session = new BrowserSession({
   loader: async (requestUrl) => {
     const page = await fetchPage("about:help");
@@ -202,7 +180,10 @@ const session = new BrowserSession({
   defaultParseMode: "text"
 });
 const snapshot = await session.open("https://example.test/");
-if (snapshot.document.root.length === 0) throw new Error("packed session did not expose a document snapshot");
+if (
+  snapshot.document.root.length === 0 ||
+  snapshot.document.node(snapshot.document.root).kind !== "document"
+) throw new Error("packed session did not expose a document snapshot");
 await session.close();
 `,
     "utf8"

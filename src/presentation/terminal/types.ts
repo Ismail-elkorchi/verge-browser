@@ -5,6 +5,7 @@ import type {
 } from "../../document/index.js";
 import type { FormattingNodeId, FormattingTree } from "../formatting/index.js";
 import type { CssColor } from "../style/index.js";
+import type { VisibleTextMatchId } from "./visible-text.js";
 
 export type FragmentId = string & { readonly __fragmentId: unique symbol };
 
@@ -60,6 +61,8 @@ interface FragmentBase {
   readonly formatting: FormattingNodeId;
   readonly source: DocumentNodeRef | null;
   readonly sourceRange: DocumentSourceRange | null;
+  readonly contentStartCodeUnit: number | null;
+  readonly contentEndCodeUnit: number | null;
   readonly rect: TerminalRect;
   readonly clip: TerminalRect;
   readonly children: readonly FragmentId[];
@@ -97,6 +100,8 @@ export interface TerminalRowFragment {
   readonly formatting: FormattingNodeId;
   readonly source: DocumentNodeRef | null;
   readonly sourceRange: DocumentSourceRange | null;
+  readonly contentStartCodeUnit: number | null;
+  readonly contentEndCodeUnit: number | null;
   readonly startCodeUnit: number;
   readonly endCodeUnit: number;
   readonly column: number;
@@ -147,6 +152,7 @@ export interface TerminalAccessibilityNode {
 }
 
 export interface TerminalSearchRange {
+  readonly match: VisibleTextMatchId;
   readonly row: number;
   readonly startCodeUnit: number;
   readonly endCodeUnit: number;
@@ -155,8 +161,14 @@ export interface TerminalSearchRange {
   readonly sourceRange: DocumentSourceRange | null;
 }
 
+export interface TerminalSearchMatch {
+  readonly id: VisibleTextMatchId;
+  readonly ranges: readonly TerminalSearchRange[];
+}
+
 export interface TerminalSearchResult {
   readonly query: string;
+  readonly matches: readonly TerminalSearchMatch[];
   readonly ranges: readonly TerminalSearchRange[];
   readonly truncated: boolean;
 }

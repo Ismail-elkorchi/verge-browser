@@ -34,7 +34,7 @@ import type { SearchPickerIndex } from "@ismail-elkorchi/terminal-ui/behavior";
 import type { TextEditBuffer } from "@ismail-elkorchi/terminal-ui/text";
 
 import type { BookmarkEntry, DownloadRecord, HistoryEntry } from "../app/storage.js";
-import type { PageSnapshot } from "../app/types.js";
+import type { IndexedPageSnapshot } from "../app/types.js";
 import type { DocumentNodeRef, DocumentState } from "../document/index.js";
 import type { DocumentPresentationCache } from "./document-layout.js";
 
@@ -70,10 +70,8 @@ export interface StatusMessage {
 }
 
 export interface DocumentSearchMatch {
-  readonly rowIndex: number;
-  readonly startCodeUnitIndex: number;
-  readonly endCodeUnitIndexExclusive: number;
-  readonly source: DocumentNodeRef | null;
+  readonly id: string;
+  readonly sources: readonly (DocumentNodeRef | null)[];
 }
 
 export interface BrowserDocumentSearch {
@@ -85,7 +83,7 @@ export interface BrowserDocumentSearch {
 
 export interface BrowserDocumentState {
   readonly id: string;
-  readonly snapshot: PageSnapshot;
+  readonly snapshot: IndexedPageSnapshot;
   readonly documentState: DocumentState;
   readonly presentationCache: DocumentPresentationCache;
   readonly scrollAnchor: {
@@ -105,7 +103,7 @@ export interface BrowserDocumentState {
     | { readonly kind: "checkboxGroup"; readonly state: CollectionInteractionState }
   >>;
   readonly savedViews: Readonly<Record<string, {
-    readonly document: PageSnapshot["document"];
+    readonly document: IndexedPageSnapshot["document"];
     readonly scrollAnchor: BrowserDocumentState["scrollAnchor"];
     readonly search: BrowserDocumentSearch | null;
   }>>;
@@ -259,7 +257,7 @@ export type BrowserTuiMessage =
   | {
       readonly kind: "pageLoaded";
       readonly documentId: string;
-      readonly snapshot: PageSnapshot;
+      readonly snapshot: IndexedPageSnapshot;
       readonly status: string;
       readonly canGoBack: boolean;
       readonly canGoForward: boolean;

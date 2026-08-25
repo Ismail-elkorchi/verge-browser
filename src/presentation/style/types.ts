@@ -1,7 +1,7 @@
 import type {
   DocumentNodeRef,
   DocumentState,
-  WebDocumentSnapshotView
+  IndexedWebDocumentSnapshot
 } from "../../document/index.js";
 
 export interface CssColor {
@@ -120,8 +120,8 @@ export interface ComputedStyle {
     | "upper-alpha";
   readonly text: ComputedTextStyle;
   readonly box: ComputedBoxStyle;
-  readonly generatedBefore: string | null;
-  readonly generatedAfter: string | null;
+  /** Computed `content` for this pseudo-element; null on principal styles. */
+  readonly generatedContent: string | null;
   readonly customProperties: ReadonlyMap<string, string>;
 }
 
@@ -162,7 +162,6 @@ export interface StyleBudgets {
   readonly maxInlineStylesheetBytes: number;
   readonly maxSelectorQueries: number;
   readonly maxSelectorSteps: number;
-  readonly maxComputedNodes: number;
   readonly maxDiagnostics: number;
 }
 
@@ -186,7 +185,7 @@ export interface StyleEnvironment {
 }
 
 export interface ResolveStylesInput {
-  readonly document: WebDocumentSnapshotView;
+  readonly document: IndexedWebDocumentSnapshot;
   readonly state: DocumentState;
   readonly resources: readonly StylesheetResource[];
   readonly initialDiagnostics?: readonly StyleDiagnostic[];
@@ -196,12 +195,12 @@ export interface ResolveStylesInput {
 }
 
 export interface StyleSnapshot {
-  readonly document: WebDocumentSnapshotView;
+  readonly document: IndexedWebDocumentSnapshot;
   readonly environment: StyleEnvironment;
   readonly diagnostics: readonly StyleDiagnostic[];
   readonly stylesheetCount: number;
   readonly outcome: StyleOutcome;
-  has(node: DocumentNodeRef): boolean;
+  /** Total for every element retained by the document snapshot. */
   style(node: DocumentNodeRef): ComputedStyle;
   pseudo(node: DocumentNodeRef, identity: PseudoElementIdentity): ComputedStyle | null;
 }

@@ -20,10 +20,13 @@ import {
   type StoredSidePanel,
   type BrowserStore
 } from "../app/storage.js";
-import type { PageRequestOptions, PageSnapshot } from "../app/types.js";
+import {
+  indexedPageSnapshot,
+  type PageRequestOptions,
+  type IndexedPageSnapshot
+} from "../app/types.js";
 import {
   createDocumentState,
-  type DocumentEdit,
   type DocumentForm,
   type DocumentNodeRef,
   type DocumentState
@@ -66,11 +69,11 @@ function excerpt(lines: readonly string[]): string {
     .trim();
 }
 
-function readerLines(snapshot: PageSnapshot): readonly string[] {
+function readerLines(snapshot: IndexedPageSnapshot): readonly string[] {
   return projectReaderLines(projectReaderDocument(snapshot.document));
 }
 
-function diagnosticsLines(snapshot: PageSnapshot): readonly string[] {
+function diagnosticsLines(snapshot: IndexedPageSnapshot): readonly string[] {
   return [
     `URL: ${snapshot.finalUrl}`,
     `Status: ${String(snapshot.status)} ${snapshot.statusText}`,
@@ -110,7 +113,7 @@ function storedScrollAnchor(document: BrowserDocumentState): StoredBrowserDocume
 }
 
 function restoredScrollAnchor(
-  snapshot: PageSnapshot,
+  snapshot: IndexedPageSnapshot,
   stored: StoredBrowserDocument["scrollAnchor"] | undefined
 ): BrowserDocumentState["scrollAnchor"] | undefined {
   if (stored === undefined || stored.target === null) return undefined;
@@ -334,7 +337,7 @@ export class BrowserController {
 
   public restoreDocument(document: BrowserDocumentState): BrowserDocumentState {
     const session = this.#session(document.id);
-    const snapshot = session.current ?? document.snapshot;
+    const snapshot = session.current === null ? document.snapshot : indexedPageSnapshot(session.current);
     const snapshotChanged = snapshot !== document.snapshot;
     const scrollAnchor = snapshotChanged
       ? { source: snapshot.document.body ?? snapshot.document.documentElement, rowOffset: 0 }
@@ -359,34 +362,34 @@ export class BrowserController {
     target: string,
     requestOptions: PageRequestOptions = {},
     parseMode?: "text" | "stream"
-  ): Promise<PageSnapshot> {
+  ): Promise<IndexedPageSnapshot> {
     const resolvedTarget = resolveInputUrl(target, document.snapshot.finalUrl);
-    return this.#session(document.id).openWithRequest(
+    return indexedPageSnapshot(await this.#session(document.id).openWithRequest(
       resolvedTarget,
       requestOptions,
       parseMode
-    );
+    ));
   }
 
   public async openLink(
     document: BrowserDocumentState,
     linkIndex: number,
     signal?: AbortSignal
-  ): Promise<PageSnapshot> {
-    return this.#session(document.id).openLink(linkIndex, signal);
+  ): Promise<IndexedPageSnapshot> {
+    return indexedPageSnapshot(await this.#session(document.id).openLink(linkIndex, signal));
   }
 
   public async traverse(
     document: BrowserDocumentState,
     operation: "back" | "forward" | "reload",
     signal?: AbortSignal
-  ): Promise<PageSnapshot> {
+  ): Promise<IndexedPageSnapshot> {
     const session = this.#session(document.id);
-    return operation === "back"
+    return indexedPageSnapshot(operation === "back"
       ? await session.back(signal)
       : operation === "forward"
         ? await session.forward(signal)
-        : await session.reload(signal);
+        : await session.reload(signal));
   }
 
   public openNew(
@@ -411,10 +414,10 @@ export class BrowserController {
     state: DocumentState,
     submitter: DocumentNodeRef | undefined,
     signal?: AbortSignal
-  ): Promise<PageSnapshot> {
+  ): Promise<IndexedPageSnapshot> {
     const submission = buildFormSubmissionRequest(form, state, submitter);
     assertPageInitiatedNavigation(document.snapshot.finalUrl, submission.url);
-    return openPageInitiatedNavigation(
+    return indexedPageSnapshot(await openPageInitiatedNavigation(
       this.#session(document.id),
       document.snapshot.finalUrl,
       submission.url,
@@ -422,18 +425,10 @@ export class BrowserController {
         ...submission.requestOptions,
         ...(signal === undefined ? {} : { signal })
       }
-    );
+    ));
   }
 
-  public async applyEdits(
-    document: BrowserDocumentState,
-    edits: readonly DocumentEdit[],
-    signal?: AbortSignal
-  ): Promise<PageSnapshot> {
-    return this.#session(document.id).applyEdits(edits, signal);
-  }
-
-  public async persistSnapshot(snapshot: PageSnapshot): Promise<void> {
+  public async persistSnapshot(snapshot: IndexedPageSnapshot): Promise<void> {
     await this.#persist(snapshot);
   }
 
@@ -638,7 +633,7 @@ export class BrowserController {
     target: string,
     signal?: AbortSignal,
     sourceUrl?: string
-  ): Promise<PageSnapshot> {
+  ): Promise<IndexedPageSnapshot> {
     const resolvedTarget = resolveInputUrl(target);
     const snapshot = sourceUrl === undefined
       ? await session.open(resolvedTarget, signal)
@@ -648,10 +643,10 @@ export class BrowserController {
         resolvedTarget,
         { ...(signal === undefined ? {} : { signal }) }
       );
-    return snapshot;
+    return indexedPageSnapshot(snapshot);
   }
 
-  async #persist(snapshot: PageSnapshot): Promise<void> {
+  async #persist(snapshot: IndexedPageSnapshot): Promise<void> {
     if (snapshot.finalUrl.startsWith("about:")) return;
     const projection = projectReaderDocument(snapshot.document);
     const lines = projectReaderLines(projection);
@@ -693,7 +688,7 @@ export class BrowserController {
 
   #document(
     id: string,
-    snapshot: PageSnapshot,
+    snapshot: IndexedPageSnapshot,
     storedAnchor?: StoredBrowserDocument["scrollAnchor"]
   ): BrowserDocumentState {
     const firstAnchor = {

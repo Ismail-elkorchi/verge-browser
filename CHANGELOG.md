@@ -22,9 +22,8 @@ All notable changes are documented in this file.
   `PageSnapshot`.
 - **Breaking:** `PageDiagnostics` replaces the old renderer/caller-cookie
   timing fields with semantic-content and stylesheet timing/count diagnostics.
-- **Breaking:** `BrowserSession.applyEdits()` is asynchronous because edits can
-  change external stylesheet resources; form extraction now exposes semantic
-  `FormControl` variants instead of the earlier flat field shape.
+- Form processing now uses semantic control variants rather than the earlier
+  flat field shape.
 - **Breaking:** Remove the exported hand-written cookie parser and cookie-header
   helpers. The browser now persists a public-suffix-aware cookie jar behind
   `HttpSessionAdapter`, which applies response cookies before redirect and
@@ -59,14 +58,18 @@ All notable changes are documented in this file.
 - **Breaking:** Replace the flatten-first renderer with immutable document,
   computed-style, formatting-tree, terminal-fragment, and reader-projection
   stages. `PageSnapshot.document` is now the sole authoritative content model.
-- **Breaking:** Expose the document boundary as `WebDocumentSnapshotView` from
-  parser-independent factories and Verge-owned parse options; the concrete
-  snapshot constructor and HTML-parser option/result types are internal.
+- **Breaking:** Expose only the read-only `WebDocumentSnapshot` structure through
+  navigation results. Document factories, dynamic state/actions, semantic
+  indexes, and the concrete snapshot implementation remain internal.
+- **Breaking:** Remove the root document-construction, document-state, source-
+  editing, and standalone form-submission helpers; browser orchestration owns
+  those operations.
 - **Breaking:** Remove `PageSnapshot.rendered`, `RenderedPage`,
   `RenderedActionable`, `RenderedLink`, `RenderInput`, `PageRenderer`, renderer
   and width overrides, fixed-width render helpers, and the former flat page,
   pager, search, parser-attachment, and terminal helper modules.
-- Preserve unknown/custom element hierarchy and semantic indexes; generate
+- Preserve unknown/custom element hierarchy and build browser-internal semantic
+  indexes; generate
   boxes from computed `display`; support suppression, contents, anonymous flow
   and table wrappers, lists, structured tables, controls, replaced fallbacks,
   flex/grid contexts, nested terminal fragments, source-aware wrapping, hit
@@ -76,19 +79,32 @@ All notable changes are documented in this file.
   fail closed for unknown media types. Preserve semantic and accessibility
   identities for `display: contents` elements without generating a principal
   box.
+- Keep baseline user-agent, initial, and inherited styles total for every
+  retained element when author selector work is truncated; formatting no longer
+  suppresses content because author-style work ran out.
+- Preserve completed terminal fragments, rows, hit geometry, anchors, and
+  accessibility entries when fragment, row, or paint budgets truncate a page.
+- Generate contiguous anonymous text items for flex/grid, discard collapsed
+  whitespace-only item runs, split inline continuations around block children,
+  and preserve source order through anonymous table repair.
+- Build viewport-independent visible-text matches before fragmentation, then
+  project each stable match onto one or more wrapped terminal fragments.
+- Remove browser source-editing APIs and the retained parser graph; the indexed
+  Verge document graph is the sole authoritative structural representation.
 - Preserve normal prose and links inside forms while replacing only control
   fragments with terminal controls; index explicit form ownership once; and
   model details disclosure as a typed document action.
 - Reject page-initiated redirects that cross into local files before committing
-  a document or stylesheet, release stream readers on completion and failure,
-  and prevent canceled edits from committing after asynchronous resource work.
+  a document or stylesheet and release stream readers on completion and failure.
 - Freeze style, fragment, geometry, search, and accessibility values at their
   subsystem boundaries; validate terminal and style environments as typed
   inputs; and represent CSS `max-width: none` and negative margins without
   terminal-unit shortcuts in computed style.
 - Drive interactive and one-shot output from the same terminal fragment path,
   and enforce document/style/formatting import boundaries plus deterministic
-  structural fuzz and per-stage performance controls.
+  structural fuzz and per-stage performance controls, including retained heap,
+  peak RSS, 100,000-node documents, large attributes, repeated tab lifecycle,
+  and post-close garbage collection.
 - Keep template contents inert during style/resource/layout indexing, preserve
   foreign-namespace element casing, index standalone controls and radio groups,
   retain generic/custom-element prose in the separate reader projection, and

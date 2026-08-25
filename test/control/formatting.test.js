@@ -53,6 +53,33 @@ function sourceNamed(document, name) {
   throw new Error(`Missing ${name}`);
 }
 
+function subtreeShape(tree, id) {
+  const node = tree.node(id);
+  const source = node.source === null ? null : tree.document.node(node.source);
+  return {
+    kind: node.kind,
+    source: source?.kind === "element" ? source.name : source?.kind === "text" ? "#text" : null,
+    ...("text" in node ? { text: node.text } : {}),
+    children: node.children.map((child) => subtreeShape(tree, child))
+  };
+}
+
+function structuralShape(tree, id) {
+  const node = tree.node(id);
+  return [
+    node.kind,
+    ...("text" in node ? [node.text] : []),
+    ...node.children.map((child) => structuralShape(tree, child))
+  ];
+}
+
+function principalShape(document, tree, name) {
+  const source = sourceNamed(document, name);
+  const node = tree.forSource(source).find((candidate) => candidate.appliesBoxStyle && candidate.pseudo === null);
+  assert.ok(node, `Missing principal formatting box for ${name}`);
+  return subtreeShape(tree, node.id);
+}
+
 test("box generation follows computed display rather than HTML tag names", () => {
   const { document, formatting } = formatted(`<style>span { display:block } div { display:inline }</style>
     <main><span>Block span</span><div>Inline div</div></main>`);
@@ -87,6 +114,48 @@ test("mixed inline and block children produce anonymous block structure", () => 
   assert.ok(kinds.includes("anonymous-inline"));
 });
 
+test("nested inline boxes split into ordered continuations around block descendants", () => {
+  const { document, formatting } = formatted("<div><span>A<em>B<section>C</section>D</em>E</span>F</div>");
+  assert.deepEqual(principalShape(document, formatting, "div"), {
+    kind: "block-container",
+    source: "div",
+    children: [
+      {
+        kind: "anonymous-block", source: null, children: [{
+          kind: "anonymous-inline", source: null, children: [{
+            kind: "inline-container", source: "span", children: [
+              { kind: "text-sequence", source: "#text", text: "A", children: [] },
+              { kind: "inline-container", source: "em", children: [
+                { kind: "text-sequence", source: "#text", text: "B", children: [] }
+              ] }
+            ]
+          }]
+        }]
+      },
+      {
+        kind: "block-container", source: "section", children: [
+          { kind: "text-sequence", source: "#text", text: "C", children: [] }
+        ]
+      },
+      {
+        kind: "anonymous-block", source: null, children: [{
+          kind: "anonymous-inline", source: null, children: [
+            {
+              kind: "inline-container", source: "span", children: [
+                { kind: "inline-container", source: "em", children: [
+                  { kind: "text-sequence", source: "#text", text: "D", children: [] }
+                ] },
+                { kind: "text-sequence", source: "#text", text: "E", children: [] }
+              ]
+            },
+            { kind: "text-sequence", source: "#text", text: "F", children: [] }
+          ]
+        }]
+      }
+    ]
+  });
+});
+
 test("generated pseudo boxes retain their computed display participation", () => {
   const { formatting } = formatted(`<style>p::before{content:"prefix";display:block;color:red}</style><p>body</p>`);
   const generated = nodes(formatting).find((node) => node.kind === "generated-text");
@@ -105,6 +174,19 @@ test("lists generate marker boxes tied to their source item", () => {
   assert.equal(items.length, 2);
   assert.deepEqual(markers.map((node) => node.text), ["1.", "2."]);
   assert.deepEqual(markers.map((node) => node.source), document.children(sourceNamed(document, "ol")).map((node) => node.ref));
+});
+
+test("generated marker, before, and after boxes preserve their exact list-item order", () => {
+  const { document, formatting } = formatted(`<style>
+    li::marker{content:"M"}li::before{content:"B"}li::after{content:"A"}
+  </style><ol><li>body</li></ol>`);
+  const shape = principalShape(document, formatting, "li");
+  assert.deepEqual(shape.children.map((child) => [child.kind, child.text ?? child.children[0]?.text]), [
+    ["marker", "M"],
+    ["pseudo-box", "B"],
+    ["text-sequence", "body"],
+    ["pseudo-box", "A"]
+  ]);
 });
 
 test("table internals remain structured and misparented cells gain anonymous wrappers", () => {
@@ -133,6 +215,88 @@ test("form controls, replaced content, flex, and grid retain structural node kin
   assert.ok(kinds.filter((kind) => kind === "form-control").length >= 2);
 });
 
+test("flex and grid form one anonymous item for contiguous text and discard collapsed whitespace-only runs", () => {
+  for (const [display, containerKind, itemKind] of [
+    ["flex", "flex-container", "flex-item"],
+    ["grid", "grid-container", "grid-item"]
+  ]) {
+    const { document, formatting } = formatted(`<style>
+      x-layout{display:${display}}x-contents{display:contents}
+    </style><x-layout>alpha<x-contents> beta</x-contents> gamma<span>E</span>   <i>I</i> tail</x-layout>`);
+    const shape = principalShape(document, formatting, "x-layout");
+    assert.equal(shape.kind, containerKind);
+    assert.deepEqual(shape.children.map((item) => ({
+      kind: item.kind,
+      children: item.children.map((child) => child.kind),
+      text: item.children.filter((child) => child.kind === "text-sequence").map((child) => child.text).join("")
+    })), [
+      { kind: itemKind, children: ["text-sequence", "text-sequence", "text-sequence"], text: "alpha beta gamma" },
+      { kind: itemKind, children: ["inline-container"], text: "" },
+      { kind: itemKind, children: ["inline-container"], text: "" },
+      { kind: itemKind, children: ["text-sequence"], text: " tail" }
+    ]);
+  }
+});
+
+test("anonymous table repair preserves row, group, column, caption, and cell order", () => {
+  const { document, formatting } = formatted(`<style>
+    x-cell{display:table-cell}x-row{display:table-row}x-group{display:table-row-group}
+    x-col{display:table-column}x-cap{display:table-caption}
+  </style><div><x-row><x-cell>R</x-cell></x-row><x-group><x-cell>G</x-cell></x-group>
+    <x-col></x-col><x-cap>Cap</x-cap><x-col></x-col><x-cell>C</x-cell></div>`);
+  const div = principalShape(document, formatting, "div");
+  assert.equal(div.children.length, 1);
+  const table = div.children[0].children[0];
+  assert.equal(div.children[0].kind, "table-wrapper");
+  assert.deepEqual(table.children.map((child) => child.kind), [
+    "table-body-group",
+    "table-body-group",
+    "table-column-group",
+    "table-caption",
+    "table-column-group",
+    "table-body-group"
+  ]);
+  assert.deepEqual(table.children.map((child) => child.source), [null, "x-group", null, "x-cap", null, null]);
+  assert.equal(table.children[0].children[0].source, "x-row");
+  assert.equal(table.children[1].children[0].kind, "table-row");
+  assert.equal(table.children[5].children[0].children[0].source, "x-cell");
+});
+
+test("nested tables preserve complete independent table structure and surrounding cell order", () => {
+  const { formatting } = formatted(
+    "<table><tr><td>outer<table><caption>cap</caption><tr><td>inner</td></tr></table>tail</td></tr></table>"
+  );
+  const table = nodes(formatting).find((node) => node.kind === "table");
+  assert.ok(table);
+  assert.deepEqual(structuralShape(formatting, table.id), [
+    "table",
+    ["table-body-group",
+      ["table-row",
+        ["table-cell",
+          ["anonymous-block", ["anonymous-inline", ["text-sequence", "outer"]]],
+          ["table-wrapper",
+            ["table",
+              ["table-caption", ["text-sequence", "cap"]],
+              ["table-body-group",
+                ["table-row", ["table-cell", ["text-sequence", "inner"]]]]]],
+          ["anonymous-block", ["anonymous-inline", ["text-sequence", "tail"]]]]]]
+  ]);
+});
+
+test("display contents participates structurally inside lists and tables", () => {
+  const list = formatted(`<style>span{display:contents}</style><ol><li><span>item</span></li></ol>`);
+  const listItem = principalShape(list.document, list.formatting, "li");
+  assert.deepEqual(listItem.children.map((child) => child.kind), ["marker", "text-sequence"]);
+
+  const table = formatted(`<style>tbody{display:contents}</style><table><tbody><tr><td>cell</td></tr></tbody></table>`);
+  const tableBox = table.formatting.forSource(sourceNamed(table.document, "table"))
+    .find((node) => node.kind === "table");
+  assert.ok(tableBox);
+  const shape = subtreeShape(table.formatting, tableBox.id);
+  assert.deepEqual(shape.children.map((child) => [child.kind, child.source]), [["table-body-group", null]]);
+  assert.equal(shape.children[0].children[0].source, "tr");
+});
+
 test("standalone HTML controls generate control boxes instead of disappearing", () => {
   const { document, state, formatting } = formatted(`<main><label for="query">Query</label><input id="query" value="term"></main>`);
   const control = document.controls[0];
@@ -149,12 +313,12 @@ test("formatting budgets return typed truncation without reconstructing flat con
   assert.ok(nodes(formatting).length <= 12);
 });
 
-test("formatting fails closed for subtrees without a computed style", () => {
+test("author-style truncation cannot suppress retained document content", () => {
   const { formatting } = formatted(
-    `<main>${"<span>word</span>".repeat(20)}</main>`,
+    `<style>span:first-child{color:red} span:last-child{color:blue}</style><main>${"<span>word</span>".repeat(20)}</main>`,
     undefined,
-    { maxComputedNodes: 4 }
+    { maxSelectorQueries: 1 }
   );
-  assert.ok(formatting.suppressed.some((entry) => entry.reason === "style-unresolved"));
-  assert.doesNotThrow(() => nodes(formatting));
+  assert.ok(formatting.suppressed.every((entry) => entry.reason === "display-none"));
+  assert.equal(nodes(formatting).filter((node) => node.kind === "text-sequence").length, 20);
 });

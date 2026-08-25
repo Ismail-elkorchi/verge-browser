@@ -1,4 +1,4 @@
-import type { DocumentNodeRef, WebDocumentNode, WebDocumentSnapshotView } from "../document/index.js";
+import type { DocumentNodeRef, WebDocumentNode, IndexedWebDocumentSnapshot } from "../document/index.js";
 import type {
   ReaderBlock,
   ReaderBudgets,
@@ -22,15 +22,15 @@ function budgets(overrides: Partial<ReaderBudgets> | undefined): ReaderBudgets {
   return values;
 }
 
-function text(document: WebDocumentSnapshotView, ref: DocumentNodeRef, remaining: number): string {
+function text(document: IndexedWebDocumentSnapshot, ref: DocumentNodeRef, remaining: number): string {
   return document.text(ref, remaining).replace(/\s+/gu, " ").trim();
 }
 
-function elementChildren(document: WebDocumentSnapshotView, node: WebDocumentNode): readonly WebDocumentNode[] {
+function elementChildren(document: IndexedWebDocumentSnapshot, node: WebDocumentNode): readonly WebDocumentNode[] {
   return node.children.map((ref) => document.node(ref)).filter((child) => child.kind === "element");
 }
 
-function listItemText(document: WebDocumentSnapshotView, ref: DocumentNodeRef, maxCodeUnits: number): string {
+function listItemText(document: IndexedWebDocumentSnapshot, ref: DocumentNodeRef, maxCodeUnits: number): string {
   const parts: string[] = [];
   let retained = 0;
   const pending = [...document.node(ref).children].reverse();
@@ -54,7 +54,7 @@ function listItemText(document: WebDocumentSnapshotView, ref: DocumentNodeRef, m
 }
 
 export function projectReaderDocument(
-  document: WebDocumentSnapshotView,
+  document: IndexedWebDocumentSnapshot,
   options: { readonly budgets?: Partial<ReaderBudgets>; readonly signal?: AbortSignal } = {}
 ): ReaderProjection {
   const limits = budgets(options.budgets);

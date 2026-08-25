@@ -2,7 +2,7 @@ import {
   snapshotDocumentState,
   type DocumentNodeRef,
   type DocumentState,
-  type WebDocumentSnapshotView
+  type IndexedWebDocumentSnapshot
 } from "../../document/index.js";
 import type {
   ComputedDisplay,
@@ -87,6 +87,12 @@ function inlineLevel(node: FormattingNode): boolean {
     || node.kind === "forced-line-break";
 }
 
+function collapsesEntireTextRun(node: FormattingNode): boolean {
+  return node.kind === "text-sequence"
+    && (node.whiteSpace === "normal" || node.whiteSpace === "nowrap")
+    && /^\s*$/u.test(node.text);
+}
+
 function principalDisplay(
   display: ComputedStyle["display"]
 ): display is Extract<ComputedStyle["display"], { readonly box: "principal" }> {
@@ -97,7 +103,7 @@ class FormattingBudgetExhausted extends Error {}
 
 class FormattingBuilder {
   readonly #input: BuildFormattingTreeInput;
-  readonly #document: WebDocumentSnapshotView;
+  readonly #document: IndexedWebDocumentSnapshot;
   readonly #state: DocumentState;
   readonly #styles: StyleSnapshot;
   readonly #budgets: FormattingBudgets;
@@ -150,7 +156,8 @@ class FormattingBuilder {
     outer: "block" | "inline",
     pseudo: PseudoElementIdentity | null = null,
     root = false,
-    appliesBoxStyle = !root
+    appliesBoxStyle = !root,
+    semanticOwner = appliesBoxStyle
   ): FormattingContainerNode {
     const documentNode = source === null ? null : this.#document.node(source);
     return this.#store({
@@ -161,7 +168,7 @@ class FormattingBuilder {
       pseudo,
       sourceRange: pseudo === null ? documentNode?.sourceRange ?? null : null,
       children: [...children],
-      semantic: source === null || pseudo !== null || !appliesBoxStyle
+      semantic: source === null || pseudo !== null || !semanticOwner
         ? null
         : this.#document.semantic(source),
       outer,
@@ -311,7 +318,7 @@ class FormattingBuilder {
       let ordinal = 0;
       for (const sibling of this.#document.node(parent).children) {
         const node = this.#document.node(sibling);
-        if (node.kind !== "element" || !this.#styles.has(sibling)) continue;
+        if (node.kind !== "element") continue;
         const display = this.#styles.style(sibling).display;
         if (display.box !== "principal" || !display.listItem) continue;
         ordinal += 1;
@@ -323,7 +330,7 @@ class FormattingBuilder {
 
   #rawChildren(source: DocumentNodeRef, depth: number): FormattingNode[] {
     const result: FormattingNode[] = [];
-    const pseudoBefore = this.#styles.pseudo(source, "before")?.generatedBefore;
+    const pseudoBefore = this.#styles.pseudo(source, "before")?.generatedContent;
     if (pseudoBefore !== null && pseudoBefore !== undefined) {
       const generated = this.#generated(source, "before", pseudoBefore);
       if (generated !== null) result.push(generated);
@@ -331,7 +338,7 @@ class FormattingBuilder {
     for (const child of this.#document.node(source).children) {
       result.push(...this.#buildDocumentNode(child, source, depth + 1));
     }
-    const pseudoAfter = this.#styles.pseudo(source, "after")?.generatedAfter;
+    const pseudoAfter = this.#styles.pseudo(source, "after")?.generatedContent;
     if (pseudoAfter !== null && pseudoAfter !== undefined) {
       const generated = this.#generated(source, "after", pseudoAfter);
       if (generated !== null) result.push(generated);
@@ -339,7 +346,7 @@ class FormattingBuilder {
     return result;
   }
 
-  #mixedFlow(children: readonly FormattingNode[], styleNode: DocumentNodeRef, containerOuter: "block" | "inline"): readonly FormattingNodeId[] {
+  #mixedFlow(children: readonly FormattingNode[], styleNode: DocumentNodeRef): readonly FormattingNodeId[] {
     const hasBlock = children.some((child) => !inlineLevel(child));
     if (!hasBlock) return children.map((child) => child.id);
     const output: FormattingNodeId[] = [];
@@ -359,10 +366,69 @@ class FormattingBuilder {
       }
     }
     flush();
-    if (containerOuter === "inline" && output.length > 1) {
-      const wrapper = this.#anonymousContainer("anonymous-inline", styleNode, output, "inline");
-      return [wrapper.id];
+    return output;
+  }
+
+  #inlineContinuations(
+    source: DocumentNodeRef,
+    children: readonly FormattingNode[]
+  ): readonly FormattingNode[] {
+    const output: FormattingNode[] = [];
+    let inlineRun: FormattingNodeId[] = [];
+    let semanticOwner = true;
+    const continuation = (): void => {
+      output.push(this.#container(
+        "inline-container",
+        source,
+        source,
+        inlineRun,
+        "inline",
+        null,
+        false,
+        true,
+        semanticOwner
+      ));
+      semanticOwner = false;
+      inlineRun = [];
+    };
+    for (const child of children) {
+      if (inlineLevel(child)) inlineRun.push(child.id);
+      else {
+        continuation();
+        output.push(child);
+      }
     }
+    continuation();
+    return output;
+  }
+
+  #independentFormattingItems(
+    children: readonly FormattingNode[],
+    kind: "flex-item" | "grid-item"
+  ): readonly FormattingNodeId[] {
+    const output: FormattingNodeId[] = [];
+    let textRun: FormattingNode[] = [];
+    const flushText = (): void => {
+      if (textRun.length === 0) return;
+      if (!textRun.every(collapsesEntireTextRun)) {
+        output.push(this.#anonymousContainer(
+          kind,
+          textRun.find((node) => node.styleNode !== null)?.styleNode ?? null,
+          textRun.map((node) => node.id),
+          "block"
+        ).id);
+      }
+      textRun = [];
+    };
+    for (const child of children) {
+      if (child.kind === "text-sequence") {
+        textRun.push(child);
+        continue;
+      }
+      flushText();
+      output.push(this.#anonymousContainer(kind, child.styleNode, [child.id], "block").id);
+    }
+    flushText();
     return output;
   }
 
@@ -370,6 +436,12 @@ class FormattingBuilder {
     const cells = new Set(["table-cell"]);
     const rows = new Set(["table-row"]);
     const groups = new Set(["table-header-group", "table-body-group", "table-footer-group"]);
+    const hasTableInternal = children.some((child) => cells.has(child.kind) || rows.has(child.kind)
+      || groups.has(child.kind) || child.kind === "table-caption" || child.kind === "table-column-group"
+      || child.kind === "table-column");
+    const normalizedChildren = hasTableInternal
+      ? children.filter((child) => !collapsesEntireTextRun(child))
+      : children;
     const expected = (kind: FormattingNode["kind"]): boolean => {
       if (parent === "table-row") return cells.has(kind);
       if (parent === "table-column-group") return kind === "table-column";
@@ -377,12 +449,12 @@ class FormattingBuilder {
       if (parent === "table") return groups.has(kind) || kind === "table-caption" || kind === "table-column-group";
       return !cells.has(kind) && !rows.has(kind) && !groups.has(kind) && kind !== "table-caption" && kind !== "table-column-group" && kind !== "table-column";
     };
-    if (children.every((child) => expected(child.kind))) return children.map((child) => child.id);
+    if (normalizedChildren.every((child) => expected(child.kind))) return normalizedChildren.map((child) => child.id);
     if (parent === "table-column-group") {
-      return children.filter((child) => child.kind === "table-column").map((child) => child.id);
+      return normalizedChildren.filter((child) => child.kind === "table-column").map((child) => child.id);
     }
     if (parent === "table-row") {
-      return children.map((child) => cells.has(child.kind)
+      return normalizedChildren.map((child) => cells.has(child.kind)
         ? child.id
         : this.#anonymousContainer("table-cell", styleNode, [child.id], "block").id);
     }
@@ -394,7 +466,7 @@ class FormattingBuilder {
         output.push(this.#anonymousContainer("table-row", styleNode, cellsRun, "block").id);
         cellsRun = [];
       };
-      for (const child of children) {
+      for (const child of normalizedChildren) {
         if (child.kind === "table-row") {
           flush();
           output.push(child.id);
@@ -405,9 +477,7 @@ class FormattingBuilder {
       return output;
     }
     if (parent === "table") {
-      const captions: FormattingNodeId[] = [];
-      const columns: FormattingNodeId[] = [];
-      const groupsOut: FormattingNodeId[] = [];
+      const output: FormattingNodeId[] = [];
       let rowsRun: FormattingNodeId[] = [];
       let cellsRun: FormattingNodeId[] = [];
       let columnsRun: FormattingNodeId[] = [];
@@ -419,43 +489,45 @@ class FormattingBuilder {
       const flushRows = (): void => {
         flushCells();
         if (rowsRun.length === 0) return;
-        groupsOut.push(this.#anonymousContainer("table-body-group", styleNode, rowsRun, "block").id);
+        output.push(this.#anonymousContainer("table-body-group", styleNode, rowsRun, "block").id);
         rowsRun = [];
       };
       const flushColumns = (): void => {
         if (columnsRun.length === 0) return;
-        columns.push(this.#anonymousContainer("table-column-group", styleNode, columnsRun, "block").id);
+        output.push(this.#anonymousContainer("table-column-group", styleNode, columnsRun, "block").id);
         columnsRun = [];
       };
-      for (const child of children) {
+      const flushAll = (): void => {
+        flushRows();
+        flushColumns();
+      };
+      for (const child of normalizedChildren) {
         if (child.kind === "table-caption") {
-          flushRows();
-          flushColumns();
-          captions.push(child.id);
+          flushAll();
+          output.push(child.id);
         } else if (child.kind === "table-column") {
           flushRows();
           columnsRun.push(child.id);
         } else if (child.kind === "table-column-group") {
-          flushRows();
-          flushColumns();
-          columns.push(child.id);
-        }
-        else if (groups.has(child.kind)) {
-          flushRows();
-          flushColumns();
-          groupsOut.push(child.id);
+          flushAll();
+          output.push(child.id);
+        } else if (groups.has(child.kind)) {
+          flushAll();
+          output.push(child.id);
         } else if (child.kind === "table-row") {
+          flushColumns();
           flushCells();
           rowsRun.push(child.id);
         } else if (child.kind === "table-cell") {
+          flushColumns();
           cellsRun.push(child.id);
         } else {
+          flushColumns();
           cellsRun.push(this.#anonymousContainer("table-cell", styleNode, [child.id], "block").id);
         }
       }
-      flushRows();
-      flushColumns();
-      return [...captions, ...columns, ...groupsOut];
+      flushAll();
+      return output;
     }
     const output: FormattingNodeId[] = [];
     let internalRun: FormattingNode[] = [];
@@ -466,7 +538,7 @@ class FormattingBuilder {
       output.push(this.#anonymousContainer("table-wrapper", styleNode, [table.id], "block").id);
       internalRun = [];
     };
-    for (const child of children) {
+    for (const child of normalizedChildren) {
       if (expected(child.kind)) {
         flush();
         output.push(child.id);
@@ -479,10 +551,6 @@ class FormattingBuilder {
   }
 
   #buildElement(source: DocumentNodeRef, depth: number): FormattingNode[] {
-    if (!this.#styles.has(source)) {
-      this.#suppressed.push({ source, reason: "style-unresolved" });
-      return [];
-    }
     const style = this.#styles.style(source);
     const display = style.display;
     const semantic = this.#document.semantic(source);
@@ -511,12 +579,10 @@ class FormattingBuilder {
 
     let children: readonly FormattingNodeId[];
     if (kind === "flex-container" || kind === "grid-container") {
-      children = rawChildren.map((child) => this.#anonymousContainer(
-        kind === "flex-container" ? "flex-item" : "grid-item",
-        child.styleNode,
-        [child.id],
-        "block"
-      ).id);
+      children = this.#independentFormattingItems(
+        rawChildren,
+        kind === "flex-container" ? "flex-item" : "grid-item"
+      );
     } else if (kind === "table" || kind === "table-column-group" || kind === "table-row" || kind === "table-header-group"
       || kind === "table-body-group" || kind === "table-footer-group") {
       children = this.#tableFixup(rawChildren, kind, source);
@@ -524,12 +590,22 @@ class FormattingBuilder {
       const fixedChildren = this.#tableFixup(rawChildren, kind, source)
         .map((id) => this.#nodes.get(id))
         .filter((node): node is FormattingNode => node !== undefined);
-      children = this.#mixedFlow(fixedChildren, source, outer);
+      if (kind === "inline-container" && display.inner === "flow"
+        && fixedChildren.some((child) => !inlineLevel(child))) {
+        return [...this.#inlineContinuations(source, fixedChildren)];
+      }
+      children = this.#mixedFlow(fixedChildren, source);
     }
 
     if (kind === "list-item") {
       const pseudoStyle = this.#styles.pseudo(source, "marker") ?? style;
-      const marker = this.#text("marker", source, source, markerText(pseudoStyle.listStyleType, this.#listOrdinal(source)), "marker");
+      const marker = this.#text(
+        "marker",
+        source,
+        source,
+        pseudoStyle.generatedContent ?? markerText(pseudoStyle.listStyleType, this.#listOrdinal(source)),
+        "marker"
+      );
       if (marker !== null) children = [marker.id, ...children];
     }
 
@@ -627,7 +703,7 @@ class FormattingBuilder {
 }
 
 class ImmutableFormattingTree implements FormattingTree {
-  readonly document: WebDocumentSnapshotView;
+  readonly document: IndexedWebDocumentSnapshot;
   readonly state: DocumentState;
   readonly styles: StyleSnapshot;
   readonly root: FormattingNodeId;
@@ -638,7 +714,7 @@ class ImmutableFormattingTree implements FormattingTree {
   readonly #sourceIndex: ReadonlyMap<DocumentNodeRef, readonly FormattingNodeId[]>;
 
   public constructor(
-    document: WebDocumentSnapshotView,
+    document: IndexedWebDocumentSnapshot,
     state: DocumentState,
     styles: StyleSnapshot,
     root: FormattingNodeId,

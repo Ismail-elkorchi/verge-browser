@@ -45,10 +45,21 @@ test("legacy flat renderer contracts and files are absent", async () => {
   }
 });
 
-test("the public document barrel exposes no concrete snapshot or parser implementation", async () => {
+test("the document barrel exposes no concrete snapshot or parser implementation", async () => {
   const declaration = await source("dist/document/index.d.ts");
   assert.doesNotMatch(
     declaration,
-    /(?:WebDocumentSnapshot|snapshot\.js|@ismail-elkorchi\/html-parser)/u
+    /(?:snapshot\.js|@ismail-elkorchi\/html-parser)/u
   );
+});
+
+test("the root API does not publish document construction, editing, or mutable state contracts", async () => {
+  const declaration = await source("dist/mod.d.ts");
+  assert.doesNotMatch(
+    declaration,
+    /\b(?:parseWebDocument|createDocumentState|applyDocumentAction|DocumentEdit|applySourceEdits|applyEdits)\b/u
+  );
+  for (const [path, text] of await files(await sourcePaths())) {
+    assert.doesNotMatch(text, /\b(?:DocumentEdit|applySourceEdits|applyEdits)\b/u, `${path} retains source editing`);
+  }
 });

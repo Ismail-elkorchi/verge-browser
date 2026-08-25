@@ -6,13 +6,12 @@
  * remain internal while their contracts mature.
  *
  * ```ts
- * import { parseWebDocument } from "@ismail-elkorchi/verge-browser";
+ * import { BrowserSession } from "@ismail-elkorchi/verge-browser";
  *
- * const document = parseWebDocument(
- *   "<h1>Hello</h1><a href='/docs'>Docs</a>",
- *   { requestUrl: "https://example.com", finalUrl: "https://example.com" }
- * );
- * console.log(document.title, document.links[0]?.destination);
+ * const session = new BrowserSession();
+ * const page = await session.open("about:help");
+ * console.log(page.document.title);
+ * await session.close();
  * ```
  *
  * @module
@@ -28,11 +27,6 @@ export {
   type LocalFileReader,
   type PageNetworkClientOptions
 } from "./app/fetch-page.js";
-export {
-  buildGetSubmissionUrl,
-  buildFormSubmissionRequest,
-  type FormSubmissionRequest
-} from "./app/forms.js";
 export {
   DEFAULT_SECURITY_POLICY,
   assertAllowedProtocol,
@@ -59,57 +53,8 @@ export type {
   FetchStylesheetResult,
   PageSnapshot
 } from "./app/types.js";
-export {
-  parseWebDocument,
-  parseWebDocumentBytes,
-  parseWebDocumentStream,
-  createDocumentState,
-  applyDocumentAction
-} from "./document/index.js";
 export type {
-  WebDocumentBytesOptions,
-  WebDocumentParseBudgetOptions,
-  WebDocumentParseContext,
-  WebDocumentParseOptions,
-  WebDocumentStreamBudgetOptions,
-  WebDocumentStreamOptions,
-  DocumentAction,
-  DocumentAttribute,
-  DocumentControlState,
-  DocumentButtonControl,
-  DocumentChoiceControl,
-  DocumentDisclosure,
-  DocumentEdit,
-  DocumentForm,
-  DocumentFormControl,
-  DocumentFormControlBase,
-  DocumentHeading,
-  DocumentIndexLimits,
-  DocumentIndexOutcome,
-  DocumentLabel,
-  DocumentLandmark,
-  DocumentLink,
-  DocumentMetadataEntry,
-  DocumentNodeRef,
-  DocumentOutlineEntry,
-  DocumentParserDiagnostic,
-  DocumentReplacedContent,
-  DocumentSelectControl,
-  DocumentSelectOption,
-  DocumentSemanticEntry,
-  DocumentSemanticRole,
-  DocumentSourceMetadata,
-  DocumentSourceRange,
-  DocumentState,
-  DocumentStylesheetReference,
-  DocumentTextControl,
-  DocumentTextareaControl,
-  DocumentHiddenControl,
-  DocumentUnsupportedControl,
-  WebDocumentNode,
-  WebDocumentSnapshotView,
-  WebElementNode,
-  WebTextNode
+  WebDocumentSnapshot
 } from "./document/index.js";
 export {
   DEFAULT_SEARCH_URL_TEMPLATE,

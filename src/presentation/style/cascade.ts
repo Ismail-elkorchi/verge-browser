@@ -22,7 +22,7 @@ import {
 import {
   type DocumentNodeRef,
   type WebDocumentNode,
-  type WebDocumentSnapshotView,
+  type IndexedWebDocumentSnapshot,
   type WebElementNode
 } from "../../document/index.js";
 import { USER_AGENT_STYLESHEET, USER_AGENT_STYLESHEET_SOURCE } from "./user-agent.js";
@@ -53,7 +53,6 @@ const DEFAULT_STYLE_BUDGETS: StyleBudgets = Object.freeze({
   maxInlineStylesheetBytes: 512 * 1024,
   maxSelectorQueries: 4_096,
   maxSelectorSteps: 500_000,
-  maxComputedNodes: 100_000,
   maxDiagnostics: 128
 });
 
@@ -617,32 +616,34 @@ function splitSelectorBranches(value: string): readonly string[] {
   return branches.map((branch) => branch.trim()).filter(Boolean);
 }
 
-function collectStyleNodes(
-  input: ResolveStylesInput,
-  limit: number
-): { readonly nodes: readonly DocumentNodeRef[]; readonly truncated: boolean } {
+function collectStyleNodes(input: ResolveStylesInput): {
+  readonly elements: readonly DocumentNodeRef[];
+  readonly totalNodes: number;
+} {
   const nodes: DocumentNodeRef[] = [];
   const pending = [input.document.root];
+  let totalNodes = 0;
   while (pending.length > 0) {
     input.signal?.throwIfAborted();
     const ref = pending.pop();
     if (ref === undefined) continue;
+    totalNodes += 1;
     const node = input.document.node(ref);
     for (let index = node.children.length - 1; index >= 0; index -= 1) {
       const child = node.children[index];
       if (child !== undefined) pending.push(child);
     }
     if (node.kind !== "element") continue;
-    if (nodes.length >= limit) return { nodes: Object.freeze(nodes), truncated: true };
     nodes.push(ref);
   }
-  return { nodes: Object.freeze(nodes), truncated: false };
+  return { elements: Object.freeze(nodes), totalNodes };
 }
 
 function collectCandidates(
   input: ResolveStylesInput,
   sources: readonly StylesheetSource[],
   styleNodes: readonly DocumentNodeRef[],
+  totalNodes: number,
   limits: StyleBudgets,
   diagnostics: DiagnosticCollector,
   truncate: (budget: keyof StyleBudgets) => void
@@ -690,29 +691,31 @@ function collectCandidates(
           const matching = matchingByPseudo.get(pseudo.pseudo) ?? new Map<DocumentNodeRef, SelectorSpecificity>();
           matchingByPseudo.set(pseudo.pseudo, matching);
           for (const [index, selector] of parsed.value.selectors.entries()) {
-            if (queryCount >= limits.maxSelectorQueries) {
+            const authorRule = source.origin === "author";
+            if (authorRule && queryCount >= limits.maxSelectorQueries) {
               truncate("maxSelectorQueries");
               selectorExhaustion.add("maxSelectorQueries");
               exhausted = true;
               break;
             }
-            if (selectorSteps >= limits.maxSelectorSteps) {
+            if (authorRule && selectorSteps >= limits.maxSelectorSteps) {
               truncate("maxSelectorSteps");
               selectorExhaustion.add("maxSelectorSteps");
               exhausted = true;
               break;
             }
-            queryCount += 1;
+            if (authorRule) queryCount += 1;
             try {
+              const baselineSteps = Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, totalNodes * 128));
               const result = querySelectorList(selectorListFor(selector, parsed.value), root, environment, {
                 limits: {
-                  maxNodes: limits.maxSelectorSteps,
-                  maxDepth: 2_048,
-                  maxSteps: limits.maxSelectorSteps - selectorSteps
+                  maxNodes: authorRule ? limits.maxSelectorSteps : Math.max(1, totalNodes),
+                  maxDepth: authorRule ? 2_048 : Math.max(1, totalNodes),
+                  maxSteps: authorRule ? limits.maxSelectorSteps - selectorSteps : baselineSteps
                 },
                 ...(input.signal === undefined ? {} : { signal: input.signal })
               });
-              selectorSteps += result.usage.steps;
+              if (authorRule) selectorSteps += result.usage.steps;
               const parsedSpecificity = specificities[index] ?? { a: 0, b: 0, c: 0 };
               const specificity = pseudo.pseudo === null
                 ? parsedSpecificity
@@ -729,12 +732,16 @@ function collectCandidates(
               }
             } catch (error) {
               input.signal?.throwIfAborted();
-              if (error !== null && typeof error === "object" && "code" in error && error.code === "CSS_RESOURCE_LIMIT_EXCEEDED") {
+              if (authorRule && error !== null && typeof error === "object" && "code" in error
+                && error.code === "CSS_RESOURCE_LIMIT_EXCEEDED") {
                 truncate("maxSelectorSteps");
                 selectorExhaustion.add("maxSelectorSteps");
                 exhausted = true;
                 break;
               }
+              if (!authorRule) throw new Error("The built-in user-agent stylesheet exceeded its fixed evaluation bound.", {
+                cause: error
+              });
               diagnostics.add("selector-unknown", source.sourceUrl, error instanceof Error ? error.name : "Selector evaluation failed.");
             }
           }
@@ -970,8 +977,7 @@ function initialStyle(parent: ComputedStyle | null, replaced: boolean): Computed
       overflowX: "visible",
       overflowY: "visible"
     },
-    generatedBefore: null,
-    generatedAfter: null,
+    generatedContent: null,
     customProperties: parent?.customProperties ?? new Map()
   };
 }
@@ -1259,7 +1265,7 @@ function parseColor(value: string, current: CssColor | null): CssColor | null | 
   return NAMED_COLORS[normalized];
 }
 
-function generatedContent(value: string, document: WebDocumentSnapshotView, node: DocumentNodeRef): string | null | undefined {
+function generatedContent(value: string, document: IndexedWebDocumentSnapshot, node: DocumentNodeRef): string | null | undefined {
   const normalized = value.trim();
   if (normalized === "none" || normalized === "normal") return null;
   const pieces: string[] = [];
@@ -1275,7 +1281,7 @@ function generatedContent(value: string, document: WebDocumentSnapshotView, node
 }
 
 function computeStyle(
-  document: WebDocumentSnapshotView,
+  document: IndexedWebDocumentSnapshot,
   node: DocumentNodeRef,
   parent: ComputedStyle | null,
   candidates: ReadonlyMap<string, readonly CascadeCandidate[]> | undefined,
@@ -1659,19 +1665,18 @@ function computeStyle(
   if (content !== null && pseudo !== null) {
     const wide = cssWide(content.value);
     const computed = wide === "inherit"
-      ? pseudo === "before" ? parent?.generatedBefore ?? null : parent?.generatedAfter ?? null
+      ? parent?.generatedContent ?? null
       : wide === "initial" || wide === "unset"
         ? null
         : generatedContent(content.value, document, node);
     if (computed === undefined) unsupported(content);
-    else if (pseudo === "before") style = { ...style, generatedBefore: computed };
-    else if (pseudo === "after") style = { ...style, generatedAfter: computed };
+    else style = { ...style, generatedContent: computed };
   }
   return immutableComputedStyle(style);
 }
 
 class ImmutableStyleSnapshot implements StyleSnapshot {
-  readonly document: WebDocumentSnapshotView;
+  readonly document: IndexedWebDocumentSnapshot;
   readonly environment: ResolveStylesInput["environment"];
   readonly diagnostics: readonly StyleDiagnostic[];
   readonly stylesheetCount: number;
@@ -1703,10 +1708,6 @@ class ImmutableStyleSnapshot implements StyleSnapshot {
     return style;
   }
 
-  public has(node: DocumentNodeRef): boolean {
-    return this.#styles.has(node);
-  }
-
   public pseudo(node: DocumentNodeRef, identity: PseudoElementIdentity): ComputedStyle | null {
     return this.#pseudos.get(styleKey(node, identity)) ?? null;
   }
@@ -1731,14 +1732,21 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
   const truncate = (budget: keyof StyleBudgets): void => {
     truncatedBudgets.add(budget);
   };
-  const styleNodes = collectStyleNodes(input, limits.maxComputedNodes);
-  if (styleNodes.truncated) truncate("maxComputedNodes");
+  const styleNodes = collectStyleNodes(input);
   const sources = stylesheetSources(input, limits, diagnostics, truncate);
-  const candidates = collectCandidates(input, sources, styleNodes.nodes, limits, diagnostics, truncate);
+  const candidates = collectCandidates(
+    input,
+    sources,
+    styleNodes.elements,
+    styleNodes.totalNodes,
+    limits,
+    diagnostics,
+    truncate
+  );
   const styles = new Map<DocumentNodeRef, ComputedStyle>();
   const pseudos = new Map<string, ComputedStyle>();
   let computedNodes = 0;
-  for (const ref of styleNodes.nodes) {
+  for (const ref of styleNodes.elements) {
     input.signal?.throwIfAborted();
     const parentNode = input.document.parent(ref);
     const parentStyle = parentNode?.kind === "element" ? styles.get(parentNode.ref) ?? null : null;

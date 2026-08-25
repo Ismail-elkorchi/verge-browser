@@ -30,7 +30,7 @@ Node/npm includes the supported library primitives and the packaged `verge` CLI 
 - command parsing and formatting
 - page, stream, and stylesheet fetch adapters
 - browser sessions, including caller-supplied redirect-aware cookie handling
-- immutable `WebDocumentSnapshotView` parsing and typed document state/actions
+- immutable `WebDocumentSnapshot` values returned by browser navigation
 - CSS-aware browser sessions whose presentation remains browser-internal
 - runtime hosts (Node/Deno/Bun)
 - exported runtime and diagnostics types
@@ -41,9 +41,9 @@ the internal style snapshot, formatting tree, fragment tree, and row
 projection. Interactive and one-shot CLI output both use those same internal
 structural stages.
 
-The document factories expose Verge-owned budget, transport-encoding, and
-cancellation options. The concrete snapshot constructor and HTML-parser result
-types are intentionally not root APIs.
+The package root exposes one read-only `WebDocumentSnapshot` interface through
+navigation results. Document factories, indexed semantic contracts, dynamic
+state, the concrete implementation, and HTML-parser result types are internal.
 
 ## Behavioral boundary
 

@@ -5,11 +5,9 @@
  * Run: npm run build && node examples/run-all.mjs
  */
 import { runCommandHelp } from "./command-help.mjs";
-import { runInspectDocument } from "./inspect-document.mjs";
 import { runUrlPolicy } from "./url-policy.mjs";
 
 runCommandHelp();
 runUrlPolicy();
-runInspectDocument();
 
 console.log("examples:run ok");

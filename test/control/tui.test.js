@@ -236,9 +236,38 @@ test("find and scrolling operate on fragment/source identities", async () => {
     });
     const search = runtime.state().documents[0].search;
     assert.ok(search?.matches.length > 1);
-    assert.ok(search.matches.every((match) => match.source !== null));
+    assert.ok(search.matches.every((match) => match.sources.every((source) => source !== null)));
     await runtime.dispatch({ kind: "moveSearch", direction: "next" });
     assert.equal(runtime.state().documents[0].search.activeMatchIndex, 1);
+  } finally {
+    await runtime.dispose();
+    await prepared.controller.close();
+  }
+});
+
+test("interactive find keeps one logical match while resize reprojects its highlight slices", async () => {
+  const { runtime, prepared } = await preparedFixture({ terminalSize: { columns: 24, rows: 20 } });
+  try {
+    const query = "page with a wrapping label";
+    await runtime.dispatch({ kind: "openFind" });
+    await runtime.dispatch({
+      kind: "findAction",
+      action: { kind: "edit", operation: { kind: "insert", text: query } }
+    });
+    const narrowDocument = runtime.state().documents[0];
+    const narrowSearch = narrowDocument.search;
+    assert.equal(narrowSearch?.matches.length, 1);
+    const matchId = narrowSearch.matches[0].id;
+    const narrowProjection = documentLayout(narrowDocument, 23, 16).fragments.search(query);
+    assert.equal(narrowProjection.matches[0]?.id, matchId);
+    assert.ok(new Set(narrowProjection.matches[0].ranges.map((range) => range.row)).size > 1);
+
+    await runtime.resize({ columns: 80, rows: 24 });
+    const wideDocument = runtime.state().documents[0];
+    assert.equal(wideDocument.search?.matches[0]?.id, matchId);
+    const wideProjection = documentLayout(wideDocument, 79, 20).fragments.search(query);
+    assert.equal(wideProjection.matches[0]?.id, matchId);
+    assert.equal(new Set(wideProjection.matches[0].ranges.map((range) => range.row)).size, 1);
   } finally {
     await runtime.dispose();
     await prepared.controller.close();

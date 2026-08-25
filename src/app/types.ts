@@ -1,6 +1,6 @@
 import type { HttpFields } from "@ismail-elkorchi/http-client";
 
-import type { WebDocumentSnapshotView } from "../document/index.js";
+import type { IndexedWebDocumentSnapshot, WebDocumentSnapshot } from "../document/index.js";
 import type { StyleDiagnostic, StylesheetResource } from "../presentation/style/index.js";
 
 /** Classified network outcome kinds surfaced by fetch helpers and page snapshots. */
@@ -100,8 +100,18 @@ export interface PageSnapshot {
   readonly contentType: string | null;
   readonly responseFields: HttpFields;
   readonly fetchedAtIso: string;
-  readonly document: WebDocumentSnapshotView;
+  readonly document: WebDocumentSnapshot;
   readonly stylesheets: readonly StylesheetResource[];
   readonly styleDiagnostics: readonly StyleDiagnostic[];
   readonly diagnostics: PageDiagnostics;
+}
+
+/** @internal Browser-owned snapshot with indexes required by presentation and UI subsystems. */
+export interface IndexedPageSnapshot extends Omit<PageSnapshot, "document"> {
+  readonly document: IndexedWebDocumentSnapshot;
+}
+
+/** @internal Narrows a browser-produced public snapshot at Verge's internal ownership boundary. */
+export function indexedPageSnapshot(snapshot: PageSnapshot): IndexedPageSnapshot {
+  return snapshot as IndexedPageSnapshot;
 }

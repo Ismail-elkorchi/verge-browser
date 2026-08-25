@@ -1,7 +1,7 @@
 # Structural rendering pipeline
 
-Verge has one HTML presentation path. Network loading produces an immutable
-`WebDocumentSnapshotView`; style resolution produces computed CSS values; box
+Verge has one HTML presentation path. Network loading produces one immutable,
+indexed document graph; style resolution produces computed CSS values; box
 generation produces a `FormattingTree`; terminal layout produces a nested
 `FragmentTree`; and the CLI and interactive UI project the same fragments.
 
@@ -9,7 +9,8 @@ The ownership boundaries are intentionally strict:
 
 - `src/document/` is the only layer that imports the HTML parser. It owns node
   identities, source ranges, document semantics, reusable indexes, document
-  state, and typed edits.
+  state, and typed actions. The package root exposes only a small read-only
+  structural view of this graph through navigation snapshots.
 - `src/presentation/style/` owns the user-agent stylesheet, author-style
   collection, cascade, computed values, selector state, diagnostics, and style
   work budgets. It is terminal- and transport-independent.

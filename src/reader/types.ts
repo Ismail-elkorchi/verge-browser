@@ -1,4 +1,4 @@
-import type { DocumentNodeRef, WebDocumentSnapshotView } from "../document/index.js";
+import type { DocumentNodeRef, IndexedWebDocumentSnapshot } from "../document/index.js";
 
 export type ReaderBlock =
   | { readonly kind: "heading"; readonly source: DocumentNodeRef; readonly level: number; readonly text: string }
@@ -19,7 +19,7 @@ export interface ReaderTableRow {
 }
 
 export interface ReaderProjection {
-  readonly document: WebDocumentSnapshotView;
+  readonly document: IndexedWebDocumentSnapshot;
   readonly title: string;
   readonly blocks: readonly ReaderBlock[];
   readonly truncated: boolean;

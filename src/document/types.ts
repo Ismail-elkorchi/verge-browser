@@ -326,14 +326,6 @@ export type DocumentAction =
   | { readonly kind: "hover"; readonly target: DocumentNodeRef | null }
   | { readonly kind: "activate"; readonly target: DocumentNodeRef | null };
 
-export type DocumentEdit =
-  | { readonly kind: "remove-node"; readonly target: DocumentNodeRef }
-  | { readonly kind: "replace-text"; readonly target: DocumentNodeRef; readonly value: string }
-  | { readonly kind: "set-attribute"; readonly target: DocumentNodeRef; readonly name: string; readonly value: string }
-  | { readonly kind: "remove-attribute"; readonly target: DocumentNodeRef; readonly name: string }
-  | { readonly kind: "insert-html-before"; readonly target: DocumentNodeRef; readonly html: string }
-  | { readonly kind: "insert-html-after"; readonly target: DocumentNodeRef; readonly html: string };
-
 export interface DocumentControlState {
   readonly values: readonly string[];
   readonly checked: boolean | null;
@@ -349,7 +341,8 @@ export interface DocumentState {
   readonly urlTarget: DocumentNodeRef | null;
 }
 
-export interface WebDocumentSnapshotView {
+/** Deliberate read-only document structure exposed by navigation snapshots. */
+export interface WebDocumentSnapshot {
   readonly root: DocumentNodeRef;
   readonly documentElement: DocumentNodeRef | null;
   readonly head: DocumentNodeRef | null;
@@ -358,6 +351,23 @@ export interface WebDocumentSnapshotView {
   readonly finalUrl: string;
   readonly baseUrl: string;
   readonly title: string;
+  readonly sourceMetadata: DocumentSourceMetadata;
+  /** Retained decoded source when parsing was configured to preserve it. */
+  readonly sourceText: string | null;
+  node(ref: DocumentNodeRef): WebDocumentNode;
+  parent(ref: DocumentNodeRef): WebDocumentNode | null;
+  children(ref: DocumentNodeRef): readonly WebDocumentNode[];
+  attribute(ref: DocumentNodeRef, name: string, namespace?: string | null): string | null;
+  text(ref: DocumentNodeRef, maxCodeUnits?: number): string;
+  textSourceRange(
+    ref: DocumentNodeRef,
+    startCodeUnit: number,
+    endCodeUnit: number
+  ): DocumentSourceRange | null;
+}
+
+/** @internal Indexed document contract consumed by browser subsystems. */
+export interface IndexedWebDocumentSnapshot extends WebDocumentSnapshot {
   readonly metadata: readonly DocumentMetadataEntry[];
   readonly links: readonly DocumentLink[];
   readonly stylesheets: readonly DocumentStylesheetReference[];
@@ -370,21 +380,7 @@ export interface WebDocumentSnapshotView {
   readonly replacedContent: readonly DocumentReplacedContent[];
   readonly disclosures: readonly DocumentDisclosure[];
   readonly diagnostics: readonly DocumentParserDiagnostic[];
-  readonly sourceMetadata: DocumentSourceMetadata;
   readonly indexOutcome: DocumentIndexOutcome;
-  /** Retained decoded source when parsing was configured to preserve it. */
-  readonly sourceText: string | null;
-  node(ref: DocumentNodeRef): WebDocumentNode;
-  parent(ref: DocumentNodeRef): WebDocumentNode | null;
-  children(ref: DocumentNodeRef): readonly WebDocumentNode[];
-  attribute(ref: DocumentNodeRef, name: string, namespace?: string | null): string | null;
-  text(ref: DocumentNodeRef, maxCodeUnits?: number): string;
-  /** Maps a decoded text-node range back to retained HTML source when the mapping is exact. */
-  textSourceRange(
-    ref: DocumentNodeRef,
-    startCodeUnit: number,
-    endCodeUnit: number
-  ): DocumentSourceRange | null;
   semantic(ref: DocumentNodeRef): DocumentSemanticEntry | null;
   elementById(id: string): DocumentNodeRef | null;
   form(ref: DocumentNodeRef): DocumentForm | null;
@@ -397,5 +393,4 @@ export interface WebDocumentSnapshotView {
   heading(ref: DocumentNodeRef): DocumentHeading | null;
   replaced(ref: DocumentNodeRef): DocumentReplacedContent | null;
   disclosure(ref: DocumentNodeRef): DocumentDisclosure | null;
-  applySourceEdits(edits: readonly DocumentEdit[]): string;
 }

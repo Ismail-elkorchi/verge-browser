@@ -3,9 +3,8 @@ import type { HttpSessionAdapter } from "@ismail-elkorchi/http-client";
 import {
   parseWebDocument,
   parseWebDocumentStream,
-  type DocumentEdit,
   type WebDocumentParseOptions,
-  type WebDocumentSnapshotView
+  type IndexedWebDocumentSnapshot
 } from "../document/index.js";
 import type { StyleDiagnostic, StylesheetResource } from "../presentation/style/index.js";
 import {
@@ -23,7 +22,8 @@ import type {
   FetchStylesheetResult,
   PageDiagnostics,
   PageRequestOptions,
-  PageSnapshot
+  PageSnapshot,
+  IndexedPageSnapshot
 } from "./types.js";
 
 export type PageLoader = (
@@ -77,7 +77,7 @@ interface NavigationTimings {
 }
 
 interface HistoryEntry {
-  readonly snapshot: PageSnapshot;
+  readonly snapshot: IndexedPageSnapshot;
   readonly parseMode: ParseMode;
   readonly navigationAccess: NavigationAccess;
 }
@@ -119,7 +119,7 @@ function unknownNetworkOutcome(): PageDiagnostics["networkOutcome"] {
 }
 
 function diagnosticsFromDocument(
-  document: WebDocumentSnapshotView,
+  document: IndexedWebDocumentSnapshot,
   styleDiagnostics: readonly StyleDiagnostic[],
   stylesheetCount: number,
   parseMode: ParseMode,
@@ -185,7 +185,7 @@ export class BrowserSession {
   readonly #defaultParseMode: ParseMode;
   readonly #history: HistoryEntry[] = [];
   #historyIndex = -1;
-  #current: PageSnapshot | null = null;
+  #current: IndexedPageSnapshot | null = null;
   #activeNavigation: AbortController | null = null;
   #navigationSequence = 0;
   #closed = false;
@@ -390,7 +390,7 @@ export class BrowserSession {
   }
 
   async #loadStylesheets(
-    document: WebDocumentSnapshotView,
+    document: IndexedWebDocumentSnapshot,
     requestOptions: PageRequestOptions
   ): Promise<LoadedStylesheets> {
     const resources: StylesheetResource[] = [];
@@ -505,70 +505,11 @@ export class BrowserSession {
     };
   }
 
-  public async applyEdits(edits: readonly DocumentEdit[], signal?: AbortSignal): Promise<PageSnapshot> {
-    const current = this.#current;
-    if (!current) throw new Error("No page is loaded");
-    const navigation = this.#navigationOptions({ ...(signal === undefined ? {} : { signal }) });
-    try {
-      const startedAtMs = Date.now();
-      navigation.options.signal?.throwIfAborted();
-      const patchedHtml = current.document.applySourceEdits(edits);
-      const parseStartedAtMs = Date.now();
-      const document = parseWebDocument(
-        patchedHtml,
-        { requestUrl: current.requestUrl, finalUrl: current.finalUrl },
-        {
-          ...this.#parseOptions,
-          ...(navigation.options.signal === undefined ? {} : { signal: navigation.options.signal })
-        }
-      );
-      const parseDurationMs = Date.now() - parseStartedAtMs;
-      const stylesheetStartedAtMs = Date.now();
-      const stylesheets = await this.#loadStylesheets(document, navigation.options);
-      const stylesheetDurationMs = Date.now() - stylesheetStartedAtMs;
-      navigation.options.signal?.throwIfAborted();
-      this.#finishNavigation(navigation.sequence);
-      const snapshot: PageSnapshot = Object.freeze({
-        ...current,
-        document,
-        stylesheets: stylesheets.resources,
-        styleDiagnostics: stylesheets.diagnostics,
-        diagnostics: diagnosticsFromDocument(
-          document,
-          stylesheets.diagnostics,
-          document.stylesheets.filter((entry) => entry.kind === "embedded").length + stylesheets.resources.length,
-          current.diagnostics.parseMode,
-          current.diagnostics.requestMethod,
-          {
-            fetchDurationMs: 0,
-            parseDurationMs,
-            documentDurationMs: parseDurationMs,
-            stylesheetDurationMs,
-            totalDurationMs: Date.now() - startedAtMs
-          },
-          current.diagnostics.networkOutcome
-        )
-      });
-      this.#current = snapshot;
-      if (this.#historyIndex >= 0) {
-        this.#history[this.#historyIndex] = {
-          snapshot,
-          parseMode: current.diagnostics.parseMode,
-          navigationAccess: this.#history[this.#historyIndex]?.navigationAccess ?? "direct"
-        };
-      }
-      return snapshot;
-    } catch (error) {
-      this.#failNavigation(navigation.sequence);
-      throw error;
-    }
-  }
-
   async #parseFetchedPayload(
     parseMode: ParseMode,
     fetchedPage: FetchPagePayload,
     signal: AbortSignal
-  ): Promise<WebDocumentSnapshotView> {
+  ): Promise<IndexedWebDocumentSnapshot> {
     const context = { requestUrl: fetchedPage.requestUrl, finalUrl: fetchedPage.finalUrl };
     if ("html" in fetchedPage) {
       return parseWebDocument(fetchedPage.html, context, { ...this.#parseOptions, signal });
@@ -584,7 +525,7 @@ export class BrowserSession {
   }
 
   #commitHistory(
-    snapshot: PageSnapshot,
+    snapshot: IndexedPageSnapshot,
     mode: "push" | "replace",
     parseMode: ParseMode,
     navigationAccess: NavigationAccess
@@ -631,7 +572,7 @@ export class BrowserSession {
       }
       const fetchDurationMs = Date.now() - fetchStartedAtMs;
       const parseStartedAtMs = Date.now();
-      let document: WebDocumentSnapshotView;
+      let document: IndexedWebDocumentSnapshot;
       try {
         signal.throwIfAborted();
         document = await this.#parseFetchedPayload(parseMode, fetchedPage, signal);
@@ -652,7 +593,7 @@ export class BrowserSession {
       const stylesheetDurationMs = Date.now() - stylesheetStartedAtMs;
       signal.throwIfAborted();
       this.#finishNavigation(navigation.sequence);
-      const snapshot: PageSnapshot = Object.freeze({
+      const snapshot: IndexedPageSnapshot = Object.freeze({
         requestUrl: fetchedPage.requestUrl,
         finalUrl: fetchedPage.finalUrl,
         status: fetchedPage.status,

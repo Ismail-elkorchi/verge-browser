@@ -105,13 +105,12 @@
 - `signal`: aborts the request, retry wait, and session navigation.
 
 ### `PageSnapshot`
-- `document` is Verge's immutable `WebDocumentSnapshotView`, with opaque node
-  references, parent/child structure, retained decoded source, source metadata,
-  and prebuilt semantic indexes.
-- Browser sessions retain source for buffered and streamed HTML. The public
-  `parseWebDocument*()` factories use the same deliberate document contract.
-- The factories return `WebDocumentSnapshotView`; the parser result and the
-  concrete snapshot implementation are not public construction APIs.
+- `document` is Verge's immutable `WebDocumentSnapshot`, with opaque node
+  references, parent/child structure, retained decoded source, and source
+  metadata.
+- Browser sessions retain source for buffered and streamed HTML. Document
+  construction, dynamic state, and the concrete snapshot implementation are
+  internal browser subsystems rather than root package APIs.
 - Presentation is derived for the current viewport. There is no pre-rendered,
   fixed-width field on the snapshot.
 - `stylesheets` contains the bounded resources attached to the document;
@@ -119,8 +118,6 @@
 - `diagnostics.stylesheetLoadIssueCount` counts those load failures. Cascade
   diagnostics remain part of the browser diagnostics presentation because
   they depend on the active style environment.
-- `applyEdits()` is asynchronous because changed HTML can change linked
-  stylesheet resources.
 - `responseFields` preserves ordered response field lines as `HttpFields`.
 - Interactive extraction considers at most 256 forms per page, 2,000 controls
   per form, and 2,000 options per select.

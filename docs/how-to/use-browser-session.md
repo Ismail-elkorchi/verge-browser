@@ -40,7 +40,7 @@ const session = new BrowserSession({
 try {
   const snapshot = await session.open("https://example.test/");
   console.log(snapshot.status);
-  console.log(snapshot.document.headings[0]?.text);
+  console.log(snapshot.document.text(snapshot.document.body));
   console.log(snapshot.diagnostics.parseErrorCount);
 } finally {
   await session.close();

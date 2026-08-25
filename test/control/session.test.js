@@ -126,56 +126,6 @@ test("BrowserSession openStream parses from byte stream", async () => {
   assert.ok(snapshot.document.sourceText?.includes("<title>A</title>"));
 });
 
-test("BrowserSession applyEdits mutates current snapshot deterministically", async () => {
-  const loader = async (requestUrl) => ({
-    requestUrl,
-    finalUrl: requestUrl,
-    status: 200,
-    statusText: "OK",
-    contentType: "text/html",
-    html: "<html><head><title>T</title></head><body><p>Hello</p></body></html>",
-    responseFields: htmlFields(),
-    networkOutcome: {
-      kind: "ok",
-      finalUrl: requestUrl,
-      status: 200,
-      statusText: "OK",
-      detailCode: "HTTP_200",
-      detailMessage: "200 OK"
-    },
-    fetchedAtIso: "2026-01-01T00:00:00.000Z"
-  });
-
-  const session = new BrowserSession({ loader, defaultParseMode: "text" });
-
-  await session.open("https://patch.example/");
-  const currentDocument = session.current?.document;
-  assert.ok(currentDocument);
-  const pending = [currentDocument.root];
-  let paragraphTextNode;
-  while (pending.length > 0 && paragraphTextNode === undefined) {
-    const ref = pending.shift();
-    const node = currentDocument.node(ref);
-    if (node.kind === "element" && node.name === "p") {
-      paragraphTextNode = currentDocument.children(node.ref).find((child) => child.kind === "text");
-      break;
-    }
-    pending.push(...node.children);
-  }
-  assert.ok(paragraphTextNode && paragraphTextNode.kind === "text");
-
-  const patched = await session.applyEdits([
-    {
-      kind: "replace-text",
-      target: paragraphTextNode.ref,
-      value: "Updated"
-    }
-  ]);
-
-  assert.ok(patched.document.sourceText?.includes("Updated"));
-  assert.equal(patched.document.text(patched.document.body), "Updated");
-});
-
 test("BrowserSession openWithRequest records the request method", async () => {
   let capturedRequestOptions = null;
   const loader = async (requestUrl, requestOptions) => {
@@ -424,27 +374,4 @@ test("superseded navigation cannot commit stale session history", async () => {
   assert.equal(session.current, current);
   assert.equal(session.current.document.title, "Fast");
   assert.equal(session.canBack(), false);
-});
-
-test("closing a session while applyEdits yields prevents the edited snapshot from committing", async () => {
-  const session = new BrowserSession({
-    defaultParseMode: "text",
-    loader: async (requestUrl) => ({
-      requestUrl,
-      finalUrl: requestUrl,
-      status: 200,
-      statusText: "OK",
-      contentType: "text/html",
-      html: "<title>Original</title><p>Body</p>",
-      responseFields: htmlFields(),
-      networkOutcome: { kind: "ok", finalUrl: requestUrl, status: 200, statusText: "OK", detailCode: "HTTP_200", detailMessage: "200 OK" },
-      fetchedAtIso: "2026-01-01T00:00:00.000Z"
-    })
-  });
-  const current = await session.open("https://edit.example/");
-  const pending = session.applyEdits([]);
-  await session.close();
-
-  await assert.rejects(pending, /closed/u);
-  assert.equal(session.current, current);
 });

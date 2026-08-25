@@ -2,7 +2,7 @@ import type { Rect } from "@ismail-elkorchi/terminal-ui/renderer";
 
 import type { DocumentForm, DocumentFormControl, DocumentLink, DocumentNodeRef } from "../document/index.js";
 import type { DocumentState } from "../document/index.js";
-import type { PageSnapshot } from "../app/types.js";
+import type { IndexedPageSnapshot } from "../app/types.js";
 import { presentDocument, type DocumentPresentation } from "../presentation/pipeline.js";
 import type { FragmentTree, TerminalAction } from "../presentation/terminal/index.js";
 import type { BrowserDocumentState } from "./model.js";
@@ -14,7 +14,7 @@ const TERMINAL_MEASURER = terminalTextMeasurer();
 
 interface CachedPresentation {
   readonly key: string;
-  readonly snapshot: PageSnapshot;
+  readonly snapshot: IndexedPageSnapshot;
   readonly state: DocumentState;
   readonly presentation: DocumentPresentation;
 }
@@ -24,7 +24,7 @@ export class DocumentPresentationCache {
   readonly #entries: CachedPresentation[] = [];
 
   public get(
-    snapshot: PageSnapshot,
+    snapshot: IndexedPageSnapshot,
     state: DocumentState,
     columns: number,
     rows: number
@@ -198,10 +198,6 @@ export function actionId(action: TerminalAction): string {
 
 export function formByRef(document: BrowserDocumentState, ref: DocumentNodeRef): DocumentForm | null {
   return document.snapshot.document.form(ref);
-}
-
-export function activeSearchMatch(document: BrowserDocumentState) {
-  return document.search?.matches[document.search.activeMatchIndex];
 }
 
 export function scrollToSource(

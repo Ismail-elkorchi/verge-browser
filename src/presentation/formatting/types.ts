@@ -4,7 +4,7 @@ import type {
   DocumentSemanticEntry,
   DocumentSourceRange,
   DocumentState,
-  WebDocumentSnapshotView
+  IndexedWebDocumentSnapshot
 } from "../../document/index.js";
 import type {
   ComputedWhiteSpace,
@@ -119,7 +119,7 @@ export type FormattingNode =
 
 export interface SuppressedFormattingSubtree {
   readonly source: DocumentNodeRef;
-  readonly reason: "display-none" | "style-unresolved";
+  readonly reason: "display-none";
 }
 
 export interface FormattingBudgets {
@@ -140,7 +140,7 @@ export type FormattingOutcome =
   | { readonly status: "rejected"; readonly reason: "document-style-mismatch" };
 
 export interface BuildFormattingTreeInput {
-  readonly document: WebDocumentSnapshotView;
+  readonly document: IndexedWebDocumentSnapshot;
   readonly state: DocumentState;
   readonly styles: StyleSnapshot;
   readonly budgets?: Partial<FormattingBudgets>;
@@ -148,7 +148,7 @@ export interface BuildFormattingTreeInput {
 }
 
 export interface FormattingTree {
-  readonly document: WebDocumentSnapshotView;
+  readonly document: IndexedWebDocumentSnapshot;
   readonly state: DocumentState;
   readonly styles: StyleSnapshot;
   readonly root: FormattingNodeId;

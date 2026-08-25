@@ -87,6 +87,11 @@ interface BrowserDocumentViewModel {
   readonly layout: FragmentTree;
   readonly finalUrl: string;
   readonly search: BrowserDocumentState["search"];
+  readonly searchRangesByRow: ReadonlyMap<number, readonly {
+    readonly match: string;
+    readonly start: number;
+    readonly end: number;
+  }[]>;
   readonly controlGroups: readonly BrowserControlGroup[];
   readonly formEditors: BrowserDocumentState["formEditors"];
 }
@@ -224,13 +229,12 @@ function rowSegments(
       ? [{ ...range, kind: "link", destination: action.destination }]
       : [{ ...range, kind: "disclosure" }];
   });
-  const active = document.search?.matches[document.search.activeMatchIndex];
-  const searchRanges = (document.search?.matches ?? [])
-    .filter((match) => match.rowIndex === rowIndex)
-    .map((match) => ({
-      start: match.startCodeUnitIndex,
-      end: match.endCodeUnitIndexExclusive,
-      active: active === match
+  const active = document.search?.matches[document.search.activeMatchIndex]?.id;
+  const searchRanges = (document.searchRangesByRow.get(rowIndex) ?? [])
+    .map((range) => ({
+      start: range.start,
+      end: range.end,
+      active: active === range.match
     }));
   const boundaries = new Set([0, rowText.length]);
   for (const range of [...inlineActions, ...searchRanges]) {
@@ -896,12 +900,29 @@ function browserDocumentViewModel(
   document: BrowserDocumentState,
   layout: FragmentTree
 ): BrowserDocumentViewModel {
+  const searchRangesByRow = new Map<number, {
+    readonly match: string;
+    readonly start: number;
+    readonly end: number;
+  }[]>();
+  if (document.search !== null) {
+    const retained = new Set(document.search.matches.map((match) => match.id));
+    for (const match of layout.search(document.search.query).matches) {
+      if (!retained.has(match.id)) continue;
+      for (const range of match.ranges) {
+        const entries = searchRangesByRow.get(range.row) ?? [];
+        entries.push({ match: match.id, start: range.startCodeUnit, end: range.endCodeUnit });
+        searchRangesByRow.set(range.row, entries);
+      }
+    }
+  }
   return {
     id: document.id,
     source: document,
     layout,
     finalUrl: document.snapshot.finalUrl,
     search: document.search,
+    searchRangesByRow,
     controlGroups: controlGroups(document.snapshot.document.controls),
     formEditors: document.formEditors
   };

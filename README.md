@@ -78,26 +78,22 @@ npm install @ismail-elkorchi/verge-browser
 
 ```ts
 import {
-  createDocumentState,
-  parseWebDocument,
+  BrowserSession,
   resolveInputUrl
 } from "@ismail-elkorchi/verge-browser";
 
 const target = resolveInputUrl("example.com");
-const document = parseWebDocument(
-  "<main><h1>Example</h1><a href='/docs'>Docs</a></main>",
-  { requestUrl: target, finalUrl: target }
-);
-const state = createDocumentState(document);
-console.log(document.headings[0]?.text, document.links[0]?.destination, state.focus);
+const session = new BrowserSession();
+const page = await session.open(target);
+console.log(page.document.title, page.finalUrl);
+await session.close();
 ```
 
-`WebDocumentSnapshotView` is the deliberate public content boundary: it preserves
-tree structure and exposes prebuilt semantic indexes for links, forms,
-headings, landmarks, replaced content, and source ranges. Verge's style,
-formatting-tree, fragment-tree, and terminal-projection contracts are internal
-until those abstractions have proven stable. Fixed-width rendered snapshots are
-not part of the library API.
+`WebDocumentSnapshot` is the single deliberate read-only document type exposed
+through navigation results. Document construction, dynamic state, semantic
+indexes, concrete implementations, style resolution, formatting, fragments,
+and terminal projection remain internal while their contracts mature.
+Fixed-width rendered snapshots are not part of the library API.
 
 The npm package contains the full Node CLI and library. The JSR package exposes
 the permission-light URL and fetch-policy utilities for Deno. Library smoke

@@ -34,7 +34,7 @@ import {
 import { formatHelpText, parseCommand, type BrowserCommand } from "../app/commands.js";
 import { NetworkFetchError } from "../app/fetch-page.js";
 import type { DownloadRecord } from "../app/storage.js";
-import type { PageRequestOptions, PageSnapshot } from "../app/types.js";
+import type { PageRequestOptions, IndexedPageSnapshot } from "../app/types.js";
 import {
   applyDocumentAction,
   createDocumentState,
@@ -219,7 +219,7 @@ function persistEffect(
 
 function persistSnapshotEffect(
   controller: BrowserController,
-  snapshot: PageSnapshot
+  snapshot: IndexedPageSnapshot
 ): TuiEffect<BrowserTuiMessage> {
   return effect("page-persistence", async () => {
     await controller.persistSnapshot(snapshot);
@@ -236,7 +236,7 @@ function contentColumns(state: BrowserTuiState, terminalColumns: number): number
 
 function pageFromSnapshot(
   document: BrowserDocumentState,
-  snapshot: PageSnapshot,
+  snapshot: IndexedPageSnapshot,
   navigation: { readonly canGoBack: boolean; readonly canGoForward: boolean }
 ): BrowserDocumentState {
   const savedViews = {
@@ -285,7 +285,7 @@ function pageText(document: BrowserDocumentState, columns: number): string {
 function navigationMessage(
   controller: BrowserController,
   document: BrowserDocumentState,
-  snapshot: PageSnapshot,
+  snapshot: IndexedPageSnapshot,
   label: string
 ): BrowserTuiMessage {
   return {
@@ -370,33 +370,37 @@ function searchDocument(
   document: BrowserDocumentState,
   query: string,
   columns: number
-): BrowserDocumentSearch {
+): { readonly search: BrowserDocumentSearch; readonly firstRow: number | null } {
   const boundedQuery = query.slice(0, MAX_PAGE_SEARCH_QUERY_CODE_UNITS);
   if (boundedQuery.length === 0) {
-    return { query: boundedQuery, matches: [], activeMatchIndex: 0, truncated: false };
+    return {
+      search: { query: boundedQuery, matches: [], activeMatchIndex: 0, truncated: false },
+      firstRow: null
+    };
   }
   const result = documentLayout(document, columns).fragments.search(boundedQuery);
-  const matches = result.ranges.slice(0, MAX_PAGE_SEARCH_MATCHES).map((range) => ({
-    rowIndex: range.row,
-    startCodeUnitIndex: range.startCodeUnit,
-    endCodeUnitIndexExclusive: range.endCodeUnit,
-    source: range.source
+  const projected = result.matches.slice(0, MAX_PAGE_SEARCH_MATCHES);
+  const matches = projected.map((match) => ({
+    id: match.id,
+    sources: Object.freeze([...new Set(match.ranges.map((range) => range.source))])
   }));
   return {
-    query: boundedQuery,
-    matches,
-    activeMatchIndex: 0,
-    truncated: result.truncated || result.ranges.length > MAX_PAGE_SEARCH_MATCHES
+    search: {
+      query: boundedQuery,
+      matches,
+      activeMatchIndex: 0,
+      truncated: result.truncated || result.matches.length > MAX_PAGE_SEARCH_MATCHES
+    },
+    firstRow: projected[0]?.ranges[0]?.row ?? null
   };
 }
 
 function applySearch(state: BrowserTuiState, query: string, columns: number): BrowserTuiState {
   const document = activeDocument(state);
-  const search = searchDocument(document, query, columns);
-  const first = search.matches[0];
-  const updated = first === undefined
+  const { search, firstRow } = searchDocument(document, query, columns);
+  const updated = firstRow === null
     ? { ...document, search }
-    : documentWithScrollRow({ ...document, search }, documentLayout(document, columns).fragments, first.rowIndex);
+    : documentWithScrollRow({ ...document, search }, documentLayout(document, columns).fragments, firstRow);
   return {
     ...updateDocument(state, document.id, () => updated),
     status: search.matches.length === 0
@@ -415,13 +419,11 @@ function moveSearch(
   const delta = direction === "next" ? 1 : -1;
   const activeMatchIndex = (search.activeMatchIndex + delta + search.matches.length) % search.matches.length;
   const match = search.matches[activeMatchIndex];
-  return match === undefined
-    ? document
-    : documentWithScrollRow(
-      { ...document, search: { ...search, activeMatchIndex } },
-      documentLayout(document, columns).fragments,
-      match.rowIndex
-    );
+  if (match === undefined) return document;
+  const layout = documentLayout(document, columns).fragments;
+  const row = layout.search(search.query).matches.find((candidate) => candidate.id === match.id)?.ranges[0]?.row;
+  const updated = { ...document, search: { ...search, activeMatchIndex } };
+  return row === undefined ? updated : documentWithScrollRow(updated, layout, row);
 }
 
 function controlById(

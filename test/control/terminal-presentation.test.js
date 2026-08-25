@@ -93,11 +93,15 @@ test("fragment snapshots freeze nested geometry, rows, actions, and search resul
   assert.equal(Object.isFrozen(hit), true);
   assert.equal(Object.isFrozen(hit.action), true);
   assert.equal(Object.isFrozen(result), true);
+  assert.equal(Object.isFrozen(result.matches), true);
+  assert.equal(Object.isFrozen(result.matches[0]), true);
+  assert.equal(Object.isFrozen(result.matches[0].ranges), true);
   assert.equal(Object.isFrozen(result.ranges), true);
   assert.equal(Object.isFrozen(result.ranges[0]), true);
   const sourceRange = result.ranges[0]?.sourceRange;
   assert.ok(sourceRange);
   assert.equal(tree.document.sourceText.slice(sourceRange.start, sourceRange.end), "link");
+  assert.equal(layout.search("link"), result);
 });
 
 test("invalid runtime terminal profiles produce typed rejected fragment trees", () => {
@@ -113,12 +117,27 @@ test("invalid runtime terminal profiles produce typed rejected fragment trees", 
   assert.equal(Object.isFrozen(layout.viewport), true);
 });
 
-test("search does not invent one source identity for a match spanning source nodes", () => {
+test("search keeps one stable match with source-linked slices across adjacent inline nodes", () => {
   const tree = formatting("<p>hel<span>lo</span></p>");
   const result = fragments(tree, 30).search("hello");
-  assert.equal(result.ranges.length, 1);
-  assert.equal(result.ranges[0].source, null);
-  assert.equal(result.ranges[0].sourceRange, null);
+  assert.equal(result.matches.length, 1);
+  assert.equal(result.ranges.length, 2);
+  assert.equal(new Set(result.ranges.map((range) => range.match)).size, 1);
+  assert.ok(result.ranges.every((range) => range.source !== null && range.sourceRange !== null));
+  assert.equal(result.ranges.map((range) =>
+    tree.document.sourceText.slice(range.sourceRange.start, range.sourceRange.end)
+  ).join(""), "hello");
+});
+
+test("visible-text matches span terminal wraps and keep their identity across resize", () => {
+  const tree = formatting("<p>alpha beta gamma delta</p>");
+  const narrow = fragments(tree, 8).search("beta gamma");
+  const wide = fragments(tree, 40).search("beta gamma");
+  assert.equal(narrow.matches.length, 1);
+  assert.equal(wide.matches.length, 1);
+  assert.equal(narrow.matches[0].id, wide.matches[0].id);
+  assert.ok(new Set(narrow.matches[0].ranges.map((range) => range.row)).size > 1);
+  assert.equal(new Set(wide.matches[0].ranges.map((range) => range.row)).size, 1);
 });
 
 test("collapsible whitespace is shared across adjacent inline source nodes", () => {
@@ -509,6 +528,22 @@ test("fragment work budgets fail with a typed truncation", () => {
   });
   assert.equal(layout.outcome.status, "truncated");
   assert.equal(layout.outcome.budget, "maxPaintCells");
+  assert.match(layout.rows.map((row) => row.text).join("\n"), /^word word/u);
+});
+
+test("row exhaustion finalizes ancestors without clearing completed rows", () => {
+  const tree = formatting("<pre>first\nsecond\nthird</pre>");
+  const layout = buildFragmentTree({
+    formatting: tree,
+    viewport: { columns: 20, rows: 3 },
+    measurer: terminalTextMeasurer(),
+    profile,
+    budgets: { maxRows: 3 }
+  });
+  assert.equal(layout.outcome.status, "truncated");
+  assert.equal(layout.outcome.budget, "maxRows");
+  assert.deepEqual(layout.rows.map((row) => row.text), ["", "first", "second"]);
+  assert.ok(layout.children(layout.root).length > 0);
 });
 
 test("atomic controls consume the same paint-cell budget as text", () => {
@@ -525,16 +560,18 @@ test("atomic controls consume the same paint-cell budget as text", () => {
   assert.ok(layout.rows.every((row) => !row.text.includes("Query: long")));
 });
 
-test("fragment count exhaustion returns a traversable fail-closed tree", () => {
+test("fragment count exhaustion retains the completed authoritative prefix", () => {
   const tree = formatting(`<div>${"<span>word </span>".repeat(20)}</div>`);
   const layout = buildFragmentTree({
     formatting: tree,
     viewport: { columns: 20, rows: 10 },
     measurer: terminalTextMeasurer(),
     profile,
-    budgets: { maxFragments: 4 }
+    budgets: { maxFragments: 12 }
   });
   assert.equal(layout.outcome.status, "truncated");
   assert.equal(layout.outcome.budget, "maxFragments");
-  assert.deepEqual(layout.children(layout.root), []);
+  assert.equal(layout.outcome.fragments, 12);
+  assert.ok(layout.children(layout.root).length > 0);
+  assert.match(layout.rows.map((row) => row.text).join("\n"), /^word word/u);
 });

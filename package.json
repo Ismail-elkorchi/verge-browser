@@ -52,7 +52,7 @@
     "smoke:node": "npm run build && node scripts/smoke/runtime-smoke.mjs --runtime=node --report=reports/smoke-node.json",
     "start": "npm run build && node dist/cli.js",
     "test": "npm run build && node --test",
-    "test:bench": "npm run build && node scripts/bench/run-bench.mjs",
+    "test:bench": "npm run build && node --expose-gc scripts/bench/run-bench.mjs",
     "test:fuzz": "npm run build && node scripts/quality/fuzz.mjs --profile=ci",
     "test:fuzz:release": "npm run build && node scripts/quality/fuzz.mjs --profile=release",
     "typecheck": "tsc --noEmit -p tsconfig.build.json"

@@ -1,11 +1,7 @@
 import {
-  applyPatchPlan,
-  computePatch,
   HTML_NAMESPACE_URI,
   type Attribute,
-  type Edit,
   type HtmlNode,
-  type NodeId,
   type ParsedDocument,
   type Span
 } from "@ismail-elkorchi/html-parser";
@@ -14,7 +10,6 @@ import type {
   DocumentAttribute,
   DocumentChoiceControl,
   DocumentDisclosure,
-  DocumentEdit,
   DocumentForm,
   DocumentFormControl,
   DocumentHeading,
@@ -35,7 +30,7 @@ import type {
   DocumentSourceRange,
   DocumentStylesheetReference,
   WebDocumentNode,
-  WebDocumentSnapshotView,
+  IndexedWebDocumentSnapshot,
   WebElementNode
 } from "./types.js";
 
@@ -230,7 +225,7 @@ function landmarkFor(
   return implicit[node.name] ?? null;
 }
 
-export class WebDocumentSnapshot implements WebDocumentSnapshotView {
+class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot {
   readonly root: DocumentNodeRef;
   readonly documentElement: DocumentNodeRef | null;
   readonly head: DocumentNodeRef | null;
@@ -270,11 +265,7 @@ export class WebDocumentSnapshot implements WebDocumentSnapshotView {
   readonly #disclosures: ReadonlyMap<DocumentNodeRef, DocumentDisclosure>;
   readonly #textRanges: ReadonlyMap<DocumentNodeRef, readonly [number, number]>;
   readonly #documentText: string;
-  readonly #parsed: ParsedDocument;
-  readonly #parserIds: ReadonlyMap<DocumentNodeRef, NodeId>;
-
   public constructor(parsed: ParsedDocument, context: SnapshotContext) {
-    this.#parsed = parsed;
     this.sourceText = parsed.sourceText;
     this.requestUrl = context.requestUrl;
     this.finalUrl = context.finalUrl;
@@ -283,18 +274,15 @@ export class WebDocumentSnapshot implements WebDocumentSnapshotView {
       outcome: { status: "complete", indexedNodes: 0 }
     };
     const nodes = new Map<DocumentNodeRef, WebDocumentNode>();
-    const parserIds = new Map<DocumentNodeRef, NodeId>();
     let sequence = 0;
 
     this.root = nodeRef(++sequence);
-    parserIds.set(this.root, parsed.tree.id);
     const pendingClones: {
       readonly source: HtmlNode;
       readonly ref: DocumentNodeRef;
     }[] = [];
     const cloneNode = (node: HtmlNode, parent: DocumentNodeRef): DocumentNodeRef => {
       const ref = nodeRef(++sequence);
-      parserIds.set(ref, node.id);
       const children: DocumentNodeRef[] = [];
       const range = node.kind === "templateContent"
         ? null
@@ -368,7 +356,6 @@ export class WebDocumentSnapshot implements WebDocumentSnapshotView {
       if (ref !== this.root && !Object.isFrozen(node)) nodes.set(ref, freezeNode(node));
     }
     this.#nodes = nodes;
-    this.#parserIds = parserIds;
 
     let totalNodes = 0;
     const elements: WebElementNode[] = [];
@@ -1187,21 +1174,8 @@ export class WebDocumentSnapshot implements WebDocumentSnapshotView {
     return this.#disclosures.get(ref) ?? null;
   }
 
-  public applySourceEdits(edits: readonly DocumentEdit[]): string {
-    const parserEdits: Edit[] = edits.map((edit): Edit => {
-      const target = this.#parserIds.get(edit.target);
-      if (target === undefined) throw new RangeError(`Unknown document edit target: ${edit.target}`);
-      if (edit.kind === "remove-node") return { kind: "removeNode", target };
-      if (edit.kind === "replace-text") return { kind: "replaceText", target, value: edit.value };
-      if (edit.kind === "set-attribute") return { kind: "setAttr", target, name: edit.name, value: edit.value };
-      if (edit.kind === "remove-attribute") return { kind: "removeAttr", target, name: edit.name };
-      if (edit.kind === "insert-html-before") return { kind: "insertHtmlBefore", target, html: edit.html };
-      return { kind: "insertHtmlAfter", target, html: edit.html };
-    });
-    return applyPatchPlan(this.#parsed, computePatch(this.#parsed, parserEdits));
-  }
 }
 
-export function createWebDocumentSnapshot(parsed: ParsedDocument, context: SnapshotContext): WebDocumentSnapshot {
-  return new WebDocumentSnapshot(parsed, context);
+export function createIndexedWebDocumentSnapshot(parsed: ParsedDocument, context: SnapshotContext): IndexedWebDocumentSnapshot {
+  return new ImmutableIndexedWebDocumentSnapshot(parsed, context);
 }

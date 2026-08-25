@@ -272,8 +272,8 @@ test("selector lists retain distinct generated pseudo-element identities", () =>
   </style><h1>Heading</h1><p>Paragraph</p>`);
   for (const name of ["h1", "p"]) {
     const ref = named(document, name);
-    assert.equal(styles.pseudo(ref, "before")?.generatedBefore, "prefix");
-    assert.equal(styles.pseudo(ref, "after")?.generatedAfter, "suffix");
+    assert.equal(styles.pseudo(ref, "before")?.generatedContent, "prefix");
+    assert.equal(styles.pseudo(ref, "after")?.generatedContent, "suffix");
   }
 });
 
@@ -326,15 +326,40 @@ test("style work exhaustion is a typed truncation and retains already-computed U
   assert.equal(styles.style(named(document, "p")).display.box, "principal");
 });
 
-test("computed-node exhaustion stops style work instead of dropping author origin globally", () => {
+test("author-style exhaustion leaves a total baseline style for every retained element", () => {
   const { document, styles } = setup(
-    `<main>${"<span>word</span>".repeat(20)}</main>`,
+    `<style>span:first-child{color:red} span:last-child{color:blue}</style><main>${"<span>word</span>".repeat(20)}</main>`,
     undefined,
-    { maxComputedNodes: 4 }
+    { maxSelectorQueries: 1 }
   );
   assert.equal(styles.outcome.status, "truncated");
-  assert.equal(styles.outcome.budget, "maxComputedNodes");
-  assert.equal(styles.outcome.computedNodes, 4);
-  const spans = document.children(named(document, "main"));
-  assert.ok(spans.some((span) => !styles.has(span.ref)));
+  assert.equal(styles.outcome.budget, "maxSelectorQueries");
+  const pending = [document.root];
+  let elements = 0;
+  while (pending.length > 0) {
+    const ref = pending.pop();
+    const node = document.node(ref);
+    pending.push(...node.children);
+    if (node.kind !== "element") continue;
+    elements += 1;
+    assert.doesNotThrow(() => styles.style(node.ref));
+  }
+  assert.equal(styles.outcome.computedNodes, elements);
+});
+
+test("user-agent baseline styles remain total beyond the former selector depth bound", () => {
+  const depth = 2_500;
+  const document = parseWebDocument(
+    `${"<x-shell>".repeat(depth)}<p>deep</p>${"</x-shell>".repeat(depth)}`,
+    { requestUrl: "https://example.test/", finalUrl: "https://example.test/" }
+  );
+  const styles = resolveStyles({
+    document,
+    state: createDocumentState(document),
+    resources: [],
+    environment
+  });
+  const paragraph = named(document, "p");
+  assert.equal(styles.style(paragraph).display.box, "principal");
+  assert.equal(styles.outcome.status, "complete");
 });

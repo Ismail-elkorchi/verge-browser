@@ -1,4 +1,4 @@
-import type { DocumentState, WebDocumentSnapshotView } from "../document/index.js";
+import type { DocumentState, IndexedWebDocumentSnapshot } from "../document/index.js";
 import { buildFormattingTree, type FormattingBudgets, type FormattingTree } from "./formatting/index.js";
 import { resolveStyles, type StyleBudgets, type StyleDiagnostic, type StylesheetResource, type StyleSnapshot } from "./style/index.js";
 import {
@@ -17,7 +17,7 @@ export interface PresentationBudgets {
 }
 
 export interface PresentDocumentInput {
-  readonly document: WebDocumentSnapshotView;
+  readonly document: IndexedWebDocumentSnapshot;
   readonly state: DocumentState;
   readonly resources: readonly StylesheetResource[];
   readonly styleDiagnostics?: readonly StyleDiagnostic[];

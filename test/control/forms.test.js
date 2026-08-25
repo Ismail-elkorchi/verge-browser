@@ -112,6 +112,25 @@ test("document state is immutable and form reset is a typed document action", ()
   assert.deepEqual(state.controls.get(control.node).values, ["initial"]);
 });
 
+test("initial state and form reset share radio-group default normalization", () => {
+  const document = documentWithForm(`<form>
+    <input type="radio" name="choice" value="first" checked>
+    <input type="radio" name="choice" value="last" checked>
+  </form>`);
+  const form = document.forms[0];
+  const radios = form.controls.filter((control) => control.kind === "radio");
+  let state = createDocumentState(document);
+  assert.deepEqual(radios.map((control) => state.controls.get(control.node)?.checked), [false, true]);
+  state = applyDocumentAction(document, state, {
+    kind: "set-checked",
+    target: radios[0].node,
+    checked: true
+  });
+  assert.deepEqual(radios.map((control) => state.controls.get(control.node)?.checked), [true, false]);
+  state = applyDocumentAction(document, state, { kind: "reset-form", target: form.node });
+  assert.deepEqual(radios.map((control) => state.controls.get(control.node)?.checked), [false, true]);
+});
+
 test("submission validates selected option identities rather than equal values", () => {
   const document = documentWithForm(`<form action="/choose"><select name="choice">
     <option disabled selected value="same">Blocked</option><option value="same">Allowed</option>

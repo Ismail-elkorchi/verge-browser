@@ -36,7 +36,6 @@ Check these fields instead of expecting an exception:
 - `back()` with no backward history entry,
 - `forward()` with no forward history entry,
 - `openLink()` with a missing link index,
-- `applyEdits()` when the current parsed document has no retained source.
 
 ## Recommended handling
 

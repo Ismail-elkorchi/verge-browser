@@ -28,10 +28,16 @@ import type {
   TerminalRowStyleRun,
   TerminalScrollAnchor,
   TerminalSearchRange,
+  TerminalSearchMatch,
   TerminalSearchResult,
   TerminalStyleRun,
   TextFragment
 } from "./types.js";
+import {
+  buildVisibleTextIndex,
+  presentedControlText,
+  type VisibleTextIndex
+} from "./visible-text.js";
 
 const DEFAULT_FRAGMENT_BUDGETS: FragmentBudgets = Object.freeze({
   maxFragments: 250_000,
@@ -46,6 +52,8 @@ interface Placement {
   readonly formatting: FormattingNodeId;
   readonly source: DocumentNodeRef | null;
   readonly sourceRange: DocumentSourceRange | null;
+  readonly contentStartCodeUnit: number | null;
+  readonly contentEndCodeUnit: number | null;
   readonly row: number;
   readonly column: number;
   readonly text: string;
@@ -133,6 +141,20 @@ function mappedSourceRange(map: MappedText, start: number, end: number): readonl
   return Number.isFinite(minimum) && Number.isFinite(maximum) ? [minimum, maximum] : [start, end];
 }
 
+function preservedLines(value: string): readonly string[] {
+  const lines: string[] = [];
+  let lineStart = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (character !== "\n" && character !== "\r") continue;
+    lines.push(value.slice(lineStart, index));
+    if (character === "\r" && value[index + 1] === "\n") index += 1;
+    lineStart = index + 1;
+  }
+  lines.push(value.slice(lineStart));
+  return lines;
+}
+
 function fragmentId(value: string): FragmentId {
   return value as FragmentId;
 }
@@ -208,6 +230,7 @@ class FragmentBuilder {
   readonly #formatting: FormattingTree;
   readonly #budgets: FragmentBudgets;
   readonly #viewportClip: TerminalRect;
+  readonly #visibleText: VisibleTextIndex;
   readonly #fragments = new Map<FragmentId, TerminalFragment>();
   readonly #placements: Placement[] = [];
   readonly #sourceIndex = new Map<DocumentNodeRef, FragmentId[]>();
@@ -222,6 +245,8 @@ class FragmentBuilder {
   #visualOrder = 0;
   #paintOrder = 0;
   #paintCells = 0;
+  #reservedFragments = 0;
+  #contentStopped = false;
   #truncated: keyof FragmentBudgets | null = null;
 
   public constructor(input: BuildFragmentTreeInput) {
@@ -229,6 +254,7 @@ class FragmentBuilder {
     this.#formatting = input.formatting;
     this.#budgets = normalizeBudgets(input.budgets);
     this.#viewportClip = rect(0, 0, input.viewport.columns, this.#budgets.maxRows);
+    this.#visibleText = buildVisibleTextIndex(input.formatting, input.signal);
   }
 
   #newId(formatting: FormattingNodeId, suffix = "box"): FragmentId {
@@ -238,9 +264,11 @@ class FragmentBuilder {
     return fragmentId(`fragment:${key}:${String(ordinal)}`);
   }
 
-  #store<T extends TerminalFragment>(fragment: T, root = false): T {
-    if (!root && this.#fragments.size >= this.#budgets.maxFragments - 1) {
+  #store<T extends TerminalFragment>(fragment: T, reserved = false): T {
+    const outstanding = this.#reservedFragments - (reserved ? 1 : 0);
+    if (this.#fragments.size + outstanding >= this.#budgets.maxFragments) {
       this.#truncated ??= "maxFragments";
+      this.#contentStopped = true;
       throw new FragmentBudgetExhausted();
     }
     const frozen = Object.freeze({
@@ -274,6 +302,15 @@ class FragmentBuilder {
       }));
     }
     return frozen;
+  }
+
+  #reserveFragment(): void {
+    if (this.#contentStopped || this.#fragments.size + this.#reservedFragments >= this.#budgets.maxFragments) {
+      this.#truncated ??= "maxFragments";
+      this.#contentStopped = true;
+      throw new FragmentBudgetExhausted();
+    }
+    this.#reservedFragments += 1;
   }
 
   #computed(node: FormattingNode): ComputedStyle | null {
@@ -438,7 +475,8 @@ class FragmentBuilder {
       const source = pending.pop();
       if (source === undefined) continue;
       const current = geometry.get(source);
-      if (current !== undefined && !existing.has(source) && this.#formatting.styles.has(source)) {
+      if (current !== undefined && !existing.has(source)
+        && this.#formatting.document.node(source).kind === "element") {
         const style = this.#formatting.styles.style(source);
         const semantic = this.#formatting.document.semantic(source);
         if (style.display.box === "contents" && style.visibility === "visible"
@@ -480,6 +518,8 @@ class FragmentBuilder {
       formatting: node.id,
       source: node.source,
       sourceRange: node.sourceRange,
+      contentStartCodeUnit: null,
+      contentEndCodeUnit: null,
       rect: box,
       clip,
       children: [...children],
@@ -487,7 +527,7 @@ class FragmentBuilder {
       paintOrder: ++this.#paintOrder,
       action: visible ? this.#action(node) : null,
       semantic
-    }, node.id === this.#formatting.root);
+    }, true);
     if (node.source !== null && semantic !== null && box.height > 0) {
       this.#anchors.push(Object.freeze({
         id: `anchor:${node.source}`,
@@ -538,6 +578,7 @@ class FragmentBuilder {
     }, 0);
     if (this.#paintCells + visibleCells > this.#budgets.maxPaintCells) {
       this.#truncated ??= "maxPaintCells";
+      this.#contentStopped = true;
       return;
     }
     const decorationStyle = {
@@ -551,6 +592,8 @@ class FragmentBuilder {
         formatting: node.id,
         source: node.source,
         sourceRange: null,
+        contentStartCodeUnit: null,
+        contentEndCodeUnit: null,
         row: decoration.row,
         column: decoration.column,
         text: decoration.text,
@@ -575,6 +618,7 @@ class FragmentBuilder {
     if (width <= 0) return null;
     if (cursor.row >= this.#budgets.maxRows) {
       this.#truncated ??= "maxRows";
+      this.#contentStopped = true;
       return null;
     }
     const style = this.#computed(node);
@@ -582,6 +626,12 @@ class FragmentBuilder {
     const visible = style.visibility === "visible";
     if (visible && this.#paintCells + width > this.#budgets.maxPaintCells) {
       this.#truncated ??= "maxPaintCells";
+      this.#contentStopped = true;
+      return null;
+    }
+    if (this.#fragments.size + this.#reservedFragments >= this.#budgets.maxFragments) {
+      this.#truncated ??= "maxFragments";
+      this.#contentStopped = true;
       return null;
     }
     const sourceRange = node.source === null || node.sourceRange === null
@@ -594,6 +644,8 @@ class FragmentBuilder {
       formatting: node.id,
       source: node.source,
       sourceRange,
+      contentStartCodeUnit: localStart,
+      contentEndCodeUnit: localEnd,
       rect: box,
       clip: intersection(clip, box),
       children: [],
@@ -610,6 +662,8 @@ class FragmentBuilder {
         formatting: node.id,
         source: node.source,
         sourceRange,
+        contentStartCodeUnit: localStart,
+        contentEndCodeUnit: localEnd,
         row: cursor.row,
         column: cursor.column,
         text,
@@ -631,6 +685,10 @@ class FragmentBuilder {
     cursor.column = cursor.continuationColumn;
     cursor.maxRow = Math.max(cursor.maxRow, cursor.row);
     cursor.collapsedSpace = false;
+    if (cursor.row >= this.#budgets.maxRows) {
+      this.#truncated ??= "maxRows";
+      this.#contentStopped = true;
+    }
   }
 
   #placeText(node: FormattingTextNode, cursor: InlineCursor, clip: TerminalRect): LayoutResult {
@@ -695,7 +753,9 @@ class FragmentBuilder {
       }
       flush();
       cursor.collapsedSpace = whitespace && !preservesSpaces;
+      if (this.#contentStopped) break;
     }
+    if (children.length === 0 && this.#contentStopped) throw new FragmentBudgetExhausted();
     const box = rect(
       startRow,
       Math.min(startColumn, cursor.column),
@@ -706,36 +766,12 @@ class FragmentBuilder {
     return { fragment: fragment.id, rect: box };
   }
 
-  #controlText(node: FormattingFormControlNode): { readonly label: string; readonly value: string; readonly text: string } {
-    const control = node.control;
-    const state = this.#formatting.state.controls.get(control.node);
-    if (control.kind === "text" || control.kind === "textarea") {
-      const value = state?.values[0] ?? control.defaultValue;
-      return { label: control.label, value, text: `${control.label}: ${value || control.placeholder || ""}` };
-    }
-    if (control.kind === "checkbox" || control.kind === "radio") {
-      const checked = state?.checked ?? control.defaultChecked;
-      return { label: control.label, value: checked ? control.value : "", text: `${checked ? "[x]" : "[ ]"} ${control.label}` };
-    }
-    if (control.kind === "select") {
-      const values = state?.values ?? control.options.filter((option) => option.defaultSelected).map((option) => option.value);
-      return { label: control.label, value: values.join(", "), text: `${control.label}: ${values.join(", ")}` };
-    }
-    if (control.kind === "submit" || control.kind === "reset") {
-      return { label: control.label, value: control.value, text: `[${control.label || control.value}]` };
-    }
-    if (control.kind === "hidden") {
-      return { label: "", value: control.defaultValue, text: "" };
-    }
-    return { label: control.label, value: "", text: `${control.label}: unsupported control` };
-  }
-
   #placeAtomic(
     node: FormattingFormControlNode | FormattingReplacedNode,
     cursor: InlineCursor,
     clip: TerminalRect
   ): LayoutResult {
-    const control = node.kind === "form-control" ? this.#controlText(node) : null;
+    const control = node.kind === "form-control" ? presentedControlText(node, this.#formatting) : null;
     const text = node.kind === "form-control" ? control?.text ?? "" : node.fallbackText;
     const maxWidth = Math.max(1, cursor.maxColumn - cursor.startColumn);
     const clipped = this.#input.measurer.width(text) > maxWidth
@@ -754,15 +790,17 @@ class FragmentBuilder {
       && (!visible || this.#paintCells + usedWidth <= this.#budgets.maxPaintCells);
     if (!paintAllowed) {
       this.#truncated ??= cursor.row >= this.#budgets.maxRows ? "maxRows" : "maxPaintCells";
+      this.#contentStopped = true;
+      throw new FragmentBudgetExhausted();
     }
-    const box = paintAllowed
-      ? rect(cursor.row, cursor.column, usedWidth, 1)
-      : rect(cursor.row, cursor.column, 0, 0);
+    const box = rect(cursor.row, cursor.column, usedWidth, 1);
     const common = {
       id: this.#newId(node.id),
       formatting: node.id,
       source: node.source,
       sourceRange: node.sourceRange,
+      contentStartCodeUnit: 0,
+      contentEndCodeUnit: text.length,
       rect: box,
       clip: intersection(clip, box),
       children: [] as const,
@@ -773,16 +811,18 @@ class FragmentBuilder {
     };
     let fragment: ControlFragment | ReplacedFragment;
     if (node.kind === "form-control" && control !== null) {
-      fragment = this.#store({ ...common, kind: "control", label: control.label, value: control.value });
+      fragment = this.#store({ ...common, kind: "control", label: control.label, value: control.value }, true);
     } else {
-      fragment = this.#store({ ...common, kind: "replaced", fallbackText: text });
+      fragment = this.#store({ ...common, kind: "replaced", fallbackText: text }, true);
     }
-    if (style !== null && visible && paintAllowed) {
+    if (style !== null && visible) {
       this.#placements.push({
         fragment: fragment.id,
         formatting: node.id,
         source: node.source,
         sourceRange: node.sourceRange,
+        contentStartCodeUnit: 0,
+        contentEndCodeUnit: text.length,
         row: box.row,
         column: box.column,
         text: clipped,
@@ -793,15 +833,40 @@ class FragmentBuilder {
       });
       this.#paintCells += box.width;
     }
-    if (paintAllowed) {
-      cursor.column += box.width;
-      cursor.maxRow = Math.max(cursor.maxRow, cursor.row);
-      cursor.collapsedSpace = false;
-    }
+    cursor.column += box.width;
+    cursor.maxRow = Math.max(cursor.maxRow, cursor.row);
+    cursor.collapsedSpace = false;
     return { fragment: fragment.id, rect: box };
   }
 
   #layoutInline(id: FormattingNodeId, cursor: InlineCursor, clip: TerminalRect, depth: number): LayoutResult {
+    const node = this.#formatting.node(id);
+    if (establishesInlineFormattingContext(node) || !isInlineFormatting(node)) {
+      return this.#layoutInlineReserved(id, cursor, clip, depth);
+    }
+    this.#reserveFragment();
+    try {
+      return this.#layoutInlineReserved(id, cursor, clip, depth);
+    } finally {
+      this.#reservedFragments -= 1;
+    }
+  }
+
+  #tryLayoutInline(
+    id: FormattingNodeId,
+    cursor: InlineCursor,
+    clip: TerminalRect,
+    depth: number
+  ): LayoutResult | null {
+    try {
+      return this.#layoutInline(id, cursor, clip, depth);
+    } catch (error) {
+      if (error instanceof FragmentBudgetExhausted) return null;
+      throw error;
+    }
+  }
+
+  #layoutInlineReserved(id: FormattingNodeId, cursor: InlineCursor, clip: TerminalRect, depth: number): LayoutResult {
     const node = this.#formatting.node(id);
     if (this.#visuallyClipped(node, Math.max(1, cursor.maxColumn - cursor.column))) {
       return this.#clippedFragment(node, cursor.column, cursor.row, clip);
@@ -840,7 +905,8 @@ class FragmentBuilder {
     const children: FragmentId[] = [];
     const childRects: TerminalRect[] = [];
     for (const child of node.children) {
-      const result = this.#layoutInline(child, cursor, clip, depth + 1);
+      const result = this.#tryLayoutInline(child, cursor, clip, depth + 1);
+      if (result === null) break;
       children.push(result.fragment);
       childRects.push(result.rect);
     }
@@ -866,22 +932,19 @@ class FragmentBuilder {
         ).value;
         let measured: number;
         if (node.whiteSpace === "pre" || node.whiteSpace === "pre-wrap") {
-          measured = 0;
-          let lineStart = 0;
-          for (let index = 0; index <= transformed.length; index += 1) {
-            const character = transformed[index];
-            if (index !== transformed.length && character !== "\n" && character !== "\r") continue;
-            measured = Math.max(measured, this.#input.measurer.width(transformed.slice(lineStart, index)));
-            if (character === "\r" && transformed[index + 1] === "\n") index += 1;
-            lineStart = index + 1;
-          }
+          measured = preservedLines(transformed).reduce(
+            (maximum, line) => Math.max(maximum, this.#input.measurer.width(line)),
+            0
+          );
         } else {
           measured = this.#input.measurer.width(transformed.replace(/\s+/gu, " "));
         }
         width += measured;
         continue;
       }
-      if (node.kind === "form-control") width += this.#input.measurer.width(this.#controlText(node).text);
+      if (node.kind === "form-control") {
+        width += this.#input.measurer.width(presentedControlText(node, this.#formatting).text);
+      }
       else if (node.kind === "replaced-element" || node.kind === "image-fallback") {
         width += this.#input.measurer.width(node.fallbackText);
       } else {
@@ -906,16 +969,12 @@ class FragmentBuilder {
         this.#computed(node)?.text.textTransform ?? "none"
       ).value;
       if (node.whiteSpace === "pre" || node.whiteSpace === "pre-wrap" || node.whiteSpace === "pre-line") {
-        let rows = 0;
-        let lineStart = 0;
-        for (let index = 0; index <= transformed.length; index += 1) {
-          const character = transformed[index];
-          if (index !== transformed.length && character !== "\n" && character !== "\r") continue;
-          const lineWidth = this.#input.measurer.width(transformed.slice(lineStart, index));
-          rows += node.whiteSpace === "pre" ? 1 : Math.max(1, Math.ceil(lineWidth / Math.max(1, width)));
-          if (character === "\r" && transformed[index + 1] === "\n") index += 1;
-          lineStart = index + 1;
-        }
+        const rows = preservedLines(transformed).reduce((total, line) => {
+          const lineWidth = this.#input.measurer.width(line);
+          return total + (node.whiteSpace === "pre"
+            ? 1
+            : Math.max(1, Math.ceil(lineWidth / Math.max(1, width))));
+        }, 0);
         return Math.max(1, rows);
       }
       const measured = this.#input.measurer.width(transformed.replace(/\s+/gu, " "));
@@ -1048,7 +1107,8 @@ class FragmentBuilder {
         collapsedSpace: false
       };
       for (const child of inlineRun) {
-        const result = this.#layoutInline(child, cursor, childClip, depth + 1);
+        const result = this.#tryLayoutInline(child, cursor, childClip, depth + 1);
+        if (result === null) break;
         children.push(result.fragment);
         childRects.push(result.rect);
       }
@@ -1080,7 +1140,8 @@ class FragmentBuilder {
         const childX = contentX + (style.box.alignItems === "center"
           ? Math.floor((contentWidth - basis) / 2)
           : style.box.alignItems === "end" ? contentWidth - basis : 0);
-        const result = this.#layoutNode(childId, childX, currentY, basis, childClip, depth + 1);
+        const result = this.#tryLayoutNode(childId, childX, currentY, basis, childClip, depth + 1);
+        if (result === null) break;
         children.push(result.fragment);
         childRects.push(result.rect);
         currentY = Math.max(currentY, result.rect.row + result.rect.height);
@@ -1088,13 +1149,15 @@ class FragmentBuilder {
       }
     } else {
       for (const childId of orderedChildren) {
+        if (this.#contentStopped) break;
         const child = this.#formatting.node(childId);
         if (isInlineFormatting(child)) {
           inlineRun.push(childId);
           continue;
         }
         flushInline();
-        const result = this.#layoutNode(childId, contentX, currentY, contentWidth, childClip, depth + 1);
+        const result = this.#tryLayoutNode(childId, contentX, currentY, contentWidth, childClip, depth + 1);
+        if (result === null) break;
         children.push(result.fragment);
         childRects.push(result.rect);
         currentY = Math.max(currentY, result.rect.row + result.rect.height);
@@ -1144,7 +1207,8 @@ class FragmentBuilder {
       const childRects: TerminalRect[] = [];
       let maxHeight = 1;
       for (const [index, child] of cells.entries()) {
-        const result = this.#layoutNode(child, x + index * cellWidth, y, cellWidth, clip, depth + 1, columns);
+        const result = this.#tryLayoutNode(child, x + index * cellWidth, y, cellWidth, clip, depth + 1, columns);
+        if (result === null) break;
         children.push(result.fragment);
         childRects.push(result.rect);
         maxHeight = Math.max(maxHeight, result.rect.height);
@@ -1156,7 +1220,8 @@ class FragmentBuilder {
     const children: FragmentId[] = [];
     let currentY = y;
     for (const child of node.children) {
-      const result = this.#layoutNode(child, x, currentY, width, clip, depth + 1, columns);
+      const result = this.#tryLayoutNode(child, x, currentY, width, clip, depth + 1, columns);
+      if (result === null) break;
       children.push(result.fragment);
       currentY += result.rect.height;
     }
@@ -1262,7 +1327,7 @@ class FragmentBuilder {
     if (grid) {
       let currentY = contentY;
       const rowGap = style === null ? 0 : this.#length(style.box.rowGap, "vertical", this.#input.viewport.rows);
-      for (let rowStart = 0; rowStart < node.children.length; rowStart += count) {
+      for (let rowStart = 0; rowStart < node.children.length && !this.#contentStopped; rowStart += count) {
         let rowBottom = currentY + 1;
         const rowChildren = node.children.slice(rowStart, rowStart + count);
         const rowEntries = rowChildren.map((child, rowIndex) => {
@@ -1279,7 +1344,7 @@ class FragmentBuilder {
           const rowOffset = style?.box.alignItems === "center"
             ? Math.floor((rowHeight - entry.estimatedHeight) / 2)
             : style?.box.alignItems === "end" ? rowHeight - entry.estimatedHeight : 0;
-          const result = this.#layoutNode(
+          const result = this.#tryLayoutNode(
             entry.child,
             contentX + (offsets[entry.column] ?? 0),
             currentY + rowOffset,
@@ -1287,6 +1352,7 @@ class FragmentBuilder {
             childClip,
             depth + 1
           );
+          if (result === null) break;
           children.push(result.fragment);
           childRects.push(result.rect);
           rowBottom = Math.max(rowBottom, result.rect.row + result.rect.height);
@@ -1314,6 +1380,7 @@ class FragmentBuilder {
       const rowGap = style === null ? 0 : this.#length(style.box.rowGap, "vertical", this.#input.viewport.rows);
       let currentY = contentY;
       for (const [lineIndex, entries] of lines.entries()) {
+        if (this.#contentStopped) break;
         const estimates = entries.map((entry) => this.#estimatedHeight(entry.child, entry.basis));
         const lineHeight = estimates.reduce((maximum, height) => Math.max(maximum, height), 1);
         const required = entries.reduce((total, entry) => total + entry.basis, 0)
@@ -1331,7 +1398,7 @@ class FragmentBuilder {
           const rowOffset = style?.box.alignItems === "center"
             ? Math.floor((lineHeight - estimate) / 2)
             : style?.box.alignItems === "end" ? lineHeight - estimate : 0;
-          const result = this.#layoutNode(
+          const result = this.#tryLayoutNode(
             entry.child,
             currentX,
             currentY + rowOffset,
@@ -1339,6 +1406,7 @@ class FragmentBuilder {
             childClip,
             depth + 1
           );
+          if (result === null) break;
           children.push(result.fragment);
           childRects.push(result.rect);
           actualBottom = Math.max(actualBottom, result.rect.row + result.rect.height);
@@ -1372,6 +1440,40 @@ class FragmentBuilder {
     depth: number,
     tableColumns?: number
   ): LayoutResult {
+    this.#reserveFragment();
+    try {
+      return this.#layoutNodeReserved(id, x, y, width, clip, depth, tableColumns);
+    } finally {
+      this.#reservedFragments -= 1;
+    }
+  }
+
+  #tryLayoutNode(
+    id: FormattingNodeId,
+    x: number,
+    y: number,
+    width: number,
+    clip: TerminalRect,
+    depth: number,
+    tableColumns?: number
+  ): LayoutResult | null {
+    try {
+      return this.#layoutNode(id, x, y, width, clip, depth, tableColumns);
+    } catch (error) {
+      if (error instanceof FragmentBudgetExhausted) return null;
+      throw error;
+    }
+  }
+
+  #layoutNodeReserved(
+    id: FormattingNodeId,
+    x: number,
+    y: number,
+    width: number,
+    clip: TerminalRect,
+    depth: number,
+    tableColumns?: number
+  ): LayoutResult {
     this.#input.signal?.throwIfAborted();
     if (depth > this.#budgets.maxDepth) {
       this.#truncated ??= "maxDepth";
@@ -1394,12 +1496,15 @@ class FragmentBuilder {
         maxRow: y,
         collapsedSpace: false
       };
-      return this.#layoutInline(id, cursor, clip, depth + 1);
+      return this.#layoutInlineReserved(id, cursor, clip, depth + 1);
     }
     if (node.kind === "table-column" || node.kind === "table-column-group") {
-      const children = node.children.map((child) =>
-        this.#layoutNode(child, x, y, 0, clip, depth + 1, tableColumns).fragment
-      );
+      const children: FragmentId[] = [];
+      for (const child of node.children) {
+        const result = this.#tryLayoutNode(child, x, y, 0, clip, depth + 1, tableColumns);
+        if (result === null) break;
+        children.push(result.fragment);
+      }
       const box = rect(y, x, 0, 0);
       const fragment = this.#containerFragment(node, box, intersection(clip, box), children);
       return { fragment: fragment.id, rect: box };
@@ -1506,6 +1611,18 @@ class FragmentBuilder {
           formatting: placement.formatting,
           source: placement.source,
           sourceRange: visibleSourceRange,
+          contentStartCodeUnit: placement.contentStartCodeUnit === null
+            ? null
+            : placement.contentEndCodeUnit !== null
+              && placement.contentEndCodeUnit - placement.contentStartCodeUnit === placement.text.length
+              ? placement.contentStartCodeUnit + first.startCodeUnit
+              : placement.contentStartCodeUnit,
+          contentEndCodeUnit: placement.contentEndCodeUnit === null
+            ? null
+            : placement.contentStartCodeUnit !== null
+              && placement.contentEndCodeUnit - placement.contentStartCodeUnit === placement.text.length
+              ? placement.contentStartCodeUnit + visibleEndCodeUnit
+              : placement.contentEndCodeUnit,
           startCodeUnit: start,
           endCodeUnit: end,
           column: first.column,
@@ -1542,33 +1659,14 @@ class FragmentBuilder {
         viewportValid ? "invalid-profile" : "invalid-viewport"
       );
     }
-    let rootResult: LayoutResult;
-    try {
-      rootResult = this.#layoutNode(
-        this.#formatting.root,
-        0,
-        0,
-        this.#input.viewport.columns,
-        this.#viewportClip,
-        0
-      );
-    } catch (error) {
-      if (!(error instanceof FragmentBudgetExhausted)) throw error;
-      this.#fragments.clear();
-      this.#placements.length = 0;
-      this.#sourceIndex.clear();
-      this.#hitRegions.length = 0;
-      this.#anchors.length = 0;
-      this.#accessibility.length = 0;
-      this.#fragmentOrdinals.clear();
-      this.#visualOrder = 0;
-      this.#paintOrder = 0;
-      this.#paintCells = 0;
-      const rootNode = this.#formatting.node(this.#formatting.root);
-      const box = rect(0, 0, this.#input.viewport.columns, 1);
-      const fragment = this.#containerFragment(rootNode, box, intersection(this.#viewportClip, box), []);
-      rootResult = { fragment: fragment.id, rect: box };
-    }
+    const rootResult = this.#layoutNode(
+      this.#formatting.root,
+      0,
+      0,
+      this.#input.viewport.columns,
+      this.#viewportClip,
+      0
+    );
     const rows = this.#rows(rootResult.rect.height);
     this.#projectUnboxedAccessibility();
     const focusByNode = new Map<DocumentNodeRef, { action: TerminalAction; fragments: FragmentId[]; rects: TerminalRect[] }>();
@@ -1610,7 +1708,8 @@ class FragmentBuilder {
       this.#anchors,
       this.#accessibility,
       outcome,
-      this.#budgets.maxSearchMatches
+      this.#budgets.maxSearchMatches,
+      this.#visibleText
     );
   }
 }
@@ -1630,6 +1729,12 @@ class ImmutableFragmentTree implements FragmentTree {
   readonly #parents: ReadonlyMap<FragmentId, FragmentId>;
   readonly #sourceIndex: ReadonlyMap<DocumentNodeRef, readonly FragmentId[]>;
   readonly #maxSearchMatches: number;
+  readonly #visibleText: VisibleTextIndex;
+  readonly #searchCache = new Map<string, TerminalSearchResult>();
+  readonly #rowFragmentsByFormatting: ReadonlyMap<FormattingNodeId, readonly {
+    readonly row: number;
+    readonly fragment: TerminalRowFragment;
+  }[]>;
 
   public constructor(
     input: BuildFragmentTreeInput,
@@ -1642,7 +1747,8 @@ class ImmutableFragmentTree implements FragmentTree {
     anchors: readonly TerminalScrollAnchor[],
     accessibility: readonly TerminalAccessibilityNode[],
     outcome: FragmentOutcome,
-    maxSearchMatches: number
+    maxSearchMatches: number,
+    visibleText: VisibleTextIndex
   ) {
     this.formatting = input.formatting;
     this.viewport = Object.freeze({ ...input.viewport });
@@ -1657,6 +1763,21 @@ class ImmutableFragmentTree implements FragmentTree {
     this.accessibility = Object.freeze([...accessibility]);
     this.outcome = Object.freeze(outcome);
     this.#maxSearchMatches = maxSearchMatches;
+    this.#visibleText = visibleText;
+    const rowFragmentsByFormatting = new Map<FormattingNodeId, {
+      readonly row: number;
+      readonly fragment: TerminalRowFragment;
+    }[]>();
+    for (const row of this.rows) {
+      for (const fragment of row.fragments) {
+        const entries = rowFragmentsByFormatting.get(fragment.formatting) ?? [];
+        entries.push(Object.freeze({ row: row.row, fragment }));
+        rowFragmentsByFormatting.set(fragment.formatting, entries);
+      }
+    }
+    this.#rowFragmentsByFormatting = new Map(
+      [...rowFragmentsByFormatting].map(([formatting, entries]) => [formatting, Object.freeze(entries)])
+    );
     const parents = new Map<FragmentId, FragmentId>();
     for (const fragment of fragments.values()) {
       for (const child of fragment.children) parents.set(child, fragment.id);
@@ -1674,6 +1795,8 @@ class ImmutableFragmentTree implements FragmentTree {
       formatting: input.formatting.root,
       source: null,
       sourceRange: null,
+      contentStartCodeUnit: null,
+      contentEndCodeUnit: null,
       rect: rect(0, 0, 0, 0),
       clip: rect(0, 0, 0, 0),
       children: Object.freeze([]),
@@ -1685,7 +1808,8 @@ class ImmutableFragmentTree implements FragmentTree {
     return new ImmutableFragmentTree(
       input, id, empty, new Map(), [], [], [], [], [],
       { status: "rejected", reason },
-      DEFAULT_FRAGMENT_BUDGETS.maxSearchMatches
+      DEFAULT_FRAGMENT_BUDGETS.maxSearchMatches,
+      buildVisibleTextIndex(input.formatting, input.signal)
     );
   }
 
@@ -1719,57 +1843,114 @@ class ImmutableFragmentTree implements FragmentTree {
   }
 
   public search(query: string): TerminalSearchResult {
-    const normalized = query.toLowerCase().slice(0, 1_024);
-    if (normalized.length === 0) {
-      return Object.freeze({ query, ranges: Object.freeze([]), truncated: false });
-    }
+    const cacheable = query.length <= 1_024;
+    const cached = cacheable ? this.#searchCache.get(query) : undefined;
+    if (cached !== undefined) return cached;
+    const indexed = this.#visibleText.search(query, this.#maxSearchMatches);
+    const matches: TerminalSearchMatch[] = [];
     const ranges: TerminalSearchRange[] = [];
-    let truncated = false;
-    for (const row of this.rows) {
-      const folded = transformTextWithSourceMap(row.text, "lowercase");
-      const haystack = folded.value;
-      let start = 0;
-      while (start <= haystack.length - normalized.length) {
-        const index = haystack.indexOf(normalized, start);
-        if (index < 0) break;
-        const foldedEnd = index + normalized.length;
-        const [originalStart, originalEnd] = mappedSourceRange(folded, index, foldedEnd);
-        const overlapping = row.fragments.filter((fragment) =>
-          originalStart < fragment.endCodeUnit && originalEnd > fragment.startCodeUnit
-        );
-        const candidateFragment = overlapping[0];
-        const rowFragment = overlapping.length === 1
-          && candidateFragment !== undefined
-          && candidateFragment.startCodeUnit <= originalStart
-          && candidateFragment.endCodeUnit >= originalEnd
-          ? candidateFragment
-          : undefined;
-        const sourceRange = rowFragment?.sourceRange !== null
-          && rowFragment?.sourceRange !== undefined
-          && rowFragment.sourceRange.end - rowFragment.sourceRange.start
-            === rowFragment.endCodeUnit - rowFragment.startCodeUnit
+    for (const match of indexed.matches) {
+      const matchRanges: TerminalSearchRange[] = [];
+      const projected = new Map<{
+        readonly row: number;
+        readonly fragment: TerminalRowFragment;
+      }, {
+        contentStart: number;
+        contentEnd: number;
+        sourceStart: number;
+        sourceEnd: number;
+        sourceProvenance: DocumentSourceRange["provenance"] | null;
+      }>();
+      for (const slice of match.slices) {
+        for (const entry of this.#rowFragmentsByFormatting.get(slice.formatting) ?? []) {
+          const fragment = entry.fragment;
+          if (fragment.contentStartCodeUnit === null || fragment.contentEndCodeUnit === null
+            || slice.contentStart >= fragment.contentEndCodeUnit
+            || slice.contentEnd <= fragment.contentStartCodeUnit) continue;
+          const current = projected.get(entry) ?? {
+            contentStart: Number.POSITIVE_INFINITY,
+            contentEnd: Number.NEGATIVE_INFINITY,
+            sourceStart: Number.POSITIVE_INFINITY,
+            sourceEnd: Number.NEGATIVE_INFINITY,
+            sourceProvenance: null
+          };
+          current.contentStart = Math.min(
+            current.contentStart,
+            Math.max(slice.contentStart, fragment.contentStartCodeUnit)
+          );
+          current.contentEnd = Math.max(
+            current.contentEnd,
+            Math.min(slice.contentEnd, fragment.contentEndCodeUnit)
+          );
+          if (slice.sourceRange !== null) {
+            const sourceStart = fragment.sourceRange === null
+              ? slice.sourceRange.start
+              : Math.max(fragment.sourceRange.start, slice.sourceRange.start);
+            const sourceEnd = fragment.sourceRange === null
+              ? slice.sourceRange.end
+              : Math.min(fragment.sourceRange.end, slice.sourceRange.end);
+            if (sourceEnd > sourceStart) {
+              current.sourceStart = Math.min(current.sourceStart, sourceStart);
+              current.sourceEnd = Math.max(current.sourceEnd, sourceEnd);
+              current.sourceProvenance ??= slice.sourceRange.provenance;
+            }
+          }
+          projected.set(entry, current);
+        }
+      }
+      for (const [entry, projection] of [...projected].sort((left, right) =>
+        left[0].row - right[0].row
+        || left[0].fragment.startCodeUnit - right[0].fragment.startCodeUnit)) {
+        const fragment = entry.fragment;
+        const contentLength = fragment.contentEndCodeUnit === null || fragment.contentStartCodeUnit === null
+          ? 0
+          : fragment.contentEndCodeUnit - fragment.contentStartCodeUnit;
+        const rowLength = fragment.endCodeUnit - fragment.startCodeUnit;
+        const exact = contentLength === rowLength && fragment.contentStartCodeUnit !== null;
+        const startCodeUnit = exact
+          ? fragment.startCodeUnit + projection.contentStart - fragment.contentStartCodeUnit
+          : fragment.startCodeUnit;
+        const endCodeUnit = exact
+          ? fragment.startCodeUnit + projection.contentEnd - fragment.contentStartCodeUnit
+          : fragment.endCodeUnit;
+        const sourceRange = Number.isFinite(projection.sourceStart)
+          && Number.isFinite(projection.sourceEnd)
+          && projection.sourceProvenance !== null
           ? Object.freeze({
-              start: rowFragment.sourceRange.start + originalStart - rowFragment.startCodeUnit,
-              end: rowFragment.sourceRange.start + originalEnd - rowFragment.startCodeUnit,
-              provenance: rowFragment.sourceRange.provenance
+              start: projection.sourceStart,
+              end: projection.sourceEnd,
+              provenance: projection.sourceProvenance
             })
-          : rowFragment?.sourceRange ?? null;
-        ranges.push(Object.freeze({
-          row: row.row,
-          startCodeUnit: originalStart,
-          endCodeUnit: originalEnd,
-          fragment: rowFragment?.fragment ?? null,
-          source: rowFragment?.source ?? null,
+          : null;
+        matchRanges.push(Object.freeze({
+          match: match.id,
+          row: entry.row,
+          startCodeUnit,
+          endCodeUnit,
+          fragment: fragment.fragment,
+          source: fragment.source,
           sourceRange
         }));
-        if (ranges.length >= this.#maxSearchMatches) {
-          truncated = true;
-          return Object.freeze({ query, ranges: Object.freeze(ranges), truncated });
-        }
-        start = Math.max(foldedEnd, index + 1);
       }
+      if (matchRanges.length === 0) continue;
+      const frozenRanges = Object.freeze(matchRanges);
+      matches.push(Object.freeze({ id: match.id, ranges: frozenRanges }));
+      ranges.push(...frozenRanges);
     }
-    return Object.freeze({ query, ranges: Object.freeze(ranges), truncated });
+    const result = Object.freeze({
+      query,
+      matches: Object.freeze(matches),
+      ranges: Object.freeze(ranges),
+      truncated: indexed.truncated
+    });
+    if (cacheable) {
+      if (this.#searchCache.size >= 8) {
+        const oldest = this.#searchCache.keys().next().value;
+        if (oldest !== undefined) this.#searchCache.delete(oldest);
+      }
+      this.#searchCache.set(query, result);
+    }
+    return result;
   }
 }
 

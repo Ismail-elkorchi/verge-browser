@@ -4,7 +4,7 @@ import type {
   DocumentFormControl,
   DocumentNodeRef,
   DocumentState,
-  WebDocumentSnapshotView
+  IndexedWebDocumentSnapshot
 } from "./types.js";
 
 class ImmutableMap<Key, Value> implements ReadonlyMap<Key, Value> {
@@ -105,7 +105,27 @@ function initialControlState(control: DocumentFormControl): DocumentControlState
   return { values: [], checked: null, selected: [] };
 }
 
-function initialUrlTarget(document: WebDocumentSnapshotView): DocumentNodeRef | null {
+function defaultControlStates(
+  controls: readonly DocumentFormControl[]
+): ReadonlyMap<DocumentNodeRef, DocumentControlState> {
+  const states = new Map<DocumentNodeRef, DocumentControlState>();
+  const checkedRadioByGroup = new Map<string, DocumentNodeRef>();
+  for (const control of controls) {
+    const initial = initialControlState(control);
+    states.set(control.node, initial);
+    if (control.kind !== "radio" || control.name.length === 0 || !initial.checked) continue;
+    const group = `${control.form ?? "document"}\u0000${control.name}`;
+    const previous = checkedRadioByGroup.get(group);
+    if (previous !== undefined) {
+      const previousState = states.get(previous);
+      if (previousState !== undefined) states.set(previous, { ...previousState, checked: false, values: [] });
+    }
+    checkedRadioByGroup.set(group, control.node);
+  }
+  return states;
+}
+
+function initialUrlTarget(document: IndexedWebDocumentSnapshot): DocumentNodeRef | null {
   let fragment: string;
   try {
     fragment = new URL(document.finalUrl).hash.slice(1);
@@ -121,7 +141,7 @@ function initialUrlTarget(document: WebDocumentSnapshotView): DocumentNodeRef | 
   return document.elementById(fragment);
 }
 
-function followedUrlTarget(document: WebDocumentSnapshotView, destination: string): DocumentNodeRef | null {
+function followedUrlTarget(document: IndexedWebDocumentSnapshot, destination: string): DocumentNodeRef | null {
   let target: URL;
   let current: URL;
   try {
@@ -143,21 +163,8 @@ function followedUrlTarget(document: WebDocumentSnapshotView, destination: strin
   return document.elementById(id);
 }
 
-export function createDocumentState(document: WebDocumentSnapshotView): DocumentState {
-  const controls = new Map<DocumentNodeRef, DocumentControlState>();
-  const checkedRadioByGroup = new Map<string, DocumentNodeRef>();
-  for (const control of document.controls) {
-    const initial = initialControlState(control);
-    controls.set(control.node, initial);
-    if (control.kind !== "radio" || control.name.length === 0 || !initial.checked) continue;
-    const group = `${control.form ?? "document"}\u0000${control.name}`;
-    const previous = checkedRadioByGroup.get(group);
-    if (previous !== undefined) {
-      const previousState = controls.get(previous);
-      if (previousState !== undefined) controls.set(previous, { ...previousState, checked: false, values: [] });
-    }
-    checkedRadioByGroup.set(group, control.node);
-  }
+export function createDocumentState(document: IndexedWebDocumentSnapshot): DocumentState {
+  const controls = defaultControlStates(document.controls);
   const open = new Set<DocumentNodeRef>();
   for (const disclosure of document.disclosures) {
     if (disclosure.initiallyOpen) open.add(disclosure.node);
@@ -173,7 +180,7 @@ export function createDocumentState(document: WebDocumentSnapshotView): Document
 }
 
 export function applyDocumentAction(
-  document: WebDocumentSnapshotView,
+  document: IndexedWebDocumentSnapshot,
   state: DocumentState,
   action: DocumentAction
 ): DocumentState {
@@ -192,7 +199,7 @@ export function applyDocumentAction(
     const form = document.form(action.target);
     if (form === null) throw new RangeError("Reset action requires a form target");
     const controls = new Map(state.controls);
-    for (const control of form.controls) controls.set(control.node, initialControlState(control));
+    for (const [node, controlState] of defaultControlStates(form.controls)) controls.set(node, controlState);
     return snapshotDocumentState({ ...state, controls });
   }
   if (action.kind === "set-open") {
