@@ -250,6 +250,7 @@ class LayoutBuilder {
   }>();
   readonly #ordinals = new Map<string, number>();
   readonly #decorationCache = new Map<FormattingNodeId, { readonly underline: boolean; readonly lineThrough: boolean }>();
+  readonly #documentActionCache = new Map<DocumentNodeRef, DocumentActionIdentity | null>();
   readonly #marginProfileCache = new Map<string, CollapsibleMarginProfile>();
   #reserved = 0;
   #reservedLineBoxes = 0;
@@ -583,26 +584,46 @@ class LayoutBuilder {
     });
   }
 
-  #action(node: FormattingNode): DocumentActionIdentity | null {
-    if (this.#computed(node)?.visibility !== "visible") return null;
-    let source = node.source;
-    while (source !== null) {
-      const link = this.#formatting.document.link(source);
-      if (link !== null) return Object.freeze({ kind: "link", node: link.node, destination: link.destination });
-      const control = this.#formatting.document.control(source);
-      if (control !== null) return Object.freeze({ kind: "form-control", node: control.node, form: control.form });
-      const parent = this.#formatting.document.parent(source);
+  #documentAction(source: DocumentNodeRef): DocumentActionIdentity | null {
+    if (this.#documentActionCache.has(source)) return this.#documentActionCache.get(source) ?? null;
+    const visited: DocumentNodeRef[] = [];
+    let current: DocumentNodeRef | null = source;
+    let action: DocumentActionIdentity | null = null;
+    while (current !== null) {
+      if (this.#documentActionCache.has(current)) {
+        action = this.#documentActionCache.get(current) ?? null;
+        break;
+      }
+      visited.push(current);
+      const link = this.#formatting.document.link(current);
+      if (link !== null) {
+        action = Object.freeze({ kind: "link", node: link.node, destination: link.destination });
+        break;
+      }
+      const control = this.#formatting.document.control(current);
+      if (control !== null) {
+        action = Object.freeze({ kind: "form-control", node: control.node, form: control.form });
+        break;
+      }
+      const parent = this.#formatting.document.parent(current);
       const disclosure = parent === null ? null : this.#formatting.document.disclosure(parent.ref);
-      if (disclosure?.kind === "details" && disclosure.summary === source) {
-        return Object.freeze({
+      if (disclosure?.kind === "details" && disclosure.summary === current) {
+        action = Object.freeze({
           kind: "disclosure",
           node: disclosure.node,
           open: this.#formatting.state.open.has(disclosure.node)
         });
+        break;
       }
-      source = parent?.ref ?? null;
+      current = parent?.ref ?? null;
     }
-    return null;
+    for (const node of visited) this.#documentActionCache.set(node, action);
+    return action;
+  }
+
+  #action(node: FormattingNode): DocumentActionIdentity | null {
+    if (this.#computed(node)?.visibility !== "visible" || node.source === null) return null;
+    return this.#documentAction(node.source);
   }
 
   #clip(node: FormattingNode, paddingRect: CssRect, borderRect: CssRect, inherited: CssRect): CssRect {
@@ -1287,10 +1308,28 @@ class LayoutBuilder {
         if (fragment.marginRect.width > 0 || fragment.marginRect.height > 0) leafRectangles.push(fragment.marginRect);
         continue;
       }
-      for (const child of fragment.children) pending.push(child);
+      for (let index = fragment.children.length - 1; index >= 0; index -= 1) {
+        const child = fragment.children[index];
+        if (child !== undefined) pending.push(child);
+      }
     }
-    leafRectangles.sort((left, right) => left.y - right.y || left.x - right.x);
     return leafRectangles;
+  }
+
+  #singleInlineLeafRectangle(children: readonly LayoutFragmentId[]): CssRect | undefined {
+    if (children.length !== 1 || children[0] === undefined) return undefined;
+    let fragment = this.#fragments.get(children[0]);
+    while (fragment !== undefined) {
+      if (fragment.kind !== "text" && fragment.inlineContinuations !== undefined) {
+        return fragment.inlineContinuations.length === 1
+          ? fragment.inlineContinuations[0]?.marginRect : undefined;
+      }
+      if (fragment.kind === "text" || fragment.kind === "control" || fragment.kind === "replaced"
+        || fragment.children.length === 0) return fragment.marginRect;
+      if (fragment.children.length !== 1 || fragment.children[0] === undefined) return undefined;
+      fragment = this.#fragments.get(fragment.children[0]);
+    }
+    return undefined;
   }
 
   #inlineContinuationGeometry(
@@ -1300,13 +1339,7 @@ class LayoutBuilder {
     const undecorated = emptyEdges(decoration.margin)
       && emptyEdges(decoration.padding)
       && emptyEdges(decoration.border);
-    const onlyChild = children.length === 1 && children[0] !== undefined
-      ? this.#fragments.get(children[0]) : undefined;
-    const directRectangle = onlyChild === undefined ? undefined
-      : onlyChild.kind !== "text" && onlyChild.inlineContinuations !== undefined
-        ? onlyChild.inlineContinuations.length === 1 ? onlyChild.inlineContinuations[0]?.marginRect : undefined
-        : onlyChild.kind === "text" || onlyChild.kind === "control" || onlyChild.kind === "replaced"
-          || onlyChild.children.length === 0 ? onlyChild.marginRect : undefined;
+    const directRectangle = this.#singleInlineLeafRectangle(children);
     if (undecorated && directRectangle !== undefined
       && (directRectangle.width > 0 || directRectangle.height > 0)) {
       return [Object.freeze({
@@ -2011,11 +2044,21 @@ class LayoutBuilder {
       && left.y === right.y
       && left.width === right.width
       && left.height === right.height;
+    let requiresClipRefresh = false;
     // Inline decorations are registered after their descendants, so insertion
     // order is already the required bottom-up continuation-finalization order.
     for (const [id, decoration] of this.#inlineDecorations) {
       const fragment = this.#fragments.get(id);
       if (fragment === undefined || fragment.kind === "text") continue;
+      const node = this.#formatting.node(fragment.formattingNode);
+      const style = this.#boxComputed(node);
+      requiresClipRefresh ||= style !== null && (
+        style.box.overflowX !== "visible"
+        || style.box.overflowY !== "visible"
+        || style.box.clipPath.kind === "inset"
+        || ((style.box.position === "absolute" || style.box.position === "fixed")
+          && style.box.legacyClip.kind === "rect")
+      );
       const continuations = this.#inlineContinuationGeometry(decoration, fragment.children);
       const contentRect = this.#unionContinuationRectangles(continuations, "contentRect", fragment.contentRect);
       const undecorated = emptyEdges(decoration.margin)
@@ -2044,6 +2087,7 @@ class LayoutBuilder {
         inlineContinuations: Object.freeze(continuations)
       });
     }
+    if (!requiresClipRefresh) return;
     const clipped: { readonly id: LayoutFragmentId; readonly inherited: CssRect }[] = [{
       id: root,
       inherited: this.#documentCanvasClip()
@@ -2163,29 +2207,37 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
         for (const child of fragment.children) pending.push(child);
       }
     }
-    const immutableFragments = new Map<LayoutFragmentId, LayoutFragment>();
-    for (const [id, fragment] of fragments) {
-      if (!complete && !reachable.has(id)) continue;
-      immutableFragments.set(id, Object.freeze(fragment));
+    if (complete) {
+      for (const fragment of fragments.values()) Object.freeze(fragment);
+      for (const ids of formattingIndex.values()) Object.freeze(ids);
+      for (const ids of documentIndex.values()) Object.freeze(ids);
+      this.#fragments = fragments;
+      this.#formattingIndex = formattingIndex;
+      this.#documentIndex = documentIndex;
+    } else {
+      const immutableFragments = new Map<LayoutFragmentId, LayoutFragment>();
+      for (const [id, fragment] of fragments) {
+        if (reachable.has(id)) immutableFragments.set(id, Object.freeze(fragment));
+      }
+      this.#fragments = immutableFragments;
+      const retainedFormatting = new Map<FormattingNodeId, readonly LayoutFragmentId[]>();
+      for (const [node, ids] of formattingIndex) {
+        const retained = ids.filter((id) => reachable.has(id));
+        if (retained.length > 0) retainedFormatting.set(node, Object.freeze(retained));
+      }
+      this.#formattingIndex = retainedFormatting;
+      const retainedDocument = new Map<DocumentNodeRef, readonly LayoutFragmentId[]>();
+      for (const [node, ids] of documentIndex) {
+        const retained = ids.filter((id) => reachable.has(id));
+        if (retained.length > 0) retainedDocument.set(node, Object.freeze(retained));
+      }
+      this.#documentIndex = retainedDocument;
     }
-    this.#fragments = immutableFragments;
-    const retainedFormatting = new Map<FormattingNodeId, readonly LayoutFragmentId[]>();
-    for (const [node, ids] of formattingIndex) {
-      const retained = complete ? ids : ids.filter((id) => reachable.has(id));
-      if (retained.length > 0) retainedFormatting.set(node, Object.freeze(retained));
-    }
-    this.#formattingIndex = retainedFormatting;
-    const retainedDocument = new Map<DocumentNodeRef, readonly LayoutFragmentId[]>();
-    for (const [node, ids] of documentIndex) {
-      const retained = complete ? ids : ids.filter((id) => reachable.has(id));
-      if (retained.length > 0) retainedDocument.set(node, Object.freeze(retained));
-    }
-    this.#documentIndex = retainedDocument;
     const retainedLines = complete ? lineBoxes : lineBoxes.filter((line) => reachable.has(line.containingFragment)
       && line.fragments.every((id) => reachable.has(id)));
     this.lineBoxes = Object.freeze(retainedLines);
     this.outcome = Object.freeze(outcome.status === "complete"
-      ? { ...outcome, fragments: immutableFragments.size, lineBoxes: retainedLines.length }
+      ? { ...outcome, fragments: fragments.size, lineBoxes: retainedLines.length }
       : outcome.status === "truncated"
         ? { ...outcome, fragments: reachable.size, lineBoxes: retainedLines.length }
         : outcome);
