@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Recorded dashboard fixture</title>
+    <style>
+      .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 1ch }
+      metric-card { display: block; border: 1px solid; padding: 1ch }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Service dashboard</h1>
+      <section class="cards" aria-label="Metrics">
+        <metric-card><h2>Requests</h2><p>1,024</p></metric-card>
+        <metric-card><h2>Errors</h2><p>3</p></metric-card>
+      </section>
+      <table>
+        <caption>Recent checks</caption>
+        <thead><tr><th>Region</th><th>Status</th></tr></thead>
+        <tbody><tr><td>West</td><td>Healthy</td></tr><tr><td>East</td><td>Healthy</td></tr></tbody>
+      </table>
+      <label><input type="checkbox" checked> Auto refresh</label>
+    </main>
+  </body>
+</html>

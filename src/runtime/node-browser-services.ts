@@ -19,10 +19,14 @@ async function writeTextFile(path: string, content: string): Promise<void> {
   await writeFile(path, content, "utf8");
 }
 
-async function runCommand(command: string, args: readonly string[], options: { readonly shell?: boolean; readonly stdio?: "ignore" | "inherit" } = {}): Promise<void> {
+async function runCommand(
+  command: string,
+  args: readonly string[],
+  options: { readonly stdio?: "ignore" | "inherit" } = {}
+): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const child = spawn(command, [...args], {
-      shell: options.shell ?? false,
+      shell: false,
       stdio: options.stdio ?? "ignore"
     });
 

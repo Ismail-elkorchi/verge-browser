@@ -17,48 +17,51 @@ const evidence = validateWorkspaceParserInstall({
     resolve(root, "node_modules", "@ismail-elkorchi", "html-parser", "package.json")
   )
 });
-const clientEvidence = validateHttpClientInstall({
+const dependencyEvidence = await Promise.all([
+  "@ismail-elkorchi/css-parser",
+  "@ismail-elkorchi/http-client",
+  "@ismail-elkorchi/terminal-ui"
+].map(async (name) => validatePublishedDependencyInstall({
+  name,
   manifest,
   lockfile,
-  installedManifest: await readJson(
-    resolve(root, "node_modules", "@ismail-elkorchi", "http-client", "package.json")
-  )
-});
+  installedManifest: await readJson(resolve(root, "node_modules", ...name.split("/"), "package.json"))
+})));
 
 process.stdout.write(
   `clean install verified: ${evidence.name}@${evidence.version} ${evidence.integrity}; `
-  + `${clientEvidence.name}@${clientEvidence.version} ${clientEvidence.integrity}\n`
+  + `${dependencyEvidence.map((entry) => `${entry.name}@${entry.version} ${entry.integrity}`).join("; ")}\n`
 );
 
-function validateHttpClientInstall({
+function validatePublishedDependencyInstall({
+  name,
   manifest,
   lockfile,
   installedManifest
 }) {
-  const name = "@ismail-elkorchi/http-client";
   const dependency = manifest.dependencies?.[name];
-  if (dependency !== "0.1.0") {
-    throw new Error("http-client must use the exact published 0.1.0 release");
+  if (typeof dependency !== "string" || !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u.test(dependency)) {
+    throw new Error(`${name} must use an exact published version`);
   }
   const rootLock = lockfile.packages?.[""];
   const lockEntry = lockfile.packages?.[`node_modules/${name}`];
   if (rootLock?.dependencies?.[name] !== dependency) {
-    throw new Error("package.json and package-lock.json disagree on http-client");
+    throw new Error(`package.json and package-lock.json disagree on ${name}`);
   }
   if (
     typeof lockEntry?.version !== "string"
     || lockEntry.version !== dependency
-    || lockEntry.resolved !== `https://registry.npmjs.org/@ismail-elkorchi/http-client/-/http-client-${lockEntry.version}.tgz`
+    || lockEntry.resolved !== `https://registry.npmjs.org/${name}/-/${name.split("/").at(-1)}-${lockEntry.version}.tgz`
     || typeof lockEntry?.integrity !== "string"
     || !/^sha512-[A-Za-z0-9+/]+={0,2}$/u.test(lockEntry.integrity)
   ) {
-    throw new Error("http-client must resolve from the public npm registry with integrity");
+    throw new Error(`${name} must resolve from the public npm registry with integrity`);
   }
   if (
     installedManifest.name !== name
     || installedManifest.version !== lockEntry.version
   ) {
-    throw new Error("installed http-client does not match the public-registry lock entry");
+    throw new Error(`installed ${name} does not match the public-registry lock entry`);
   }
   return Object.freeze({
     name,

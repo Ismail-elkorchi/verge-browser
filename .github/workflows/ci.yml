@@ -71,7 +71,7 @@ jobs:
         run: npm run check:core && npm run smoke:node
 
   platform-node:
-    name: node-${{ matrix.platform }}
+    name: ${{ matrix.check-name }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
@@ -79,9 +79,21 @@ jobs:
       matrix:
         include:
           - platform: macos
+            check-name: node-macos
             runner: macos-15
+            node-version: 24
+          - platform: macos
+            check-name: node-macos-26
+            runner: macos-15
+            node-version: 26
           - platform: windows
+            check-name: node-windows
             runner: windows-2025
+            node-version: 24
+          - platform: windows
+            check-name: node-windows-26
+            runner: windows-2025
+            node-version: 26
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -89,7 +101,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: "24"
+          node-version: ${{ matrix.node-version }}
           cache: npm
 
       - name: Install
@@ -125,3 +137,28 @@ jobs:
 
       - name: Compare runtime behavior
         run: npm run smoke:all
+
+  release-qualification:
+    name: release-qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.x
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Run release qualification
+        run: npm run release:check

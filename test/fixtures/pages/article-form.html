@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Recorded article fixture</title>
+    <style>
+      main { max-width: 60ch; margin-inline: auto }
+      .meta { display: flex; flex-wrap: wrap; gap: 1ch }
+    </style>
+  </head>
+  <body>
+    <header><nav aria-label="Primary"><a href="/">Home</a> <a href="/archive">Archive</a></nav></header>
+    <main id="content">
+      <article>
+        <h1>A practical terminal article</h1>
+        <div class="meta"><span>Standards</span><span>8 minute read</span></div>
+        <p>Structural rendering keeps <strong>meaning</strong> attached to source nodes.</p>
+        <details><summary>Further context</summary><p>This starts closed.</p></details>
+      </article>
+      <form action="/search" role="search">
+        <label for="query">Search articles</label>
+        <input id="query" name="q" value="layout">
+        <button type="submit">Search</button>
+      </form>
+    </main>
+  </body>
+</html>

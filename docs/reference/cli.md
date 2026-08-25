@@ -72,17 +72,6 @@ find prev
 recall <query>
 ```
 
-Low-level HTML patch commands remain available for parser and audit workflows:
-
-```text
-patch remove-node <id>
-patch replace-text <id> <value>
-patch set-attr <id> <name> <value>
-patch remove-attr <id> <name>
-patch insert-before <id> <html>
-patch insert-after <id> <html>
-```
-
 ## Environment
 
 - `VERGE_SEARCH_URL_TEMPLATE`: search URL containing `{query}`.
@@ -90,8 +79,9 @@ patch insert-after <id> <html>
 
 ## `--once`
 
-`--once` loads one target, renders the browser’s element tree to plain text, and
-exits. It does not enter raw terminal mode or emit terminal control sequences.
+`--once` loads one target and projects the same terminal fragments used by the
+interactive page view to plain text. It does not enter raw terminal mode or emit
+terminal control sequences.
 
 ## Browser boundary
 

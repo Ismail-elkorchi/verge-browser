@@ -37,24 +37,7 @@ export type BrowserCommand =
   | { readonly kind: "open-external" }
   | { readonly kind: "go"; readonly target: string }
   | { readonly kind: "go-stream"; readonly target: string }
-  | { readonly kind: "patch-remove-node"; readonly target: number }
-  | { readonly kind: "patch-replace-text"; readonly target: number; readonly value: string }
-  | { readonly kind: "patch-set-attr"; readonly target: number; readonly name: string; readonly value: string }
-  | { readonly kind: "patch-remove-attr"; readonly target: number; readonly name: string }
-  | { readonly kind: "patch-insert-before"; readonly target: number; readonly html: string }
-  | { readonly kind: "patch-insert-after"; readonly target: number; readonly html: string }
   | { readonly kind: "invalid"; readonly reason: string };
-
-function parsePositiveInteger(value: string): number | null {
-  if (!/^\d+$/.test(value)) {
-    return null;
-  }
-  const parsedValue = Number.parseInt(value, 10);
-  if (!Number.isSafeInteger(parsedValue) || parsedValue < 1) {
-    return null;
-  }
-  return parsedValue;
-}
 
 /**
  * Parses action-palette input into a structured {@link BrowserCommand}.
@@ -190,74 +173,6 @@ export function parseCommand(rawInput: string): BrowserCommand {
     return { kind: "go-stream", target: tail };
   }
 
-  if (headLower === "patch") {
-    if (tail.length === 0) {
-      return {
-        kind: "invalid",
-        reason: "patch requires a subcommand: remove-node | replace-text | set-attr | remove-attr | insert-before | insert-after"
-      };
-    }
-
-    const patchParts = tail.split(/\s+/);
-    const patchSubcommand = patchParts[0]?.toLowerCase() ?? "";
-    const patchTargetToken = patchParts[1] ?? "";
-    const patchTarget = parsePositiveInteger(patchTargetToken);
-
-    if (patchTarget === null) {
-      return { kind: "invalid", reason: "patch requires a positive node id as second token" };
-    }
-
-    if (patchSubcommand === "remove-node") {
-      return { kind: "patch-remove-node", target: patchTarget };
-    }
-
-    if (patchSubcommand === "replace-text") {
-      const value = patchParts.slice(2).join(" ").trim();
-      if (value.length === 0) {
-        return { kind: "invalid", reason: "patch replace-text requires a replacement value" };
-      }
-      return { kind: "patch-replace-text", target: patchTarget, value };
-    }
-
-    if (patchSubcommand === "set-attr") {
-      const name = patchParts[2]?.trim() ?? "";
-      const value = patchParts.slice(3).join(" ").trim();
-      if (name.length === 0 || value.length === 0) {
-        return { kind: "invalid", reason: "patch set-attr requires: <nodeId> <name> <value>" };
-      }
-      return { kind: "patch-set-attr", target: patchTarget, name, value };
-    }
-
-    if (patchSubcommand === "remove-attr") {
-      const name = patchParts[2]?.trim() ?? "";
-      if (name.length === 0) {
-        return { kind: "invalid", reason: "patch remove-attr requires: <nodeId> <name>" };
-      }
-      return { kind: "patch-remove-attr", target: patchTarget, name };
-    }
-
-    if (patchSubcommand === "insert-before") {
-      const html = patchParts.slice(2).join(" ").trim();
-      if (html.length === 0) {
-        return { kind: "invalid", reason: "patch insert-before requires HTML content" };
-      }
-      return { kind: "patch-insert-before", target: patchTarget, html };
-    }
-
-    if (patchSubcommand === "insert-after") {
-      const html = patchParts.slice(2).join(" ").trim();
-      if (html.length === 0) {
-        return { kind: "invalid", reason: "patch insert-after requires HTML content" };
-      }
-      return { kind: "patch-insert-after", target: patchTarget, html };
-    }
-
-    return {
-      kind: "invalid",
-      reason: "patch supports: remove-node | replace-text | set-attr | remove-attr | insert-before | insert-after"
-    };
-  }
-
   if (headLower === "find" || headLower === "search") {
     if (tail.length === 0) {
       return { kind: "invalid", reason: "find requires a query, or use: find next | find prev" };
@@ -322,7 +237,6 @@ export function formatHelpText(): string {
     "  save page <path>    Save the current HTML source",
     "  save text <path>    Export the readable page text",
     "  open-external       Open the current page outside Verge",
-    "  patch ...           Apply a low-level HTML patch to the current page",
     "",
     "CLI flags:",
     "  --once              Load the initial target once, then exit"

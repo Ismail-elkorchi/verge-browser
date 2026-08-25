@@ -22,9 +22,8 @@ All notable changes are documented in this file.
   `PageSnapshot`.
 - **Breaking:** `PageDiagnostics` replaces the old renderer/caller-cookie
   timing fields with semantic-content and stylesheet timing/count diagnostics.
-- **Breaking:** `BrowserSession.applyEdits()` is asynchronous because edits can
-  change external stylesheet resources; form extraction now exposes semantic
-  `FormControl` variants instead of the earlier flat field shape.
+- Form processing now uses semantic control variants rather than the earlier
+  flat field shape.
 - **Breaking:** Remove the exported hand-written cookie parser and cookie-header
   helpers. The browser now persists a public-suffix-aware cookie jar behind
   `HttpSessionAdapter`, which applies response cookies before redirect and
@@ -52,13 +51,82 @@ All notable changes are documented in this file.
   navigation when tabs close, separate cancelable navigation from profile I/O,
   time out stalled download responses, and release failed, discarded, or
   pre-parse streaming resources.
-- Bound interactive form projection and replace repeated radio-group, option,
+- Bound interactive form indexing and replace repeated radio-group, option,
   and label scans with linear work on large documents.
 - Validate the Node host on current macOS and Windows runners in addition to
   Linux.
-- Preserve `PageSnapshot.rendered` and the legacy renderer override while
-  keeping flatten-first `PageContent`, `PageBlock`, and `PageLayout` contracts
-  out of the stable root snapshot/export surface.
+- **Breaking:** Replace the flatten-first renderer with immutable document,
+  computed-style-map, box-tree, terminal-fragment-tree, and reader-document
+  stages. `PageSnapshot.document` is now the sole authoritative content model.
+- **Breaking:** Expose only the read-only `WebDocumentSnapshot` structure through
+  navigation results. Document factories, dynamic state/actions, semantic
+  indexes, and the concrete snapshot implementation remain internal.
+- **Breaking:** Remove the root document-construction, document-state, source-
+  editing, and standalone form-submission helpers; browser orchestration owns
+  those operations.
+- **Breaking:** Remove `PageSnapshot.rendered`, `RenderedPage`,
+  `RenderedActionable`, `RenderedLink`, `RenderInput`, `PageRenderer`, renderer
+  and width overrides, fixed-width render helpers, and the former flat page,
+  pager, search, parser-attachment, and terminal helper modules.
+- Preserve unknown/custom element hierarchy and build browser-internal semantic
+  indexes; generate
+  boxes from computed `display`; support suppression, contents, anonymous flow
+  and table wrappers, lists, structured tables, controls, replaced fallbacks,
+  flex/grid contexts, nested terminal fragments, source-aware wrapping, hit
+  geometry, focus, scrolling, search, accessibility bounds, and reader documents.
+- Give anonymous and generated boxes explicit box-style and semantic ownership,
+  exclude blank cells inside wrapped action unions from pointer geometry, and
+  fail closed for unknown media types. Preserve semantic and accessibility
+  identities for `display: contents` elements without generating a principal
+  box.
+- Keep baseline user-agent, initial, and inherited styles total for every
+  retained element when author selector work is truncated; formatting no longer
+  suppresses content because author-style work ran out.
+- Preserve completed terminal fragments, rows, hit geometry, anchors, and
+  accessibility entries when fragment, row, or paint budgets truncate a page.
+- Generate contiguous anonymous text items for flex/grid, discard collapsed
+  whitespace-only item runs, split inline continuations around block children,
+  and preserve source order through anonymous table repair.
+- Reserve open box-tree ancestors before descending, retain connected
+  source-order prefixes across formatting-node and anonymous-wrapper budget
+  exhaustion, keep UTF-16 text budgets Unicode-scalar-safe, and aggregate one
+  document-semantic geometry entry across split inline and `display: contents`
+  boxes.
+- Build viewport-independent visible-text matches before fragmentation, then
+  map each stable match onto one or more wrapped terminal fragments.
+- Remove browser source-editing APIs and the retained parser graph; the indexed
+  Verge document tree is the sole authoritative document structure.
+- Preserve normal prose and links inside forms while replacing only control
+  fragments with terminal controls; index explicit form ownership once; and
+  model details disclosure as a typed document action.
+- Reject page-initiated redirects that cross into local files before committing
+  a document or stylesheet and release stream readers on completion and failure.
+- Freeze style, fragment, geometry, search, and accessibility values at their
+  subsystem boundaries; validate terminal and style environments as typed
+  inputs; and represent CSS `max-width: none` and negative margins without
+  terminal-unit shortcuts in computed style.
+- Drive interactive and one-shot output from the same terminal fragment path,
+  and enforce document/style/formatting import boundaries plus deterministic
+  structural fuzz and per-stage performance controls, including retained heap,
+  peak RSS, 100,000-node documents, large attributes, repeated tab lifecycle,
+  and post-close garbage collection.
+- Keep template contents inert during style/resource/layout indexing, preserve
+  foreign-namespace element casing, index standalone controls and radio groups,
+  retain generic/custom-element prose in the separate reader document, and
+  persist scroll positions through durable element/source locators rather than
+  snapshot-local node-reference strings.
+- **Breaking:** Replace persisted workspace `scrollAnchor.source` strings with
+  typed durable `scrollAnchor.target` locators; stale workspace entries using
+  the snapshot-local format are rejected instead of guessed or migrated.
+- Restore typed text alignment, indentation, automatic margins, flex wrapping
+  and alignment, and common visually-clipped content handling; resolve terminal
+  overlap by paint order and avoid argument-spread and repeated-reader-scan
+  cliffs on large documents; keep document cloning and index propagation
+  stack-safe at extreme parser-supported nesting depths.
+- Make structural page actions a keyboard-navigable group, reveal offscreen
+  control fragments before focusing their terminal-ui controls, retain
+  absolute scroll anchors for rows without a source node, and keep Tab/Shift+Tab
+  traversal within form controls.
 
 ## [0.1.2] - 2026-03-07
 - Add the redesigned terminal UI with page-first navigation, help, and shell flows.

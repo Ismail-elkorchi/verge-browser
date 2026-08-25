@@ -10,7 +10,7 @@ const session = new BrowserSession();
 try {
   const snapshot = await session.open("https://example.com/");
   console.log(snapshot.diagnostics.stylesheetCount);
-  console.log(snapshot.diagnostics.styleIssueCount);
+  console.log(snapshot.diagnostics.stylesheetLoadIssueCount);
 } finally {
   await session.close();
 }
@@ -22,22 +22,32 @@ link or document base URL. Use `stylesheetLoader` for trusted fixtures or
 another transport and `stylesheetPolicy` to lower the resource limits.
 
 The browser evaluates responsive styles at the current terminal width while
-retaining stable semantic actions across resize. The current flatten-first
-content and layout structures are implementation details rather than root API
-contracts.
+retaining stable semantic actions across resize. Style resolution produces a
+document-keyed internal style snapshot; the formatting and terminal fragment
+contracts remain internal while they mature.
 
 Verge supports a terminal CSS profile rather than pixel rendering:
 
 - inherited custom properties and `var()` fallbacks;
 - `screen` and width media queries, using eight CSS pixels per terminal column;
-- visibility, whitespace, colors, text emphasis, decoration, and alignment;
-- logical margins and padding mapped to terminal rows and cells;
-- simple flow, wrapping row flexbox, and column grids;
-- bounded widths, gaps, borders, and the common visually-hidden pattern.
+- visibility, whitespace, colors, text emphasis, and decoration;
+- typed CSS margins and padding resolved to used terminal geometry during layout;
+- block/inline flow, four flex directions, wrapping, main/cross-axis alignment,
+  and grids with explicit auto, length, fraction, fixed `repeat()`, and
+  `minmax()` tracks;
+- bounded widths, heights, gaps, solid borders, and overflow clipping.
+
+Flex and grid support is intentionally an initial formatting slice. Flex grow,
+shrink, ordering, complete intrinsic sizing, grid spanning, auto-repeated
+tracks, and the full CSS sizing algorithms are not implemented yet. Verge also
+recognizes the common absolutely positioned, one-pixel, overflow-hidden
+`clip`/`clip-path` pattern as visually clipped content while retaining its
+accessibility semantic.
 
 HTML meaning remains available when a rule cannot be represented. Unsupported
 selectors, properties, and values are ignored and aggregated in the browser's
-diagnostics view; the snapshot exposes their aggregate count.
+diagnostics view. `stylesheetLoadIssueCount` covers transport and resource-load
+failures; it does not claim to count every cascade diagnostic.
 
 Reader view ignores author styles. Browser chrome and keyboard-focus
 indication are never styled by the page.

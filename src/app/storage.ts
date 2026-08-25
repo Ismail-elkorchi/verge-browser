@@ -58,10 +58,15 @@ export interface DownloadRecord {
 
 export type StoredSidePanel = "history" | "bookmarks" | "downloads" | null;
 
+export type StoredScrollTarget =
+  | { readonly kind: "element-id"; readonly value: string }
+  | { readonly kind: "source"; readonly offset: number; readonly nodeKind: "element" | "text" }
+  | null;
+
 export interface StoredBrowserDocument {
   readonly url: string;
   readonly scrollAnchor: {
-    readonly blockId: string;
+    readonly target: StoredScrollTarget;
     readonly rowOffset: number;
   };
 }
@@ -88,7 +93,8 @@ const MAX_INDEX_LIMIT = 250;
 const MAX_INDEX_TEXT_CODE_UNITS = 16 * 1024;
 const MAX_STATE_BYTES = 80 * 1024 * 1024;
 const MAX_WORKSPACE_DOCUMENTS = 50;
-const MAX_SCROLL_BLOCK_ID_CODE_UNITS = 512;
+const MAX_SCROLL_TARGET_CODE_UNITS = 512;
+const MAX_SCROLL_SOURCE_OFFSET = 16 * 1024 * 1024;
 const MAX_SCROLL_ROW_OFFSET = 10_000_000;
 const MAX_SEARCH_QUERY_TOKENS = 16;
 const MAX_SEARCH_TOKEN_CODE_UNITS = 128;
@@ -219,15 +225,34 @@ function normalizeWorkspace(value: unknown): BrowserWorkspace | null {
       || typeof anchor !== "object"
     ) return [];
     const anchorRecord = anchor as Record<string, unknown>;
+    const rawTarget = anchorRecord["target"];
+    let target: StoredScrollTarget;
+    if (rawTarget === null) target = null;
+    else if (typeof rawTarget === "object") {
+      const targetRecord = rawTarget as Record<string, unknown>;
+      if (targetRecord["kind"] === "element-id" && typeof targetRecord["value"] === "string"
+        && targetRecord["value"].length > 0 && targetRecord["value"].length <= MAX_SCROLL_TARGET_CODE_UNITS) {
+        target = { kind: "element-id", value: targetRecord["value"] };
+      } else if (targetRecord["kind"] === "source"
+        && (targetRecord["nodeKind"] === "element" || targetRecord["nodeKind"] === "text")
+        && Number.isSafeInteger(targetRecord["offset"])
+        && Number(targetRecord["offset"]) >= 0
+        && Number(targetRecord["offset"]) <= MAX_SCROLL_SOURCE_OFFSET) {
+        target = {
+          kind: "source",
+          offset: Number(targetRecord["offset"]),
+          nodeKind: targetRecord["nodeKind"]
+        };
+      } else return [];
+    } else return [];
     if (
-      typeof anchorRecord["blockId"] !== "string"
-      || !Number.isSafeInteger(anchorRecord["rowOffset"])
+      !Number.isSafeInteger(anchorRecord["rowOffset"])
       || Number(anchorRecord["rowOffset"]) < 0
     ) return [];
     return [{
       url: document["url"],
       scrollAnchor: {
-        blockId: anchorRecord["blockId"].slice(0, MAX_SCROLL_BLOCK_ID_CODE_UNITS),
+        target,
         rowOffset: Math.min(Number(anchorRecord["rowOffset"]), MAX_SCROLL_ROW_OFFSET)
       }
     }];
@@ -394,6 +419,10 @@ async function prepareStateDirectory(statePath: string): Promise<void> {
   }
   if (created !== undefined || basename(directory) === "verge-browser") {
     await restrictPermissions(directory, PRIVATE_DIRECTORY_MODE);
+  } else if (process.platform !== "win32" && (directoryEntry.mode & 0o077) !== 0) {
+    throw new Error(
+      `Browser state directory permissions must exclude group and other users: ${directory}`
+    );
   }
 }
 

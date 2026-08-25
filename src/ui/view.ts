@@ -18,8 +18,6 @@ import {
   commandInput,
   contextMenu,
   dialog,
-  field,
-  form,
   menuTrigger,
   numberInput,
   passwordInput,
@@ -51,20 +49,21 @@ import type {
 import type { TuiContext } from "@ismail-elkorchi/terminal-ui/tui";
 import { themeColor } from "@ismail-elkorchi/terminal-ui/theme";
 
-import { extractForms, type FormControl, type FormEntry } from "../app/forms.js";
-import { pageContent } from "../app/page-content.js";
 import type {
-  PageAction,
-  PageBlock,
-  PageContent,
-  PageLayout,
-  PageLinkAction,
-  PageLayoutRow,
-  PageTextStyle
-} from "../app/types.js";
+  DocumentChoiceControl,
+  DocumentFormControl,
+  DocumentNodeRef
+} from "../document/index.js";
+import type {
+  FragmentTree,
+  TerminalFragment,
+  TerminalRow,
+  TerminalStyleRun
+} from "../presentation/terminal/index.js";
 import {
+  actionId,
   documentContentBounds,
-  documentLayout,
+  renderDocumentForViewport,
   documentScrollRow
 } from "./document-layout.js";
 import type {
@@ -78,24 +77,36 @@ import type {
   PickerOverlay
 } from "./model.js";
 import { browserMenuItems, formComboboxPageSize, linkMenuItems } from "./model.js";
+import { terminalTextMeasurer } from "./terminal-measure.js";
+
+const TERMINAL_MEASURER = terminalTextMeasurer();
 
 interface BrowserDocumentViewModel {
   readonly id: string;
-  readonly content: PageContent;
-  readonly actionsById: ReadonlyMap<string, PageAction>;
-  readonly blocksById: ReadonlyMap<string, PageBlock>;
-  readonly linksByBlockId: ReadonlyMap<string, readonly PageLinkAction[]>;
-  readonly linkPositionsById: ReadonlyMap<string, number>;
-  readonly layout: PageLayout;
+  readonly source: BrowserDocumentState;
+  readonly layout: FragmentTree;
   readonly finalUrl: string;
   readonly search: BrowserDocumentState["search"];
-  readonly forms: readonly FormEntry[];
-  readonly formValues: BrowserDocumentState["formValues"];
+  readonly searchRangesByRow: ReadonlyMap<number, readonly {
+    readonly match: string;
+    readonly start: number;
+    readonly end: number;
+  }[]>;
+  readonly controlGroups: readonly BrowserControlGroup[];
   readonly formEditors: BrowserDocumentState["formEditors"];
+}
+
+interface BrowserControlGroup {
+  readonly form: DocumentNodeRef | null;
+  readonly controls: readonly DocumentFormControl[];
 }
 
 interface BrowserDocumentComponentOptions {
   readonly document: BrowserDocumentViewModel;
+}
+
+interface BrowserControlComponentOptions {
+  readonly label: string;
 }
 
 type BrowserDocumentAction = Extract<
@@ -103,107 +114,140 @@ type BrowserDocumentAction = Extract<
   { readonly kind: "activateActionAt" | "openLinkMenu" }
 >;
 
-function actionForId(document: BrowserDocumentViewModel, id: string | undefined): PageAction | undefined {
-  return id === undefined ? undefined : document.actionsById.get(id);
-}
+const browserControlSlots = {
+  control: { cardinality: "one", owner: "caller", messages: "bubble" }
+} as const;
 
-function accessibleBlock(block: PageBlock) {
-  if (block.kind === "heading") {
+const browserControlComponent = defineComponent<
+  BrowserControlComponentOptions,
+  BrowserControlComponentOptions,
+  never,
+  never,
+  readonly [],
+  "required",
+  readonly [],
+  typeof browserControlSlots
+>({
+  name: "verge-browser/components/labelled-control",
+  identity: "required",
+  structure: "composite",
+  semantics: "semantic",
+  accessibleRole: "group",
+  slots: browserControlSlots,
+  measure({ slots }) {
+    return slots.measure("control");
+  },
+  layout({ bounds }) {
+    return { control: bounds };
+  },
+  accessibility({ id, model, slots }) {
+    const control = slots.control[0];
+    if (control === undefined) throw new Error("A labelled browser control requires its control slot.");
+    const labelId = `${id}:label`;
     return {
-      id: block.id,
-      role: "heading" as const,
-      label: block.text,
-      position: { level: block.level ?? 1 }
+      id,
+      role: "group",
+      label: model.label,
+      children: [
+        { id: labelId, role: "text", value: model.label, controls: control.id },
+        { ...control, labelledBy: labelId }
+      ]
     };
   }
-  return { id: block.id, role: "text" as const, label: block.text };
+});
+
+function labelledBrowserControl(
+  id: string,
+  label: string,
+  control: Element<BrowserTuiMessage>
+): Element<BrowserTuiMessage> {
+  return browserControlComponent({
+    id: `${id}:labelled-control`,
+    label,
+    slots: { control }
+  });
 }
 
-function blockStyle(block: PageBlock): TerminalStyle {
-  if (block.kind === "heading" || block.kind === "definitionTerm") {
-    return {
-      fg: themeColor(
-        block.kind === "heading" && block.level === 1 ? "accent.primary" : "text.strong"
-      ),
-      bold: true
-    };
-  }
-  if (block.kind === "quote") {
-    return { fg: themeColor("text.muted"), italic: true };
-  }
-  if (block.kind === "notice") {
-    return { fg: themeColor("status.warning") };
-  }
-  return { fg: themeColor("text.default") };
-}
-
-function terminalStyle(style: PageTextStyle | undefined): TerminalStyle {
+function terminalStyle(style: TerminalStyleRun | undefined): TerminalStyle {
   if (style === undefined) return {};
   return {
-    ...(style.foreground === undefined
+    ...(style.foreground === null
       ? {}
-      : { fg: { kind: "rgb" as const, ...style.foreground } }),
-    ...(style.background === undefined
+      : {
+        fg: {
+          kind: "rgb" as const,
+          r: style.foreground.r,
+          g: style.foreground.g,
+          b: style.foreground.b
+        }
+      }),
+    ...(style.background === null
       ? {}
-      : { bg: { kind: "rgb" as const, ...style.background } }),
-    ...(style.bold === undefined ? {} : { bold: style.bold }),
-    ...(style.italic === undefined ? {} : { italic: style.italic }),
-    ...(style.underline === undefined ? {} : { underline: style.underline }),
-    ...(style.strikethrough === undefined ? {} : { strikethrough: style.strikethrough })
+      : {
+        bg: {
+          kind: "rgb" as const,
+          r: style.background.r,
+          g: style.background.g,
+          b: style.background.b
+        }
+      }),
+    bold: style.bold,
+    italic: style.italic,
+    underline: style.underline,
+    strikethrough: style.strikethrough
   };
 }
 
 function rowSegments(
   document: BrowserDocumentViewModel,
-  layoutRow: PageLayoutRow,
+  layoutRow: TerminalRow,
   rowIndex: number,
   focusedActionId: string | undefined
 ): readonly RenderSpan[] {
+  type InlineRowAction = {
+    readonly id: string;
+    readonly start: number;
+    readonly end: number;
+  } & ({ readonly kind: "link"; readonly destination: string } | { readonly kind: "disclosure" });
   const rowText = layoutRow.text;
-  const links = layoutRow.fragments.flatMap((fragment) =>
-    (document.linksByBlockId.get(fragment.blockId) ?? []).flatMap((link) => {
-      const start = Math.max(link.textOffset, fragment.blockStartCodeUnitIndex);
-      const end = Math.min(
-        link.textOffset + link.label.length,
-        fragment.blockEndCodeUnitIndexExclusive
-      );
-      return start >= end
-        ? []
-        : [{
-          link,
-          start: fragment.rowStartCodeUnitIndex + start - fragment.blockStartCodeUnitIndex,
-          end: fragment.rowStartCodeUnitIndex + end - fragment.blockStartCodeUnitIndex
-        }];
-    })
-  );
-  const active = document.search?.matches[document.search.activeMatchIndex];
-  const searchRanges: { readonly start: number; readonly end: number; readonly active: boolean }[] = [];
-  for (const match of document.search?.matches ?? []) {
-    if (match.rowIndex !== rowIndex) continue;
-    for (const fragment of layoutRow.fragments) {
-      if (fragment.blockId !== match.blockId) continue;
-      const start = Math.max(match.startCodeUnitIndex, fragment.blockStartCodeUnitIndex);
-      const end = Math.min(match.endCodeUnitIndexExclusive, fragment.blockEndCodeUnitIndexExclusive);
-      if (start >= end) continue;
-      searchRanges.push({
-        start: fragment.rowStartCodeUnitIndex + start - fragment.blockStartCodeUnitIndex,
-        end: fragment.rowStartCodeUnitIndex + end - fragment.blockStartCodeUnitIndex,
-        active: active === match
-      });
-    }
-  }
+  const snapshot = document.source.snapshot.document;
+  const actionForFragment = (fragment: TerminalFragment): TerminalFragment | null => {
+    let current: TerminalFragment | null = fragment;
+    while (current !== null && current.action === null) current = document.layout.parent(current.id);
+    return current;
+  };
+  const inlineActions = layoutRow.fragments.flatMap((entry): InlineRowAction[] => {
+    const owner = actionForFragment(document.layout.fragment(entry.fragment));
+    const action = owner?.action;
+    if (action === undefined || action === null || action.kind === "form-control") return [];
+    const range = {
+      id: actionId(action),
+      start: entry.startCodeUnit,
+      end: entry.endCodeUnit
+    };
+    return action.kind === "link"
+      ? [{ ...range, kind: "link", destination: action.destination }]
+      : [{ ...range, kind: "disclosure" }];
+  });
+  const active = document.search?.matches[document.search.activeMatchIndex]?.id;
+  const searchRanges = (document.searchRangesByRow.get(rowIndex) ?? [])
+    .map((range) => ({
+      start: range.start,
+      end: range.end,
+      active: active === range.match
+    }));
   const boundaries = new Set([0, rowText.length]);
-  for (const range of [...links, ...searchRanges]) {
+  for (const range of [...inlineActions, ...searchRanges]) {
     boundaries.add(range.start);
     boundaries.add(range.end);
   }
-  for (const run of layoutRow.styleRuns) {
-    boundaries.add(run.startCodeUnitIndex);
-    boundaries.add(run.endCodeUnitIndexExclusive);
+  for (const run of layoutRow.styles) {
+    boundaries.add(run.startCodeUnit);
+    boundaries.add(run.endCodeUnit);
   }
   for (const fragment of layoutRow.fragments) {
-    boundaries.add(fragment.rowStartCodeUnitIndex);
-    boundaries.add(fragment.rowEndCodeUnitIndexExclusive);
+    boundaries.add(fragment.startCodeUnit);
+    boundaries.add(fragment.endCodeUnit);
   }
   const positions = [...boundaries].sort((left, right) => left - right);
   const spans: RenderSpan[] = [];
@@ -211,31 +255,31 @@ function rowSegments(
     const start = positions[index] ?? 0;
     const end = positions[index + 1] ?? rowText.length;
     if (start >= end) continue;
-    const link = links.find((range) => range.start <= start && range.end >= end)?.link;
+    const inlineAction = inlineActions.find((range) => range.start <= start && range.end >= end);
     const search = searchRanges.find((range) => range.start <= start && range.end >= end);
-    const fragment = layoutRow.fragments.find((candidate) =>
-      candidate.rowStartCodeUnitIndex <= start
-      && candidate.rowEndCodeUnitIndexExclusive >= end
-    );
-    const block = fragment === undefined ? undefined : document.blocksById.get(fragment.blockId);
     const authored = Object.assign(
       {},
-      ...layoutRow.styleRuns
+      ...layoutRow.styles
         .filter((run) =>
-          run.startCodeUnitIndex <= start && run.endCodeUnitIndexExclusive >= end
+          run.startCodeUnit <= start && run.endCodeUnit >= end
         )
         .map((run) => terminalStyle(run.style))
     ) as TerminalStyle;
+    const isControlText = layoutRow.fragments.some((fragment) =>
+      fragment.startCodeUnit <= start
+      && fragment.endCodeUnit >= end
+      && fragment.source !== null
+      && snapshot.control(fragment.source) !== null
+    );
     const style: TerminalStyle = {
-      ...(block === undefined ? {} : blockStyle(block)),
-      ...(link === undefined
+      ...(inlineAction?.kind !== "link"
         ? {}
         : {
           fg: themeColor("link.foreground"),
           underline: true
         }),
       ...authored,
-      ...(link !== undefined && link.id === focusedActionId ? { inverse: true, bold: true } : {}),
+      ...(inlineAction?.id === focusedActionId ? { inverse: true, bold: true } : {}),
       ...(search === undefined
         ? {}
         : search.active
@@ -243,34 +287,72 @@ function rowSegments(
           : { underline: true })
     };
     spans.push({
-      text: rowText.slice(start, end),
+      text: isControlText
+        ? " ".repeat(TERMINAL_MEASURER.width(rowText.slice(start, end)))
+        : rowText.slice(start, end),
       style,
-      ...(link === undefined ? {} : { link: { href: link.resolvedHref } })
+      ...(inlineAction?.kind !== "link" ? {} : { link: { href: inlineAction.destination } })
     });
   }
   return spans;
 }
 
-function forms(document: BrowserDocumentViewModel): readonly FormEntry[] {
-  return document.forms;
+function controlGroups(controls: readonly DocumentFormControl[]): readonly BrowserControlGroup[] {
+  const groups: BrowserControlGroup[] = [];
+  const radioGroups = new Map<string, DocumentFormControl[]>();
+  for (const control of controls) {
+    if (control.kind !== "radio") continue;
+    const groupName = control.name.length === 0
+      ? control.node
+      : `${control.form ?? "document"}\u0000${control.name}`;
+    const group = radioGroups.get(groupName) ?? [];
+    group.push(control);
+    radioGroups.set(groupName, group);
+  }
+  const emittedRadios = new Set<string>();
+  for (const control of controls) {
+    if (control.kind === "hidden") continue;
+    if (control.kind !== "radio") {
+      groups.push({ form: control.form, controls: [control] });
+      continue;
+    }
+    const groupName = control.name.length === 0
+      ? control.node
+      : `${control.form ?? "document"}\u0000${control.name}`;
+    if (emittedRadios.has(groupName)) continue;
+    emittedRadios.add(groupName);
+    groups.push({ form: control.form, controls: radioGroups.get(groupName) ?? [control] });
+  }
+  return groups;
 }
 
-function formControlValues(document: BrowserDocumentViewModel, control: FormControl): readonly string[] {
-  const explicit = document.formValues[control.id];
+function formControlValues(document: BrowserDocumentViewModel, control: DocumentFormControl): readonly string[] {
+  const explicit = document.source.documentState.controls.get(control.node)?.values;
   if (explicit !== undefined) return explicit;
-  if (control.kind === "hidden" || control.kind === "text" || control.kind === "textarea") return [control.value];
-  if ((control.kind === "checkbox" || control.kind === "radio") && control.checked) return [control.value];
-  if (control.kind === "select") return control.options.filter((option) => option.selected).map((option) => option.value);
+  if (control.kind === "hidden" || control.kind === "text" || control.kind === "textarea") return [control.defaultValue];
+  if ((control.kind === "checkbox" || control.kind === "radio") && control.defaultChecked) return [control.value];
+  if (control.kind === "select") return control.options.filter((option) => option.defaultSelected).map((option) => option.value);
   return [];
 }
 
+function formControlSelections(
+  document: BrowserDocumentViewModel,
+  control: Extract<DocumentFormControl, { readonly kind: "select" }>
+): ReadonlySet<DocumentNodeRef> {
+  const explicit = document.source.documentState.controls.get(control.node)?.selected;
+  if (explicit !== undefined) return new Set(explicit);
+  const defaults = control.options.filter((option) => option.defaultSelected);
+  const effective = control.multiple ? defaults : [defaults.at(-1) ?? control.options[0]];
+  return new Set(effective.flatMap((option) => option === undefined ? [] : [option.node]));
+}
+
 function radioAction(
-  controls: readonly Extract<FormControl, { readonly kind: "radio" }>[],
+  controls: readonly DocumentChoiceControl[],
   selectedId: string | undefined,
   action: RadioGroupAction
 ): BrowserTuiMessage {
   const options = controls.map((control) => ({
-    id: control.id,
+    id: control.node,
     label: control.label,
     value: control.value,
     disabled: control.disabled
@@ -284,34 +366,34 @@ function radioAction(
   };
   const next = radioGroupReducer(initial, action, options);
   const nextId = next.selection.mode === "single" ? next.selection.selectedId : undefined;
-  const control = controls.find((entry) => entry.id === nextId) ?? controls[0];
+  const control = controls.find((entry) => entry.node === nextId) ?? controls[0];
   if (!control) throw new Error("A radio group must contain at least one control.");
   return {
     kind: "formValues",
-    controlId: control.id,
+    controlId: control.node,
     values: nextId === undefined ? [] : [control.value]
   };
 }
 
 function multiChoiceAction(
-  control: Extract<FormControl, { readonly kind: "select" }>,
+  control: Extract<DocumentFormControl, { readonly kind: "select" }>,
   action: CheckboxGroupAction
 ): BrowserTuiMessage {
-  return { kind: "formCheckboxGroup", controlId: control.id, action };
+  return { kind: "formCheckboxGroup", controlId: control.node, action };
 }
 
 function inlineFormControl(
   document: BrowserDocumentViewModel,
-  control: FormControl,
-  formId: string
+  control: DocumentFormControl,
+  formId: DocumentNodeRef | null
 ): Element<BrowserTuiMessage> | null {
   const values = formControlValues(document, control);
   if (control.kind === "hidden") return null;
   if (control.kind === "unsupported") {
-    return text({ content: `${control.label}: ${control.reason}`, id: `${control.id}:unsupported` });
+    return text({ content: `${control.label}: ${control.reason}`, id: `${control.node}:unsupported` });
   }
   if (control.kind === "text") {
-    const editor = document.formEditors[control.id];
+    const editor = document.formEditors[control.node];
     const value = values[0] ?? "";
     if (control.inputType === "number") {
       const numberEditor = editor?.kind === "number"
@@ -319,15 +401,15 @@ function inlineFormControl(
         : {
           input: { text: value, cursor: value.length },
           configuration: createNumberInputConfiguration({
-            ...(control.min === undefined ? {} : { min: control.min }),
-            ...(control.max === undefined ? {} : { max: control.max }),
-            ...(control.step === undefined ? {} : { step: control.step })
+            ...(control.min === null ? {} : { min: control.min }),
+            ...(control.max === null ? {} : { max: control.max }),
+            ...(control.step === null ? {} : { step: control.step })
           })
         };
       const numberOptions = {
-        id: control.id,
+        id: control.node,
         presentation: numberInputPresentation(numberEditor),
-        ...(control.placeholder === undefined ? {} : { placeholder: control.placeholder }),
+        ...(control.placeholder === null ? {} : { placeholder: control.placeholder }),
         required: control.required
       };
       const input = control.disabled
@@ -337,23 +419,19 @@ function inlineFormControl(
           readOnly: control.readOnly,
           onAction: (action): BrowserTuiMessage => ({
             kind: "formNumber",
-            controlId: control.id,
+            controlId: control.node,
             action
           })
         });
-      return field({
-        id: `${control.id}:field`,
-        label: control.label,
-        control: input
-      });
+      return labelledBrowserControl(control.node, control.label, input);
     }
     const presentation = editor?.kind === "text"
       ? textInputPresentation(editor.state)
       : { value, cursor: value.length };
     const inputOptions = {
-      id: control.id,
+      id: control.node,
       presentation,
-      ...(control.placeholder === undefined ? {} : { placeholder: control.placeholder }),
+      ...(control.placeholder === null ? {} : { placeholder: control.placeholder }),
       required: control.required
     };
     const input = control.inputType === "password"
@@ -364,7 +442,7 @@ function inlineFormControl(
           readOnly: control.readOnly,
           onAction: (action): BrowserTuiMessage => ({
             kind: "formText",
-            controlId: control.id,
+            controlId: control.node,
             action
           })
         })
@@ -375,18 +453,14 @@ function inlineFormControl(
           readOnly: control.readOnly,
           onAction: (action): BrowserTuiMessage => ({
             kind: "formText",
-            controlId: control.id,
+            controlId: control.node,
             action
           })
         });
-    return field({
-      id: `${control.id}:field`,
-      label: control.label,
-      control: input
-    });
+    return labelledBrowserControl(control.node, control.label, input);
   }
   if (control.kind === "textarea") {
-    const editor = document.formEditors[control.id];
+    const editor = document.formEditors[control.node];
     const presentation = editor?.kind === "textarea"
       ? editor.state
       : createTextAreaState({
@@ -394,7 +468,7 @@ function inlineFormControl(
         scroll: createScrollState()
       });
     const areaOptions = {
-      id: control.id,
+      id: control.node,
       presentation,
       wrap: true
     };
@@ -405,17 +479,13 @@ function inlineFormControl(
         readOnly: control.readOnly,
         onAction: (
           action: Extract<BrowserTuiMessage, { readonly kind: "formArea" }>["action"]
-        ): BrowserTuiMessage => ({ kind: "formArea", controlId: control.id, action })
+        ): BrowserTuiMessage => ({ kind: "formArea", controlId: control.node, action })
       });
-    return field({
-      id: `${control.id}:field`,
-      label: control.label,
-      control: area
-    });
+    return labelledBrowserControl(control.node, control.label, area);
   }
   if (control.kind === "checkbox") {
     const checkboxOptions = {
-      id: control.id,
+      id: control.node,
       label: control.label,
       checked: values.includes(control.value),
       required: control.required
@@ -426,22 +496,23 @@ function inlineFormControl(
         ...checkboxOptions,
         onAction: (action): BrowserTuiMessage => ({
           kind: "formValues",
-          controlId: control.id,
+          controlId: control.node,
           values: action.checked ? [control.value] : []
         })
       });
   }
   if (control.kind === "select") {
+    const selectedNodes = formControlSelections(document, control);
     if (control.multiple) {
       const selectedIds = control.options.flatMap((option, index) =>
-        values.includes(option.value) ? [`${control.id}:${String(index)}`] : []
+        selectedNodes.has(option.node) ? [`${control.node}:${String(index)}`] : []
       );
-      const editor = document.formEditors[control.id];
+      const editor = document.formEditors[control.node];
       const groupOptions = {
-        id: control.id,
+        id: control.node,
         label: control.label,
         options: control.options.map((option, index) => ({
-          id: `${control.id}:${String(index)}`,
+          id: `${control.node}:${String(index)}`,
           label: option.label,
           value: option.value,
           disabled: option.disabled
@@ -461,9 +532,9 @@ function inlineFormControl(
           onAction: (action): BrowserTuiMessage => multiChoiceAction(control, action)
         });
     }
-    const selectedIndex = control.options.findIndex((option) => values.includes(option.value));
-    const editor = document.formEditors[control.id];
-    const selectedId = selectedIndex < 0 ? undefined : `${control.id}:${String(selectedIndex)}`;
+    const selectedIndex = control.options.findIndex((option) => selectedNodes.has(option.node));
+    const editor = document.formEditors[control.node];
+    const selectedId = selectedIndex < 0 ? undefined : `${control.node}:${String(selectedIndex)}`;
     const closedPresentation = {
       kind: "select" as const,
       open: false as const,
@@ -476,10 +547,10 @@ function inlineFormControl(
       }
     };
     const selectOptions = {
-      id: control.id,
+      id: control.node,
       label: control.label,
       options: control.options.map((option, index) => ({
-        id: `${control.id}:${String(index)}`,
+        id: `${control.node}:${String(index)}`,
         label: option.label,
         value: option.value,
         disabled: option.disabled
@@ -498,39 +569,39 @@ function inlineFormControl(
         presentation: editor?.kind === "combobox" ? editor.state : closedPresentation,
         onTransition: (transition): BrowserTuiMessage => ({
           kind: "formComboboxTransition",
-          controlId: control.id,
+          controlId: control.node,
           transition
         }),
         onCommit: (event): BrowserTuiMessage => ({
           kind: "formComboboxCommit",
-          controlId: control.id,
+          controlId: control.node,
           event
         })
       });
   }
   if (control.kind === "submit") {
     const buttonOptions = {
-      id: control.id,
+      id: control.node,
       label: control.label || control.value || "Submit",
       tone: "primary" as const
     };
-    return control.disabled
+    return control.disabled || formId === null
       ? button({ ...buttonOptions, disabled: true })
       : button({
         ...buttonOptions,
         onAction: buttonAction({
           kind: "submitForm",
           formId,
-          submitterId: control.id
+          submitterId: control.node
         })
       });
   }
   if (control.kind === "reset") {
     const buttonOptions = {
-      id: control.id,
+      id: control.node,
       label: control.label || "Reset"
     };
-    return control.disabled
+    return control.disabled || formId === null
       ? button({ ...buttonOptions, disabled: true })
       : button({
         ...buttonOptions,
@@ -543,62 +614,35 @@ function inlineFormControl(
   return null;
 }
 
-function inlineForm(document: BrowserDocumentViewModel, entry: FormEntry): Element<BrowserTuiMessage> {
-  const radioGroups = new Map<string, Extract<FormControl, { readonly kind: "radio" }>[]>();
-  for (const control of entry.controls) {
-    if (control.kind !== "radio") continue;
-    const groupName = control.name.length === 0 ? control.id : control.name;
-    const group = radioGroups.get(groupName) ?? [];
-    group.push(control);
-    radioGroups.set(groupName, group);
-  }
-  const radioNames = new Set<string>();
-  const controls: Element<BrowserTuiMessage>[] = [];
-  for (const control of entry.controls) {
-    if (control.kind === "radio") {
-      const groupName = control.name.length === 0 ? control.id : control.name;
-      if (radioNames.has(groupName)) continue;
-      radioNames.add(groupName);
-      const group = radioGroups.get(groupName) ?? [control];
-      const selected = group.find((candidate) => formControlValues(document, candidate).length > 0);
-      controls.push(radioGroup({
-        id: `${entry.id}:radio:${groupName}`,
-        label: control.label,
-        options: group.map((candidate) => ({
-          id: candidate.id,
-          label: candidate.label,
-          value: candidate.value,
-          disabled: candidate.disabled
-        })),
-        presentation: {
-          ...(selected === undefined ? {} : { activeId: selected.id }),
-          selection: {
-            mode: "single",
-            ...(selected === undefined ? {} : { selectedId: selected.id })
-          }
-        },
-        required: group.some((candidate) => candidate.required),
-        onAction: (action): BrowserTuiMessage => radioAction(group, selected?.id, action)
-      }));
-      continue;
-    }
-    const element = inlineFormControl(document, control, entry.id);
-    if (element !== null) controls.push(element);
-  }
-  const hasSubmitter = entry.controls.some((control) => control.kind === "submit");
-  if (!hasSubmitter) {
-    controls.push(button({
-      id: `${entry.id}:submit`,
-      label: "Submit",
-      tone: "primary",
-      onAction: buttonAction({ kind: "submitForm", formId: entry.id })
-    }));
-  }
-  return form({
-    id: entry.id,
-    title: entry.label,
-    gap: 0,
-    slots: { content: controls }
+function inlineControlGroup(
+  document: BrowserDocumentViewModel,
+  group: BrowserControlGroup
+): Element<BrowserTuiMessage> | null {
+  const first = group.controls[0];
+  if (first === undefined) return null;
+  if (first.kind !== "radio") return inlineFormControl(document, first, group.form);
+  const controls = group.controls.filter(
+    (control): control is DocumentChoiceControl => control.kind === "radio"
+  );
+  const selected = controls.find((candidate) => formControlValues(document, candidate).length > 0);
+  return radioGroup({
+    id: `${group.form ?? "document"}:radio:${first.name.length === 0 ? first.node : first.name}`,
+    label: first.label,
+    options: controls.map((candidate) => ({
+      id: candidate.node,
+      label: candidate.label,
+      value: candidate.value,
+      disabled: candidate.disabled
+    })),
+    presentation: {
+      ...(selected === undefined ? {} : { activeId: selected.node }),
+      selection: {
+        mode: "single",
+        ...(selected === undefined ? {} : { selectedId: selected.node })
+      }
+    },
+    required: controls.some((candidate) => candidate.required),
+    onAction: (action): BrowserTuiMessage => radioAction(controls, selected?.node, action)
   });
 }
 
@@ -609,31 +653,32 @@ function browserDocumentChildBounds(
 ): readonly Rect[] {
   const layout = document.layout;
   const contentBounds = documentContentBounds(bounds);
-  const entries = forms(document);
-  const placements = new Map(layout.blockPlacements.map((placement) => [
-    placement.blockId,
-    placement
-  ]));
+  const entries = document.controlGroups;
   return Array.from({ length: childCount }, (_, index) => {
     const entry = entries[index];
     if (!entry) {
       return { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 };
     }
-    const placement = placements.get(entry.id);
-    if (placement === undefined) {
+    const fragments = entry.controls.flatMap((control) => layout.forSource(control.node))
+      .filter((fragment) => fragment.rect.width > 0 && fragment.rect.height > 0);
+    if (fragments.length === 0) {
       return { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 };
     }
+    const row = Math.min(...fragments.map((fragment) => fragment.rect.row));
+    const column = Math.min(...fragments.map((fragment) => fragment.rect.column));
+    const bottom = Math.max(...fragments.map((fragment) => fragment.rect.row + fragment.rect.height));
+    const edge = Math.max(...fragments.map((fragment) => fragment.rect.column + fragment.rect.width));
     return {
-      row: contentBounds.row + placement.rowIndex,
-      column: contentBounds.column + placement.columnIndex,
-      width: placement.width,
-      height: placement.height
+      row: contentBounds.row + row,
+      column: contentBounds.column + column,
+      width: Math.max(1, edge - column),
+      height: Math.max(1, bottom - row)
     };
   });
 }
 
 const browserDocumentSlots = {
-  forms: { cardinality: "many", owner: "caller", messages: "bubble" }
+  controls: { cardinality: "many", owner: "caller", messages: "bubble" }
 } as const;
 
 const browserDocumentComponent = defineComponent<
@@ -660,7 +705,7 @@ const browserDocumentComponent = defineComponent<
       height: constraints.height
     };
     const layout = model.document.layout;
-    const childCount = slots.count("forms");
+    const childCount = slots.count("controls");
     const childBounds = browserDocumentChildBounds(
       model.document,
       bounds,
@@ -678,10 +723,10 @@ const browserDocumentComponent = defineComponent<
   },
   layout({ model, bounds, slots }) {
     return {
-      forms: browserDocumentChildBounds(
+      controls: browserDocumentChildBounds(
         model.document,
         bounds,
-        slots.count("forms")
+        slots.count("controls")
       )
     };
   },
@@ -689,32 +734,19 @@ const browserDocumentComponent = defineComponent<
     if (bounds.width <= 0 || bounds.height <= 0) return;
     const document = model.document;
     const layout = document.layout;
-    const focusedAction = actionForId(document, focusedTargetId);
     const contentBounds = documentContentBounds(bounds);
-    const formIds = new Set(forms(document).map((entry) => entry.id));
     const startIndex = Math.max(0, visibleBounds.row - contentBounds.row);
     const endIndexExclusive = Math.min(
       layout.rows.length,
       visibleBounds.row + visibleBounds.height - contentBounds.row
     );
-    const canvas = terminalStyle(layout.canvasStyle);
-    if (canvas.bg !== undefined || canvas.fg !== undefined) {
-      for (let rowIndex = startIndex; rowIndex < endIndexExclusive; rowIndex += 1) {
-        target.write(
-          contentBounds.row + rowIndex,
-          contentBounds.column,
-          [{ text: " ".repeat(contentBounds.width), style: canvas }]
-        );
-      }
-    }
     for (let rowIndex = startIndex; rowIndex < endIndexExclusive; rowIndex += 1) {
       const layoutRow = layout.rows[rowIndex];
-      if (!layoutRow || layoutRow.fragments.length > 0
-        && layoutRow.fragments.every((fragment) => formIds.has(fragment.blockId))) continue;
+      if (!layoutRow) continue;
       target.write(
         contentBounds.row + rowIndex,
         contentBounds.column,
-        rowSegments(document, layoutRow, rowIndex, focusedAction?.id)
+        rowSegments(document, layoutRow, rowIndex, focusedTargetId)
       );
     }
   },
@@ -730,25 +762,14 @@ const browserDocumentComponent = defineComponent<
       Math.max(startIndex, visibleBounds.row + visibleBounds.height - contentBounds.row),
       layout.rows.length
     );
-    const visibleBlockIds = new Set(
-      layout.rows
-        .slice(startIndex, endIndexExclusive)
-        .flatMap((row) => row.fragments.map((fragment) => fragment.blockId))
-    );
-    const focusedAction = actionForId(document, focusedTargetId);
-    const visibleActionIds = new Set(layout.actionPlacements
-      .filter((placement) =>
-        placement.rowIndex >= startIndex
-        && placement.rowIndex < endIndexExclusive
-      )
-      .map((placement) => placement.actionId));
-    const visibleActions = document.content.actions.filter((action) =>
-      visibleActionIds.has(action.id)
+    const visibleSemantic = layout.accessibility.filter((entry) =>
+      document.source.snapshot.document.control(entry.source) === null
+      && entry.rect.row < endIndexExclusive && entry.rect.row + entry.rect.height > startIndex
     );
     return {
       id,
       role: "document",
-      label: document.content.title,
+      label: document.source.snapshot.document.title,
       description: document.finalUrl,
       window: {
         startIndex,
@@ -758,21 +779,18 @@ const browserDocumentComponent = defineComponent<
         omittedAfter: layout.rows.length - endIndexExclusive
       },
       children: [
-        ...[...visibleBlockIds].flatMap((blockId) => {
-          const block = document.blocksById.get(blockId);
-          return block === undefined || block.kind === "form" ? [] : [accessibleBlock(block)];
-        }),
-        ...visibleActions.filter((action) => action.kind === "link").map((action) => ({
-          id: action.id,
-          role: "link" as const,
-          label: action.label,
-          ...(focusedAction?.id === action.id ? { focused: true } : {}),
-          position: {
-            positionInSet: document.linkPositionsById.get(action.id) ?? 1,
-            setSize: document.content.links.length
-          }
+        ...visibleSemantic.map((entry) => ({
+          id: `semantic:${entry.source}`,
+          role: entry.role === "heading" ? "heading" as const : entry.role === "link" ? "link" as const : "text" as const,
+          label: entry.name,
+          description: entry.description,
+          ...(focusedTargetId === `link:${entry.source}`
+            || focusedTargetId === `control:${entry.source}`
+            || focusedTargetId === `disclosure:${entry.source}`
+            ? { focused: true }
+            : {})
         })),
-        ...slots.forms
+        ...slots.controls
       ]
     };
   },
@@ -781,65 +799,61 @@ const browserDocumentComponent = defineComponent<
     const document = model.document;
     const layout = document.layout;
     const contentBounds = documentContentBounds(bounds);
-    const seen = new Set<string>();
-    return layout.actionPlacements
-      .flatMap((placement) => {
-        const action = actionForId(document, placement.actionId);
-        if (action?.kind !== "link"
-          || seen.has(placement.actionId)) {
-          return [];
+    return layout.focusTargets.flatMap((target) => {
+      if (target.rects.length === 0) return [];
+      const row = Math.min(...target.rects.map((rect) => rect.row));
+      const column = Math.min(...target.rects.map((rect) => rect.column));
+      const bottom = Math.max(...target.rects.map((rect) => rect.row + rect.height));
+      const edge = Math.max(...target.rects.map((rect) => rect.column + rect.width));
+      return [{
+        id: actionId(target.action),
+        bounds: {
+          row: contentBounds.row + row,
+          column: contentBounds.column + column,
+          width: Math.max(1, Math.min(edge - column, contentBounds.width - column)),
+          height: Math.max(1, bottom - row)
         }
-        seen.add(placement.actionId);
-        const columnIndex = Math.min(contentBounds.width - 1, placement.columnIndex);
-        return [{
-          id: placement.actionId,
-          bounds: {
-            row: contentBounds.row + placement.rowIndex,
-            column: contentBounds.column + columnIndex,
-            width: Math.max(1, Math.min(placement.width, contentBounds.width - columnIndex)),
-            height: 1
-          }
-        }];
-      });
+      }];
+    });
   },
   hitTargets({ model, bounds, viewport: visibleBounds }) {
     if (bounds.width <= 0 || bounds.height <= 0) return [];
     const document = model.document;
     const layout = document.layout;
     const contentBounds = documentContentBounds(bounds);
-    return layout.actionPlacements
-      .filter((placement) => {
-        const action = actionForId(document, placement.actionId);
-        return action?.kind === "link"
-          && contentBounds.row + placement.rowIndex >= visibleBounds.row
-          && contentBounds.row + placement.rowIndex < visibleBounds.row + visibleBounds.height;
-      })
+    return layout.hitRegions
+      .filter((placement) => placement.action.kind !== "form-control"
+        && contentBounds.row + placement.rect.row < visibleBounds.row + visibleBounds.height
+        && contentBounds.row + placement.rect.row + placement.rect.height > visibleBounds.row)
       .map((placement) => {
-        const columnIndex = Math.min(contentBounds.width - 1, placement.columnIndex);
+        const placementActionId = actionId(placement.action);
+        const columnIndex = Math.min(contentBounds.width - 1, placement.rect.column);
         return {
-          id: `activate:${placement.actionId}:${String(placement.rowIndex)}:${String(placement.columnIndex)}`,
+          id: `activate:${placementActionId}:${placement.fragment}`,
           bounds: {
-            row: contentBounds.row + placement.rowIndex,
+            row: contentBounds.row + placement.rect.row,
             column: contentBounds.column + columnIndex,
-            width: Math.max(1, Math.min(placement.width, contentBounds.width - columnIndex)),
-            height: 1
+            width: Math.max(1, Math.min(placement.rect.width, contentBounds.width - columnIndex)),
+            height: Math.max(1, placement.rect.height)
           },
-          accepts: ["click" as const, "contextMenu" as const, "pointerDown" as const],
+          accepts: placement.action.kind === "link"
+            ? ["click" as const, "contextMenu" as const, "pointerDown" as const]
+            : ["click" as const, "pointerDown" as const],
           cursor: "pointer" as const,
-          focus: { kind: "target" as const, targetId: placement.actionId },
+          focus: { kind: "target" as const, targetId: placementActionId },
           message: (event: RoutedPointerEvent) =>
             event.kind === "pointerDown" && event.button !== "middle"
               ? ignoreMessage()
-              : event.kind === "contextMenu"
+              : event.kind === "contextMenu" && placement.action.kind === "link"
                 ? {
                   kind: "openLinkMenu",
-                  actionId: placement.actionId,
+                  actionId: placementActionId,
                   row: event.row,
                   column: event.column
                 }
                 : {
                   kind: "activateActionAt",
-                  actionId: placement.actionId,
+                  actionId: placementActionId,
                   disposition: event.button === "middle"
                     ? "newBackground"
                     : event.modifiers.ctrl
@@ -853,17 +867,18 @@ const browserDocumentComponent = defineComponent<
 
 function browserDocument(
   document: BrowserDocumentState,
-  availableColumns: number
+  layout: FragmentTree
 ): Element<BrowserTuiMessage> {
-  const contentColumns = Math.max(1, Math.floor(availableColumns) - 1);
-  const layout = documentLayout(document, contentColumns);
   const scrollRow = documentScrollRow(document, layout);
   const model = browserDocumentViewModel(document, layout);
-  const children = forms(model).map((entry) => inlineForm(model, entry));
+  const children = model.controlGroups.flatMap((group) => {
+    const element = inlineControlGroup(model, group);
+    return element === null ? [] : [element];
+  });
   const content = browserDocumentComponent({
     id: `browser-${document.id}`,
     document: model,
-    slots: { forms: children },
+    slots: { controls: children },
     onAction: (action): BrowserTuiMessage => action
   });
   return surface(viewport(content, {
@@ -883,27 +898,32 @@ function browserDocument(
 
 function browserDocumentViewModel(
   document: BrowserDocumentState,
-  layout: PageLayout
+  layout: FragmentTree
 ): BrowserDocumentViewModel {
-  const content = pageContent(document.snapshot);
-  const linksByBlockId = new Map<string, PageLinkAction[]>();
-  for (const link of content.links) {
-    const links = linksByBlockId.get(link.blockId) ?? [];
-    links.push(link);
-    linksByBlockId.set(link.blockId, links);
+  const searchRangesByRow = new Map<number, {
+    readonly match: string;
+    readonly start: number;
+    readonly end: number;
+  }[]>();
+  if (document.search !== null) {
+    const retained = new Set(document.search.matches.map((match) => match.id));
+    for (const match of layout.search(document.search.query).matches) {
+      if (!retained.has(match.id)) continue;
+      for (const range of match.ranges) {
+        const entries = searchRangesByRow.get(range.row) ?? [];
+        entries.push({ match: match.id, start: range.startCodeUnit, end: range.endCodeUnit });
+        searchRangesByRow.set(range.row, entries);
+      }
+    }
   }
   return {
     id: document.id,
-    content,
-    actionsById: new Map(content.actions.map((action) => [action.id, action])),
-    blocksById: new Map(content.blocks.map((block) => [block.id, block])),
-    linksByBlockId,
-    linkPositionsById: new Map(content.links.map((link, index) => [link.id, index + 1])),
+    source: document,
     layout,
     finalUrl: document.snapshot.finalUrl,
     search: document.search,
-    forms: extractForms(document.snapshot.document.tree, document.snapshot.finalUrl),
-    formValues: document.formValues,
+    searchRangesByRow,
+    controlGroups: controlGroups(document.snapshot.document.controls),
     formEditors: document.formEditors
   };
 }
@@ -1240,13 +1260,19 @@ function findBar(state: BrowserTuiState): Element<BrowserTuiMessage> | null {
   });
 }
 
-function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMessage> {
+function baseView(state: BrowserTuiState, columns: number, rows: number): Element<BrowserTuiMessage> {
   const selected = state.documents[state.activeDocumentIndex] ?? state.documents[0];
   if (!selected) throw new Error("The browser view requires an open document.");
   const pageColumns = state.sidePanel !== null && columns >= 100 ? columns - 41 : columns;
+  const viewportRows = Math.max(1, rows - (state.findBar === null ? 3 : 4));
+  const layout = renderDocumentForViewport(
+    selected,
+    Math.max(1, pageColumns - 1),
+    viewportRows
+  ).fragments;
   const pagePanel = selected.snapshot.finalUrl === "about:newtab"
     ? newTabDashboard(state)
-    : browserDocument(selected, pageColumns);
+    : browserDocument(selected, layout);
   const body = state.sidePanel !== null
     ? columns >= 100
       ? splitPane([pagePanel, sidePanel(state)], {
@@ -1257,7 +1283,6 @@ function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMe
       })
       : sidePanel(state)
     : pagePanel;
-  const layout = documentLayout(selected, Math.max(1, pageColumns - 1));
   const find = findBar(state);
   const selectedPanel = column([
     browserToolbar(state, selected, columns),
@@ -1278,7 +1303,7 @@ function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMe
       maxTabWidth: 36,
       tabs: state.documents.map((document) => ({
         id: document.id,
-        label: `${document.loading ? "◌ " : ""}${pageContent(document.snapshot).title}`,
+        label: `${document.loading ? "◌ " : ""}${document.snapshot.document.title}`,
         closable: true,
         panel: document.id === selected.id ? selectedPanel : text({ content: "" })
       })),
@@ -1438,7 +1463,7 @@ export function browserView(
   state: BrowserTuiState,
   context: Pick<TuiContext, "terminalSize"> = { terminalSize: { columns: 80, rows: 24 } }
 ): Element<BrowserTuiMessage> {
-  const base = baseView(state, context.terminalSize.columns);
+  const base = baseView(state, context.terminalSize.columns, context.terminalSize.rows);
   if (state.overlay === null || state.overlay.kind === "browserMenu") return base;
   const transient = state.overlay.kind === "actionPalette"
     ? actionPaletteView(state.overlay)

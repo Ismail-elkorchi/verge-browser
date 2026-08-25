@@ -3,7 +3,6 @@ import test from "node:test";
 import { TextEncoder } from "node:util";
 import { ReadableStream } from "node:stream/web";
 
-import { findAllByTagName } from "@ismail-elkorchi/html-parser";
 import { HttpFields } from "@ismail-elkorchi/http-client";
 
 import { BrowserSession } from "../../dist/app/session.js";
@@ -123,51 +122,8 @@ test("BrowserSession openStream parses from byte stream", async () => {
   assert.equal(snapshot.diagnostics.networkOutcome.kind, "ok");
   assert.ok(snapshot.diagnostics.triageIds.some((entry) => entry.startsWith("NET:OK:HTTP_200")));
   assert.ok(snapshot.diagnostics.triageIds.some((entry) => entry.startsWith("PARSE:")));
-  assert.equal(snapshot.rendered.title, "A");
+  assert.equal(snapshot.document.title, "A");
   assert.ok(snapshot.document.sourceText?.includes("<title>A</title>"));
-});
-
-test("BrowserSession applyEdits mutates current snapshot deterministically", async () => {
-  const loader = async (requestUrl) => ({
-    requestUrl,
-    finalUrl: requestUrl,
-    status: 200,
-    statusText: "OK",
-    contentType: "text/html",
-    html: "<html><head><title>T</title></head><body><p>Hello</p></body></html>",
-    responseFields: htmlFields(),
-    networkOutcome: {
-      kind: "ok",
-      finalUrl: requestUrl,
-      status: 200,
-      statusText: "OK",
-      detailCode: "HTTP_200",
-      detailMessage: "200 OK"
-    },
-    fetchedAtIso: "2026-01-01T00:00:00.000Z"
-  });
-
-  const session = new BrowserSession({ loader, defaultParseMode: "text" });
-
-  await session.open("https://patch.example/");
-  const currentTree = session.current?.document.tree;
-  assert.ok(currentTree);
-
-  const paragraphNode = currentTree ? [...findAllByTagName(currentTree, "p")][0] : undefined;
-  assert.ok(paragraphNode && paragraphNode.kind === "element");
-  const paragraphTextNode = paragraphNode.children.find((child) => child.kind === "text");
-  assert.ok(paragraphTextNode && paragraphTextNode.kind === "text");
-
-  const patched = await session.applyEdits([
-    {
-      kind: "replaceText",
-      target: paragraphTextNode.id,
-      value: "Updated"
-    }
-  ]);
-
-  assert.ok(patched.document.sourceText?.includes("Updated"));
-  assert.ok(patched.rendered.lines.some((line) => line.includes("Updated")));
 });
 
 test("BrowserSession openWithRequest records the request method", async () => {
@@ -283,4 +239,139 @@ test("remote pages cannot turn a file base URL into a local link navigation", as
 
   await assert.rejects(session.openLink(1), /page-initiated local-file/u);
   assert.equal(loadCount, 1);
+});
+
+test("remote documents cannot trigger local stylesheet reads through links or a file base", async () => {
+  let stylesheetCalls = 0;
+  const session = new BrowserSession({
+    defaultParseMode: "text",
+    loader: async (requestUrl) => ({
+      requestUrl,
+      finalUrl: requestUrl,
+      status: 200,
+      statusText: "OK",
+      contentType: "text/html",
+      html: "<base href='file:///private/'><link rel='stylesheet' href='secret.css'><p>Safe</p>",
+      responseFields: htmlFields(),
+      networkOutcome: { kind: "ok", finalUrl: requestUrl, status: 200, statusText: "OK", detailCode: "HTTP_200", detailMessage: "200 OK" },
+      fetchedAtIso: "2026-01-01T00:00:00.000Z"
+    }),
+    stylesheetLoader: async () => {
+      stylesheetCalls += 1;
+      throw new Error("must not read local files");
+    }
+  });
+  const snapshot = await session.open("https://remote.example/");
+  assert.equal(stylesheetCalls, 0);
+  assert.equal(snapshot.stylesheets.length, 0);
+  assert.ok(snapshot.styleDiagnostics.some((entry) => entry.code === "stylesheet-fetch" && /local-file/u.test(entry.detail)));
+});
+
+test("a stylesheet loader redirect result cannot cross from a remote document to file", async () => {
+  const session = new BrowserSession({
+    defaultParseMode: "text",
+    loader: async (requestUrl) => ({
+      requestUrl,
+      finalUrl: requestUrl,
+      status: 200,
+      statusText: "OK",
+      contentType: "text/html",
+      html: "<link rel='stylesheet' href='/redirect.css'><p>Safe</p>",
+      responseFields: htmlFields(),
+      networkOutcome: { kind: "ok", finalUrl: requestUrl, status: 200, statusText: "OK", detailCode: "HTTP_200", detailMessage: "200 OK" },
+      fetchedAtIso: "2026-01-01T00:00:00.000Z"
+    }),
+    stylesheetLoader: async (requestUrl) => ({
+      requestUrl,
+      finalUrl: "file:///private/secret.css",
+      contentType: "text/css",
+      bytes: new TextEncoder().encode("body { color: red }"),
+      responseFields: htmlFields()
+    })
+  });
+
+  const snapshot = await session.open("https://remote.example/");
+  assert.equal(snapshot.stylesheets.length, 0);
+  assert.ok(snapshot.styleDiagnostics.some((entry) =>
+    entry.code === "stylesheet-fetch" && /local-file/u.test(entry.detail)
+  ));
+});
+
+test("page-initiated navigation validates a loader's final redirect URL before commit", async () => {
+  const session = new BrowserSession({
+    defaultParseMode: "text",
+    loader: async (requestUrl) => ({
+      requestUrl,
+      finalUrl: requestUrl.endsWith("next") ? "file:///private/result.html" : requestUrl,
+      status: 200,
+      statusText: "OK",
+      contentType: "text/html",
+      html: requestUrl.endsWith("next") ? "<title>Secret</title>" : "<title>Remote</title><a href='/next'>Next</a>",
+      responseFields: htmlFields(),
+      networkOutcome: { kind: "ok", finalUrl: requestUrl, status: 200, statusText: "OK", detailCode: "HTTP_200", detailMessage: "200 OK" },
+      fetchedAtIso: "2026-01-01T00:00:00.000Z"
+    })
+  });
+  const current = await session.open("https://remote.example/");
+
+  await assert.rejects(session.openLink(1), /page-initiated local-file/u);
+  assert.equal(session.current, current);
+  assert.equal(session.current?.document.title, "Remote");
+});
+
+test("aggregate stylesheet bytes are a per-request transport budget", async () => {
+  const requestedBudgets = [];
+  const session = new BrowserSession({
+    defaultParseMode: "text",
+    stylesheetPolicy: { maxStylesheetBytes: 8, maxTotalStylesheetBytes: 10 },
+    loader: async (requestUrl) => ({
+      requestUrl,
+      finalUrl: requestUrl,
+      status: 200,
+      statusText: "OK",
+      contentType: "text/html",
+      html: "<link rel='stylesheet' href='/a.css'><link rel='stylesheet' href='/b.css'><link rel='stylesheet' href='/c.css'>",
+      responseFields: htmlFields(),
+      networkOutcome: { kind: "ok", finalUrl: requestUrl, status: 200, statusText: "OK", detailCode: "HTTP_200", detailMessage: "200 OK" },
+      fetchedAtIso: "2026-01-01T00:00:00.000Z"
+    }),
+    stylesheetLoader: async (requestUrl, options) => {
+      requestedBudgets.push(options.maxContentBytes);
+      const bytes = new TextEncoder().encode(requestUrl.endsWith("a.css") ? "a{c:1}" : "b{} ");
+      return { requestUrl, finalUrl: requestUrl, contentType: "text/css", bytes, responseFields: htmlFields() };
+    }
+  });
+  const snapshot = await session.open("https://styles.example/");
+  assert.deepEqual(requestedBudgets, [8, 4]);
+  assert.equal(snapshot.stylesheets.reduce((total, entry) => total + entry.bytes.byteLength, 0), 10);
+});
+
+test("superseded navigation cannot commit stale session history", async () => {
+  let release;
+  const slow = new Promise((resolve) => { release = resolve; });
+  const session = new BrowserSession({
+    defaultParseMode: "text",
+    stylesheetLoader: async () => assert.fail("no stylesheets"),
+    loader: async (requestUrl) => {
+      if (requestUrl.endsWith("slow")) await slow;
+      return {
+        requestUrl,
+        finalUrl: requestUrl,
+        status: 200,
+        statusText: "OK",
+        contentType: "text/html",
+        html: `<title>${requestUrl.endsWith("slow") ? "Slow" : "Fast"}</title>`,
+        responseFields: htmlFields(),
+        networkOutcome: { kind: "ok", finalUrl: requestUrl, status: 200, statusText: "OK", detailCode: "HTTP_200", detailMessage: "200 OK" },
+        fetchedAtIso: "2026-01-01T00:00:00.000Z"
+      };
+    }
+  });
+  const stale = session.open("https://race.example/slow");
+  const current = await session.open("https://race.example/fast");
+  release();
+  await assert.rejects(stale, /superseded/u);
+  assert.equal(session.current, current);
+  assert.equal(session.current.document.title, "Fast");
+  assert.equal(session.canBack(), false);
 });

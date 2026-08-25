@@ -33,17 +33,25 @@ import {
 
 import { formatHelpText, parseCommand, type BrowserCommand } from "../app/commands.js";
 import { NetworkFetchError } from "../app/fetch-page.js";
-import { pageContent } from "../app/page-content.js";
-import type { FormControl, FormControlValue } from "../app/forms.js";
 import type { DownloadRecord } from "../app/storage.js";
-import type { PageRequestOptions, PageSnapshot } from "../app/types.js";
+import type { PageRequestOptions, IndexedPageSnapshot } from "../app/types.js";
+import {
+  applyDocumentAction,
+  createDocumentState,
+  type DocumentButtonControl,
+  type DocumentForm,
+  type DocumentFormControl,
+  type DocumentNodeRef
+} from "../document/index.js";
 import type { BrowserController } from "./browser-controller.js";
 import {
   actionById,
-  documentLayout,
+  actionId,
+  RenderPipelineCache,
+  renderDocumentForViewport,
   documentScrollRow,
   documentWithScrollRow,
-  scrollToBlock
+  scrollToSource
 } from "./document-layout.js";
 import type {
   BrowserDocumentSearch,
@@ -211,7 +219,7 @@ function persistEffect(
 
 function persistSnapshotEffect(
   controller: BrowserController,
-  snapshot: PageSnapshot
+  snapshot: IndexedPageSnapshot
 ): TuiEffect<BrowserTuiMessage> {
   return effect("page-persistence", async () => {
     await controller.persistSnapshot(snapshot);
@@ -228,24 +236,27 @@ function contentColumns(state: BrowserTuiState, terminalColumns: number): number
 
 function pageFromSnapshot(
   document: BrowserDocumentState,
-  snapshot: PageSnapshot,
+  snapshot: IndexedPageSnapshot,
   navigation: { readonly canGoBack: boolean; readonly canGoForward: boolean }
 ): BrowserDocumentState {
   const savedViews = {
     ...document.savedViews,
     [document.snapshot.finalUrl]: {
+      document: document.snapshot.document,
       scrollAnchor: document.scrollAnchor,
       search: document.search
     }
   };
-  const restored = savedViews[snapshot.finalUrl];
+  const candidate = savedViews[snapshot.finalUrl];
+  const restored = candidate?.document === snapshot.document ? candidate : undefined;
   return {
     ...document,
     snapshot,
     scrollAnchor: restored?.scrollAnchor
-      ?? { blockId: pageContent(snapshot).blocks[0]?.id ?? "page:empty", rowOffset: 0 },
+      ?? { source: snapshot.document.body ?? snapshot.document.documentElement, rowOffset: 0 },
     search: restored?.search ?? null,
-    formValues: {},
+    documentState: createDocumentState(snapshot.document),
+    renderPipelineCache: new RenderPipelineCache(),
     formEditors: {},
     savedViews,
     loading: false,
@@ -256,14 +267,25 @@ function pageFromSnapshot(
   };
 }
 
+function focusedControlActionId(
+  state: BrowserTuiState,
+  focusPath: readonly string[] | undefined
+): string | null {
+  const document = state.documents[state.activeDocumentIndex];
+  const target = focusPath?.at(-1);
+  if (document === undefined || target === undefined) return null;
+  const control = document.snapshot.document.control(target as DocumentNodeRef);
+  return control === null ? null : `control:${control.node}`;
+}
+
 function pageText(document: BrowserDocumentState, columns: number): string {
-  return documentLayout(document, columns).rows.map((row) => row.text).join("\n");
+  return renderDocumentForViewport(document, columns).fragments.rows.map((row) => row.text).join("\n");
 }
 
 function navigationMessage(
   controller: BrowserController,
   document: BrowserDocumentState,
-  snapshot: PageSnapshot,
+  snapshot: IndexedPageSnapshot,
   label: string
 ): BrowserTuiMessage {
   return {
@@ -348,73 +370,37 @@ function searchDocument(
   document: BrowserDocumentState,
   query: string,
   columns: number
-): BrowserDocumentSearch {
+): { readonly search: BrowserDocumentSearch; readonly firstRow: number | null } {
   const boundedQuery = query.slice(0, MAX_PAGE_SEARCH_QUERY_CODE_UNITS);
-  const normalizedQuery = boundedQuery.toLocaleLowerCase();
-  if (normalizedQuery.length === 0) {
-    return { query: boundedQuery, matches: [], activeMatchIndex: 0, truncated: false };
+  if (boundedQuery.length === 0) {
+    return {
+      search: { query: boundedQuery, matches: [], activeMatchIndex: 0, truncated: false },
+      firstRow: null
+    };
   }
-  const layout = documentLayout(document, columns);
-  const fragmentsByBlock = new Map<string, {
-    readonly rowIndex: number;
-    readonly start: number;
-    readonly end: number;
-  }[]>();
-  for (const [rowIndex, row] of layout.rows.entries()) {
-    for (const fragment of row.fragments) {
-      const fragments = fragmentsByBlock.get(fragment.blockId) ?? [];
-      fragments.push({
-        rowIndex,
-        start: fragment.blockStartCodeUnitIndex,
-        end: Math.max(
-          fragment.blockEndCodeUnitIndexExclusive,
-          fragment.blockStartCodeUnitIndex + 1
-        )
-      });
-      fragmentsByBlock.set(fragment.blockId, fragments);
-    }
-  }
-  const matches: BrowserDocumentSearch["matches"][number][] = [];
-  let truncated = false;
-  for (const block of pageContent(document.snapshot).blocks) {
-    const haystack = block.text.toLocaleLowerCase();
-    let start = 0;
-    let fragmentIndex = 0;
-    const fragments = fragmentsByBlock.get(block.id) ?? [];
-    while (start <= haystack.length - normalizedQuery.length) {
-      const found = haystack.indexOf(normalizedQuery, start);
-      if (found < 0) break;
-      if (matches.length >= MAX_PAGE_SEARCH_MATCHES) {
-        truncated = true;
-        break;
-      }
-      while (fragmentIndex < fragments.length && found >= (fragments[fragmentIndex]?.end ?? 0)) {
-        fragmentIndex += 1;
-      }
-      const fragment = fragments[fragmentIndex];
-      const rowIndex = fragment !== undefined && found >= fragment.start
-        ? fragment.rowIndex
-        : 0;
-      matches.push({
-        blockId: block.id,
-        rowIndex,
-        startCodeUnitIndex: found,
-        endCodeUnitIndexExclusive: found + boundedQuery.length
-      });
-      start = found + Math.max(1, normalizedQuery.length);
-    }
-    if (truncated) break;
-  }
-  return { query: boundedQuery, matches, activeMatchIndex: 0, truncated };
+  const result = renderDocumentForViewport(document, columns).fragments.search(boundedQuery);
+  const projected = result.matches.slice(0, MAX_PAGE_SEARCH_MATCHES);
+  const matches = projected.map((match) => ({
+    id: match.id,
+    sources: Object.freeze([...new Set(match.ranges.map((range) => range.source))])
+  }));
+  return {
+    search: {
+      query: boundedQuery,
+      matches,
+      activeMatchIndex: 0,
+      truncated: result.truncated || result.matches.length > MAX_PAGE_SEARCH_MATCHES
+    },
+    firstRow: projected[0]?.ranges[0]?.row ?? null
+  };
 }
 
 function applySearch(state: BrowserTuiState, query: string, columns: number): BrowserTuiState {
   const document = activeDocument(state);
-  const search = searchDocument(document, query, columns);
-  const first = search.matches[0];
-  const updated = first === undefined
+  const { search, firstRow } = searchDocument(document, query, columns);
+  const updated = firstRow === null
     ? { ...document, search }
-    : documentWithScrollRow({ ...document, search }, documentLayout(document, columns), first.rowIndex);
+    : documentWithScrollRow({ ...document, search }, renderDocumentForViewport(document, columns).fragments, firstRow);
   return {
     ...updateDocument(state, document.id, () => updated),
     status: search.matches.length === 0
@@ -433,78 +419,84 @@ function moveSearch(
   const delta = direction === "next" ? 1 : -1;
   const activeMatchIndex = (search.activeMatchIndex + delta + search.matches.length) % search.matches.length;
   const match = search.matches[activeMatchIndex];
-  return match === undefined
-    ? document
-    : documentWithScrollRow(
-      { ...document, search: { ...search, activeMatchIndex } },
-      documentLayout(document, columns),
-      match.rowIndex
-    );
+  if (match === undefined) return document;
+  const layout = renderDocumentForViewport(document, columns).fragments;
+  const row = layout.search(search.query).matches.find((candidate) => candidate.id === match.id)?.ranges[0]?.row;
+  const updated = { ...document, search: { ...search, activeMatchIndex } };
+  return row === undefined ? updated : documentWithScrollRow(updated, layout, row);
 }
 
 function controlById(
-  controller: BrowserController,
   document: BrowserDocumentState,
   controlId: string
-): FormControl | undefined {
-  return controller.forms(document).flatMap((form) => form.controls)
-    .find((control) => control.id === controlId);
+): DocumentFormControl | undefined {
+  return document.snapshot.document.control(controlId as DocumentNodeRef) ?? undefined;
 }
 
-function defaultControlValues(control: FormControl): readonly string[] {
-  if (control.kind === "hidden" || control.kind === "text" || control.kind === "textarea") return [control.value];
-  if ((control.kind === "checkbox" || control.kind === "radio") && control.checked) return [control.value];
+function defaultControlValues(control: DocumentFormControl): readonly string[] {
+  if (control.kind === "hidden" || control.kind === "text" || control.kind === "textarea") return [control.defaultValue];
+  if ((control.kind === "checkbox" || control.kind === "radio") && control.defaultChecked) return [control.value];
   if (control.kind === "select") {
     return control.options
-      .filter((option) => option.selected && !option.disabled)
+      .filter((option) => option.defaultSelected && !option.disabled)
       .map((option) => option.value);
   }
   return [];
 }
 
-function controlValues(document: BrowserDocumentState, control: FormControl): readonly string[] {
-  return document.formValues[control.id] ?? defaultControlValues(control);
+function controlValues(document: BrowserDocumentState, control: DocumentFormControl): readonly string[] {
+  return document.documentState.controls.get(control.node)?.values ?? defaultControlValues(control);
+}
+
+function controlSelections(
+  document: BrowserDocumentState,
+  control: Extract<DocumentFormControl, { readonly kind: "select" }>
+): readonly DocumentNodeRef[] {
+  const explicit = document.documentState.controls.get(control.node)?.selected;
+  if (explicit !== undefined) return explicit;
+  const defaults = control.options.filter((option) => option.defaultSelected);
+  return (control.multiple ? defaults : [defaults.at(-1) ?? control.options[0]])
+    .flatMap((option) => option === undefined ? [] : [option.node]);
 }
 
 function updateFormControl(
   state: BrowserTuiState,
   document: BrowserDocumentState,
-  control: FormControl,
+  control: DocumentFormControl,
   values: readonly string[],
-  editor?: BrowserDocumentState["formEditors"][string]
+  editor?: BrowserDocumentState["formEditors"][string],
+  selectedOptions?: readonly DocumentNodeRef[]
 ): BrowserTuiState {
   return updateDocument(state, document.id, (current) => ({
     ...current,
-    formValues: { ...current.formValues, [control.id]: values },
+    documentState: control.kind === "checkbox" || control.kind === "radio"
+      ? applyDocumentAction(
+        current.snapshot.document,
+        current.documentState,
+        { kind: "set-checked", target: control.node, checked: values.length > 0 }
+      )
+      : control.kind === "select"
+        ? applyDocumentAction(current.snapshot.document, current.documentState, {
+          kind: "set-selected-options",
+          target: control.node,
+          options: selectedOptions ?? control.options.filter((option) => values.includes(option.value)).map((option) => option.node)
+        })
+        : applyDocumentAction(current.snapshot.document, current.documentState, {
+          kind: "set-control-value",
+          target: control.node,
+          value: values[0] ?? ""
+        }),
     ...(editor === undefined
       ? {}
-      : { formEditors: { ...current.formEditors, [control.id]: editor } })
+      : { formEditors: { ...current.formEditors, [control.node]: editor } })
   }));
-}
-
-function submissionValues(
-  controller: BrowserController,
-  document: BrowserDocumentState,
-  formId: string
-): readonly FormControlValue[] {
-  const form = controller.form(document, formId);
-  if (!form) return [];
-  const submitted: FormControlValue[] = [];
-  for (const control of form.controls) {
-    const values = controlValues(document, control);
-    if (values.length === 0) submitted.push({ controlId: control.id, value: null });
-    else {
-      for (const value of values) submitted.push({ controlId: control.id, value });
-    }
-  }
-  return submitted;
 }
 
 function firstMissingRequiredControl(
   controller: BrowserController,
   document: BrowserDocumentState,
   formId: string
-): Exclude<FormControl, { readonly kind: "hidden" }> | undefined {
+): Exclude<DocumentFormControl, { readonly kind: "hidden" }> | undefined {
   const form = controller.form(document, formId);
   if (!form) return undefined;
   const selectedRadioGroups = new Set<string>();
@@ -513,14 +505,14 @@ function firstMissingRequiredControl(
       control.kind === "radio"
       && controlValues(document, control).length > 0
     ) {
-      selectedRadioGroups.add(control.name.length === 0 ? control.id : control.name);
+      selectedRadioGroups.add(control.name.length === 0 ? control.node : control.name);
     }
   }
   for (const control of form.controls) {
     if (control.disabled || !("required" in control) || !control.required) continue;
     if ((control.kind === "text" || control.kind === "textarea") && control.readOnly) continue;
     if (control.kind === "radio") {
-      const groupName = control.name.length === 0 ? control.id : control.name;
+      const groupName = control.name.length === 0 ? control.node : control.name;
       if (!selectedRadioGroups.has(groupName)) return control;
       continue;
     }
@@ -530,6 +522,17 @@ function firstMissingRequiredControl(
     if (control.kind === "checkbox" && values.length === 0) return control;
   }
   return undefined;
+}
+
+function submitterControl(
+  form: DocumentForm,
+  submitterId: string | undefined
+): (DocumentButtonControl & { readonly kind: "submit" }) | undefined {
+  if (submitterId === undefined) return undefined;
+  const control = form.controls.find((candidate) => candidate.node === submitterId);
+  return control?.kind === "submit"
+    ? control as DocumentButtonControl & { readonly kind: "submit" }
+    : undefined;
 }
 
 function openNewDocumentEffect(
@@ -650,35 +653,6 @@ function runCommand(
       return updateBrowser(controller, state, { kind: "closeDocument" });
     case "reopen-document":
       return updateBrowser(controller, state, { kind: "reopenDocument" });
-    case "patch-remove-node":
-    case "patch-replace-text":
-    case "patch-set-attr":
-    case "patch-remove-attr":
-    case "patch-insert-before":
-    case "patch-insert-after": {
-      const edit = command.kind === "patch-remove-node"
-        ? { kind: "removeNode" as const, target: command.target }
-        : command.kind === "patch-replace-text"
-          ? { kind: "replaceText" as const, target: command.target, value: command.value }
-          : command.kind === "patch-set-attr"
-            ? { kind: "setAttr" as const, target: command.target, name: command.name, value: command.value }
-            : command.kind === "patch-remove-attr"
-              ? { kind: "removeAttr" as const, target: command.target, name: command.name }
-              : command.kind === "patch-insert-before"
-                ? { kind: "insertHtmlBefore" as const, target: command.target, html: command.html }
-                : { kind: "insertHtmlAfter" as const, target: command.target, html: command.html };
-      return beginNavigation(state, document, document.snapshot.finalUrl, effect(
-        `navigation:${document.id}`,
-        async (effectContext) => navigationMessage(
-          controller,
-          document,
-          await controller.applyEdits(document, [edit], effectContext.signal),
-          "Patched page"
-        ),
-        "replace",
-        document.id
-      ));
-    }
   }
 }
 
@@ -691,7 +665,7 @@ export function updateBrowser(
   const document = activeDocument(state);
   const columns = contentColumns(state, context.terminalSize.columns);
   const viewportRows = Math.max(1, context.terminalSize.rows - (state.findBar === null ? 3 : 4));
-  const layout = documentLayout(document, columns);
+  const layout = renderDocumentForViewport(document, columns, viewportRows).fragments;
   switch (message.kind) {
     case "quit":
       return { state, exit: { reason: "quit" } };
@@ -714,6 +688,36 @@ export function updateBrowser(
       return result(updateDocument(state, document.id, (current) =>
         documentWithScrollRow(current, layout, layout.rows.length, viewportRows)
       ));
+    case "movePageFocus": {
+      const targets = layout.focusTargets.filter((target) => target.rects.length > 0);
+      if (targets.length === 0) return result(state);
+      const currentIndex = targets.findIndex((target) =>
+        actionId(target.action) === message.currentActionId
+      );
+      const nextIndex = message.direction === "next"
+        ? (currentIndex + 1 + targets.length) % targets.length
+        : (currentIndex - 1 + targets.length) % targets.length;
+      const target = targets[nextIndex];
+      if (target === undefined) return result(state);
+      const top = Math.min(...target.rects.map((rect) => rect.row));
+      const bottom = Math.max(...target.rects.map((rect) => rect.row + rect.height));
+      const currentRow = documentScrollRow(document, layout);
+      const revealedRow = top < currentRow
+        ? top
+        : bottom > currentRow + viewportRows
+          ? bottom - viewportRows
+          : currentRow;
+      const updated = documentWithScrollRow(document, layout, revealedRow, viewportRows);
+      return result(updateDocument(state, document.id, () => updated), {
+        focus: target.action.kind === "form-control"
+          ? { kind: "element", elementId: target.action.node }
+          : {
+            kind: "elementTarget",
+            elementId: `browser-${document.id}`,
+            targetId: actionId(target.action)
+          }
+      });
+    }
     case "moveSearch": {
       if (!document.search) return result({ ...state, status: status("No active find query.", "error") });
       const updated = moveSearch(document, message.direction, columns);
@@ -731,27 +735,32 @@ export function updateBrowser(
     case "activateActionAt": {
       const action = actionById(document, message.actionId);
       if (!action) return result({ ...state, status: status("Focus a link or form first.", "error") });
-      if (action.kind === "form") {
-        const firstControl = controller.form(document, action.id)?.controls.find(
-          (control) => control.kind !== "hidden" && control.kind !== "unsupported"
-        );
-        return firstControl === undefined
-          ? result({ ...state, status: status("This form has no interactive controls.", "error") })
-          : result(state, { focus: { kind: "element", elementId: firstControl.id } });
+      if (action.kind === "form-control") {
+        return result(state, { focus: { kind: "element", elementId: action.node } });
+      }
+      if (action.kind === "disclosure") {
+        return result(updateDocument(state, document.id, (current) => ({
+          ...current,
+          documentState: applyDocumentAction(
+            current.snapshot.document,
+            current.documentState,
+            { kind: "set-open", target: action.node, open: !action.open }
+          )
+        })));
       }
       const disposition = message.disposition ?? "current";
       if (disposition === "newForeground" || disposition === "newBackground") {
         return result(state, {
           effects: [openNewDocumentEffect(
             controller,
-            action.resolvedHref,
+            action.destination,
             disposition === "newBackground",
             false,
             document
           )]
         });
       }
-      return beginNavigation(state, document, action.resolvedHref, effect(
+      return beginNavigation(state, document, action.destination, effect(
         `navigation:${document.id}`,
         async (effectContext) => navigationMessage(
           controller,
@@ -805,9 +814,9 @@ export function updateBrowser(
           : id === "newBackground"
             ? { kind: "activateActionAt", actionId: link.id, disposition: "newBackground" }
             : id === "download"
-              ? { kind: "download", target: link.resolvedHref }
+              ? { kind: "download", target: link.destination }
               : id === "external"
-                ? { kind: "openExternal", target: link.resolvedHref }
+                ? { kind: "openExternal", target: link.destination }
                 : undefined;
       return next === undefined
         ? result({ ...state, overlay: null })
@@ -947,7 +956,11 @@ export function updateBrowser(
     case "openExternal":
       return result({ ...state, overlay: null }, { effects: [effect("open-external", async () => ({
         kind: "operationComplete",
-        status: await controller.openExternal(message.target ?? document.snapshot.finalUrl)
+        status: await controller.openExternal(
+          document.snapshot.finalUrl,
+          message.target ?? document.snapshot.finalUrl,
+          message.target === undefined ? "direct" : "page-initiated"
+        )
       }))] });
     case "newDocument": {
       const target = message.target ?? "about:newtab";
@@ -972,7 +985,7 @@ export function updateBrowser(
           recentlyClosed: [document, ...state.recentlyClosed].slice(0, 10),
           overlay: null,
           omnibox: resetCommandInput(state.omnibox, selected?.snapshot.finalUrl ?? ""),
-          status: status(`Closed ${pageContent(document.snapshot).title}.`, "success")
+          status: status(`Closed ${document.snapshot.document.title}.`, "success")
         };
         return result(next, {
           cancelEffects: [`navigation:${document.id}`],
@@ -989,7 +1002,7 @@ export function updateBrowser(
         activeDocumentIndex: state.documents.length,
         recentlyClosed: state.recentlyClosed.slice(1),
         omnibox: resetCommandInput(state.omnibox, restored.snapshot.finalUrl),
-        status: status(`Reopened ${pageContent(restored.snapshot).title}.`, "success")
+        status: status(`Reopened ${restored.snapshot.document.title}.`, "success")
       };
       return result(next, {
         effects: [persistSnapshotEffect(controller, restored.snapshot), persistEffect(controller, next)]
@@ -1008,12 +1021,12 @@ export function updateBrowser(
     case "tabsTransition": {
       const selected = state.documents[state.activeDocumentIndex];
       if (!selected) return result(state);
-      const presentation = tabsReducer(
+      const tabState = tabsReducer(
         { activeId: selected.id, selectedId: selected.id },
         message.transition,
         { tabs: state.documents, activation: "automatic" }
       );
-      const nextIndex = state.documents.findIndex((entry) => entry.id === presentation.selectedId);
+      const nextIndex = state.documents.findIndex((entry) => entry.id === tabState.selectedId);
       return nextIndex < 0
         ? result(state)
         : updateBrowser(controller, state, { kind: "selectDocument", index: nextIndex }, context);
@@ -1084,13 +1097,13 @@ export function updateBrowser(
       const value = message.value;
       if (!value) return result({ ...state, status: status("No item is selected.", "error") });
       if (value.kind === "outline") {
-        return result({ ...updateDocument(state, document.id, (current) => scrollToBlock(current, value.blockId)), overlay: null });
+        return result({ ...updateDocument(state, document.id, (current) => scrollToSource(current, value.node)), overlay: null });
       }
       if (value.kind === "link") {
-        const action = pageContent(document.snapshot).links.find((entry) => entry.index === value.index);
-        return action === undefined
+        const link = document.snapshot.document.links.find((entry) => entry.index === value.index);
+        return link === undefined
           ? result(state)
-          : updateBrowser(controller, state, { kind: "activateActionAt", actionId: action.id }, context);
+          : updateBrowser(controller, state, { kind: "activateActionAt", actionId: `link:${link.node}` }, context);
       }
       const target = value.target ?? "";
       return beginNavigation(state, document, target, loadEffect(controller, document, target));
@@ -1128,9 +1141,9 @@ export function updateBrowser(
         documents: state.documents.map((entry) => ({ ...entry, search: null }))
       });
     case "formText": {
-      const control = controlById(controller, document, message.controlId);
+      const control = controlById(document, message.controlId);
       if (!control || control.kind !== "text" || control.inputType === "number") return result(state);
-      const current = document.formEditors[control.id];
+      const current = document.formEditors[control.node];
       const editor = current?.kind === "text"
         ? current.state
         : { text: controlValues(document, control)[0] ?? "", cursor: (controlValues(document, control)[0] ?? "").length };
@@ -1138,18 +1151,18 @@ export function updateBrowser(
       return result(updateFormControl(state, document, control, [next.text], { kind: "text", state: next }));
     }
     case "formNumber": {
-      const control = controlById(controller, document, message.controlId);
+      const control = controlById(document, message.controlId);
       if (!control || control.kind !== "text" || control.inputType !== "number") return result(state);
       const value = controlValues(document, control)[0] ?? "";
-      const current = document.formEditors[control.id];
+      const current = document.formEditors[control.node];
       const editor = current?.kind === "number"
         ? current.state
         : {
           input: { text: value, cursor: value.length },
           configuration: createNumberInputConfiguration({
-            ...(control.min === undefined ? {} : { min: control.min }),
-            ...(control.max === undefined ? {} : { max: control.max }),
-            ...(control.step === undefined ? {} : { step: control.step })
+            ...(control.min === null ? {} : { min: control.min }),
+            ...(control.max === null ? {} : { max: control.max }),
+            ...(control.step === null ? {} : { step: control.step })
           })
         };
       const next = numberInputReducer(editor, message.action);
@@ -1162,9 +1175,9 @@ export function updateBrowser(
       ));
     }
     case "formArea": {
-      const control = controlById(controller, document, message.controlId);
+      const control = controlById(document, message.controlId);
       if (!control || control.kind !== "textarea") return result(state);
-      const current = document.formEditors[control.id];
+      const current = document.formEditors[control.node];
       const editor = current?.kind === "textarea"
         ? current.state
         : createTextAreaState({
@@ -1181,18 +1194,19 @@ export function updateBrowser(
       ));
     }
     case "formComboboxTransition": {
-      const control = controlById(controller, document, message.controlId);
+      const control = controlById(document, message.controlId);
       if (!control || control.kind !== "select" || control.multiple) return result(state);
       const options = control.options.map((option, index) => ({
-        id: `${control.id}:${String(index)}`,
+        id: `${control.node}:${String(index)}`,
         label: option.label,
         value: option.value,
         disabled: option.disabled
       }));
       const values = controlValues(document, control);
-      const selectedIndex = control.options.findIndex((option) => values.includes(option.value));
-      const current = document.formEditors[control.id];
-      const selectedId = selectedIndex < 0 ? undefined : `${control.id}:${String(selectedIndex)}`;
+      const selected = new Set(controlSelections(document, control));
+      const selectedIndex = control.options.findIndex((option) => selected.has(option.node));
+      const current = document.formEditors[control.node];
+      const selectedId = selectedIndex < 0 ? undefined : `${control.node}:${String(selectedIndex)}`;
       const editor = current?.kind === "combobox"
         ? current.state
         : {
@@ -1224,13 +1238,13 @@ export function updateBrowser(
       ));
     }
     case "formComboboxCommit": {
-      const control = controlById(controller, document, message.controlId);
+      const control = controlById(document, message.controlId);
       if (!control || control.kind !== "select" || control.multiple) return result(state);
       const option = control.options.find(
-        (_, index) => `${control.id}:${String(index)}` === message.event.id
+        (_, index) => `${control.node}:${String(index)}` === message.event.id
       );
       if (option === undefined || option.disabled) return result(state);
-      const current = document.formEditors[control.id];
+      const current = document.formEditors[control.node];
       if (current?.kind !== "combobox") return result(state);
       const next = commitCombobox(current.state, message.event, {
         index: current.index,
@@ -1241,24 +1255,25 @@ export function updateBrowser(
         document,
         control,
         [option.value],
-        { kind: "combobox", state: next, index: current.index }
+        { kind: "combobox", state: next, index: current.index },
+        [option.node]
       ));
     }
     case "formCheckboxGroup": {
-      const control = controlById(controller, document, message.controlId);
+      const control = controlById(document, message.controlId);
       if (!control || control.kind !== "select" || !control.multiple) return result(state);
       const options = control.options.map((option, index) => ({
-        id: `${control.id}:${String(index)}`,
+        id: `${control.node}:${String(index)}`,
         label: option.label,
         value: option.value,
         disabled: option.disabled
       }));
       const selectedIds = control.options.flatMap((option, index) =>
-        controlValues(document, control).includes(option.value)
-          ? [`${control.id}:${String(index)}`]
+        controlSelections(document, control).includes(option.node)
+          ? [`${control.node}:${String(index)}`]
           : []
       );
-      const current = document.formEditors[control.id];
+      const current = document.formEditors[control.node];
       const interaction = current?.kind === "checkboxGroup"
         ? current.state
         : {
@@ -1271,36 +1286,37 @@ export function updateBrowser(
         const option = options.find((candidate) => candidate.id === id);
         return option === undefined ? [] : [option.value];
       });
+      const nextOptions = nextIds.flatMap((id) => {
+        const index = Number.parseInt(id.slice(id.lastIndexOf(":") + 1), 10);
+        const option = control.options[index];
+        return option === undefined ? [] : [option.node];
+      });
       return result(updateFormControl(
         state,
         document,
         control,
         nextValues,
-        { kind: "checkboxGroup", state: next }
+        { kind: "checkboxGroup", state: next },
+        nextOptions
       ));
     }
     case "formValues": {
-      const control = controlById(controller, document, message.controlId);
+      const control = controlById(document, message.controlId);
       if (control === undefined) return result(state);
       if (control.kind === "radio") {
-        const containingForm = controller.forms(document).find(
-          (entry) => entry.controls.some((candidate) => candidate.id === control.id)
-        );
-        const groupIds = new Set(
-          (containingForm?.controls ?? [])
-            .filter((entry) =>
-              entry.kind === "radio"
-              && (control.name.length === 0 ? entry.id === control.id : entry.name === control.name)
-            )
-            .map((entry) => entry.id)
+        const groupNodes = new Set(
+          document.snapshot.document.radioGroup(control.node).map((entry) => entry.node)
         );
         return result(updateDocument(state, document.id, (current) => ({
           ...current,
-          formValues: {
-            ...current.formValues,
-            ...Object.fromEntries([...groupIds].map((id) => [id, []])),
-            [control.id]: message.values
-          }
+          documentState: [...groupNodes].reduce(
+            (next, node) => applyDocumentAction(
+              current.snapshot.document,
+              next,
+              { kind: "set-checked", target: node, checked: node === control.node && message.values.length > 0 }
+            ),
+            current.documentState
+          )
         })));
       }
       return result(updateFormControl(state, document, control, message.values));
@@ -1308,31 +1324,37 @@ export function updateBrowser(
     case "resetForm": {
       const form = controller.form(document, message.formId);
       if (!form) return result(state);
-      const ids = new Set(form.controls.map((control) => control.id));
+      const nodes = new Set(form.controls.map((control) => control.node));
       return result(updateDocument(state, document.id, (current) => ({
         ...current,
-        formValues: Object.fromEntries(Object.entries(current.formValues).filter(([id]) => !ids.has(id))),
-        formEditors: Object.fromEntries(Object.entries(current.formEditors).filter(([id]) => !ids.has(id)))
+        documentState: applyDocumentAction(current.snapshot.document, current.documentState, {
+          kind: "reset-form",
+          target: form.node
+        }),
+        formEditors: Object.fromEntries(Object.entries(current.formEditors).filter(([id]) => !nodes.has(id as DocumentNodeRef)))
       })));
     }
     case "submitForm": {
       const form = controller.form(document, message.formId);
       if (!form) return result({ ...state, status: status("The form no longer exists.", "error") });
-      const missing = firstMissingRequiredControl(controller, document, form.id);
+      const submitter = submitterControl(form, message.submitterId);
+      const missing = form.noValidate || submitter?.formNoValidate === true
+        ? undefined
+        : firstMissingRequiredControl(controller, document, form.node);
       if (missing !== undefined) {
         const focus = missing.kind === "radio"
           ? {
             kind: "elementTarget" as const,
-            elementId: `${form.id}:radio:${missing.name.length === 0 ? missing.id : missing.name}`,
-            targetId: missing.id
+            elementId: `${form.node}:radio:${missing.name.length === 0 ? missing.node : missing.name}`,
+            targetId: missing.node
           }
-          : { kind: "element" as const, elementId: missing.id };
+          : { kind: "element" as const, elementId: missing.node };
         return result({
           ...state,
           status: status(`${missing.label} is required.`, "error")
         }, { focus });
       }
-      return beginNavigation(state, document, form.actionUrl, effect(
+      return beginNavigation(state, document, submitter?.formAction ?? form.action, effect(
         `navigation:${document.id}`,
         async (effectContext) => navigationMessage(
           controller,
@@ -1340,8 +1362,8 @@ export function updateBrowser(
           await controller.submitForm(
             document,
             form,
-            submissionValues(controller, document, form.id),
-            message.submitterId,
+            document.documentState,
+            message.submitterId as DocumentNodeRef | undefined,
             effectContext.signal
           ),
           "Submitted form"
@@ -1587,8 +1609,64 @@ export function createBrowserApp(
           actionId: focusPath?.at(-1) ?? ""
         })
       },
-      { id: "scroll-down", triggers: [{ kind: "key", key: "arrowDown" }], enabled: ({ state }) => state.overlay === null || state.overlay.kind === "detail", message: { kind: "scroll", rows: 1 } },
-      { id: "scroll-up", triggers: [{ kind: "key", key: "arrowUp" }], enabled: ({ state }) => state.overlay === null || state.overlay.kind === "detail", message: { kind: "scroll", rows: -1 } },
+      {
+        id: "page-focus-next",
+        phase: "beforeFocus",
+        triggers: [{ kind: "key", key: "arrowDown" }],
+        enabled: ({ state, focusPath }) => {
+          const current = state.documents[state.activeDocumentIndex];
+          const target = focusPath?.at(-1);
+          return state.overlay === null && current !== undefined
+            && target !== undefined && actionById(current, target) !== undefined;
+        },
+        toMessage: ({ focusPath }) => ({
+          kind: "movePageFocus",
+          direction: "next",
+          currentActionId: focusPath?.at(-1) ?? ""
+        })
+      },
+      {
+        id: "page-focus-previous",
+        phase: "beforeFocus",
+        triggers: [{ kind: "key", key: "arrowUp" }],
+        enabled: ({ state, focusPath }) => {
+          const current = state.documents[state.activeDocumentIndex];
+          const target = focusPath?.at(-1);
+          return state.overlay === null && current !== undefined
+            && target !== undefined && actionById(current, target) !== undefined;
+        },
+        toMessage: ({ focusPath }) => ({
+          kind: "movePageFocus",
+          direction: "prev",
+          currentActionId: focusPath?.at(-1) ?? ""
+        })
+      },
+      {
+        id: "page-control-focus-next",
+        phase: "beforeFocus",
+        triggers: [{ kind: "key", key: "tab" }],
+        enabled: ({ state, focusPath }) => state.overlay === null
+          && focusedControlActionId(state, focusPath) !== null,
+        toMessage: ({ state, focusPath }) => ({
+          kind: "movePageFocus",
+          direction: "next",
+          currentActionId: focusedControlActionId(state, focusPath) ?? ""
+        })
+      },
+      {
+        id: "page-control-focus-previous",
+        phase: "beforeFocus",
+        triggers: [{ kind: "key", key: "tab", modifiers: { shift: true } }],
+        enabled: ({ state, focusPath }) => state.overlay === null
+          && focusedControlActionId(state, focusPath) !== null,
+        toMessage: ({ state, focusPath }) => ({
+          kind: "movePageFocus",
+          direction: "prev",
+          currentActionId: focusedControlActionId(state, focusPath) ?? ""
+        })
+      },
+      { id: "scroll-down", phase: "afterFocus", triggers: [{ kind: "key", key: "arrowDown" }], enabled: ({ state }) => state.overlay === null || state.overlay.kind === "detail", message: { kind: "scroll", rows: 1 } },
+      { id: "scroll-up", phase: "afterFocus", triggers: [{ kind: "key", key: "arrowUp" }], enabled: ({ state }) => state.overlay === null || state.overlay.kind === "detail", message: { kind: "scroll", rows: -1 } },
       { id: "page-down", triggers: [{ kind: "key", key: "pageDown" }, { kind: "text", text: " " }], enabled: ({ state }) => state.overlay === null || state.overlay.kind === "detail", message: { kind: "scroll", rows: 10 } },
       { id: "page-up", triggers: [{ kind: "key", key: "pageUp" }], enabled: ({ state }) => state.overlay === null || state.overlay.kind === "detail", message: { kind: "scroll", rows: -10 } },
       { id: "scroll-top", triggers: [{ kind: "key", key: "home" }], enabled: ({ state }) => state.overlay === null, message: { kind: "scrollTop" } },

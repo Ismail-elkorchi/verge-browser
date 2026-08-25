@@ -34,7 +34,9 @@ import type { SearchPickerIndex } from "@ismail-elkorchi/terminal-ui/behavior";
 import type { TextEditBuffer } from "@ismail-elkorchi/terminal-ui/text";
 
 import type { BookmarkEntry, DownloadRecord, HistoryEntry } from "../app/storage.js";
-import type { PageSnapshot } from "../app/types.js";
+import type { IndexedPageSnapshot } from "../app/types.js";
+import type { DocumentNodeRef, DocumentState } from "../document/index.js";
+import type { RenderPipelineCache } from "./document-layout.js";
 
 export type PickerKind = "links" | "outline" | "recall";
 export type DetailKind = "help" | "diagnostics" | "reader" | "cookies";
@@ -68,10 +70,8 @@ export interface StatusMessage {
 }
 
 export interface DocumentSearchMatch {
-  readonly blockId: string;
-  readonly rowIndex: number;
-  readonly startCodeUnitIndex: number;
-  readonly endCodeUnitIndexExclusive: number;
+  readonly id: string;
+  readonly sources: readonly (DocumentNodeRef | null)[];
 }
 
 export interface BrowserDocumentSearch {
@@ -83,13 +83,14 @@ export interface BrowserDocumentSearch {
 
 export interface BrowserDocumentState {
   readonly id: string;
-  readonly snapshot: PageSnapshot;
+  readonly snapshot: IndexedPageSnapshot;
+  readonly documentState: DocumentState;
+  readonly renderPipelineCache: RenderPipelineCache;
   readonly scrollAnchor: {
-    readonly blockId: string;
+    readonly source: DocumentNodeRef | null;
     readonly rowOffset: number;
   };
   readonly search: BrowserDocumentSearch | null;
-  readonly formValues: Readonly<Record<string, readonly string[]>>;
   readonly formEditors: Readonly<Record<string,
     | { readonly kind: "text"; readonly state: TextEditBuffer }
     | { readonly kind: "number"; readonly state: NumberInputState }
@@ -102,6 +103,7 @@ export interface BrowserDocumentState {
     | { readonly kind: "checkboxGroup"; readonly state: CollectionInteractionState }
   >>;
   readonly savedViews: Readonly<Record<string, {
+    readonly document: IndexedPageSnapshot["document"];
     readonly scrollAnchor: BrowserDocumentState["scrollAnchor"];
     readonly search: BrowserDocumentSearch | null;
   }>>;
@@ -116,7 +118,7 @@ export interface PickerValue {
   readonly kind: "link" | "outline" | "recall";
   readonly index: number;
   readonly target?: string;
-  readonly blockId?: string;
+  readonly node?: DocumentNodeRef;
 }
 
 export interface PickerOverlay {
@@ -197,6 +199,11 @@ export type BrowserTuiMessage =
   | { readonly kind: "scrollBottom" }
   | { readonly kind: "moveSearch"; readonly direction: "next" | "prev" }
   | {
+      readonly kind: "movePageFocus";
+      readonly direction: "next" | "prev";
+      readonly currentActionId: string;
+    }
+  | {
       readonly kind: "activateActionAt";
       readonly actionId: string;
       readonly disposition?: "current" | "newForeground" | "newBackground";
@@ -250,7 +257,7 @@ export type BrowserTuiMessage =
   | {
       readonly kind: "pageLoaded";
       readonly documentId: string;
-      readonly snapshot: PageSnapshot;
+      readonly snapshot: IndexedPageSnapshot;
       readonly status: string;
       readonly canGoBack: boolean;
       readonly canGoForward: boolean;

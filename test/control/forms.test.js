@@ -1,185 +1,171 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parse } from "@ismail-elkorchi/html-parser";
+import {
+  applyDocumentAction,
+  createDocumentState,
+  parseWebDocument
+} from "../../dist/document/index.js";
+import {
+  buildFormSubmissionRequest,
+  buildGetSubmissionUrl
+} from "../../dist/app/forms.js";
 
-import { buildFormSubmissionRequest, buildGetSubmissionUrl, extractForms } from "../../dist/app/forms.js";
+function documentWithForm(html) {
+  return parseWebDocument(html, {
+    requestUrl: "https://example.test/base",
+    finalUrl: "https://example.test/base"
+  });
+}
 
-test("extractForms preserves semantic controls, unchecked choices, and duplicate names", () => {
-  const document = parse(`
-    <html><body>
-      <label for="query">Search terms</label>
-      <form method="get" action="/search">
-        <input id="query" type="search" name="q" value="alpha" required />
-        <label>Nested label <input name="nested" value="inside" /></label>
-        <input type="checkbox" name="debug" value="1" />
-        <input type="checkbox" name="tag" value="one" checked />
-        <input type="checkbox" name="tag" value="two" checked />
-        <select name="lang"><option value="en" selected>English</option></select>
-        <input type="number" name="count" value="2" min="1" max="9" step="0.5" />
-        <input type="file" name="upload" />
-        <button type="submit" name="intent" value="search">Search</button>
-      </form>
-    </body></html>
-  `);
-
-  const form = extractForms(document.tree, "https://example.com/base")[0];
-  assert.equal(form?.method, "get");
-  assert.equal(form?.label, "Search terms");
-  assert.equal(form?.encoding, "application/x-www-form-urlencoded");
-  assert.equal(form?.actionUrl, "https://example.com/search");
-  assert.deepEqual(form?.controls.map((control) => [control.kind, control.name]), [
-    ["text", "q"],
-    ["text", "nested"],
-    ["checkbox", "debug"],
-    ["checkbox", "tag"],
-    ["checkbox", "tag"],
-    ["select", "lang"],
-    ["text", "count"],
-    ["unsupported", "upload"],
-    ["submit", "intent"]
+test("form indexes preserve labels, successful controls, defaults, and bounded options", () => {
+  const document = documentWithForm(`<form method="get" action="/search" aria-label="Search">
+    <label for="query">Search terms</label><input id="query" type="search" name="q" value="alpha" required>
+    <label>Nested label <input name="nested" value="inside"></label>
+    <input type="checkbox" name="tag" value="one" checked>
+    <select name="lang"><option value="en" selected>English</option></select>
+    <input type="number" name="count" value="2" min="1" max="9" step="0.5">
+    <input type="file" name="upload"><button name="intent" value="search">Search</button>
+  </form>`);
+  const form = document.forms[0];
+  assert.equal(form.action, "https://example.test/search");
+  assert.deepEqual(form.controls.map((control) => [control.kind, control.name]), [
+    ["text", "q"], ["text", "nested"], ["checkbox", "tag"], ["select", "lang"],
+    ["text", "count"], ["unsupported", "upload"], ["submit", "intent"]
   ]);
-  assert.equal(form?.controls[0]?.label, "Search terms");
-  assert.equal(form?.controls[1]?.label, "Nested label");
-  assert.equal(form?.controls[2]?.kind === "checkbox" && form.controls[2].checked, false);
-  const count = form?.controls.find((control) => control.kind === "text" && control.inputType === "number");
-  assert.deepEqual(count && { min: count.min, max: count.max, step: count.step }, { min: 1, max: 9, step: 0.5 });
-  assert.equal(form?.controls.find((control) => control.kind === "submit")?.label, "Search");
+  assert.equal(form.controls[0].label, "Search terms");
+  assert.equal(form.controls[1].label, "Nested label");
+  const number = form.controls.find((control) => control.kind === "text" && control.inputType === "number");
+  assert.deepEqual(number && { min: number.min, max: number.max, step: number.step }, { min: 1, max: 9, step: 0.5 });
 });
 
-test("buildGetSubmissionUrl preserves ordering, duplicates, and explicit unchecked state", () => {
-  const form = {
-    id: "form:1",
-    index: 1,
-    label: "Search",
-    method: "get",
-    encoding: "application/x-www-form-urlencoded",
-    actionUrl: "https://example.com/search",
-    controls: [
-      { id: "q", kind: "text", inputType: "search", name: "q", label: "Query", value: "alpha", disabled: false, required: false, readOnly: false },
-      { id: "one", kind: "checkbox", name: "tag", label: "One", value: "one", checked: true, disabled: false, required: false },
-      { id: "two", kind: "checkbox", name: "tag", label: "Two", value: "two", checked: true, disabled: false, required: false }
-    ]
-  };
-  const url = buildGetSubmissionUrl(form, [
-    { controlId: "q", value: "beta" },
-    { controlId: "one", value: null },
-    { controlId: "two", value: "two" }
-  ]);
-  assert.equal(url, "https://example.com/search?q=beta&tag=two");
-});
-
-test("buildFormSubmissionRequest includes only the activated submitter", () => {
-  const submission = buildFormSubmissionRequest(
-    {
-      id: "form:2",
-      index: 2,
-      label: "Login",
-      method: "post",
-      encoding: "application/x-www-form-urlencoded",
-      actionUrl: "https://example.com/login",
-      controls: [
-        { id: "user", kind: "text", inputType: "text", name: "user", label: "User", value: "ismail", disabled: false, required: false, readOnly: false },
-        { id: "pass", kind: "text", inputType: "password", name: "pass", label: "Password", value: "secret", disabled: false, required: false, readOnly: false },
-        { id: "login", kind: "submit", name: "intent", label: "Login", value: "login", disabled: false, required: false },
-        { id: "preview", kind: "submit", name: "intent", label: "Preview", value: "preview", disabled: false, required: false }
-      ]
-    },
-    [{ controlId: "pass", value: "updated" }],
-    "login"
-  );
-
-  assert.equal(submission.url, "https://example.com/login");
+test("form submission consumes typed dynamic state and only the activated submitter", () => {
+  const document = documentWithForm(`<form method="post" action="/login">
+    <input name="user" value="ismail"><input name="pass" type="password" value="secret">
+    <button name="intent" value="login">Login</button><button name="intent" value="preview">Preview</button>
+  </form>`);
+  const form = document.forms[0];
+  const password = form.controls.find((control) => control.name === "pass");
+  const login = form.controls.find((control) => control.kind === "submit" && control.value === "login");
+  let state = createDocumentState(document);
+  state = applyDocumentAction(document, state, { kind: "set-control-value", target: password.node, value: "updated" });
+  const submission = buildFormSubmissionRequest(form, state, login.node);
+  assert.equal(submission.url, "https://example.test/login");
   assert.equal(submission.requestOptions.method, "POST");
-  assert.equal(submission.requestOptions.headers?.["content-type"], "application/x-www-form-urlencoded; charset=UTF-8");
   assert.equal(submission.requestOptions.bodyText, "user=ismail&pass=updated&intent=login");
 });
 
-test("buildFormSubmissionRequest rejects unsupported encodings and methods", () => {
-  const base = {
-    id: "form:3",
-    index: 3,
-    label: "Upload",
-    actionUrl: "https://example.com/upload",
-    controls: []
-  };
-  assert.throws(
-    () => buildFormSubmissionRequest({ ...base, method: "post", encoding: "multipart/form-data" }),
-    /Unsupported form encoding/
-  );
-  assert.throws(
-    () => buildFormSubmissionRequest({ ...base, method: "delete", encoding: "application/x-www-form-urlencoded" }),
-    /Unsupported form method/
-  );
-});
-
-test("forms honor disabled ancestors, empty numeric constraints, and button defaults", () => {
-  const document = parse(`
-    <form method="invalid" action="/submit" enctype="multipart/form-data">
-      <fieldset disabled>
-        <legend><input name="legend" value="kept"></legend>
-        <div><input name="disabled" value="secret"></div>
-      </fieldset>
-      <input type="number" name="count" min="" max="" step="">
-      <select name="choice"><optgroup disabled><option selected value="blocked">Blocked</option></optgroup></select>
-      <button name="intent">Send</button>
-    </form>
-  `);
-  const form = extractForms(document.tree, "https://example.test/base")[0];
-  assert.ok(form);
-  assert.equal(form.method, "get");
-  assert.equal(form.controls.find((control) => control.name === "legend")?.disabled, false);
-  assert.equal(form.controls.find((control) => control.name === "disabled")?.disabled, true);
-  const number = form.controls.find((control) => control.kind === "text" && control.inputType === "number");
-  assert.deepEqual(number && { min: number.min, max: number.max, step: number.step }, {
-    min: undefined,
-    max: undefined,
-    step: undefined
-  });
-  const select = form.controls.find((control) => control.kind === "select");
-  assert.ok(select);
-  assert.equal(select?.options[0]?.disabled, true);
-  assert.equal(form.controls.find((control) => control.kind === "submit")?.value, "");
-
-  assert.equal(
-    buildFormSubmissionRequest(
-      form,
-      [],
-      form.controls.find((control) => control.kind === "submit")?.id
-    ).url,
-    "https://example.test/submit?legend=kept&count=&intent="
-  );
-  assert.equal(
-    buildGetSubmissionUrl(form, [{ controlId: select.id, value: "blocked" }]),
-    "https://example.test/submit?legend=kept&count="
-  );
-});
-
-test("form extraction bounds page, control, and select-option expansion", () => {
-  const manyForms = parse(Array.from(
-    { length: 300 },
-    (_, index) => `<form aria-label="form-${String(index)}"></form>`
-  ).join(""));
-  assert.equal(extractForms(manyForms.tree, "https://example.test/").length, 256);
-
-  const largeForm = parse(`<form>
-    ${Array.from(
-      { length: 2_100 },
-      (_, index) => `<input name="field-${String(index)}">`
-    ).join("")}
+test("unchecked and disabled choices are omitted and invalid selected values are rejected", () => {
+  const document = documentWithForm(`<form action="/search">
+    <input name="q" value="alpha"><input type="checkbox" name="debug" value="1" checked>
+    <select name="lang"><option value="en" selected>English</option><option disabled value="blocked">Blocked</option></select>
   </form>`);
-  assert.equal(
-    extractForms(largeForm.tree, "https://example.test/")[0]?.controls.length,
-    2_000
-  );
+  const form = document.forms[0];
+  const checkbox = form.controls.find((control) => control.kind === "checkbox");
+  const select = form.controls.find((control) => control.kind === "select");
+  let state = createDocumentState(document);
+  state = applyDocumentAction(document, state, { kind: "set-checked", target: checkbox.node, checked: false });
+  state = applyDocumentAction(document, state, {
+    kind: "set-selected-options",
+    target: select.node,
+    options: [select.options.find((option) => option.value === "blocked").node]
+  });
+  assert.deepEqual(state.controls.get(select.node), { values: [], checked: null, selected: [] });
+  assert.equal(buildGetSubmissionUrl(form, state), "https://example.test/search?q=alpha");
+});
 
-  const largeSelect = parse(`<form><select name="choice">
-    ${Array.from(
-      { length: 2_100 },
-      (_, index) => `<option value="${String(index)}">${String(index)}</option>`
-    ).join("")}
+test("document state enforces radio groups and effective single-select defaults", () => {
+  const document = documentWithForm(`<form action="/choose">
+    <input type="radio" name="size" value="small" checked>
+    <input type="radio" name="size" value="large">
+    <select name="color"><option value="red">Red</option><option value="blue">Blue</option></select>
+  </form>`);
+  const form = document.forms[0];
+  const radios = form.controls.filter((control) => control.kind === "radio");
+  const select = form.controls.find((control) => control.kind === "select");
+  let state = createDocumentState(document);
+  assert.deepEqual(state.controls.get(select.node)?.values, ["red"]);
+  state = applyDocumentAction(document, state, { kind: "set-checked", target: radios[1].node, checked: true });
+  assert.equal(state.controls.get(radios[0].node)?.checked, false);
+  assert.equal(state.controls.get(radios[1].node)?.checked, true);
+  assert.equal(buildGetSubmissionUrl(form, state), "https://example.test/choose?size=large&color=red");
+});
+
+test("document state is immutable and form reset is a typed document action", () => {
+  const document = documentWithForm(`<form><input name="value" value="initial"></form>`);
+  const form = document.forms[0];
+  const control = form.controls[0];
+  let state = createDocumentState(document);
+  assert.equal(Object.isFrozen(state), true);
+  assert.equal(Object.isFrozen(state.controls), true);
+  assert.equal(typeof state.controls.set, "undefined");
+  assert.equal(Object.isFrozen(state.controls.get(control.node)), true);
+  assert.equal(Object.isFrozen(state.controls.get(control.node).values), true);
+
+  state = applyDocumentAction(document, state, {
+    kind: "set-control-value",
+    target: control.node,
+    value: "changed"
+  });
+  assert.deepEqual(state.controls.get(control.node).values, ["changed"]);
+  state = applyDocumentAction(document, state, { kind: "reset-form", target: form.node });
+  assert.deepEqual(state.controls.get(control.node).values, ["initial"]);
+});
+
+test("initial state and form reset share radio-group default normalization", () => {
+  const document = documentWithForm(`<form>
+    <input type="radio" name="choice" value="first" checked>
+    <input type="radio" name="choice" value="last" checked>
+  </form>`);
+  const form = document.forms[0];
+  const radios = form.controls.filter((control) => control.kind === "radio");
+  let state = createDocumentState(document);
+  assert.deepEqual(radios.map((control) => state.controls.get(control.node)?.checked), [false, true]);
+  state = applyDocumentAction(document, state, {
+    kind: "set-checked",
+    target: radios[0].node,
+    checked: true
+  });
+  assert.deepEqual(radios.map((control) => state.controls.get(control.node)?.checked), [true, false]);
+  state = applyDocumentAction(document, state, { kind: "reset-form", target: form.node });
+  assert.deepEqual(radios.map((control) => state.controls.get(control.node)?.checked), [false, true]);
+});
+
+test("submission validates selected option identities rather than equal values", () => {
+  const document = documentWithForm(`<form action="/choose"><select name="choice">
+    <option disabled selected value="same">Blocked</option><option value="same">Allowed</option>
   </select></form>`);
-  const select = extractForms(largeSelect.tree, "https://example.test/")[0]
-    ?.controls.find((control) => control.kind === "select");
-  assert.equal(select?.kind === "select" ? select.options.length : 0, 2_000);
+  const form = document.forms[0];
+  const state = createDocumentState(document);
+  assert.equal(buildGetSubmissionUrl(form, state), "https://example.test/choose");
+});
+
+test("unsupported form methods and encodings fail closed", () => {
+  const dialog = documentWithForm("<form method='dialog'></form>").forms[0];
+  assert.throws(() => buildFormSubmissionRequest(dialog, createDocumentState(documentWithForm("<form></form>"))), /Unsupported form method/u);
+  const multipartDocument = documentWithForm("<form method='post' enctype='multipart/form-data'></form>");
+  assert.throws(
+    () => buildFormSubmissionRequest(multipartDocument.forms[0], createDocumentState(multipartDocument)),
+    /Unsupported form encoding/u
+  );
+});
+
+test("forms normalize HTML defaults and submitters override submission metadata", () => {
+  const document = documentWithForm(`<base href="https://cdn.example/base/"><form method="post" action="">
+    <input name="q" value="term"><button name="intent" value="find"
+      formaction="/search?old=1" formmethod="get" formenctype="text/plain" formnovalidate>Find</button>
+  </form>`);
+  const form = document.forms[0];
+  const submitter = form.controls.find((control) => control.kind === "submit");
+  assert.equal(form.action, "https://example.test/base");
+  assert.equal(submitter.formAction, "https://cdn.example/search?old=1");
+  assert.equal(submitter.formNoValidate, true);
+  const submission = buildFormSubmissionRequest(form, createDocumentState(document), submitter.node);
+  assert.equal(submission.url, "https://cdn.example/search?q=term&intent=find");
+  assert.equal(submission.requestOptions.method, "GET");
+});
+
+test("invalid button and input type keywords follow HTML missing-value defaults", () => {
+  const document = documentWithForm(`<form><input type="future-widget" name="value"><button type="future-button">Go</button></form>`);
+  assert.deepEqual(document.forms[0].controls.map((control) => control.kind), ["text", "submit"]);
 });

@@ -1,32 +1,18 @@
 /**
- * Public npm/Node entrypoint for verge-browser.
+ * Public npm/Node entrypoint for Verge Browser.
  *
- * This module exposes the package's terminal browsing primitives, deterministic
- * HTML rendering helpers, fetch/safety utilities, and runtime adapters used by
- * the supported Node.js CLI and the full npm library surface.
+ * The package exposes navigation, transport safety, and Verge's immutable web
+ * document boundary. Style, box generation, fragmentation, and terminal rows
+ * remain internal while their contracts mature.
  *
  * ```ts
- * import { parseCommand, parseHtml, renderDocumentToTerminal } from "@ismail-elkorchi/verge-browser";
+ * import { BrowserSession } from "@ismail-elkorchi/verge-browser";
  *
- * const command = parseCommand("open https://example.com");
- * const document = parseHtml("<h1>Hello</h1><a href=\"/docs\">Docs</a>");
- * const page = renderDocumentToTerminal({
- *   tree: document.tree,
- *   requestUrl: "https://example.com",
- *   finalUrl: "https://example.com",
- *   status: 200,
- *   statusText: "OK",
- *   fetchedAtIso: "2026-01-01T00:00:00.000Z",
- *   width: 80
- * });
- *
- * console.log(command.kind);
- * console.log(page.title);
+ * const session = new BrowserSession();
+ * const page = await session.open("about:help");
+ * console.log(page.document.title);
+ * await session.close();
  * ```
- *
- * The published JSR entrypoint intentionally exposes a smaller, utility-only
- * surface. Use the npm package when you need the interactive `verge` CLI or
- * the full browser/session runtime.
  *
  * @module
  */
@@ -42,59 +28,34 @@ export {
   type PageNetworkClientOptions
 } from "./app/fetch-page.js";
 export {
-  extractForms,
-  buildGetSubmissionUrl,
-  buildFormSubmissionRequest,
-  type FormEntry,
-  type FormControl,
-  type FormControlValue,
-  type FormSubmissionRequest
-} from "./app/forms.js";
-export {
-  createPager,
-  pagerViewport,
-  pagerTop,
-  pagerBottom,
-  pagerLineDown,
-  pagerLineUp,
-  pagerPageDown,
-  pagerPageUp,
-  pagerJumpToLine,
-  setPagerLines,
-  type PagerState,
-  type PagerViewport
-} from "./app/pager.js";
-export { parseHtml } from "./app/parse-html.js";
-export { renderDocumentToTerminal } from "./app/render.js";
-export { createSearchState, hasSearchMatches, activeSearchLineIndex, moveSearchMatch, type SearchState } from "./app/search.js";
-export { DEFAULT_SECURITY_POLICY, assertAllowedProtocol, assertAllowedUrl, isHtmlLikeContentType, type SecurityPolicyOptions } from "./app/security.js";
+  DEFAULT_SECURITY_POLICY,
+  assertAllowedProtocol,
+  assertAllowedUrl,
+  isHtmlLikeContentType,
+  type SecurityPolicyOptions
+} from "./app/security.js";
 export {
   BrowserSession,
   type BrowserSessionOptions,
   type PageLoader,
   type PageStreamLoader,
-  type PageRenderer,
+  type StylesheetLoader,
   type StylesheetPolicyOptions
 } from "./app/session.js";
-export { terminalWidth, terminalHeight, clearTerminal, formatRenderedPage, formatLinkTable } from "./app/terminal.js";
 export type {
   NetworkOutcome,
   NetworkOutcomeKind,
-  RenderedLink,
-  RenderedPage,
   FetchPageResult,
   FetchPageStreamResult,
   FetchPagePayload,
   PageRequestOptions,
   PageDiagnostics,
-  PageStyleIssue,
-  PageStyleIssueCode,
-  PageStylesheetResource,
   FetchStylesheetResult,
-  RenderInput,
-  PageSnapshot,
-  KeyboardKey
+  PageSnapshot
 } from "./app/types.js";
+export type {
+  WebDocumentSnapshot
+} from "./document/index.js";
 export {
   DEFAULT_SEARCH_URL_TEMPLATE,
   resolveInputUrl,

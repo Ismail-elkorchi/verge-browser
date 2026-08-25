@@ -9,7 +9,11 @@ import {
   validateParserPackageContract
 } from "./parser-package-contract.mjs";
 
-const HTTP_CLIENT_PACKAGE_NAME = "@ismail-elkorchi/http-client";
+const SHARED_RUNTIME_DEPENDENCIES = Object.freeze([
+  "@ismail-elkorchi/css-parser",
+  "@ismail-elkorchi/http-client",
+  "@ismail-elkorchi/terminal-ui"
+]);
 
 function run(command, args, { cwd, capture = false } = {}) {
   const result = spawnSync(command, args, {
@@ -65,6 +69,25 @@ function verifyPackedFiles(packEntry) {
   return paths.length;
 }
 
+async function validateInstalledDependency(name, installedVerge, workspaceManifest, consumerLock, consumerRoot) {
+  const installed = await readJson(join(consumerRoot, "node_modules", ...name.split("/"), "package.json"));
+  const declared = installedVerge.dependencies?.[name];
+  const locked = consumerLock.packages?.[`node_modules/${name}`];
+  if (
+    typeof declared !== "string"
+    || !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u.test(declared)
+    || declared !== workspaceManifest.dependencies?.[name]
+    || installed.name !== name
+    || locked?.version !== installed.version
+    || locked.version !== declared
+    || typeof locked.integrity !== "string"
+    || !/^sha512-[A-Za-z0-9+/]+={0,2}$/u.test(locked.integrity)
+  ) {
+    throw new Error(`packed Verge does not install its declared ${name} release`);
+  }
+  return { name, version: installed.version };
+}
+
 const root = process.cwd();
 const temporaryRoot = await mkdtemp(join(tmpdir(), "verge-packed-consumer-"));
 
@@ -93,40 +116,75 @@ try {
       type: "module",
       dependencies: {
         "@ismail-elkorchi/verge-browser": pathToFileURL(tarballPath).href
+      },
+      devDependencies: {
+        "@types/node": workspaceManifest.devDependencies["@types/node"],
+        "typescript": workspaceManifest.devDependencies.typescript
       }
+    }, null, 2)}\n`,
+    "utf8"
+  );
+  await writeFile(
+    join(consumerRoot, "smoke.ts"),
+    `import {
+  BrowserSession,
+  fetchPage,
+  type PageSnapshot,
+  type WebDocumentSnapshot
+} from "@ismail-elkorchi/verge-browser";
+
+const session = new BrowserSession({
+  defaultParseMode: "text",
+  loader: async (requestUrl) => {
+    const page = await fetchPage("about:help");
+    return { ...page, requestUrl, finalUrl: requestUrl };
+  }
+});
+const snapshot: PageSnapshot = await session.open("https://example.test/");
+const document: WebDocumentSnapshot = snapshot.document;
+if (document.root.length === 0) throw new Error("invalid document");
+await session.close();
+`,
+    "utf8"
+  );
+  await writeFile(
+    join(consumerRoot, "tsconfig.json"),
+    `${JSON.stringify({
+      compilerOptions: {
+        target: "ES2024",
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+        strict: true,
+        noEmit: true,
+        skipLibCheck: false,
+        types: ["node"]
+      },
+      include: ["smoke.ts"]
     }, null, 2)}\n`,
     "utf8"
   );
   await writeFile(
     join(consumerRoot, "smoke.mjs"),
     `import {
+  BrowserSession,
   PageNetworkClient,
-  parseHtml,
-  renderDocumentToTerminal
+  fetchPage
 } from "@ismail-elkorchi/verge-browser";
-
-const document = parseHtml("<main><h1>Packed consumer</h1><p>Public parser.</p></main>");
 const networkClient = new PageNetworkClient();
 await networkClient.close();
-if (
-  document.tree.kind !== "document" ||
-  document.metadata.inputKind !== "text" ||
-  document.metadata.resourceUsage.nodes < 1
-) {
-  throw new Error("parseHtml did not return a ParsedDocument");
-}
-const rendered = renderDocumentToTerminal({
-  tree: document.tree,
-  requestUrl: "https://example.test",
-  finalUrl: "https://example.test",
-  status: 200,
-  statusText: "OK",
-  fetchedAtIso: "2026-01-01T00:00:00.000Z",
-  width: 80
+const session = new BrowserSession({
+  loader: async (requestUrl) => {
+    const page = await fetchPage("about:help");
+    return { ...page, requestUrl, finalUrl: requestUrl };
+  },
+  defaultParseMode: "text"
 });
-if (!rendered.lines.join("\\n").includes("Packed consumer")) {
-  throw new Error("packed Verge runtime did not render parsed content");
-}
+const snapshot = await session.open("https://example.test/");
+if (
+  snapshot.document.root.length === 0 ||
+  snapshot.document.node(snapshot.document.root).kind !== "document"
+) throw new Error("packed session did not expose a document snapshot");
+await session.close();
 `,
     "utf8"
   );
@@ -172,30 +230,16 @@ if (!rendered.lines.join("\\n").includes("Packed consumer")) {
     lockEntry: consumerLock.packages?.[`node_modules/${HTML_PARSER_PACKAGE_NAME}`],
     installedManifest: installedParser
   });
-  const installedHttpClient = await readJson(
-    join(
-      consumerRoot,
-      "node_modules",
-      "@ismail-elkorchi",
-      "http-client",
-      "package.json"
-    )
-  );
-  if (
-    installedHttpClient.name !== HTTP_CLIENT_PACKAGE_NAME
-    || installedVerge.dependencies?.[HTTP_CLIENT_PACKAGE_NAME]
-      !== workspaceManifest.dependencies?.[HTTP_CLIENT_PACKAGE_NAME]
-    || consumerLock.packages?.[`node_modules/${HTTP_CLIENT_PACKAGE_NAME}`]?.version
-      !== installedHttpClient.version
-  ) {
-    throw new Error("packed Verge does not install its declared http-client release");
-  }
+  const sharedDependencies = await Promise.all(SHARED_RUNTIME_DEPENDENCIES.map((name) =>
+    validateInstalledDependency(name, installedVerge, workspaceManifest, consumerLock, consumerRoot)
+  ));
 
   run(process.execPath, ["smoke.mjs"], { cwd: consumerRoot });
+  run("npx", ["--no-install", "tsc", "-p", "tsconfig.json"], { cwd: consumerRoot });
   process.stdout.write(
     `packed consumer verified: ${workspaceManifest.name}@${workspaceManifest.version} (${String(packedFileCount)} files) -> ` +
       `${parserEvidence.name}@${parserEvidence.version} ${parserEvidence.integrity}; `
-      + `${installedHttpClient.name}@${installedHttpClient.version}\n`
+      + `${sharedDependencies.map((entry) => `${entry.name}@${entry.version}`).join("; ")}\n`
   );
 } finally {
   await rm(temporaryRoot, { recursive: true, force: true });
