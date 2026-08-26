@@ -77,7 +77,8 @@ test("layout, display-list, and cell-rasterizer boundaries are explicit", async 
   assert.match(displayList, /LayoutFragment/u);
   assert.match(displayList, /inlineContinuations/u);
   assert.match(displayList, /buildTerminalDisplayList/u);
-  assert.match(displayList, /input\.layout\.fragment\(id\)/u);
+  assert.match(displayList, /input\.layout\.fragment\(childId\)/u);
+  assert.match(displayList, /paintStackingContext/u);
   assert.doesNotMatch(displayList, /visualFragment|visualLineFragments|lineForFragment/u);
   assert.doesNotMatch(displayList, /FormattingTree|CssLength/u);
   assert.match(rasterizer, /TerminalPaintCommand/u);
