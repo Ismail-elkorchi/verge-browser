@@ -346,6 +346,135 @@ test("aggregate stylesheet bytes are a per-request transport budget", async () =
   assert.equal(snapshot.stylesheets.reduce((total, entry) => total + entry.bytes.byteLength, 0), 10);
 });
 
+test("stylesheet dependencies load recursively in cascade order with cycles and budgets bounded", async () => {
+  const requests = [];
+  const sources = new Map([
+    ["https://styles.example/root.css", `@import "a.css" layer(base); @import "b.css" supports(display:flex) screen;
+      @import "unsupported.css" supports(writing-mode:vertical-rl); @import "file:///private.css"; p{color:black}`],
+    ["https://styles.example/a.css", `@import "nested.css"; p{color:red}`],
+    ["https://styles.example/nested.css", `@import "a.css"; p{font-style:italic}`],
+    ["https://styles.example/b.css", `p{font-weight:700}`],
+    ["https://styles.example/unsupported.css", `p{padding-left:99px}`]
+  ]);
+  const session = new BrowserSession({
+    defaultParseMode: "text",
+    loader: async (requestUrl) => ({
+      requestUrl,
+      finalUrl: requestUrl,
+      status: 200,
+      statusText: "OK",
+      contentType: "text/html",
+      html: `<link rel="stylesheet" href="/root.css"><p>text</p>`,
+      responseFields: htmlFields(),
+      networkOutcome: { kind: "ok", finalUrl: requestUrl, status: 200, statusText: "OK", detailCode: "HTTP_200", detailMessage: "200 OK" },
+      fetchedAtIso: "2026-01-01T00:00:00.000Z"
+    }),
+    stylesheetLoader: async (requestUrl, options) => {
+      requests.push({ requestUrl, maxRedirects: options.maxRedirects });
+      const source = sources.get(requestUrl);
+      assert.ok(source);
+      return {
+        requestUrl,
+        finalUrl: requestUrl,
+        contentType: "text/css",
+        bytes: new TextEncoder().encode(source),
+        responseFields: htmlFields()
+      };
+    }
+  });
+  const snapshot = await session.open("https://styles.example/");
+  assert.deepEqual(requests.map((entry) => entry.requestUrl), [
+    "https://styles.example/root.css",
+    "https://styles.example/a.css",
+    "https://styles.example/nested.css",
+    "https://styles.example/b.css",
+    "https://styles.example/unsupported.css"
+  ]);
+  assert.ok(requests.every((entry) => entry.maxRedirects === 5));
+  assert.deepEqual(snapshot.stylesheets.map((entry) => entry.finalUrl), [
+    "https://styles.example/nested.css",
+    "https://styles.example/a.css",
+    "https://styles.example/b.css",
+    "https://styles.example/unsupported.css",
+    "https://styles.example/root.css"
+  ]);
+  assert.ok(snapshot.styleDiagnostics.some((entry) => entry.code === "stylesheet-cycle"));
+  assert.ok(snapshot.styleDiagnostics.some((entry) => entry.code === "stylesheet-import" && /local-file/u.test(entry.detail)));
+  assert.deepEqual(snapshot.stylesheets.map((entry) => entry.importDepth), [2, 1, 1, 1, 0]);
+  assert.deepEqual(snapshot.stylesheets.map((entry) => entry.importLayer), ["base", "base", null, null, null]);
+  assert.deepEqual(snapshot.stylesheets.map((entry) => entry.supportsConditions), [
+    [], [], ["display:flex"], ["writing-mode:vertical-rl"], []
+  ]);
+  assert.deepEqual(snapshot.stylesheets.map((entry) => entry.predeclaredLayers), [
+    ["base"], ["base"], [], [], []
+  ]);
+});
+
+test("each stylesheet dependency-graph budget stops work at a resource boundary", async () => {
+  const sources = new Map([
+    ["https://budget.example/root.css", `@import "a.css";@import "b.css";p{color:black}`],
+    ["https://budget.example/a.css", `@import "deep.css";a{color:red}`],
+    ["https://budget.example/b.css", `b{color:blue}`],
+    ["https://budget.example/deep.css", `i{color:green}`]
+  ]);
+  const open = async (stylesheetPolicy) => {
+    const requests = [];
+    const session = new BrowserSession({
+      defaultParseMode: "text",
+      stylesheetPolicy,
+      loader: async (requestUrl) => ({
+        requestUrl,
+        finalUrl: requestUrl,
+        status: 200,
+        statusText: "OK",
+        contentType: "text/html",
+        html: `<link rel="stylesheet" href="/root.css"><p>text</p>`,
+        responseFields: htmlFields(),
+        networkOutcome: { kind: "ok", finalUrl: requestUrl, status: 200, statusText: "OK", detailCode: "HTTP_200", detailMessage: "200 OK" },
+        fetchedAtIso: "2026-01-01T00:00:00.000Z"
+      }),
+      stylesheetLoader: async (requestUrl, options) => {
+        requests.push({ requestUrl, maxContentBytes: options.maxContentBytes });
+        const source = sources.get(requestUrl);
+        assert.ok(source);
+        return {
+          requestUrl,
+          finalUrl: requestUrl,
+          contentType: "text/css",
+          bytes: new TextEncoder().encode(source),
+          responseFields: htmlFields()
+        };
+      }
+    });
+    return { snapshot: await session.open("https://budget.example/"), requests };
+  };
+
+  const depth = await open({ maxImportDepth: 1 });
+  assert.ok(depth.requests.some((entry) => entry.requestUrl.endsWith("a.css")));
+  assert.ok(!depth.requests.some((entry) => entry.requestUrl.endsWith("deep.css")));
+  assert.ok(depth.snapshot.styleDiagnostics.some((entry) => entry.code === "stylesheet-limit"));
+
+  const sourcesLimit = await open({ maxImportedSources: 1 });
+  assert.deepEqual(sourcesLimit.snapshot.stylesheets.map((entry) => entry.finalUrl), [
+    "https://budget.example/a.css", "https://budget.example/root.css"
+  ]);
+
+  const edges = await open({ maxDependencyEdges: 1 });
+  assert.deepEqual(edges.snapshot.stylesheets.map((entry) => entry.finalUrl), [
+    "https://budget.example/a.css", "https://budget.example/root.css"
+  ]);
+
+  const rules = await open({ maxParsedRules: 1 });
+  assert.deepEqual(rules.snapshot.stylesheets.map((entry) => entry.finalUrl), [
+    "https://budget.example/root.css"
+  ]);
+
+  const bytes = await open({ maxAggregateImportedBytes: 32 });
+  assert.ok(bytes.requests.filter((entry) => !entry.requestUrl.endsWith("root.css"))
+    .every((entry) => (entry.maxContentBytes ?? 0) <= 32));
+  assert.ok(bytes.snapshot.styleDiagnostics.some((entry) => entry.code === "stylesheet-limit"));
+});
+
 test("superseded navigation cannot commit stale session history", async () => {
   let release;
   const slow = new Promise((resolve) => { release = resolve; });

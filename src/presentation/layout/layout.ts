@@ -27,7 +27,7 @@ import {
   type BreakOpportunityKind
 } from "../../unicode/index.js";
 import type { InlineItemStream, ProcessedCssText } from "../text/index.js";
-import type { ComputedStyle, CssLength } from "../style/index.js";
+import type { ComputedStyle, CssLength, CssMathExpression } from "../style/index.js";
 import {
   cssAdd,
   cssCoordinate,
@@ -67,6 +67,7 @@ import type {
   LineBoxId,
   UsedFontMetrics
 } from "./types.js";
+import { resolveFlexLines, type FlexItemInput, type ResolvedFlexItem } from "./flex.js";
 import { selectLogicalLines } from "./line-selection.js";
 
 const DEFAULT_LAYOUT_BUDGETS: LayoutBudgets = Object.freeze({
@@ -181,8 +182,12 @@ function formattingCache<K, V>(
 interface InlineFormattingCursor {
   readonly containingFragment: LayoutFragmentId;
   readonly containingFormattingNode: FormattingNodeId;
-  readonly continuationX: CssCoordinate;
-  readonly continuationMaxX: CssCoordinate;
+  continuationX: CssCoordinate;
+  continuationMaxX: CssCoordinate;
+  readonly lineRange?: (blockStart: CssCoordinate, lineHeight: CssPixelLength) => {
+    readonly start: CssCoordinate;
+    readonly end: CssCoordinate;
+  };
   maxX: CssCoordinate;
   readonly textAlign: ComputedStyle["text"]["textAlign"];
   readonly direction: "ltr" | "rtl";
@@ -366,6 +371,7 @@ class LayoutBuilder {
   readonly #paintStyleCache: Map<FormattingNodeId, LayoutPaintStyle>;
   readonly #documentSemanticAncestorCache: Map<DocumentNodeRef, readonly NonNullable<LayoutFragment["semantic"]>[]>;
   readonly #marginProfileCache = new Map<string, CollapsibleMarginProfile>();
+  readonly #positionedContainingBlocks = new Map<FormattingNodeId, CssRect>();
   #reserved = 0;
   #reservedLineBoxes = 0;
   #textFragments = 0;
@@ -796,6 +802,7 @@ class LayoutBuilder {
   ): CssPixelLength | null {
     if (value.kind === "auto" || value.kind === "none") return null;
     if (value.kind === "zero") return ZERO;
+    if (value.kind === "calculation") return this.#usedMath(value.expression, percentageBasis, style);
     if (!Number.isFinite(value.value)) throw new RangeError("Non-finite computed CSS length.");
     if (value.unit === "px") return cssPx(value.value);
     if (value.unit === "%") return cssMultiply(percentageBasis, value.value / 100);
@@ -804,6 +811,39 @@ class LayoutBuilder {
     if (value.unit === "rem") return cssMultiply(this.#rootFontMetrics.fontSize, value.value);
     if (value.unit === "em") return cssMultiply(this.#fontSize(style), value.value);
     return cssMultiply(this.#metrics(style).chAdvance, value.value);
+  }
+
+  #usedMath(
+    expression: CssMathExpression,
+    percentageBasis: CssPixelLength,
+    style: ComputedStyle | null
+  ): CssPixelLength {
+    if (expression.kind === "value") {
+      if (expression.unit === "number") throw new RangeError("A unitless number escaped CSS math dimensional analysis.");
+      return this.#usedLength({ kind: "length", value: expression.value, unit: expression.unit }, percentageBasis, style) ?? ZERO;
+    }
+    if (expression.kind === "negate") return negate(this.#usedMath(expression.value, percentageBasis, style));
+    if (expression.kind === "sum") return cssAdd(
+      this.#usedMath(expression.left, percentageBasis, style),
+      this.#usedMath(expression.right, percentageBasis, style)
+    );
+    if (expression.kind === "product") {
+      return cssMultiply(this.#usedMath(expression.value, percentageBasis, style), expression.factor);
+    }
+    if (expression.kind === "minimum" || expression.kind === "maximum") {
+      let result: CssPixelLength | null = null;
+      for (const value of expression.values) {
+        const candidate = this.#usedMath(value, percentageBasis, style);
+        result = result === null ? candidate
+          : expression.kind === "minimum" ? cssMin(result, candidate) : cssMax(result, candidate);
+      }
+      if (result === null) throw new RangeError("CSS min/max calculation has no arguments.");
+      return result;
+    }
+    const minimum = this.#usedMath(expression.minimum, percentageBasis, style);
+    const preferred = this.#usedMath(expression.preferred, percentageBasis, style);
+    const maximum = this.#usedMath(expression.maximum, percentageBasis, style);
+    return cssMax(minimum, cssMin(preferred, maximum));
   }
 
   #edges(style: ComputedStyle | null, containingWidth: CssPixelLength): {
@@ -836,7 +876,8 @@ class LayoutBuilder {
   #dimensions(
     node: FormattingNode,
     containingWidth: CssPixelLength,
-    containingHeight: CssPixelLength | null
+    containingHeight: CssPixelLength | null,
+    forcedContentWidth: CssPixelLength | null = null
   ): UsedDimensions {
     const style = this.#boxComputed(node);
     const { margin, padding, border } = this.#edges(style, containingWidth);
@@ -851,16 +892,21 @@ class LayoutBuilder {
       ? nonNegative(sum(candidate, negate(horizontalChrome)))
       : nonNegative(candidate);
     const availableContent = nonNegative(sum(availableBorderBox, negate(horizontalChrome)));
-    let contentWidth = specified === null ? availableContent : toContent(specified);
-    if (maximum !== null) contentWidth = cssMin(contentWidth, toContent(maximum));
-    contentWidth = cssMax(toContent(minimum), contentWidth);
+    let contentWidth = forcedContentWidth ?? (specified === null ? availableContent : toContent(specified));
+    if (forcedContentWidth === null) {
+      if (maximum !== null) contentWidth = cssMin(contentWidth, toContent(maximum));
+      contentWidth = cssMax(toContent(minimum), contentWidth);
+    }
     const borderBoxWidth = sum(contentWidth, horizontalChrome);
     const remaining = sum(containingWidth, negate(fixedLeft), negate(fixedRight), negate(borderBoxWidth));
     const autoLeft = style?.box.margin.left.kind === "auto";
     const autoRight = style?.box.margin.right.kind === "auto";
     let marginLeft = fixedLeft;
     let marginRight = fixedRight;
-    if (remaining >= 0 && autoLeft && autoRight) {
+    if (forcedContentWidth !== null) {
+      marginLeft = autoLeft ? ZERO : fixedLeft;
+      marginRight = autoRight ? ZERO : fixedRight;
+    } else if (remaining >= 0 && autoLeft && autoRight) {
       marginLeft = cssDivide(remaining, 2);
       marginRight = sum(remaining, negate(marginLeft));
     } else if (remaining >= 0 && autoLeft) marginLeft = remaining;
@@ -892,6 +938,11 @@ class LayoutBuilder {
 
   #normalBlockFlow(node: FormattingNode): boolean {
     if (node.outer !== "block") return false;
+    const style = this.#boxComputed(node);
+    if (style !== null && (style.box.float !== "none"
+      || style.box.position === "absolute" || style.box.position === "fixed")) {
+      return false;
+    }
     if (node.kind === "table-wrapper" || node.kind.startsWith("table-") || node.kind === "table"
       || node.kind === "flex-container" || node.kind === "grid-container") return false;
     const display = this.#boxComputed(node)?.display;
@@ -1420,6 +1471,11 @@ class LayoutBuilder {
     cursor.lineBoxes.push(line);
     cursor.entries.length = 0;
     cursor.y = point(cursor.y, height);
+    const nextRange = cursor.lineRange?.(cursor.y, cursor.strutLineHeight);
+    if (nextRange !== undefined) {
+      cursor.continuationX = nextRange.start;
+      cursor.continuationMaxX = nextRange.end;
+    }
     cursor.x = cursor.continuationX;
     cursor.lineStartX = cursor.continuationX;
     cursor.maxX = cursor.continuationMaxX;
@@ -2398,11 +2454,86 @@ class LayoutBuilder {
     return cssMin(maximum, cssMax(this.#metrics(null).chAdvance, total));
   }
 
-  #translateVertically(result: LayoutResult, offset: CssPixelLength, containingClip: CssRect): LayoutResult {
-    if (offset === 0) return result;
+  #intrinsicMinimumWidth(id: FormattingNodeId, maximum: CssPixelLength): CssPixelLength {
+    const pending = [id];
+    let segment: CssPixelLength = ZERO;
+    let widest: CssPixelLength = ZERO;
+    let trailingCollapsibleAdvance: CssPixelLength = ZERO;
+    const finishSegment = (): void => {
+      widest = cssMax(widest, nonNegative(sum(segment, negate(trailingCollapsibleAdvance))));
+      segment = ZERO;
+      trailingCollapsibleAdvance = ZERO;
+    };
+    const appendProcessed = (processed: ProcessedCssText, style: ComputedStyle | null): void => {
+      if (processed.outcome.status !== "complete") {
+        throw new RangeError("Inline item stream contains incomplete logical text.");
+      }
+      const metrics = this.#metrics(style);
+      const breaks = buildLineBreakMap(processed.transformed.value, {
+        lineBreak: style?.text.lineBreak ?? "auto",
+        wordBreak: style?.text.wordBreak === "break-word" ? "normal" : style?.text.wordBreak ?? "normal",
+        overflowWrap: style?.text.overflowWrap ?? "normal",
+        hyphens: style?.text.hyphens ?? "manual",
+        language: null,
+        preserveGraphemeClusters: true
+      }, {}, this.#input.signal);
+      if (breaks.outcome.status !== "complete") throw new RangeError("Intrinsic line-break analysis was incomplete.");
+      const tabInterval = cssMultiply(metrics.chAdvance, style?.text.tabSize ?? 8);
+      for (const unit of processed.units) {
+        this.#input.signal?.throwIfAborted();
+        const opportunity = unit.transformedStartCodeUnit === 0
+          ? null : breaks.atCodeUnit(unit.transformedStartCodeUnit);
+        if (opportunity?.kind === "allowed" || opportunity?.kind === "mandatory") finishSegment();
+        if (unit.kind === "forced-break") {
+          finishSegment();
+          continue;
+        }
+        if (unit.kind === "soft-hyphen") continue;
+        const advance = unit.kind === "tab" ? tabInterval : this.#measure(unit.text, metrics.fontSize);
+        segment = cssAdd(segment, advance);
+        if (unit.collapsibleSpace) trailingCollapsibleAdvance = cssAdd(trailingCollapsibleAdvance, advance);
+        else trailingCollapsibleAdvance = ZERO;
+      }
+    };
+    while (pending.length > 0 && widest <= maximum) {
+      const current = pending.pop();
+      if (current === undefined) continue;
+      const node = this.#formatting.node(current);
+      const style = this.#computed(node);
+      if (node.kind === "text-sequence" || node.kind === "generated-text" || node.kind === "marker"
+        || node.kind === "form-control") {
+        const processed = this.#input.inlineItemStreams.textForFormattingNode(node.id);
+        if (processed === null) throw new RangeError("Inline item streams do not contain logical text for intrinsic sizing.");
+        appendProcessed(processed, style);
+      } else if (node.kind === "replaced-element" || node.kind === "image-fallback") {
+        finishSegment();
+        const intrinsic = node.intrinsicWidth === null ? null : cssPx(node.intrinsicWidth);
+        const processed = intrinsic === null ? this.#input.inlineItemStreams.textForFormattingNode(node.id) : null;
+        if (intrinsic === null && processed === null) {
+          throw new RangeError("Inline item streams do not contain replaced fallback text for intrinsic sizing.");
+        }
+        if (intrinsic === null) appendProcessed(processed as ProcessedCssText, style);
+        else widest = cssMax(widest, intrinsic);
+        finishSegment();
+      } else for (let index = node.children.length - 1; index >= 0; index -= 1) {
+        const child = node.children[index];
+        if (child !== undefined) pending.push(child);
+      }
+    }
+    finishSegment();
+    return cssMin(maximum, cssMax(this.#metrics(null).chAdvance, widest));
+  }
+
+  #translate(
+    result: LayoutResult,
+    inlineOffset: CssPixelLength,
+    blockOffset: CssPixelLength,
+    containingClip: CssRect
+  ): LayoutResult {
+    if (inlineOffset === 0 && blockOffset === 0) return result;
     const move = (rect: CssRect): CssRect => cssRect(
-      rect.x,
-      point(rect.y, offset),
+      point(rect.x, inlineOffset),
+      point(rect.y, blockOffset),
       rect.width,
       rect.height
     );
@@ -2417,7 +2548,7 @@ class LayoutBuilder {
         const moved = Object.freeze({
           ...line,
           rect: move(line.rect),
-          baseline: cssAdd(line.baseline, offset)
+          baseline: cssAdd(line.baseline, blockOffset)
         });
         const position = this.#lineBoxPositions.get(line.id);
         if (position !== undefined) this.#lineBoxes[position] = moved;
@@ -2431,13 +2562,205 @@ class LayoutBuilder {
         marginRect: move(fragment.marginRect),
         overflowRect: move(fragment.overflowRect),
         clipRect: cssIntersection(move(fragment.clipRect), containingClip),
-        lineBoxes: Object.freeze(lineBoxes)
+        lineBoxes: Object.freeze(lineBoxes),
+        ...(fragment.kind === "box" && fragment.inlineContinuations !== undefined
+          ? {
+              inlineContinuations: Object.freeze(fragment.inlineContinuations.map((continuation) => Object.freeze({
+                contentRect: move(continuation.contentRect),
+                paddingRect: move(continuation.paddingRect),
+                borderRect: move(continuation.borderRect),
+                marginRect: move(continuation.marginRect)
+              })))
+            }
+          : {})
       });
     }
     const moved = this.#fragments.get(result.fragment);
     return moved === undefined
       ? result
       : { fragment: result.fragment, borderRect: moved.borderRect, marginRect: moved.marginRect };
+  }
+
+  #translateVertically(result: LayoutResult, offset: CssPixelLength, containingClip: CssRect): LayoutResult {
+    return this.#translate(result, ZERO, offset, containingClip);
+  }
+
+  #usedInset(
+    style: ComputedStyle | null,
+    side: keyof ComputedStyle["box"]["inset"],
+    basis: CssPixelLength
+  ): CssPixelLength | null {
+    const value = style?.box.inset[side];
+    return value === undefined || value.kind === "auto" || value.kind === "none"
+      ? null
+      : this.#usedLength(value, basis, style);
+  }
+
+  #positionedContainingBlock(node: FormattingNode, fixed: boolean): CssRect {
+    if (fixed) return this.#input.context.scrollport;
+    let parent = this.#formatting.parent(node.id);
+    while (parent !== null) {
+      const containingBlock = this.#positionedContainingBlocks.get(parent.id);
+      if (containingBlock !== undefined) return containingBlock;
+      parent = this.#formatting.parent(parent.id);
+    }
+    return this.#input.context.initialContainingBlock;
+  }
+
+  #layoutOutOfFlow(
+    node: FormattingNode,
+    staticX: CssCoordinate,
+    staticY: CssCoordinate,
+    inheritedClip: CssRect,
+    depth: number
+  ): LayoutResult | null {
+    const style = this.#boxComputed(node) ?? this.#computed(node);
+    const containingBlock = this.#positionedContainingBlock(node, style?.box.position === "fixed");
+    const left = this.#usedInset(style, "left", containingBlock.width);
+    const right = this.#usedInset(style, "right", containingBlock.width);
+    const top = this.#usedInset(style, "top", containingBlock.height);
+    const bottom = this.#usedInset(style, "bottom", containingBlock.height);
+    const edges = this.#edges(style, containingBlock.width);
+    const horizontalChrome = sum(edges.border.left, edges.padding.left, edges.padding.right, edges.border.right);
+    const verticalChrome = sum(edges.border.top, edges.padding.top, edges.padding.bottom, edges.border.bottom);
+    const autoWidth = style?.box.width.kind === "auto" || style?.box.width.kind === "none" || style === null;
+    const autoHeight = style?.box.height.kind === "auto" || style?.box.height.kind === "none" || style === null;
+    let forcedWidth = autoWidth
+      ? left !== null && right !== null
+        ? nonNegative(sum(
+            containingBlock.width,
+            negate(left),
+            negate(right),
+            negate(edges.margin.left),
+            negate(edges.margin.right),
+            negate(horizontalChrome)
+          ))
+        : (() => {
+            const available = nonNegative(sum(
+              containingBlock.width,
+              negate(left ?? (right === null
+                ? nonNegative(cssCoordinateDifference(staticX, containingBlock.x)) : ZERO)),
+              negate(right ?? ZERO),
+              negate(edges.margin.left),
+              negate(edges.margin.right),
+              negate(horizontalChrome)
+            ));
+            const preferredMinimum = this.#intrinsicMinimumWidth(node.id, containingBlock.width);
+            const preferred = this.#intrinsicWidth(node.id, containingBlock.width);
+            return cssMax(preferredMinimum, cssMin(available, preferred));
+          })()
+      : null;
+    if (forcedWidth !== null) {
+      const toContent = (value: CssPixelLength): CssPixelLength => style?.box.boxSizing === "border-box"
+        ? nonNegative(sum(value, negate(horizontalChrome))) : nonNegative(value);
+      const minimum = style === null ? ZERO : toContent(
+        this.#usedLength(style.box.minWidth, containingBlock.width, style) ?? ZERO
+      );
+      const maximumValue = style === null
+        ? null : this.#usedLength(style.box.maxWidth, containingBlock.width, style);
+      if (maximumValue !== null) forcedWidth = cssMin(forcedWidth, toContent(maximumValue));
+      forcedWidth = cssMax(forcedWidth, minimum);
+    }
+    const forcedHeight = autoHeight && top !== null && bottom !== null
+      ? nonNegative(sum(
+          containingBlock.height,
+          negate(top),
+          negate(bottom),
+          negate(edges.margin.top),
+          negate(edges.margin.bottom),
+          negate(verticalChrome)
+        ))
+      : null;
+    const dimensions = this.#dimensions(node, containingBlock.width, containingBlock.height, forcedWidth);
+    const borderBoxWidth = sum(
+      dimensions.contentWidth,
+      dimensions.padding.left,
+      dimensions.padding.right,
+      dimensions.border.left,
+      dimensions.border.right
+    );
+    const useLeftInset = left !== null
+      && !(right !== null && !autoWidth && style.text.direction === "rtl");
+    const borderX = useLeftInset
+      ? point(containingBlock.x, sum(left, edges.margin.left))
+      : right !== null
+        ? point(cssCoordinateAdd(containingBlock.x, containingBlock.width), sum(
+            negate(right), negate(edges.margin.right), negate(borderBoxWidth)
+          ))
+        : point(staticX, edges.margin.left);
+    const borderY = top !== null
+      ? point(containingBlock.y, sum(top, edges.margin.top))
+      : bottom !== null && forcedHeight !== null
+        ? point(cssCoordinateAdd(containingBlock.y, containingBlock.height), sum(
+            negate(bottom),
+            negate(edges.margin.bottom),
+            negate(forcedHeight),
+            negate(verticalChrome)
+          ))
+        : point(staticY, edges.margin.top);
+    const result = this.#tryLayoutNode(
+      node.id,
+      point(borderX, negate(dimensions.marginLeft)),
+      borderY,
+      containingBlock.width,
+      style?.box.position === "fixed" ? this.#input.context.scrollport : inheritedClip,
+      depth,
+      undefined,
+      containingBlock.height,
+      forcedWidth,
+      forcedHeight
+    );
+    if (result === null || top !== null || bottom === null || forcedHeight !== null) return result;
+    const targetBorderY = point(
+      cssCoordinateAdd(containingBlock.y, containingBlock.height),
+      sum(negate(bottom), negate(edges.margin.bottom), negate(result.borderRect.height))
+    );
+    return this.#translate(
+      result,
+      ZERO,
+      cssCoordinateDifference(targetBorderY, result.borderRect.y),
+      style?.box.position === "fixed" ? this.#input.context.scrollport : inheritedClip
+    );
+  }
+
+  #applyInFlowPosition(
+    node: FormattingNode,
+    result: LayoutResult,
+    containingClip: CssRect
+  ): LayoutResult {
+    const style = this.#boxComputed(node) ?? this.#computed(node);
+    if (style === null || (style.box.position !== "relative" && style.box.position !== "sticky")) return result;
+    const containingBlock = style.box.position === "sticky"
+      ? this.#input.context.scrollport
+      : this.#positionedContainingBlock(node, false);
+    const left = this.#usedInset(style, "left", containingBlock.width);
+    const right = this.#usedInset(style, "right", containingBlock.width);
+    const top = this.#usedInset(style, "top", containingBlock.height);
+    const bottom = this.#usedInset(style, "bottom", containingBlock.height);
+    let inlineOffset = left !== null && right !== null
+      ? style.text.direction === "rtl" ? negate(right) : left
+      : left ?? (right === null ? ZERO : negate(right));
+    let blockOffset = top ?? (bottom === null ? ZERO : negate(bottom));
+    if (style.box.position === "sticky") {
+      const movedX = point(result.borderRect.x, inlineOffset);
+      const movedY = point(result.borderRect.y, blockOffset);
+      if (left !== null && movedX < point(containingBlock.x, left)) {
+        inlineOffset = cssCoordinateDifference(point(containingBlock.x, left), result.borderRect.x);
+      } else if (right !== null) {
+        const maximum = point(cssCoordinateAdd(containingBlock.x, containingBlock.width), sum(negate(right), negate(result.borderRect.width)));
+        if (movedX > maximum) inlineOffset = cssCoordinateDifference(maximum, result.borderRect.x);
+      }
+      if (top !== null && movedY < point(containingBlock.y, top)) {
+        blockOffset = cssCoordinateDifference(point(containingBlock.y, top), result.borderRect.y);
+      } else if (bottom !== null) {
+        const maximum = point(cssCoordinateAdd(containingBlock.y, containingBlock.height), sum(negate(bottom), negate(result.borderRect.height)));
+        if (movedY > maximum) blockOffset = cssCoordinateDifference(maximum, result.borderRect.y);
+      }
+    }
+    this.#translate(result, inlineOffset, blockOffset, containingClip);
+    // Relative and sticky positioning move the painted box without changing
+    // the position it occupies in normal flow.
+    return result;
   }
 
   #flow(
@@ -2447,16 +2770,19 @@ class LayoutBuilder {
     containingWidth: CssPixelLength,
     inheritedClip: CssRect,
     depth: number,
-    containingHeight: CssPixelLength | null
+    containingHeight: CssPixelLength | null,
+    forcedContentWidth: CssPixelLength | null = null,
+    forcedContentHeight: CssPixelLength | null = null
   ): LayoutResult {
     const containerId = this.#newId(node.id);
-    const dimensions = this.#dimensions(node, containingWidth, containingHeight);
+    const dimensions = this.#dimensions(node, containingWidth, containingHeight, forcedContentWidth);
     const borderX = point(containingX, dimensions.marginLeft);
     const contentX = point(borderX, sum(dimensions.border.left, dimensions.padding.left));
     const contentY = point(borderY, sum(dimensions.border.top, dimensions.padding.top));
-    const definiteContentHeight = dimensions.specifiedHeight === null ? null : constrainedSize(
-      dimensions.specifiedHeight,
-      dimensions.specifiedHeight,
+    const specifiedContentHeight = forcedContentHeight ?? dimensions.specifiedHeight;
+    const definiteContentHeight = specifiedContentHeight === null ? null : constrainedSize(
+      specifiedContentHeight,
+      specifiedContentHeight,
       dimensions.minHeight,
       dimensions.maxHeight
     );
@@ -2475,21 +2801,52 @@ class LayoutBuilder {
       provisionalHeight
     );
     const childClip = this.#clip(node, provisionalPadding, provisionalBorder, inheritedClip);
+    const nodeStyle = this.#boxComputed(node) ?? this.#computed(node);
+    if (nodeStyle?.box.position !== "static") this.#positionedContainingBlocks.set(node.id, provisionalPadding);
     const children: LayoutFragmentId[] = [];
+    const floats: { readonly rect: CssRect; readonly side: "left" | "right" }[] = [];
+    let inFlowChildren = 0;
     let currentBottom = contentY;
     let pendingBottomMargin: CssPixelLength = ZERO;
     let inlineRun: FormattingNodeId[] = [];
     let firstInline = true;
     let layoutStopped = false;
     const ownedLineBoxes: LineBox[] = [];
+    const floatRange = (lineY: CssCoordinate, lineHeight: CssPixelLength): {
+      readonly start: CssCoordinate;
+      readonly end: CssCoordinate;
+    } => {
+      let start = contentX;
+      let end = point(contentX, dimensions.contentWidth);
+      const lineBottom = point(lineY, lineHeight);
+      for (const area of floats) {
+        const floatBottom = cssCoordinateAdd(area.rect.y, area.rect.height);
+        if (floatBottom <= lineY || area.rect.y >= lineBottom) continue;
+        if (area.side === "left") start = cssCoordinateFromFixed(Math.max(start, cssCoordinateAdd(area.rect.x, area.rect.width)));
+        else end = cssCoordinateFromFixed(Math.min(end, area.rect.x));
+      }
+      if (end < start) end = start;
+      return { start, end };
+    };
+    const clearance = (value: ComputedStyle["box"]["clear"]): void => {
+      if (value === "none") return;
+      let cleared = currentBottom;
+      for (const area of floats) {
+        if (value !== "both" && value !== area.side) continue;
+        cleared = cssCoordinateFromFixed(Math.max(cleared, cssCoordinateAdd(area.rect.y, area.rect.height)));
+      }
+      currentBottom = cleared;
+    };
     const flushInline = (): boolean => {
       if (inlineRun.length === 0) return !layoutStopped;
       const style = this.#boxComputed(node) ?? this.#computed(node);
+      const metrics = this.#metrics(style);
+      const range = floatRange(currentBottom, this.#lineHeight(style, metrics));
       const indent = firstInline && style !== null
         ? this.#usedLength(style.text.textIndent, dimensions.contentWidth, style) ?? ZERO
         : ZERO;
-      const continuationMaxX = point(contentX, dimensions.contentWidth);
-      const startX = style?.text.direction === "rtl" ? contentX : point(contentX, indent);
+      const continuationMaxX = range.end;
+      const startX = style?.text.direction === "rtl" ? range.start : point(range.start, indent);
       const firstLineMaxX = style?.text.direction === "rtl"
         ? point(continuationMaxX, negate(indent))
         : continuationMaxX;
@@ -2505,13 +2862,14 @@ class LayoutBuilder {
       const cursor: InlineFormattingCursor = {
         containingFragment: containerId,
         containingFormattingNode: node.id,
-        continuationX: contentX,
+        continuationX: range.start,
         continuationMaxX,
+        lineRange: floatRange,
         maxX: firstLineMaxX,
         textAlign: style?.text.textAlign ?? "start",
         direction: style?.text.direction ?? "ltr",
-        strutMetrics: this.#metrics(style),
-        strutLineHeight: this.#lineHeight(style, this.#metrics(style)),
+        strutMetrics: metrics,
+        strutLineHeight: this.#lineHeight(style, metrics),
         clipRect: childClip,
         textAnalysis,
         selectedLineBreaks: new Set<number>(),
@@ -2547,78 +2905,125 @@ class LayoutBuilder {
       layoutStopped ||= cursor.lineSelectionStopped;
       return !layoutStopped;
     };
-    const columnFlex = node.kind === "flex-container"
-      && (this.#boxComputed(node)?.box.flexDirection === "column"
-        || this.#boxComputed(node)?.box.flexDirection === "column-reverse");
-    if (columnFlex) {
-      const style = this.#boxComputed(node);
-      const ordered = style?.box.flexDirection === "column-reverse" ? [...node.children].reverse() : node.children;
-      const gap = style === null ? ZERO : this.#usedLength(style.box.rowGap, dimensions.contentWidth, style) ?? ZERO;
-      const laidOut: LayoutResult[] = [];
-      for (const childId of ordered) {
-        const childWidth = style?.box.alignItems === "stretch"
-          ? dimensions.contentWidth : this.#intrinsicWidth(childId, dimensions.contentWidth);
-        const childDimensions = this.#dimensions(
-          this.#formatting.node(childId),
-          childWidth,
-          definiteContentHeight
-        );
-        const remainingInline = sum(dimensions.contentWidth, negate(childWidth));
-        const dx = style?.box.alignItems === "center" ? cssDivide(remainingInline, 2)
-          : style?.box.alignItems === "end" ? nonNegative(remainingInline) : ZERO;
-        const result = this.#tryLayoutNode(
-          childId, point(contentX, dx), point(currentBottom, childDimensions.margin.top), childWidth,
-          childClip, depth + 1, undefined, definiteContentHeight
-        );
-        if (result === null) break;
-        children.push(result.fragment);
-        laidOut.push(result);
-        currentBottom = cssCoordinateAdd(result.marginRect.y, result.marginRect.height);
-        if (laidOut.length < ordered.length) currentBottom = point(currentBottom, gap);
-      }
-      const last = laidOut.at(-1);
-      const occupied = last === undefined ? ZERO : nonNegative(cssCoordinateDifference(
-        cssCoordinateAdd(last.marginRect.y, last.marginRect.height),
-        contentY
-      ));
-      const spare = definiteContentHeight === null ? ZERO
-        : nonNegative(sum(definiteContentHeight, negate(occupied)));
-      const leading = style?.box.justifyContent === "center" ? cssDivide(spare, 2)
-        : style?.box.justifyContent === "end" ? spare : ZERO;
-      const extraBetween = style?.box.justifyContent === "space-between" && laidOut.length > 1
-        ? cssDivide(spare, laidOut.length - 1) : ZERO;
-      currentBottom = contentY;
-      for (const [index, result] of laidOut.entries()) {
-        const moved = this.#translateVertically(
-          result,
-          cssAdd(leading, cssMultiply(extraBetween, index)),
-          childClip
-        );
-        currentBottom = cssCoordinateAdd(moved.marginRect.y, moved.marginRect.height);
-      }
-    } else for (const childId of node.children) {
+    for (const childId of node.children) {
       const child = this.#formatting.node(childId);
       if (isInlineFormattingNode(child)) { inlineRun.push(childId); continue; }
       if (!flushInline()) break;
+      const childStyle = this.#boxComputed(child) ?? this.#computed(child);
+      if (childStyle?.box.position === "absolute" || childStyle?.box.position === "fixed") {
+        const positioned = this.#layoutOutOfFlow(child, contentX, currentBottom, childClip, depth + 1);
+        if (positioned === null) break;
+        children.push(positioned.fragment);
+        continue;
+      }
+      if (childStyle !== null && childStyle.box.float !== "none") {
+        clearance(childStyle.box.clear);
+        const floatEdges = this.#edges(childStyle, dimensions.contentWidth);
+        const horizontalChrome = sum(
+          floatEdges.padding.left,
+          floatEdges.padding.right,
+          floatEdges.border.left,
+          floatEdges.border.right
+        );
+        const toContent = (value: CssPixelLength): CssNonNegativeLength => nonNegative(
+          childStyle.box.boxSizing === "border-box" ? sum(value, negate(horizontalChrome)) : value
+        );
+        const specified = this.#usedLength(childStyle.box.width, dimensions.contentWidth, childStyle);
+        const preferred = this.#intrinsicWidth(childId, cssLengthFromFixed(Number.MAX_SAFE_INTEGER));
+        const preferredMinimum = this.#intrinsicMinimumWidth(
+          childId,
+          cssLengthFromFixed(Number.MAX_SAFE_INTEGER)
+        );
+        const available = nonNegative(sum(
+          dimensions.contentWidth,
+          negate(floatEdges.margin.left),
+          negate(floatEdges.margin.right),
+          negate(horizontalChrome)
+        ));
+        let floatContentWidth = specified === null
+          ? cssMin(preferred, cssMax(preferredMinimum, available))
+          : toContent(specified);
+        const minimum = this.#usedLength(childStyle.box.minWidth, dimensions.contentWidth, childStyle) ?? ZERO;
+        const maximum = this.#usedLength(childStyle.box.maxWidth, dimensions.contentWidth, childStyle);
+        floatContentWidth = cssMax(floatContentWidth, toContent(minimum));
+        if (maximum !== null) floatContentWidth = cssMin(floatContentWidth, toContent(maximum));
+        const childDimensions = this.#dimensions(
+          child,
+          dimensions.contentWidth,
+          definiteContentHeight,
+          floatContentWidth
+        );
+        let floatY = currentBottom;
+        let range = floatRange(floatY, this.#lineHeight(childStyle, this.#metrics(childStyle)));
+        for (const area of floats) {
+          const available = nonNegative(cssCoordinateDifference(range.end, range.start));
+          const required = sum(
+            childDimensions.marginLeft,
+            childDimensions.contentWidth,
+            childDimensions.padding.left,
+            childDimensions.padding.right,
+            childDimensions.border.left,
+            childDimensions.border.right,
+            childDimensions.marginRight
+          );
+          if (required <= available) break;
+          floatY = cssCoordinateFromFixed(Math.max(floatY, cssCoordinateAdd(area.rect.y, area.rect.height)));
+          range = floatRange(floatY, this.#lineHeight(childStyle, this.#metrics(childStyle)));
+        }
+        const initialX = childStyle.box.float === "left"
+          ? range.start
+          : point(range.end, negate(sum(
+              childDimensions.marginLeft,
+              childDimensions.contentWidth,
+              childDimensions.padding.left,
+              childDimensions.padding.right,
+              childDimensions.border.left,
+              childDimensions.border.right,
+              childDimensions.marginRight
+            )));
+        const result = this.#tryLayoutNode(
+          childId,
+          initialX,
+          point(floatY, childDimensions.margin.top),
+          dimensions.contentWidth,
+          childClip,
+          depth + 1,
+          undefined,
+          definiteContentHeight,
+          floatContentWidth
+        );
+        if (result === null) break;
+        children.push(result.fragment);
+        floats.push({ rect: result.marginRect, side: childStyle.box.float });
+        pendingBottomMargin = ZERO;
+        continue;
+      }
+      clearance(childStyle?.box.clear ?? "none");
       const childMargins = this.#collapsibleMargins(
         childId,
         dimensions.contentWidth,
         definiteContentHeight
       );
       const topMargin = childMargins.before;
-      const collapseWithParent = children.length === 0
+      const collapseWithParent = inFlowChildren === 0
         && dimensions.border.top === 0 && dimensions.padding.top === 0
         && this.#normalBlockFlow(node)
         && (this.#boxComputed(node)?.box.overflowY ?? "visible") === "visible";
       const collapsed = collapseWithParent ? ZERO : collapseMargins(pendingBottomMargin, topMargin);
       const previousBorderBottom = currentBottom;
       const childY = point(currentBottom, collapsed);
+      const range = floatRange(childY, this.#lineHeight(childStyle, this.#metrics(childStyle)));
+      const availableWidth = nonNegative(cssCoordinateDifference(range.end, range.start));
       const result = this.#tryLayoutNode(
-        childId, contentX, childY, dimensions.contentWidth, childClip, depth + 1,
-        undefined, definiteContentHeight
+        childId, range.start, childY, availableWidth, childClip, depth + 1,
+        undefined,
+        definiteContentHeight,
+        node.kind === "flex-item" ? dimensions.contentWidth : null,
+        node.kind === "flex-item" ? forcedContentHeight : null
       );
       if (result === null) break;
       children.push(result.fragment);
+      inFlowChildren += 1;
       const collapsesThrough = childMargins.through && result.borderRect.height === 0;
       if (collapsesThrough) {
         currentBottom = previousBorderBottom;
@@ -2634,12 +3039,25 @@ class LayoutBuilder {
       && this.#normalBlockFlow(node)
       && (this.#boxComputed(node)?.box.overflowY ?? "visible") === "visible";
     if (!collapseLast) currentBottom = point(currentBottom, pendingBottomMargin);
-    const contentHeight = constrainedSize(
-      nonNegative(cssCoordinateDifference(currentBottom, contentY)),
-      dimensions.specifiedHeight,
-      dimensions.minHeight,
-      dimensions.maxHeight
-    );
+    const containsFloats = !this.#normalBlockFlow(node)
+      || (nodeStyle?.box.overflowX ?? "visible") !== "visible"
+      || (nodeStyle?.box.overflowY ?? "visible") !== "visible";
+    if (containsFloats) {
+      for (const area of floats) {
+        currentBottom = cssCoordinateFromFixed(Math.max(
+          currentBottom,
+          cssCoordinateAdd(area.rect.y, area.rect.height)
+        ));
+      }
+    }
+    const contentHeight = forcedContentHeight === null
+      ? constrainedSize(
+          nonNegative(cssCoordinateDifference(currentBottom, contentY)),
+          dimensions.specifiedHeight,
+          dimensions.minHeight,
+          dimensions.maxHeight
+        )
+      : nonNegative(forcedContentHeight);
     const contentRect = cssRect(contentX, contentY, dimensions.contentWidth, contentHeight);
     const paddingRect = cssRect(
       point(contentX, negate(dimensions.padding.left)),
@@ -2659,6 +3077,7 @@ class LayoutBuilder {
       sum(borderRect.width, dimensions.marginLeft, dimensions.marginRight),
       sum(borderRect.height, dimensions.margin.top, dimensions.margin.bottom)
     );
+    if (nodeStyle?.box.position !== "static") this.#positionedContainingBlocks.set(node.id, paddingRect);
     return this.#container(
       node,
       contentRect,
@@ -2721,29 +3140,26 @@ class LayoutBuilder {
     return maximum;
   }
 
-  #layoutFlexOrGrid(
+  #layoutGrid(
     node: FormattingNode,
     x: CssCoordinate,
     y: CssCoordinate,
     width: CssPixelLength,
     clip: CssRect,
     depth: number,
-    grid: boolean
+    forcedContentWidth: CssPixelLength | null = null
   ): LayoutResult {
     const style = this.#boxComputed(node);
-    if (!grid && (style?.box.flexDirection === "column" || style?.box.flexDirection === "column-reverse")) {
-      return this.#flow(node, x, y, width, clip, depth, null);
-    }
-    const dimensions = this.#dimensions(node, width, null);
+    const dimensions = this.#dimensions(node, width, null, forcedContentWidth);
     const borderX = point(x, dimensions.marginLeft);
     const contentX = point(borderX, sum(dimensions.border.left, dimensions.padding.left));
     const contentY = point(y, sum(dimensions.border.top, dimensions.padding.top));
     const contentWidth = dimensions.contentWidth;
     const tracks = style?.box.gridTemplateColumns ?? [];
-    const count = grid ? Math.max(1, tracks.length) : Math.max(1, node.children.length);
+    const count = Math.max(1, tracks.length);
     const gap = style === null ? ZERO : this.#usedLength(style.box.columnGap, contentWidth, style) ?? ZERO;
     const available = nonNegative(sum(contentWidth, negate(cssMultiply(gap, count - 1))));
-    const widths = grid && tracks.length > 0 ? (() => {
+    const widths = tracks.length > 0 ? (() => {
       const fixed = tracks.map((track) => track.kind === "length"
         ? this.#usedLength(track.value, contentWidth, style) ?? ZERO
         : track.kind === "minmax" && track.minimum.kind === "length"
@@ -2769,8 +3185,7 @@ class LayoutBuilder {
     const children: LayoutFragmentId[] = [];
     let currentY = contentY;
     const rowGap = style === null ? ZERO : this.#usedLength(style.box.rowGap, contentWidth, style) ?? ZERO;
-    if (grid) {
-      for (let start = 0; start < node.children.length; start += count) {
+    for (let start = 0; start < node.children.length; start += count) {
         let rowBottom = currentY;
         const entries = node.children.slice(start, start + count).map((child, index) => {
           const requested = this.#computed(this.#formatting.node(child))?.box.gridColumn;
@@ -2809,65 +3224,6 @@ class LayoutBuilder {
           ));
         }
         currentY = point(rowBottom, start + count < node.children.length ? rowGap : ZERO);
-      }
-    } else {
-      const ordered = style?.box.flexDirection === "row-reverse" ? [...node.children].reverse() : node.children;
-      const lines: { readonly child: FormattingNodeId; readonly basis: CssPixelLength }[][] = [];
-      let line: { readonly child: FormattingNodeId; readonly basis: CssPixelLength }[] = [];
-      let occupied: CssPixelLength = ZERO;
-      for (const child of ordered) {
-        const basis = this.#intrinsicWidth(child, contentWidth);
-        if (style?.box.flexWrap !== "nowrap" && line.length > 0 && sum(occupied, gap, basis) > contentWidth) {
-          lines.push(line); line = []; occupied = ZERO;
-        }
-        line.push({ child, basis });
-        occupied = sum(occupied, line.length === 1 ? ZERO : gap, basis);
-      }
-      if (line.length > 0) lines.push(line);
-      if (style?.box.flexWrap === "wrap-reverse") lines.reverse();
-      for (const [lineIndex, entries] of lines.entries()) {
-        const required = entries.reduce((total, entry) => cssAdd(total, entry.basis), cssMultiply(gap, Math.max(0, entries.length - 1)));
-        const spare = nonNegative(sum(contentWidth, negate(required)));
-        let currentX = point(contentX, style?.box.justifyContent === "center" ? cssDivide(spare, 2)
-          : style?.box.justifyContent === "end" ? spare : ZERO);
-        const between = style?.box.justifyContent === "space-between" && entries.length > 1
-          ? cssAdd(gap, cssDivide(spare, entries.length - 1)) : gap;
-        let bottom = currentY;
-        const laidOut: { readonly result: LayoutResult; readonly outerHeight: CssPixelLength }[] = [];
-        for (const entry of entries) {
-          const childDimensions = this.#dimensions(this.#formatting.node(entry.child), entry.basis, null);
-          const result = this.#tryLayoutNode(
-            entry.child,
-            currentX,
-            point(currentY, childDimensions.margin.top),
-            entry.basis,
-            clip,
-            depth + 1
-          );
-          if (result === null) break;
-          children.push(result.fragment);
-          laidOut.push({ result, outerHeight: result.marginRect.height });
-          currentX = point(currentX, cssAdd(entry.basis, between));
-        }
-        const lineHeight = laidOut.reduce<CssPixelLength>(
-          (maximum, entry) => cssMax(maximum, entry.outerHeight),
-          ZERO
-        );
-        for (const entry of laidOut) {
-          const remainingBlock = sum(lineHeight, negate(entry.outerHeight));
-          const dy = style?.box.alignItems === "center"
-            ? cssDivide(remainingBlock, 2)
-            : style?.box.alignItems === "end"
-              ? nonNegative(remainingBlock)
-              : ZERO;
-          const moved = this.#translateVertically(entry.result, dy, clip);
-          bottom = cssCoordinateFromFixed(Math.max(
-            bottom,
-            cssCoordinateAdd(moved.marginRect.y, moved.marginRect.height)
-          ));
-        }
-        currentY = point(bottom, lineIndex < lines.length - 1 ? rowGap : ZERO);
-      }
     }
     const contentHeight = constrainedSize(
       nonNegative(cssCoordinateDifference(currentY, contentY)),
@@ -2891,6 +3247,399 @@ class LayoutBuilder {
     );
   }
 
+  #flexItemInput(
+    childId: FormattingNodeId,
+    sourceIndex: number,
+    rowAxis: boolean,
+    containingWidth: CssPixelLength,
+    definiteMainSize: CssPixelLength | null
+  ): FlexItemInput<FormattingNodeId> {
+    const child = this.#formatting.node(childId);
+    const style = this.#boxComputed(child) ?? this.#computed(child);
+    const edges = this.#edges(style, containingWidth);
+    const horizontalChrome = sum(edges.padding.left, edges.padding.right, edges.border.left, edges.border.right);
+    const verticalChrome = sum(edges.padding.top, edges.padding.bottom, edges.border.top, edges.border.bottom);
+    const toContent = (value: CssPixelLength): CssNonNegativeLength => nonNegative(
+      style?.box.boxSizing === "border-box"
+        ? sum(value, negate(rowAxis ? horizontalChrome : verticalChrome))
+        : value
+    );
+    const intrinsic = rowAxis
+      ? this.#intrinsicWidth(childId, cssLengthFromFixed(Number.MAX_SAFE_INTEGER))
+      : this.#lineHeight(style, this.#metrics(style));
+    const basisValue = style?.box.flexBasis;
+    const basisFromProperty = basisValue === undefined || basisValue.kind === "auto" || basisValue.kind === "none"
+      || (basisValue.kind === "length" && basisValue.unit === "%" && definiteMainSize === null)
+      ? null
+      : basisValue.kind === "content"
+        ? intrinsic
+        : this.#usedLength(basisValue, definiteMainSize ?? containingWidth, style);
+    const preferred = rowAxis ? style?.box.width : style?.box.height;
+    const preferredValue = preferred === undefined || preferred.kind === "auto" || preferred.kind === "none"
+      || (preferred.kind === "length" && preferred.unit === "%" && definiteMainSize === null && !rowAxis)
+      ? null
+      : this.#usedLength(preferred, rowAxis ? containingWidth : definiteMainSize ?? ZERO, style);
+    const base = toContent(basisFromProperty ?? preferredValue ?? intrinsic);
+    const minimumProperty = rowAxis ? style?.box.minWidth : style?.box.minHeight;
+    const automaticMinimum = rowAxis
+      ? cssMin(
+          this.#intrinsicMinimumWidth(childId, cssLengthFromFixed(Number.MAX_SAFE_INTEGER)),
+          preferredValue === null ? intrinsic : toContent(preferredValue)
+        )
+      : intrinsic;
+    const minimum = minimumProperty === undefined || minimumProperty.kind === "auto"
+      ? nonNegative(automaticMinimum)
+      : toContent(this.#usedLength(
+          minimumProperty,
+          rowAxis ? containingWidth : definiteMainSize ?? ZERO,
+          style
+        ) ?? ZERO);
+    const maximumProperty = rowAxis ? style?.box.maxWidth : style?.box.maxHeight;
+    const maximumValue = maximumProperty === undefined || maximumProperty.kind === "none"
+      || maximumProperty.kind === "auto"
+      || (!rowAxis && maximumProperty.kind === "length" && maximumProperty.unit === "%" && definiteMainSize === null)
+      ? null
+      : this.#usedLength(
+          maximumProperty,
+          rowAxis ? containingWidth : definiteMainSize ?? ZERO,
+          style
+        );
+    const maximum = maximumValue === null ? null : toContent(maximumValue);
+    const hypothetical = constrainedSize(base, null, minimum, maximum);
+    const mainStart = rowAxis ? edges.margin.left : edges.margin.top;
+    const mainEnd = rowAxis ? edges.margin.right : edges.margin.bottom;
+    const marginStartProperty = rowAxis ? style?.box.margin.left : style?.box.margin.top;
+    const marginEndProperty = rowAxis ? style?.box.margin.right : style?.box.margin.bottom;
+    return Object.freeze({
+      identity: childId,
+      sourceIndex,
+      order: style?.box.order ?? 0,
+      flexBaseSize: base,
+      hypotheticalMainSize: hypothetical,
+      minimumMainSize: minimum,
+      maximumMainSize: maximum,
+      flexGrow: style?.box.flexGrow ?? 0,
+      flexShrink: style?.box.flexShrink ?? 1,
+      marginMainStart: mainStart,
+      marginMainEnd: mainEnd,
+      autoMarginMainStart: marginStartProperty?.kind === "auto",
+      autoMarginMainEnd: marginEndProperty?.kind === "auto"
+    });
+  }
+
+  #flexCrossOffset(
+    item: ResolvedFlexItem<FormattingNodeId>,
+    outerCrossSize: CssPixelLength,
+    lineCrossSize: CssPixelLength,
+    rowAxis: boolean,
+    crossReverse: boolean,
+    containerStyle: ComputedStyle | null,
+    baselineOffset: CssPixelLength,
+    lineBaseline: CssPixelLength
+  ): CssPixelLength {
+    const child = this.#formatting.node(item.identity);
+    const style = this.#boxComputed(child) ?? this.#computed(child);
+    const startProperty = rowAxis
+      ? crossReverse ? style?.box.margin.bottom : style?.box.margin.top
+      : crossReverse ? style?.box.margin.right : style?.box.margin.left;
+    const endProperty = rowAxis
+      ? crossReverse ? style?.box.margin.top : style?.box.margin.bottom
+      : crossReverse ? style?.box.margin.left : style?.box.margin.right;
+    const free = nonNegative(sum(lineCrossSize, negate(outerCrossSize)));
+    const autoStart = startProperty?.kind === "auto";
+    const autoEnd = endProperty?.kind === "auto";
+    if (autoStart && autoEnd) return cssDivide(free, 2);
+    if (autoStart) return free;
+    if (autoEnd) return ZERO;
+    const align = style?.box.alignSelf === "auto" || style?.box.alignSelf === undefined
+      ? containerStyle?.box.alignItems ?? "stretch"
+      : style.box.alignSelf;
+    if (align === "center") return cssDivide(free, 2);
+    if (align === "end") return crossReverse ? ZERO : free;
+    if (align === "start" && crossReverse) return free;
+    if (align === "baseline" && rowAxis) return cssMax(ZERO, sum(lineBaseline, negate(baselineOffset)));
+    return ZERO;
+  }
+
+  #stretchFlexItemCrossSize(
+    result: LayoutResult,
+    rowAxis: boolean,
+    targetOuterCrossSize: CssPixelLength,
+    containingClip: CssRect
+  ): LayoutResult {
+    const fragment = this.#fragments.get(result.fragment);
+    const current = rowAxis ? result.marginRect.height : result.marginRect.width;
+    const increase = sum(targetOuterCrossSize, negate(current));
+    if (fragment === undefined || fragment.kind !== "box" || increase <= 0) return result;
+    const grow = (rectangle: CssRect): CssRect => cssRect(
+      rectangle.x,
+      rectangle.y,
+      rowAxis ? rectangle.width : sum(rectangle.width, increase),
+      rowAxis ? sum(rectangle.height, increase) : rectangle.height
+    );
+    const contentRect = grow(fragment.contentRect);
+    const paddingRect = grow(fragment.paddingRect);
+    const borderRect = grow(fragment.borderRect);
+    const marginRect = grow(fragment.marginRect);
+    const overflowRect = unionOverflowRect(borderRect, fragment.overflowRect);
+    const clipRect = cssIntersection(
+      this.#clip(this.#formatting.node(fragment.formattingNode), paddingRect, borderRect, containingClip),
+      overflowRect
+    );
+    this.#fragments.set(fragment.id, {
+      ...fragment,
+      contentRect,
+      paddingRect,
+      borderRect,
+      marginRect,
+      overflowRect,
+      clipRect
+    });
+    const formattingNode = this.#formatting.node(fragment.formattingNode);
+    if (formattingNode.kind === "flex-item" && fragment.children.length === 1) {
+      const childId = fragment.children[0];
+      const child = childId === undefined ? undefined : this.#fragments.get(childId);
+      if (child !== undefined) {
+        this.#stretchFlexItemCrossSize(
+          { fragment: child.id, borderRect: child.borderRect, marginRect: child.marginRect },
+          rowAxis,
+          rowAxis ? contentRect.height : contentRect.width,
+          clipRect
+        );
+      }
+    }
+    return { fragment: result.fragment, borderRect, marginRect };
+  }
+
+  #layoutFlex(
+    node: FormattingNode,
+    x: CssCoordinate,
+    y: CssCoordinate,
+    width: CssPixelLength,
+    clip: CssRect,
+    depth: number,
+    forcedContentWidth: CssPixelLength | null = null,
+    forcedContentHeight: CssPixelLength | null = null
+  ): LayoutResult {
+    const style = this.#boxComputed(node) ?? this.#computed(node);
+    if (style === null) throw new Error("A flex formatting context requires a computed style.");
+    const dimensions = this.#dimensions(node, width, null, forcedContentWidth);
+    const borderX = point(x, dimensions.marginLeft);
+    const contentX = point(borderX, sum(dimensions.border.left, dimensions.padding.left));
+    const contentY = point(y, sum(dimensions.border.top, dimensions.padding.top));
+    const rowAxis = style.box.flexDirection === "row" || style.box.flexDirection === "row-reverse";
+    const reverse = rowAxis
+      ? (style.text.direction === "rtl") !== (style.box.flexDirection === "row-reverse")
+      : style.box.flexDirection === "column-reverse";
+    const crossReverse = (style.box.flexWrap === "wrap-reverse")
+      !== (!rowAxis && style.text.direction === "rtl");
+    const mainGap = this.#usedLength(
+      rowAxis ? style.box.columnGap : style.box.rowGap,
+      dimensions.contentWidth,
+      style
+    ) ?? ZERO;
+    const crossGap = this.#usedLength(
+      rowAxis ? style.box.rowGap : style.box.columnGap,
+      dimensions.contentWidth,
+      style
+    ) ?? ZERO;
+    const definiteBlockSize = forcedContentHeight ?? dimensions.specifiedHeight;
+    const preliminary = node.children.map((child, sourceIndex) => this.#flexItemInput(
+      child,
+      sourceIndex,
+      rowAxis,
+      dimensions.contentWidth,
+      rowAxis ? dimensions.contentWidth : definiteBlockSize
+    ));
+    let mainSize: CssNonNegativeLength;
+    if (rowAxis) mainSize = nonNegative(dimensions.contentWidth);
+    else if (definiteBlockSize !== null) mainSize = nonNegative(definiteBlockSize);
+    else {
+      let automatic: CssPixelLength = cssMultiply(mainGap, Math.max(0, preliminary.length - 1));
+      for (const item of preliminary) automatic = sum(
+        automatic,
+        item.hypotheticalMainSize,
+        item.autoMarginMainStart ? ZERO : item.marginMainStart,
+        item.autoMarginMainEnd ? ZERO : item.marginMainEnd
+      );
+      mainSize = nonNegative(automatic);
+    }
+    const lines = resolveFlexLines({
+      items: preliminary,
+      containerMainSize: mainSize,
+      gap: nonNegative(mainGap),
+      wrap: style.box.flexWrap,
+      reverse,
+      justifyContent: style.box.justifyContent
+    });
+    const children: LayoutFragmentId[] = [];
+    const laidOutLines: {
+      readonly results: {
+        readonly item: ResolvedFlexItem<FormattingNodeId>;
+        result: LayoutResult;
+        outerCross: CssPixelLength;
+        readonly baseline: CssPixelLength;
+        readonly stretches: boolean;
+      }[];
+      readonly naturalCrossStart: CssPixelLength;
+      crossSize: CssNonNegativeLength;
+    }[] = [];
+    let crossCursor: CssPixelLength = ZERO;
+    for (const line of lines) {
+      const laidOut: {
+        readonly item: ResolvedFlexItem<FormattingNodeId>;
+        result: LayoutResult;
+        outerCross: CssPixelLength;
+        readonly baseline: CssPixelLength;
+        readonly stretches: boolean;
+      }[] = [];
+      let lineCross: CssPixelLength = ZERO;
+      for (const item of line.items) {
+        const child = this.#formatting.node(item.identity);
+        const childStyle = this.#boxComputed(child) ?? this.#computed(child);
+        const childEdges = this.#edges(childStyle, dimensions.contentWidth);
+        const alignment = childStyle?.box.alignSelf === "auto" || childStyle?.box.alignSelf === undefined
+          ? style.box.alignItems : childStyle.box.alignSelf;
+        const crossProperty = rowAxis ? childStyle?.box.height : childStyle?.box.width;
+        const crossMarginStart = rowAxis ? childStyle?.box.margin.top : childStyle?.box.margin.left;
+        const crossMarginEnd = rowAxis ? childStyle?.box.margin.bottom : childStyle?.box.margin.right;
+        const stretches = alignment === "stretch"
+          && (crossProperty === undefined || crossProperty.kind === "auto" || crossProperty.kind === "none")
+          && crossMarginStart?.kind !== "auto" && crossMarginEnd?.kind !== "auto";
+        const crossWidth = rowAxis ? item.targetMainSize : this.#intrinsicWidth(item.identity, dimensions.contentWidth);
+        const containingX = rowAxis
+          ? point(contentX, sum(item.mainOffset, negate(childEdges.margin.left)))
+          : point(contentX, crossCursor);
+        const borderY = rowAxis
+          ? point(contentY, sum(crossCursor, childEdges.margin.top))
+          : point(contentY, item.mainOffset);
+        const result = this.#tryLayoutNode(
+          item.identity,
+          containingX,
+          borderY,
+          crossWidth,
+          clip,
+          depth + 1,
+          undefined,
+          rowAxis ? null : mainSize,
+          rowAxis ? item.targetMainSize : crossWidth,
+          rowAxis ? null : item.targetMainSize
+        );
+        if (result === null) break;
+        children.push(result.fragment);
+        const fragment = this.#fragments.get(result.fragment);
+        const outerCross = rowAxis ? result.marginRect.height : result.marginRect.width;
+        const baseline = rowAxis && fragment?.baseline !== null && fragment?.baseline !== undefined
+          ? sum(cssCoordinateDifference(fragment.borderRect.y, result.marginRect.y), fragment.baseline)
+          : outerCross;
+        laidOut.push({ item, result, outerCross, baseline, stretches });
+        lineCross = cssMax(lineCross, outerCross);
+      }
+      let lineBaseline: CssPixelLength = ZERO;
+      for (const entry of laidOut) lineBaseline = cssMax(lineBaseline, entry.baseline);
+      laidOutLines.push({
+        results: laidOut,
+        naturalCrossStart: crossCursor,
+        crossSize: nonNegative(lineCross)
+      });
+      crossCursor = sum(crossCursor, lineCross, crossGap);
+    }
+    if (laidOutLines.length > 0) crossCursor = sum(crossCursor, negate(crossGap));
+    const automaticContentHeight = rowAxis ? nonNegative(crossCursor) : mainSize;
+    const contentHeight = forcedContentHeight === null
+      ? constrainedSize(
+          automaticContentHeight,
+          dimensions.specifiedHeight,
+          dimensions.minHeight,
+          dimensions.maxHeight
+        )
+      : nonNegative(forcedContentHeight);
+    const availableCrossSize = rowAxis ? contentHeight : dimensions.contentWidth;
+    let usedCrossSize = crossCursor;
+    if (laidOutLines.length > 0 && availableCrossSize > usedCrossSize
+      && (laidOutLines.length === 1 || style.box.alignContent === "stretch")) {
+      let free = sum(availableCrossSize, negate(usedCrossSize));
+      let remainingLines = laidOutLines.length;
+      for (const line of laidOutLines) {
+        const addition = cssDivide(free, remainingLines);
+        line.crossSize = nonNegative(sum(line.crossSize, addition));
+        free = sum(free, negate(addition));
+        remainingLines -= 1;
+      }
+      usedCrossSize = availableCrossSize;
+    }
+    if (laidOutLines.length > 0) {
+      const free = cssMax(ZERO, sum(availableCrossSize, negate(usedCrossSize)));
+      const count = laidOutLines.length;
+      const align = style.box.alignContent;
+      const leading = align === "end" ? free : align === "center" ? cssDivide(free, 2)
+        : align === "space-around" ? cssDivide(free, count * 2)
+          : align === "space-evenly" ? cssDivide(free, count + 1) : ZERO;
+      const between = align === "space-between" && count > 1 ? cssDivide(free, count - 1)
+        : align === "space-around" ? cssDivide(free, count)
+          : align === "space-evenly" ? cssDivide(free, count + 1)
+            : ZERO;
+      let expandedCrossStart: CssPixelLength = ZERO;
+      for (const [index, line] of laidOutLines.entries()) {
+        const logicalLinePosition = sum(expandedCrossStart, leading, cssMultiply(between, index));
+        const linePosition = crossReverse
+          ? sum(availableCrossSize, negate(logicalLinePosition), negate(line.crossSize))
+          : logicalLinePosition;
+        const lineOffset = sum(linePosition, negate(line.naturalCrossStart));
+        let lineBaseline: CssPixelLength = ZERO;
+        for (const entry of line.results) lineBaseline = cssMax(lineBaseline, entry.baseline);
+        for (const entry of line.results) {
+          if (entry.stretches) {
+            entry.result = this.#stretchFlexItemCrossSize(entry.result, rowAxis, line.crossSize, clip);
+            entry.outerCross = rowAxis ? entry.result.marginRect.height : entry.result.marginRect.width;
+          }
+          const itemOffset = this.#flexCrossOffset(
+            entry.item,
+            entry.outerCross,
+            line.crossSize,
+            rowAxis,
+            crossReverse,
+            style,
+            entry.baseline,
+            lineBaseline
+          );
+          if (rowAxis) this.#translate(entry.result, ZERO, sum(lineOffset, itemOffset), clip);
+          else this.#translate(entry.result, sum(lineOffset, itemOffset), ZERO, clip);
+        }
+        expandedCrossStart = sum(expandedCrossStart, line.crossSize, crossGap);
+      }
+    }
+    const contentRect = cssRect(contentX, contentY, dimensions.contentWidth, contentHeight);
+    const paddingRect = cssRect(
+      point(contentX, negate(dimensions.padding.left)),
+      point(contentY, negate(dimensions.padding.top)),
+      sum(dimensions.contentWidth, dimensions.padding.left, dimensions.padding.right),
+      sum(contentHeight, dimensions.padding.top, dimensions.padding.bottom)
+    );
+    const borderRect = cssRect(
+      point(paddingRect.x, negate(dimensions.border.left)),
+      point(paddingRect.y, negate(dimensions.border.top)),
+      sum(paddingRect.width, dimensions.border.left, dimensions.border.right),
+      sum(paddingRect.height, dimensions.border.top, dimensions.border.bottom)
+    );
+    const marginRect = cssRect(
+      point(borderRect.x, negate(dimensions.marginLeft)),
+      point(borderRect.y, negate(dimensions.margin.top)),
+      sum(borderRect.width, dimensions.marginLeft, dimensions.marginRight),
+      sum(borderRect.height, dimensions.margin.top, dimensions.margin.bottom)
+    );
+    return this.#container(
+      node,
+      contentRect,
+      paddingRect,
+      borderRect,
+      marginRect,
+      this.#clip(node, paddingRect, borderRect, clip),
+      children,
+      []
+    );
+  }
+
   #layoutNode(
     id: FormattingNodeId,
     x: CssCoordinate,
@@ -2899,7 +3648,9 @@ class LayoutBuilder {
     clip: CssRect,
     depth: number,
     tableColumns?: number,
-    containingHeight: CssPixelLength | null = null
+    containingHeight: CssPixelLength | null = null,
+    forcedContentWidth: CssPixelLength | null = null,
+    forcedContentHeight: CssPixelLength | null = null
   ): LayoutResult {
     this.#reserve();
     try {
@@ -2960,9 +3711,13 @@ class LayoutBuilder {
         || node.kind === "table-footer-group" || node.kind === "table-row") {
         return this.#table(node, x, y, width, clip, depth, tableColumns);
       }
-      if (node.kind === "flex-container") return this.#layoutFlexOrGrid(node, x, y, width, clip, depth, false);
-      if (node.kind === "grid-container") return this.#layoutFlexOrGrid(node, x, y, width, clip, depth, true);
-      return this.#flow(node, x, y, width, clip, depth, containingHeight);
+      if (node.kind === "flex-container") {
+        return this.#layoutFlex(node, x, y, width, clip, depth, forcedContentWidth, forcedContentHeight);
+      }
+      if (node.kind === "grid-container") return this.#layoutGrid(node, x, y, width, clip, depth, forcedContentWidth);
+      return this.#flow(
+        node, x, y, width, clip, depth, containingHeight, forcedContentWidth, forcedContentHeight
+      );
     } finally {
       this.#reserved -= 1;
     }
@@ -2976,9 +3731,16 @@ class LayoutBuilder {
     clip: CssRect,
     depth: number,
     columns?: number,
-    containingHeight: CssPixelLength | null = null
+    containingHeight: CssPixelLength | null = null,
+    forcedContentWidth: CssPixelLength | null = null,
+    forcedContentHeight: CssPixelLength | null = null
   ): LayoutResult | null {
-    try { return this.#layoutNode(id, x, y, width, clip, depth, columns, containingHeight); }
+    try {
+      const result = this.#layoutNode(
+        id, x, y, width, clip, depth, columns, containingHeight, forcedContentWidth, forcedContentHeight
+      );
+      return this.#applyInFlowPosition(this.#formatting.node(id), result, clip);
+    }
     catch (error) { if (error instanceof LayoutBudgetExhausted) return null; throw error; }
   }
 
@@ -3071,7 +3833,13 @@ class LayoutBuilder {
       && Number.isSafeInteger(context.initialContainingBlock.width) && context.initialContainingBlock.width > 0
       && Number.isSafeInteger(context.initialContainingBlock.height) && context.initialContainingBlock.height > 0
       && context.initialContainingBlock.width === context.viewport.width
-      && context.initialContainingBlock.height === context.viewport.height;
+      && context.initialContainingBlock.height === context.viewport.height
+      && Number.isSafeInteger(context.scrollport.x)
+      && Number.isSafeInteger(context.scrollport.y)
+      && Number.isSafeInteger(context.scrollport.width) && context.scrollport.width > 0
+      && Number.isSafeInteger(context.scrollport.height) && context.scrollport.height > 0
+      && context.scrollport.width === context.viewport.width
+      && context.scrollport.height === context.viewport.height;
     if (!valid) return ImmutableLayoutFragmentTree.rejected(this.#input, "invalid-context");
     let root: LayoutResult | null = null;
     try {
@@ -3130,7 +3898,8 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
     this.context = Object.freeze({
       ...input.context,
       viewport: Object.freeze({ ...input.context.viewport }),
-      initialContainingBlock: Object.freeze({ ...input.context.initialContainingBlock })
+      initialContainingBlock: Object.freeze({ ...input.context.initialContainingBlock }),
+      scrollport: Object.freeze({ ...input.context.scrollport })
     });
     this.rootFontMetrics = Object.freeze({ ...rootMetrics });
     this.root = root;

@@ -59,6 +59,7 @@ function coherentRenderingRequest(input: RenderDocumentInput): boolean {
     const terminalWidth = cssMultiply(input.terminalContext.cellWidthCssPx, input.terminalContext.columns);
     const terminalHeight = cssMultiply(input.terminalContext.rowHeightCssPx, input.terminalContext.rows);
     const initial = input.layoutContext.initialContainingBlock;
+    const scrollport = input.layoutContext.scrollport;
     return mediaWidth === input.layoutContext.viewport.width
       && mediaHeight === input.layoutContext.viewport.height
       && terminalWidth === mediaWidth
@@ -66,7 +67,11 @@ function coherentRenderingRequest(input: RenderDocumentInput): boolean {
       && initial.x === 0
       && initial.y === 0
       && initial.width === mediaWidth
-      && initial.height === mediaHeight;
+      && initial.height === mediaHeight
+      && Number.isSafeInteger(scrollport.x)
+      && Number.isSafeInteger(scrollport.y)
+      && scrollport.width === mediaWidth
+      && scrollport.height === mediaHeight;
   } catch {
     return false;
   }

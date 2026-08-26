@@ -12,11 +12,29 @@ export interface CssColor {
 }
 
 export type CssLengthUnit = "px" | "em" | "rem" | "ch" | "%" | "vw" | "vh";
+
+export type CssMathExpression =
+  | { readonly kind: "value"; readonly value: number; readonly unit: CssLengthUnit | "number" }
+  | { readonly kind: "negate"; readonly value: CssMathExpression }
+  | { readonly kind: "sum"; readonly left: CssMathExpression; readonly right: CssMathExpression }
+  | { readonly kind: "product"; readonly value: CssMathExpression; readonly factor: number }
+  | { readonly kind: "minimum"; readonly values: readonly CssMathExpression[] }
+  | { readonly kind: "maximum"; readonly values: readonly CssMathExpression[] }
+  | {
+      readonly kind: "clamp";
+      readonly minimum: CssMathExpression;
+      readonly preferred: CssMathExpression;
+      readonly maximum: CssMathExpression;
+    };
+
 export type CssLength =
   | { readonly kind: "length"; readonly value: number; readonly unit: CssLengthUnit }
+  | { readonly kind: "calculation"; readonly expression: CssMathExpression }
   | { readonly kind: "zero" }
   | { readonly kind: "auto" }
   | { readonly kind: "none" };
+
+export type CssFlexBasis = CssLength | { readonly kind: "content" };
 
 export interface CssEdges {
   readonly top: CssLength;
@@ -106,9 +124,19 @@ export interface ComputedBoxStyle {
   readonly borderColor: CssColor | null;
   readonly flexDirection: "row" | "row-reverse" | "column" | "column-reverse";
   readonly flexWrap: "nowrap" | "wrap" | "wrap-reverse";
-  readonly justifyContent: "start" | "center" | "end" | "space-between";
-  readonly alignItems: "start" | "center" | "end" | "stretch";
+  readonly flexGrow: number;
+  readonly flexShrink: number;
+  readonly flexBasis: CssFlexBasis;
+  readonly order: number;
+  readonly justifyContent: "start" | "center" | "end" | "space-between" | "space-around" | "space-evenly";
+  readonly alignItems: "start" | "center" | "end" | "stretch" | "baseline";
+  readonly alignSelf: "auto" | "start" | "center" | "end" | "stretch" | "baseline";
+  readonly alignContent: "start" | "center" | "end" | "stretch" | "space-between" | "space-around" | "space-evenly";
   readonly position: "static" | "relative" | "absolute" | "fixed" | "sticky";
+  readonly inset: CssEdges;
+  readonly zIndex: number | null;
+  readonly float: "none" | "left" | "right";
+  readonly clear: "none" | "left" | "right" | "both";
   readonly legacyClip: CssLegacyClip;
   readonly clipPath: CssClipPath;
   readonly gridTemplateColumns: readonly CssGridTrack[];
@@ -157,13 +185,43 @@ export interface StylesheetResource {
   readonly bytes: Uint8Array;
   readonly media: string | null;
   readonly transportEncodingLabel: string | null;
+  /** Document stylesheet order shared by the root sheet and all recursive imports. */
+  readonly rootOrder?: number;
+  /** Depth-first cascade order within one document stylesheet root. */
+  readonly dependencyOrder?: number;
+  readonly importDepth?: number;
+  readonly importedFrom?: string | null;
+  readonly importLayer?: string | null;
+  readonly mediaConditions?: readonly string[];
+  readonly supportsConditions?: readonly string[];
+  /** Qualified layer names established before this imported source enters the cascade. */
+  readonly predeclaredLayers?: readonly string[];
 }
+
+export interface StylesheetImportDependency {
+  readonly request: string;
+  readonly media: string | null;
+  readonly layer: string | null;
+  readonly supports: string | null;
+  readonly order: number;
+  readonly precedingLayers: readonly string[];
+}
+
+export type StylesheetDependencyInspection =
+  | {
+      readonly status: "complete";
+      readonly imports: readonly StylesheetImportDependency[];
+      readonly parsedRules: number;
+    }
+  | { readonly status: "rejected"; readonly reason: "parse" | "encoding" };
 
 export type StyleDiagnosticCode =
   | "stylesheet-fetch"
   | "stylesheet-limit"
   | "stylesheet-media"
   | "stylesheet-parse"
+  | "stylesheet-cycle"
+  | "stylesheet-import"
   | "unsupported-at-rule"
   | "selector-parse"
   | "selector-unknown"

@@ -62,6 +62,10 @@ layout model.
 
 HTTP, redirects, cookies, local-resource policy, downloads, tabs, history,
 bookmarks, persistence, and browser chrome remain application concerns.
+The application builds the recursive stylesheet dependency graph and applies
+the ordinary page-resource security boundary to every `@import`; style owns CSS
+syntax inspection, dependency metadata, cascade layers, `@supports`, and typed
+computed values. Neither style nor layout performs network access.
 
 ## Geometry and CSS values
 
@@ -136,6 +140,17 @@ geometry for background and border painting.
 Work-budget exhaustion finalizes open ancestors and keeps a connected
 source-order layout-fragment prefix. Completed fragments are never cleared.
 
+The horizontal-writing-mode flex formatting algorithm computes flex base and
+hypothetical main sizes, automatic minimum sizes, line collection, iterative
+grow/shrink freezing, automatic margins, order-modified placement, reverse
+directions, cross sizes, baseline alignment, wrapping, wrap reversal, gaps,
+and multi-line alignment. Positioned layout resolves positioned containing
+blocks, static positions, opposing insets, shrink-to-fit widths, relative
+offsets, fixed initial-containing-block geometry, sticky scrollport
+constraints, and stacking buckets. Floats are out of normal block flow, shorten
+line boxes, honor computed-direction logical sides and clearance, and contribute
+to formatting-context overflow.
+
 ## Terminal contracts
 
 `TerminalDisplayList` contains ordered background-fill, border-side, and text
@@ -194,6 +209,10 @@ prefixes.
   runs. No reordered search string or row-based search path exists.
 - Physical and logical box properties compete in the cascade; horizontal
   logical sides map only after the element's computed `direction` is known.
+- Parser component-value trees—not whitespace or function regular expressions—
+  drive custom-property substitution, CSS math, length-percentage values,
+  colors, and the supported layout shorthands. Used-value math remains in
+  layout.
 - Unicode property lookup is pinned to Unicode 17.0.0 and never depends on the
   host ICU or operating-system Unicode version.
 - Budget, cancellation, unsupported, rejected, and truncated behavior is typed;

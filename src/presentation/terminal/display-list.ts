@@ -5,6 +5,7 @@ import {
   cssPx,
   type LayoutFragment
 } from "../layout/index.js";
+import type { ComputedStyle } from "../style/index.js";
 import type {
   BuildTerminalDisplayListInput,
   TerminalDisplayList,
@@ -137,6 +138,31 @@ function commandGroup(fragment: LayoutFragment): readonly Omit<TerminalPaintComm
   return commands;
 }
 
+function computedStyle(fragment: LayoutFragment, list: BuildTerminalDisplayListInput["layout"]): ComputedStyle | null {
+  let formattingNode = list.formatting.node(fragment.formattingNode);
+  let computed: ComputedStyle | null = null;
+  for (;;) {
+    const source = formattingNode.source;
+    if (source !== null && list.formatting.document.node(source).kind === "element") {
+      computed = formattingNode.pseudo === null
+        ? list.formatting.styles.style(source)
+        : list.formatting.styles.pseudo(source, formattingNode.pseudo);
+    }
+    const parent = list.formatting.parent(formattingNode.id);
+    if (computed !== null || parent === null) break;
+    formattingNode = parent;
+  }
+  return computed;
+}
+
+function positionedZIndex(
+  fragment: LayoutFragment,
+  layout: BuildTerminalDisplayListInput["layout"]
+): number | null {
+  const computed = computedStyle(fragment, layout);
+  return computed !== null && computed.box.position !== "static" ? computed.box.zIndex ?? 0 : null;
+}
+
 export function buildTerminalDisplayList(input: BuildTerminalDisplayListInput): TerminalDisplayList {
   const context = Object.freeze({ ...input.context });
   const budgets = terminalPaintBudgets(context.budgets);
@@ -151,27 +177,59 @@ export function buildTerminalDisplayList(input: BuildTerminalDisplayListInput): 
     });
   }
   const commands: TerminalPaintCommand[] = [];
-  const pending = [input.layout.root];
-  let truncated = false;
-  while (pending.length > 0) {
+  const append = (fragment: LayoutFragment): boolean => {
     input.signal?.throwIfAborted();
-    const id = pending.pop();
-    if (id === undefined) continue;
-    const fragment = input.layout.fragment(id);
     const group = commandGroup(fragment);
     if (commands.length + group.length > budgets.maxDisplayListCommands) {
-      truncated = true;
-      break;
+      return false;
     }
     for (const command of group) {
       commands.push(Object.freeze({ ...command, paintOrder: commands.length }) as TerminalPaintCommand);
     }
-    for (let index = fragment.children.length - 1; index >= 0; index -= 1) {
-      const child = fragment.children[index];
-      if (child !== undefined) pending.push(child);
+    return true;
+  };
+  const paintStackingContext = (root: LayoutFragment): boolean => {
+    if (!append(root)) return false;
+    const positioned: { readonly fragment: LayoutFragment; readonly zIndex: number; readonly sourceOrder: number }[] = [];
+    let sourceOrder = 0;
+    const scan = (parent: LayoutFragment): void => {
+      for (const childId of parent.children) {
+        input.signal?.throwIfAborted();
+        const child = input.layout.fragment(childId);
+        const zIndex = positionedZIndex(child, input.layout);
+        const order = sourceOrder++;
+        if (zIndex === null) scan(child);
+        else positioned.push({ fragment: child, zIndex, sourceOrder: order });
+      }
+    };
+    scan(root);
+    const ordered = (predicate: (zIndex: number) => boolean): readonly typeof positioned[number][] =>
+      positioned.filter((entry) => predicate(entry.zIndex)).sort((left, right) =>
+        left.zIndex - right.zIndex || left.sourceOrder - right.sourceOrder
+      );
+    for (const entry of ordered((zIndex) => zIndex < 0)) {
+      if (!paintStackingContext(entry.fragment)) return false;
     }
-  }
-  const outcome: TerminalDisplayListOutcome = truncated
+    const paintNormal = (parent: LayoutFragment): boolean => {
+      for (const childId of parent.children) {
+        input.signal?.throwIfAborted();
+        const child = input.layout.fragment(childId);
+        if (positionedZIndex(child, input.layout) !== null) continue;
+        if (!append(child) || !paintNormal(child)) return false;
+      }
+      return true;
+    };
+    if (!paintNormal(root)) return false;
+    for (const entry of ordered((zIndex) => zIndex === 0)) {
+      if (!paintStackingContext(entry.fragment)) return false;
+    }
+    for (const entry of ordered((zIndex) => zIndex > 0)) {
+      if (!paintStackingContext(entry.fragment)) return false;
+    }
+    return true;
+  };
+  const complete = paintStackingContext(input.layout.fragment(input.layout.root));
+  const outcome: TerminalDisplayListOutcome = !complete
     ? {
         status: "truncated",
         commands: commands.length,

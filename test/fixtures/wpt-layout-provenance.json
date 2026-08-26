@@ -158,6 +158,78 @@
       "behavior": "table, row-group, row, and cell backgrounds retain structural paint order",
       "terminalAdjustment": "only the table background order in Verge's current table slice is adapted",
       "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-flexbox/flex-grow-002.html",
+      "behavior": "positive free space is distributed by flex grow factors after flex base sizes are established",
+      "terminalAdjustment": "target main sizes are asserted in fixed-point CSS pixels",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-flexbox/flex-shrink-001.html",
+      "behavior": "negative free space uses scaled shrink factors and min/max freezing",
+      "terminalAdjustment": "the adapted items use deterministic terminal text metrics for intrinsic contributions",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-flexbox/flexbox_align-self-stretch.html",
+      "behavior": "auto cross-size flex items stretch to the flex line cross size while definite cross sizes remain definite",
+      "terminalAdjustment": "background and descendant paint remain attached to the stretched layout fragment",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-flexbox/align-content_stretch.html",
+      "behavior": "remaining cross space expands multiple flex lines and their stretch-eligible items",
+      "terminalAdjustment": "row and column flex directions are asserted before cell snapping",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-position/position-absolute-fit-content.html",
+      "behavior": "absolute boxes resolve insets against their positioned containing block and leave normal flow",
+      "terminalAdjustment": "used rectangles and the following in-flow box position are asserted in CSS pixels",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-position/position-fixed-at-bottom-right-on-viewport.html",
+      "behavior": "fixed boxes use the initial containing block",
+      "terminalAdjustment": "the initial containing block is the CSS viewport derived from terminal metrics",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/floats-clear/clear-on-child-with-margins.html",
+      "behavior": "clearance moves a cleared in-flow box below applicable floats",
+      "terminalAdjustment": "clearance is calculated in CSS pixels before terminal row snapping",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/floats/floats-line-wrap-shifted-001.html",
+      "behavior": "line boxes are shortened beside a float until its block-end edge",
+      "terminalAdjustment": "the line-box rectangle is inspected directly rather than comparing pixels",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-cascade/layer-important.html",
+      "behavior": "important declarations reverse normal cascade-layer precedence and outrank unlayered important declarations",
+      "terminalAdjustment": "computed values are asserted without depending on graphical paint output",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-cascade/revert-layer-001.html",
+      "behavior": "revert-layer rolls a property back to the previous cascade layer within the same origin",
+      "terminalAdjustment": "the adapted case uses supported color and padding computed values",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-cascade/parsing/supports-import-parsing.html",
+      "behavior": "stylesheet imports retain supports conditions separately from layer and media modifiers",
+      "terminalAdjustment": "the application fetches the offline resource while style decides whether its rules apply",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-values/clamp-length-computed.html",
+      "behavior": "nested clamp and length-percentage math remains typed through computed-value processing",
+      "terminalAdjustment": "mixed terms resolve only during fixed-point layout against a CSS-pixel basis",
+      "license": "WPT 3-clause BSD"
     }
   ]
 }

@@ -51,6 +51,8 @@ export interface LayoutContext {
   readonly viewport: CssSize;
   readonly textMeasurer: CssTextMeasurer;
   readonly initialContainingBlock: CssRect;
+  /** The visible CSS-pixel scrollport in document coordinates. */
+  readonly scrollport: CssRect;
   readonly budgets?: Partial<LayoutBudgets>;
 }
 

@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "sourceBranch": "feat/web-compatibility-baseline",
+  "corpusManifest": "corpus.json",
+  "metrics": {
+    "meaningfulVisibleTextRecall": 1,
+    "headingRecall": 1,
+    "landmarkRecall": 1,
+    "linkRecall": 1,
+    "formControlRecall": 1,
+    "readingOrderAgreement": 1,
+    "unexplainedBlankPages": 0,
+    "clippedOrUnreachableContent": 0,
+    "layoutTruncations": 0,
+    "terminalTruncations": 0,
+    "unsupportedSelectors": 0,
+    "unsupportedAtRules": 0,
+    "unsupportedProperties": 0,
+    "unsupportedValues": 0,
+    "stylesheetFailures": 0
+  }
+}

@@ -15,6 +15,7 @@ import {
   browserMediaEnvironment,
   browserRenderPreferences,
   documentScrollRow,
+  documentWithScrollRow,
   renderDocumentForViewport,
   scrollToSource
 } from "../../dist/ui/document-layout.js";
@@ -189,6 +190,23 @@ test("outline document nodes resolve through layout-fragment geometry", async ()
     const layout = renderDocumentForViewport(document, 79, 24).terminal;
     const anchored = scrollToSource(document, heading.node);
     assert.ok(documentScrollRow(anchored, layout) > 20);
+  } finally {
+    await runtime.dispose();
+    await prepared.controller.close();
+  }
+});
+
+test("sticky and fixed paint does not replace the normal-flow scroll anchor", async () => {
+  const page = `<title>Sticky</title><header id="sticky" style="position:sticky;top:0">Header</header>
+    ${Array.from({ length: 40 }, (_, index) => `<p>Row ${String(index)}</p>`).join("")}`;
+  const { runtime, prepared } = await preparedFixture({ loader: async (requestUrl) => response(requestUrl, page) });
+  try {
+    const document = runtime.state().documents[0];
+    const initial = renderDocumentForViewport(document, 50, 10).terminal;
+    const scrolled = documentWithScrollRow(document, initial, 12, 10);
+    assert.notEqual(scrolled.scrollAnchor.source, document.snapshot.document.elementById("sticky"));
+    const rendered = renderDocumentForViewport(scrolled, 50, 10).terminal;
+    assert.equal(documentScrollRow(scrolled, rendered), 12);
   } finally {
     await runtime.dispose();
     await prepared.controller.close();

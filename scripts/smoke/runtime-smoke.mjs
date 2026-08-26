@@ -112,6 +112,9 @@ async function runSmoke(expectedRuntime) {
       textMeasurer: CSS_TEXT_MEASURER,
       initialContainingBlock: cssRect(
         cssCoordinate(cssPx(0)), cssCoordinate(cssPx(0)), viewportWidth, viewportHeight
+      ),
+      scrollport: cssRect(
+        cssCoordinate(cssPx(0)), cssCoordinate(cssPx(0)), viewportWidth, viewportHeight
       )
     },
     terminalContext: {

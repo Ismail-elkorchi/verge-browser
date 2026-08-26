@@ -92,11 +92,13 @@ export class RenderPipelineCache {
     snapshot: IndexedPageSnapshot,
     state: DocumentState,
     columns: number,
-    rows: number
+    rows: number,
+    scrollRow: number
   ): RenderPipelineResult {
     const viewportColumns = documentContentColumns(columns);
     const viewportRows = Math.max(1, Math.floor(rows));
-    const key = `${String(viewportColumns)}x${String(viewportRows)}`;
+    const viewportScrollRow = Math.max(0, Math.floor(scrollRow));
+    const key = `${String(viewportColumns)}x${String(viewportRows)}@${String(viewportScrollRow)}`;
     const existingIndex = this.#entries.findIndex((entry) =>
       entry.key === key && entry.snapshot === snapshot && entry.state === state
     );
@@ -125,6 +127,12 @@ export class RenderPipelineCache {
         initialContainingBlock: cssRect(
           cssCoordinate(cssPx(0)),
           cssCoordinate(cssPx(0)),
+          cssLengthFromFixed(viewportColumns * CELL_WIDTH),
+          cssLengthFromFixed(viewportRows * ROW_HEIGHT)
+        ),
+        scrollport: cssRect(
+          cssCoordinate(cssPx(0)),
+          cssCoordinate(cssLengthFromFixed(viewportScrollRow * ROW_HEIGHT)),
           cssLengthFromFixed(viewportColumns * CELL_WIDTH),
           cssLengthFromFixed(viewportRows * ROW_HEIGHT)
         )
@@ -209,7 +217,23 @@ export function renderDocumentForViewport(
   columns: number,
   viewportRows = 24
 ): RenderPipelineResult {
-  return document.renderPipelineCache.get(document.snapshot, document.documentState, columns, viewportRows);
+  const initial = document.renderPipelineCache.get(
+    document.snapshot,
+    document.documentState,
+    columns,
+    viewportRows,
+    0
+  );
+  const scrollRow = documentScrollRow(document, initial.terminal);
+  return scrollRow === 0
+    ? initial
+    : document.renderPipelineCache.get(
+      document.snapshot,
+      document.documentState,
+      columns,
+      viewportRows,
+      scrollRow
+    );
 }
 
 export function documentContentBounds(bounds: Rect): Rect {
@@ -261,7 +285,25 @@ export function documentWithScrollRow(
     Math.min(Math.max(0, render.cellBuffer.rows.length - normalizedViewportRows), Math.floor(requestedRow))
   );
   const row = render.cellBuffer.rows[rowIndex];
-  const source = row?.spans.find((span) => span.documentNode !== null)?.documentNode ?? null;
+  const source = row?.spans.find((span) => {
+    if (span.documentNode === null) return false;
+    let formattingNode = render.layout.formatting.node(
+      render.layout.fragment(span.layoutFragment).formattingNode
+    );
+    for (;;) {
+      const node = formattingNode.source;
+      if (node !== null && render.layout.formatting.document.node(node).kind === "element") {
+        const style = formattingNode.pseudo === null
+          ? render.layout.formatting.styles.style(node)
+          : render.layout.formatting.styles.pseudo(node, formattingNode.pseudo);
+        if (style !== null) return style.box.position !== "absolute"
+          && style.box.position !== "fixed" && style.box.position !== "sticky";
+      }
+      const parent = render.layout.formatting.parent(formattingNode.id);
+      if (parent === null) return true;
+      formattingNode = parent;
+    }
+  })?.documentNode ?? null;
   if (source === null) return { ...document, scrollAnchor: { source: null, rowOffset: rowIndex } };
   const matchingRows = rowsForSource(render, source);
   return {

@@ -51,9 +51,10 @@ persistence. Non-HTML navigation offers to download the resource instead of
 replacing the current page.
 
 Author CSS contributes page colors, emphasis, visibility, spacing, borders,
-block/inline flow, flex direction/wrapping/alignment, and grids with explicit
-terminal-sized tracks. Verge resolves custom properties and width media queries
-against terminal columns. Reader view ignores author styling, and page CSS
+block/inline flow, flexible sizing and alignment, positioned layout, floats,
+and grids with explicit CSS-pixel tracks. Verge resolves typed custom-property
+fallbacks and media queries against the CSS viewport before terminal cell
+snapping. Reader view ignores author styling, and page CSS
 never controls browser chrome or focus indication.
 
 Downloads go to `Downloads` unless `VERGE_DOWNLOAD_DIR` is set. Partial files
@@ -103,9 +104,11 @@ checks also run on Bun.
 
 Verge is an HTML browser, not a Chromium replacement. It does not execute page
 JavaScript or attempt pixel layout. Its CSS profile covers block/inline flow,
-lists, structured tables, generated text, and structural flex and grid
-contexts, but not complete flex/grid algorithms, arbitrary positioning,
-animation, web fonts, or raster image decoding. Client-rendered
+lists, structured tables, generated text, horizontal-writing-mode flex sizing,
+relative/absolute/fixed/sticky positioning, stacking, floats, and explicit grid
+tracks. It does not yet cover complete grid placement, table spans and border
+collapse, vertical writing modes, animation, web fonts, raster image decoding,
+or page JavaScript. Client-rendered
 sites, anti-bot challenges, media, and unsupported form encodings may therefore
 be unavailable. Network access remains constrained by the package’s protocol,
 redirect, content-type, timeout, and size policies.

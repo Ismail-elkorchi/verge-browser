@@ -36,6 +36,8 @@
     "build": "node scripts/build/clean-dist.mjs && tsc -p tsconfig.build.json",
     "check": "npm run check:core && npm run smoke:node && npm run test:fuzz",
     "check:core": "npm run lint && npm run typecheck && npm run unicode:check && npm test && npm run smoke:cli",
+    "compat:check": "npm run build && node scripts/compat/run.mjs --check",
+    "compat:oracle": "npm run build && node scripts/compat/chromium-oracle.mjs",
     "examples:run": "npm run build && node examples/run-all.mjs",
     "audit:dependencies": "npm audit --audit-level=high",
     "jsr:check": "deno check --no-lock --sloppy-imports jsr/mod.ts && deno doc --lint --no-lock --sloppy-imports jsr/mod.ts && deno test --doc --no-lock --sloppy-imports jsr/mod.ts",
@@ -44,7 +46,7 @@
     "release:jsr-dry-run": "deno publish --dry-run",
     "release:npm-dry-run": "npm publish --dry-run",
     "release:package": "node scripts/release/verify-packed-consumer.mjs",
-    "release:check": "npm run release:clean-install && npm run check:core && npm run jsr:check && npm run examples:run && npm run smoke:all && npm run test:fuzz:release && npm run test:bench && npm run audit:dependencies && npm run release:package && npm run release:npm-dry-run && npm run release:jsr-dry-run",
+    "release:check": "npm run release:clean-install && npm run check:core && npm run compat:check && npm run jsr:check && npm run examples:run && npm run smoke:all && npm run test:fuzz:release && npm run test:bench && npm run audit:dependencies && npm run release:package && npm run release:npm-dry-run && npm run release:jsr-dry-run",
     "smoke:all": "npm run smoke:node && npm run smoke:deno && npm run smoke:bun && node scripts/smoke/check-runtime-parity.mjs",
     "smoke:bun": "npm run build && bun scripts/smoke/runtime-smoke.mjs --runtime=bun --report=reports/smoke-bun.json",
     "smoke:cli": "npm run build && node scripts/smoke/cli.mjs",
@@ -60,7 +62,7 @@
     "unicode:generate": "node scripts/unicode/generate-unicode-data.mjs"
   },
   "dependencies": {
-    "@ismail-elkorchi/css-parser": "0.2.0",
+    "@ismail-elkorchi/css-parser": "0.2.1",
     "@ismail-elkorchi/html-parser": "0.2.1",
     "@ismail-elkorchi/http-client": "0.1.1",
     "@ismail-elkorchi/terminal-ui": "0.1.3",

@@ -21,6 +21,7 @@ import {
   cssSubtract,
   cssUnion,
   isSafeCssFixedValue,
+  resolveFlexLines,
   selectLogicalLines
 } from "../../dist/presentation/layout/index.js";
 import { buildTextSearchIndex } from "../../dist/presentation/search/index.js";
@@ -82,6 +83,12 @@ function renderFormatting(formattingTree, columns, rows = 24, budgets = {}, capa
       initialContainingBlock: cssRect(
         cssCoordinate(ZERO),
         cssCoordinate(ZERO),
+        cssLengthFromFixed(columns * CELL_WIDTH),
+        cssLengthFromFixed(rows * ROW_HEIGHT)
+      ),
+      scrollport: cssRect(
+        cssCoordinate(ZERO),
+        cssCoordinate(cssLengthFromFixed((capabilities.scrollRow ?? 0) * ROW_HEIGHT)),
         cssLengthFromFixed(columns * CELL_WIDTH),
         cssLengthFromFixed(rows * ROW_HEIGHT)
       ),
@@ -175,7 +182,8 @@ test("fixed-point arithmetic saturates and invalid layout inputs are rejected by
   const context = {
     viewport: { width: cssPx(160), height: cssPx(160) },
     textMeasurer,
-    initialContainingBlock: cssRect(cssCoordinate(ZERO), cssCoordinate(ZERO), cssPx(160), cssPx(160))
+    initialContainingBlock: cssRect(cssCoordinate(ZERO), cssCoordinate(ZERO), cssPx(160), cssPx(160)),
+    scrollport: cssRect(cssCoordinate(ZERO), cssCoordinate(ZERO), cssPx(160), cssPx(160))
   };
   const invalidContext = buildLayoutFragmentTree({
     formatting: tree,
@@ -554,6 +562,196 @@ test("flex and grid geometry is fixed-point layout-owned", () => {
   assert.equal(items[2].borderRect.y, items[3].borderRect.y);
 });
 
+test("flexible lengths use order, freezing, wrapping, and automatic margins", () => {
+  const item = (identity, sourceIndex, values = {}) => ({
+    identity,
+    sourceIndex,
+    order: values.order ?? 0,
+    flexBaseSize: cssPx(values.base ?? 20),
+    hypotheticalMainSize: cssPx(values.hypothetical ?? values.base ?? 20),
+    minimumMainSize: cssPx(values.minimum ?? 0),
+    maximumMainSize: values.maximum === undefined ? null : cssPx(values.maximum),
+    flexGrow: values.grow ?? 0,
+    flexShrink: values.shrink ?? 1,
+    marginMainStart: cssPx(values.marginStart ?? 0),
+    marginMainEnd: cssPx(values.marginEnd ?? 0),
+    autoMarginMainStart: values.autoStart ?? false,
+    autoMarginMainEnd: values.autoEnd ?? false
+  });
+  const grown = resolveFlexLines({
+    items: [item("later", 0, { order: 2, grow: 1 }), item("first", 1, { order: 1, grow: 3, maximum: 50 })],
+    containerMainSize: cssPx(100), gap: cssPx(0), wrap: "nowrap", reverse: false,
+    justifyContent: "start"
+  });
+  assert.deepEqual(grown[0].items.map((entry) => entry.identity), ["first", "later"]);
+  assert.deepEqual(grown[0].items.map((entry) => cssPixels(entry.targetMainSize)), [50, 50]);
+
+  const shrunk = resolveFlexLines({
+    items: [item("a", 0, { base: 80, minimum: 60 }), item("b", 1, { base: 80, minimum: 10 })],
+    containerMainSize: cssPx(100), gap: cssPx(0), wrap: "nowrap", reverse: false,
+    justifyContent: "start"
+  });
+  assert.deepEqual(shrunk[0].items.map((entry) => cssPixels(entry.targetMainSize)), [60, 40]);
+
+  const wrapped = resolveFlexLines({
+    items: [item("a", 0, { base: 45 }), item("b", 1, { base: 45 }), item("c", 2, { base: 45 })],
+    containerMainSize: cssPx(100), gap: cssPx(10), wrap: "wrap", reverse: false,
+    justifyContent: "start"
+  });
+  assert.deepEqual(wrapped.map((line) => line.items.map((entry) => entry.identity)), [["a", "b"], ["c"]]);
+
+  const automatic = resolveFlexLines({
+    items: [item("a", 0, { autoStart: true }), item("b", 1)],
+    containerMainSize: cssPx(100), gap: cssPx(0), wrap: "nowrap", reverse: false,
+    justifyContent: "space-between"
+  });
+  assert.equal(cssPixels(automatic[0].items[0].mainOffset), 60);
+
+  const fractionalGrow = resolveFlexLines({
+    items: [item("a", 0, { grow: 0.25 }), item("b", 1, { grow: 0.25 })],
+    containerMainSize: cssPx(100), gap: cssPx(0), wrap: "nowrap", reverse: false,
+    justifyContent: "start"
+  });
+  assert.deepEqual(fractionalGrow[0].items.map((entry) => cssPixels(entry.targetMainSize)), [35, 35]);
+
+  const fractionalShrink = resolveFlexLines({
+    items: [item("a", 0, { base: 80, shrink: 0.25 }), item("b", 1, { base: 80, shrink: 0.25 })],
+    containerMainSize: cssPx(100), gap: cssPx(0), wrap: "nowrap", reverse: false,
+    justifyContent: "start"
+  });
+  assert.deepEqual(fractionalShrink[0].items.map((entry) => cssPixels(entry.targetMainSize)), [65, 65]);
+});
+
+test("flex formatting applies resolved main sizes, order, directions, and column sizing", () => {
+  const grown = render(`<div style="display:flex;width:100px">
+    <div id="one" style="flex:1 1 0;min-width:0">one</div>
+    <div id="two" style="flex:3 1 0;min-width:0">two</div>
+  </div>`, 30);
+  const one = principalFragment(grown, elementById(grown, "one"));
+  const two = principalFragment(grown, elementById(grown, "two"));
+  assert.equal(cssPixels(one.contentRect.width), 25);
+  assert.equal(cssPixels(two.contentRect.width), 75);
+
+  const shrunk = render(`<div style="display:flex;width:100px">
+    <div id="first" style="width:80px;min-width:60px;flex-shrink:1;order:2">first</div>
+    <div id="second" style="width:80px;min-width:10px;flex-shrink:1;order:1">second</div>
+  </div>`, 30);
+  const first = principalFragment(shrunk, elementById(shrunk, "first"));
+  const second = principalFragment(shrunk, elementById(shrunk, "second"));
+  assert.equal(cssPixels(first.contentRect.width), 60);
+  assert.equal(cssPixels(second.contentRect.width), 40);
+  assert.ok(second.borderRect.x < first.borderRect.x);
+
+  const column = render(`<div style="display:flex;flex-direction:column;height:80px;width:80px">
+    <div id="top" style="flex:1 1 0;min-height:0">top</div>
+    <div id="bottom" style="flex:3 1 0;min-height:0">bottom</div>
+  </div>`, 30);
+  const top = principalFragment(column, elementById(column, "top"));
+  const bottom = principalFragment(column, elementById(column, "bottom"));
+  assert.equal(cssPixels(top.contentRect.height), 20);
+  assert.equal(cssPixels(bottom.contentRect.height), 60);
+  assert.equal(bottom.borderRect.y, top.borderRect.y + top.borderRect.height);
+
+  const automaticMinimum = render(`<div style="display:flex;width:80px">
+    <div id="min-one">long long</div><div id="min-two">long long</div></div>`, 30);
+  assert.equal(cssPixels(principalFragment(automaticMinimum, elementById(automaticMinimum, "min-one")).contentRect.width), 40);
+  assert.equal(cssPixels(principalFragment(automaticMinimum, elementById(automaticMinimum, "min-two")).contentRect.width), 40);
+
+  const rtl = render(`<div style="display:flex;direction:rtl;width:80px">
+    <div id="rtl-first" style="flex:0 0 20px">first</div>
+    <div id="rtl-second" style="flex:0 0 20px">second</div></div>`, 30);
+  assert.ok(principalFragment(rtl, elementById(rtl, "rtl-first")).borderRect.x
+    > principalFragment(rtl, elementById(rtl, "rtl-second")).borderRect.x);
+});
+
+test("positioned layout resolves containing blocks, out-of-flow geometry, sticky constraints, and stacking", () => {
+  const result = render(`<div id="containing" style="position:relative;width:100px;height:80px">
+    <div id="absolute" style="position:absolute;right:10px;top:5px;width:20px;height:10px;background:red">A</div>
+    <div id="normal" style="height:16px">N</div>
+    <div id="relative" style="position:relative;left:8px;top:4px;height:16px">R</div>
+    <div id="sticky" style="position:sticky;top:0;height:16px">S</div>
+    <div id="bottom" style="position:absolute;bottom:2px">bottom</div>
+  </div>`, 30, 20);
+  const containing = principalFragment(result, elementById(result, "containing"));
+  const absolute = principalFragment(result, elementById(result, "absolute"));
+  const normal = principalFragment(result, elementById(result, "normal"));
+  const relative = principalFragment(result, elementById(result, "relative"));
+  const sticky = principalFragment(result, elementById(result, "sticky"));
+  const bottom = principalFragment(result, elementById(result, "bottom"));
+  assert.equal(cssPixels(absolute.borderRect.x - containing.paddingRect.x), 70);
+  assert.equal(cssPixels(absolute.borderRect.y - containing.paddingRect.y), 5);
+  assert.equal(normal.borderRect.y, containing.contentRect.y);
+  assert.equal(cssPixels(relative.borderRect.x - containing.contentRect.x), 8);
+  assert.equal(cssPixels(sticky.borderRect.y - containing.contentRect.y), 32);
+  assert.ok(sticky.borderRect.y >= result.layout.context.initialContainingBlock.y);
+  assert.equal(cssPixels(
+    containing.contentRect.y + containing.contentRect.height - bottom.borderRect.y - bottom.borderRect.height
+  ), 2);
+
+  const shrinkToFit = render(`<div id="cb" style="position:relative;width:80px;height:40px">
+    <div id="fit" style="position:absolute;right:0;max-width:50px">long long long</div></div>`, 30, 10);
+  const fit = principalFragment(shrinkToFit, elementById(shrinkToFit, "fit"));
+  const fitContainingBlock = principalFragment(shrinkToFit, elementById(shrinkToFit, "cb"));
+  assert.equal(cssPixels(fit.contentRect.width), 50);
+  assert.equal(fit.borderRect.x + fit.borderRect.width, fitContainingBlock.paddingRect.x + fitContainingBlock.paddingRect.width);
+
+  const stacked = render(`<div style="position:relative;width:40px;height:32px">
+    <div id="high" style="position:absolute;inset:0;background:red;z-index:2">high</div>
+    <div id="low" style="position:absolute;inset:0;background:blue;z-index:-1">low</div>
+    <div id="auto" style="position:absolute;inset:0;background:green">auto</div>
+  </div>`, 20, 10);
+  const backgroundOrder = stacked.displayList.commands
+    .filter((command) => command.kind === "background")
+    .map((command) => stacked.layout.fragment(command.layoutFragment).documentNode);
+  assert.ok(backgroundOrder.indexOf(elementById(stacked, "low")) < backgroundOrder.indexOf(elementById(stacked, "auto")));
+  assert.ok(backgroundOrder.indexOf(elementById(stacked, "auto")) < backgroundOrder.indexOf(elementById(stacked, "high")));
+
+  const nestedStack = render(`<div style="position:relative;width:40px;height:16px">
+    <div id="normal-stack" style="position:static;width:40px;height:16px;background:blue">
+      <span id="negative-stack" style="position:absolute;inset:0;background:red;z-index:-1">negative</span>
+    </div></div>`, 20, 6);
+  const normalPaint = nestedStack.displayList.commands.find((command) => command.kind === "background"
+    && command.documentNode === elementById(nestedStack, "normal-stack"));
+  const negativePaint = nestedStack.displayList.commands.find((command) => command.kind === "background"
+    && command.documentNode === elementById(nestedStack, "negative-stack"));
+  assert.ok(normalPaint && negativePaint && negativePaint.paintOrder < normalPaint.paintOrder);
+
+  const scrolled = render(`<div style="height:64px">before</div>
+    <div id="scrolled-sticky" style="position:sticky;top:0;height:16px">sticky</div>
+    <div id="scrolled-fixed" style="position:fixed;top:0;right:0;height:16px">fixed</div>`,
+  20, 4, {}, { scrollRow: 5 });
+  const scrollportY = cssPx(80);
+  assert.equal(principalFragment(scrolled, elementById(scrolled, "scrolled-sticky")).borderRect.y, scrollportY);
+  assert.equal(principalFragment(scrolled, elementById(scrolled, "scrolled-fixed")).borderRect.y, scrollportY);
+
+  const directionalInsets = render(`<div id="direction-cb" style="position:relative;width:100px">
+    <div id="rtl-absolute" style="position:absolute;direction:rtl;left:10px;right:20px;width:30px">a</div>
+    <div id="rtl-relative" style="position:relative;direction:rtl;left:10px;right:20px;width:30px">r</div>
+  </div>`, 20, 8);
+  const directionalContaining = principalFragment(directionalInsets, elementById(directionalInsets, "direction-cb"));
+  const rtlAbsolute = principalFragment(directionalInsets, elementById(directionalInsets, "rtl-absolute"));
+  const rtlRelative = principalFragment(directionalInsets, elementById(directionalInsets, "rtl-relative"));
+  assert.equal(cssPixels(rtlAbsolute.borderRect.x - directionalContaining.paddingRect.x), 50);
+  assert.equal(cssPixels(rtlRelative.borderRect.x - directionalContaining.contentRect.x), -20);
+});
+
+test("floats shorten line boxes, logical floats use computed direction, and clear applies clearance", () => {
+  const result = render(`<div id="flow" style="width:120px;direction:rtl">
+    <aside id="float" style="float:inline-start;width:24px;height:32px">F</aside>
+    text wraps beside the floated box
+    <div id="cleared" style="clear:inline-start;height:16px">clear</div>
+  </div>`, 30, 20);
+  const floated = principalFragment(result, elementById(result, "float"));
+  const cleared = principalFragment(result, elementById(result, "cleared"));
+  const flow = principalFragment(result, elementById(result, "flow"));
+  assert.equal(floated.contentRect.width, cssPx(24));
+  assert.ok(floated.borderRect.x > flow.contentRect.x);
+  assert.ok(result.layout.lineBoxes.some((line) => line.rect.x + line.rect.width <= floated.marginRect.x));
+  assert.ok(result.layout.lineBoxes.some((line) =>
+    line.rect.y >= floated.marginRect.y + floated.marginRect.height && line.rect.width === flow.contentRect.width));
+  assert.ok(cleared.borderRect.y >= floated.marginRect.y + floated.marginRect.height);
+});
+
 test("flex cross-axis alignment moves complete fixed-point fragment subtrees", () => {
   const result = render(`<div id="flex" style="display:flex;width:12ch;align-items:flex-end">
     <div id="short" style="width:4ch;height:1em">short</div>
@@ -563,6 +761,40 @@ test("flex cross-axis alignment moves complete fixed-point fragment subtrees", (
   assert.ok(short.borderRect.y > tall.borderRect.y);
   assert.equal(short.borderRect.y + short.borderRect.height, tall.borderRect.y + tall.borderRect.height);
   assert.ok(short.lineBoxes.every((line) => line.rect.y >= short.contentRect.y));
+});
+
+test("flex line cross sizes apply stretch, align-content, and column wrapping", () => {
+  const single = render(`<div style="display:flex;width:100px;height:60px;align-items:stretch">
+    <div id="auto">auto</div><div id="definite" style="height:10px">fixed</div></div>`, 30, 20);
+  assert.equal(cssPixels(principalFragment(single, elementById(single, "auto")).marginRect.height), 60);
+  assert.equal(cssPixels(principalFragment(single, elementById(single, "definite")).contentRect.height), 10);
+
+  const wrapped = render(`<div style="display:flex;flex-wrap:wrap;width:100px;height:100px;align-content:stretch">
+    <div id="row-one" style="width:60px">one</div><div id="row-two" style="width:60px">two</div></div>`, 30, 20);
+  const rowOne = principalFragment(wrapped, elementById(wrapped, "row-one"));
+  const rowTwo = principalFragment(wrapped, elementById(wrapped, "row-two"));
+  assert.equal(cssPixels(rowOne.marginRect.height), 50);
+  assert.equal(cssPixels(rowTwo.marginRect.height), 50);
+  assert.equal(rowTwo.marginRect.y, rowOne.marginRect.y + rowOne.marginRect.height);
+
+  const columns = render(`<div style="display:flex;flex-direction:column;flex-wrap:wrap;width:100px;height:60px;align-content:stretch">
+    <div id="column-one" style="height:40px">one</div><div id="column-two" style="height:40px">two</div></div>`, 30, 20);
+  const columnOne = principalFragment(columns, elementById(columns, "column-one"));
+  const columnTwo = principalFragment(columns, elementById(columns, "column-two"));
+  assert.equal(cssPixels(columnOne.marginRect.width), 50);
+  assert.equal(cssPixels(columnTwo.marginRect.width), 50);
+  assert.equal(columnTwo.marginRect.x, columnOne.marginRect.x + columnOne.marginRect.width);
+
+  const wrapReverse = render(`<div style="display:flex;flex-wrap:wrap-reverse;align-content:flex-start;width:100px;height:100px">
+    <div id="reverse-one" style="width:60px">one</div><div id="reverse-two" style="width:60px">two</div></div>`, 30, 20);
+  assert.ok(principalFragment(wrapReverse, elementById(wrapReverse, "reverse-one")).marginRect.y
+    > principalFragment(wrapReverse, elementById(wrapReverse, "reverse-two")).marginRect.y);
+
+  const rtlColumns = render(`<div style="display:flex;direction:rtl;flex-direction:column;flex-wrap:wrap;
+    align-content:flex-start;width:100px;height:60px">
+    <div id="rtl-column-one" style="height:40px">one</div><div id="rtl-column-two" style="height:40px">two</div></div>`, 30, 20);
+  assert.ok(principalFragment(rtlColumns, elementById(rtlColumns, "rtl-column-one")).marginRect.x
+    > principalFragment(rtlColumns, elementById(rtlColumns, "rtl-column-two")).marginRect.x);
 });
 
 test("CSS geometry is invariant across color depth and Unicode capability", () => {
@@ -806,7 +1038,8 @@ test("layout, display-list construction, and cell rasterization honor cancellati
     context: {
       viewport: { width: cssPx(160), height: cssPx(160) },
       textMeasurer,
-      initialContainingBlock: cssRect(cssCoordinate(ZERO), cssCoordinate(ZERO), cssPx(160), cssPx(160))
+      initialContainingBlock: cssRect(cssCoordinate(ZERO), cssCoordinate(ZERO), cssPx(160), cssPx(160)),
+      scrollport: cssRect(cssCoordinate(ZERO), cssCoordinate(ZERO), cssPx(160), cssPx(160))
     },
     signal: layoutController.signal
   }), { name: "AbortError" });

@@ -92,7 +92,7 @@ test("layout, display-list, and cell-rasterizer boundaries are explicit", async 
   assert.doesNotMatch(layout, /\.\.\.profiles\.flatMap/u);
   assert.ok(!terminalFiles.includes("layout.ts"));
   assert.ok(!terminalFiles.includes("visible-text.ts"));
-  const formerHelpers = /\b(?:buildFragmentTree|FragmentTree|TerminalFragment|TerminalRow|estimatedHeight|flexBasis|InlineCursor|buildVisibleTextIndex|VisibleTextIndex)\b/u;
+  const formerHelpers = /\b(?:buildFragmentTree|FragmentTree|TerminalFragment|TerminalRow|estimatedHeight|InlineCursor|buildVisibleTextIndex|VisibleTextIndex)\b/u;
   for (const [path, text] of await files(await sourcePaths())) {
     assert.doesNotMatch(text, formerHelpers, `${path} retains former terminal-cell layout ownership`);
   }
@@ -142,6 +142,30 @@ test("Unicode text analysis has one pinned internal ownership path", async () =>
   const generatedOwners = (await sourcePaths()).filter((path) => path.endsWith("generated/unicode-17.ts"));
   assert.deepEqual(generatedOwners, ["src/unicode/generated/unicode-17.ts"]);
   assert.doesNotMatch(rootDeclaration, /\b(?:BidiParagraph|BidiRun|LineBreakMap|GraphemeClusterStream|ProcessedCssText)\b/u);
+});
+
+test("web compatibility tooling and CSS ownership remain outside the runtime rendering path", async () => {
+  const manifest = JSON.parse(await source("package.json"));
+  const lockfile = await source("package-lock.json");
+  const application = await source("src/app/session.ts");
+  const dependencyInspection = await source("src/presentation/style/stylesheet-dependencies.ts");
+  const valueEvaluator = await source("src/presentation/style/css-values.ts");
+  const flexLayout = await source("src/presentation/layout/flex.ts");
+  const terminal = (await files((await sourcePaths()).filter((path) => path.startsWith("src/presentation/terminal/"))))
+    .map(([, text]) => text).join("\n");
+  assert.equal(manifest.dependencies?.["playwright-core"], undefined);
+  assert.equal(manifest.devDependencies?.["playwright-core"], undefined);
+  assert.doesNotMatch(lockfile, /(?:playwright|puppeteer|chromium)/iu);
+  for (const [path, text] of await files(await sourcePaths())) {
+    assert.doesNotMatch(text, /(?:playwright|puppeteer|chromium)/iu, `${path} contains a browser-backed runtime path`);
+  }
+  assert.match(application, /inspectStylesheetBytes/u);
+  assert.doesNotMatch(dependencyInspection, /(?:fetch\(|Http|Cookie|node:)/u);
+  assert.match(valueEvaluator, /parseComponentValues/u);
+  assert.match(valueEvaluator, /resolveCssVariables/u);
+  assert.match(flexLayout, /resolveFlexibleLengths/u);
+  assert.match(flexLayout, /collectLines/u);
+  assert.doesNotMatch(terminal, /(?:flexBaseSize|resolveFlexLines|positionedContainingBlock|float:\s*["'])/u);
 });
 
 test("the document barrel exposes no concrete snapshot or parser implementation", async () => {

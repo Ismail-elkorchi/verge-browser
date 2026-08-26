@@ -76,9 +76,11 @@
   client. It cannot be combined with `networkClient`.
 - `loader` and `streamLoader` replace the built-in page fetchers.
 - `stylesheetLoader` replaces external CSS fetching.
-- `stylesheetPolicy` bounds stylesheet count, per-resource bytes, and aggregate
-  transport/buffering work. Stylesheets load in document order so later
-  requests are not started after the aggregate budget is exhausted.
+- `stylesheetPolicy` bounds root stylesheet count, per-resource and aggregate
+  bytes, recursive import depth and source count, aggregate imported bytes,
+  redirects, parsed rules, and dependency edges. Stylesheets load in
+  deterministic depth-first cascade order so later requests are not started
+  after a relevant budget is exhausted.
 - `parseOptions` accepts Verge-owned parse budgets and
   defaults to the package's bounded HTML parse profile. Structure, source
   spans, retained decoded source, disabled scripting, and summary diagnostics
