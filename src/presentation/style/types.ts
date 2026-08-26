@@ -74,7 +74,14 @@ export interface ComputedTextStyle {
   readonly lineThrough: boolean;
   readonly textTransform: "none" | "uppercase" | "lowercase" | "capitalize";
   readonly whiteSpace: ComputedWhiteSpace;
-  readonly textAlign: "left" | "center" | "right";
+  readonly direction: "ltr" | "rtl";
+  readonly unicodeBidi: "normal" | "embed" | "isolate" | "bidi-override" | "isolate-override" | "plaintext";
+  readonly textAlign: "start" | "end" | "left" | "center" | "right";
+  readonly lineBreak: "auto" | "normal" | "anywhere";
+  readonly wordBreak: "normal" | "break-all" | "keep-all" | "break-word";
+  readonly overflowWrap: "normal" | "anywhere" | "break-word";
+  readonly hyphens: "none" | "manual";
+  readonly tabSize: number;
   readonly textIndent: CssLength;
   /** Absolute computed font size. */
   readonly fontSize: CssLength;

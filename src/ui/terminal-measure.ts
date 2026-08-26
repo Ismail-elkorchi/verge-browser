@@ -1,5 +1,4 @@
 import {
-  segmentGraphemes,
   terminalTextWidth,
   type TextWidthProfile
 } from "@ismail-elkorchi/terminal-ui/text";
@@ -20,19 +19,19 @@ function widthProfile(ambiguousWidth: 1 | 2): TextWidthProfile {
   return { emoji: "wide", ambiguous: ambiguousWidth === 2 ? "wide" : "narrow" };
 }
 
+function asciiCellWidth(text: string): number | null {
+  for (let index = 0; index < text.length; index += 1) {
+    const codeUnit = text.charCodeAt(index);
+    if (codeUnit < 0x20 || codeUnit > 0x7e) return null;
+  }
+  return text.length;
+}
+
 export function terminalCellMeasurer(ambiguousWidth: 1 | 2 = 1): TerminalCellMeasurer {
   const profile = widthProfile(ambiguousWidth);
   return {
     width(text) {
-      return terminalTextWidth(text, { widthProfile: profile });
-    },
-    graphemes(text) {
-      return segmentGraphemes(text).map((segment) => ({
-        text: segment.text,
-        startCodeUnit: segment.startOffset,
-        endCodeUnit: segment.endOffsetExclusive,
-        cells: terminalTextWidth(segment.text, { widthProfile: profile })
-      }));
+      return asciiCellWidth(text) ?? terminalTextWidth(text, { widthProfile: profile });
     }
   };
 }
@@ -42,7 +41,6 @@ export function terminalCssTextMeasurer(
   rowHeightCssPx: CssPixelLength = cssPx(16),
   ambiguousWidth: 1 | 2 = 1
 ): CssTextMeasurer {
-  const profile = widthProfile(ambiguousWidth);
   const cells = terminalCellMeasurer(ambiguousWidth);
   const metrics = (fontSize: CssPixelLength): UsedFontMetrics => {
     const scale = fontSize / cssPx(16);
@@ -63,18 +61,6 @@ export function terminalCssTextMeasurer(
   return {
     measure(text, fontSize) {
       return cssMultiply(cssMultiply(cellWidthCssPx, cells.width(text)), fontSize / cssPx(16));
-    },
-    graphemes(text, fontSize) {
-      const scale = fontSize / cssPx(16);
-      return segmentGraphemes(text).map((segment) => Object.freeze({
-        text: segment.text,
-        startCodeUnit: segment.startOffset,
-        endCodeUnit: segment.endOffsetExclusive,
-        advance: cssMultiply(
-          cellWidthCssPx,
-          terminalTextWidth(segment.text, { widthProfile: profile }) * scale
-        )
-      }));
     },
     fontMetrics: metrics,
     defaultFontMetrics() {

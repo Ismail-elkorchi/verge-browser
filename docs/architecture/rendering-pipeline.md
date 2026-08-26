@@ -6,6 +6,7 @@ Verge has one HTML rendering path:
 IndexedWebDocumentSnapshot
 → StyleSnapshot
 → FormattingTree
+→ InlineItemStreamSet
 → LayoutFragmentTree
 → TerminalDisplayList
 → TerminalCellBuffer
@@ -34,11 +35,19 @@ layout model.
 - `src/presentation/formatting/` owns CSS box generation, anonymous repair,
   formatting-context classification, generated boxes, and formatting-node
   identity. A formatting tree has no dimensions or positions.
+- `src/unicode/` owns the pinned Unicode 17.0.0 property tables, UAX #9,
+  UAX #14, and UAX #29 primitives, version metadata, and checksum-backed
+  generated data. It imports no browser-engine subsystem.
+- `src/presentation/text/` builds immutable inline-item streams, applies CSS
+  text transformation and white-space processing, and combines generic Unicode
+  primitives with document and computed-style identities. It owns no CSS box
+  dimensions, search index, or terminal cells.
 - `src/presentation/layout/` owns containing blocks, computed-to-used value
   resolution, intrinsic contributions, block and inline formatting contexts,
   line boxes, margin collapse, replaced and control geometry, and the supported
   table, flex, and grid algorithms. It has no terminal dependency.
 - `src/presentation/search/` owns the viewport-independent `TextSearchIndex`.
+  It consumes inline-item streams and owns no text input needed by layout.
   Logical match IDs map to layout text fragments before terminal rasterization.
 - `src/presentation/terminal/display-list.ts` derives ordered terminal paint
   commands from layout fragments. It does not calculate CSS geometry.
@@ -83,8 +92,9 @@ CSS-pixel text measurer, and layout budgets. Layout derives root font metrics
 from the computed root-element font size after style resolution. The root
 element resolves `rem` in its own `font-size` against the initial font size;
 descendants resolve `rem` against that computed root size. One top-level
-cancellation signal is passed through style resolution, box generation, text
-search indexing, layout, display-list construction, and cell rasterization.
+cancellation signal is passed through style resolution, box generation,
+inline-item stream construction, text search indexing, layout, display-list
+construction, and cell rasterization.
 Terminal rows, columns, color capability, and Unicode capability do not enter
 layout. Text metrics, advances, grapheme boundaries, and fixed-point inputs are
 validated at their subsystem boundaries; malformed values produce typed
@@ -105,8 +115,17 @@ baseline, intrinsic contributions, visual order, paint order, action identity,
 and semantic identity. One formatting box may produce several fragments.
 
 Each immutable line box records its CSS rectangle, baseline, ascent, descent,
-logical text fragments, and visual-order slots. Verge currently preserves
-logical text order and does not claim a Unicode bidi implementation.
+logical item range, break cause, source-linked text fragments, resolved
+embedding levels, bidi runs, and visual runs. Each inline formatting context
+owns an immutable inline-item stream across ordinary inline box boundaries;
+atomic inline boxes own independent inner streams, so their trailing white-space
+state cannot affect the containing context. CSS white-space processing and UAX #29
+grapheme boundaries precede UAX #9 paragraph resolution and UAX #14/CSS break
+opportunities. Layout selects logical lines from fixed-point advances, applies
+the UAX #9 per-line reset and reordering rules, and then creates visual runs and
+the corresponding fragment geometry. Display-list construction traverses the
+actual layout fragment tree in CSS paint order; it never substitutes identities
+from a visual-order list and does not reorder text.
 
 Replaced boxes, form controls, `inline-block`, `inline-table`, `inline-flex`,
 and `inline-grid` boxes are atomic inline boxes. Their inner formatting context
@@ -134,6 +153,12 @@ actual terminal cell, wide graphemes remain atomic, and larger CSS advances may
 produce cell gaps because a terminal cannot resize glyphs. Later paint commands
 win collisions. Source-over alpha composition occurs before terminal
 color-depth quantization.
+
+Every text paint command carries layout-established grapheme clusters with
+their logical content range and document source range. The cell rasterizer does
+not segment, line-break, or run the bidi algorithm. Terminal emulators remain
+responsible for glyph shaping; correct Arabic bidi order does not imply that
+Verge implements an Arabic shaping engine.
 
 The hit-test index comes from clipped action-bearing content, padding, and
 border geometry; every retained region has a stable routing identity. The
@@ -165,5 +190,11 @@ prefixes.
 - Layout fragments contain no terminal cells, ANSI styles, or terminal-ui types.
 - Display-list construction consumes layout fragments.
 - Cell rasterization consumes terminal paint commands.
+- Search consumes logical text; line placement and painting consume visual
+  runs. No reordered search string or row-based search path exists.
+- Physical and logical box properties compete in the cascade; horizontal
+  logical sides map only after the element's computed `direction` is known.
+- Unicode property lookup is pinned to Unicode 17.0.0 and never depends on the
+  host ICU or operating-system Unicode version.
 - Budget, cancellation, unsupported, rejected, and truncated behavior is typed;
   control flow never matches diagnostic prose.

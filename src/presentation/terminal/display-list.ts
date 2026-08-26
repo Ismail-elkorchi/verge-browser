@@ -63,12 +63,10 @@ export function validTerminalRenderContext(input: BuildTerminalDisplayListInput[
     && (depth === 0 || depth === 4 || depth === 8 || depth === 24)
     && typeof input.unicode === "boolean"
     && (ambiguous === 1 || ambiguous === 2)
-    && typeof input.cellMeasurer.width === "function"
-    && typeof input.cellMeasurer.graphemes === "function";
+    && typeof input.cellMeasurer.width === "function";
 }
 
 function commandGroup(fragment: LayoutFragment): readonly Omit<TerminalPaintCommand, "paintOrder">[] {
-  if (!fragment.style.visible) return [];
   const common = {
     layoutFragment: fragment.id,
     formattingNode: fragment.formattingNode,
@@ -82,7 +80,7 @@ function commandGroup(fragment: LayoutFragment): readonly Omit<TerminalPaintComm
     style: fragment.style
   } as const;
   const commands: Omit<TerminalPaintCommand, "paintOrder">[] = [];
-  if (fragment.kind !== "text") {
+  if (fragment.style.visible && fragment.kind !== "text") {
     const boxes = fragment.inlineContinuations ?? [{
       contentRect: fragment.contentRect,
       paddingRect: fragment.paddingRect,
@@ -123,16 +121,17 @@ function commandGroup(fragment: LayoutFragment): readonly Omit<TerminalPaintComm
       }
     }
   }
-  const text = fragment.kind === "text" ? fragment.text
+  const text = fragment.kind === "text" ? fragment.visualText
     : fragment.kind === "control" ? fragment.controlText ?? ""
       : fragment.kind === "replaced" ? fragment.replacedText ?? "" : "";
-  if (text.length > 0) {
+  if (fragment.style.visible && text.length > 0) {
     commands.push(Object.freeze({
       ...common,
       id: `terminal-paint:text:${fragment.id}`,
       kind: "text",
       rect: fragment.contentRect,
-      text
+      text,
+      clusters: fragment.visualClusters ?? Object.freeze([])
     }));
   }
   return commands;

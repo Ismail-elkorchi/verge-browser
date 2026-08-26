@@ -5,7 +5,8 @@ import type {
   FormattingTree
 } from "../formatting/index.js";
 import { formattingNodeLogicalText } from "../formatting/index.js";
-import { transformTextWithSourceRanges, transformedSourceRange } from "../text/index.js";
+import type { InlineItemStreamSet } from "../text/index.js";
+import type { LayoutFragmentId, LayoutFragmentTree } from "../layout/index.js";
 
 export type TextSearchMatchId = string & { readonly __textSearchMatchId: unique symbol };
 
@@ -27,6 +28,15 @@ export interface TextSearchMatch {
 export interface TextSearchResult {
   readonly matches: readonly TextSearchMatch[];
   readonly truncated: boolean;
+}
+
+export interface TextSearchLayoutSpan {
+  readonly match: TextSearchMatchId;
+  readonly fragment: LayoutFragmentId;
+  readonly documentNode: DocumentNodeRef | null;
+  readonly sourceRange: DocumentSourceRange | null;
+  readonly contentStartCodeUnit: number;
+  readonly contentEndCodeUnit: number;
 }
 
 export interface TextSearchIndex {
@@ -76,7 +86,10 @@ class ImmutableTextSearchIndex implements TextSearchIndex {
   readonly text: string;
   readonly #segments: readonly TextSearchSegment[];
 
-  public constructor(text: string, segments: readonly TextSearchSegment[]) {
+  public constructor(
+    text: string,
+    segments: readonly TextSearchSegment[]
+  ) {
     this.text = text;
     this.#segments = Object.freeze(segments.map((segment) => Object.freeze(segment)));
     Object.freeze(this);
@@ -146,7 +159,14 @@ class ImmutableTextSearchIndex implements TextSearchIndex {
   }
 }
 
-export function buildTextSearchIndex(tree: FormattingTree, signal?: AbortSignal): TextSearchIndex {
+export function buildTextSearchIndex(
+  tree: FormattingTree,
+  inlineItemStreams: InlineItemStreamSet,
+  signal?: AbortSignal
+): TextSearchIndex {
+  if (inlineItemStreams.formatting !== tree) {
+    throw new RangeError("Inline item streams and text search must use the same box tree.");
+  }
   const parts: string[] = [];
   const segments: TextSearchSegment[] = [];
   let length = 0;
@@ -186,20 +206,21 @@ export function buildTextSearchIndex(tree: FormattingTree, signal?: AbortSignal)
       sourceRange
     };
   };
-  const appendRenderedText = (node: FormattingNode, raw: string): void => {
+  const appendRenderedText = (node: FormattingNode): void => {
     const style = node.styleNode === null ? null : node.pseudo === null
       ? tree.styles.style(node.styleNode)
       : tree.styles.pseudo(node.styleNode, node.pseudo) ?? tree.styles.style(node.styleNode);
-    if (style?.visibility !== "visible") return;
-    const mapped = transformTextWithSourceRanges(raw, style.text.textTransform);
-    for (const match of mapped.value.matchAll(/\s+|\S+/gu)) {
-      const value = match[0];
-      const start = match.index;
-      const end = start + value.length;
-      const [contentStart, contentEnd] = transformedSourceRange(mapped, start, end);
-      const segment = nodeSegment(node, contentStart, contentEnd);
-      if (/^\s+$/u.test(value)) separator(segment);
-      else append(value, segment);
+    if (style === null) return;
+    const processed = inlineItemStreams.textForFormattingNode(node.id);
+    if (processed === null || processed.outcome.status !== "complete") {
+      throw new RangeError("Inline item streams do not contain logical text for a retained formatting node.");
+    }
+    if (style.visibility !== "visible") return;
+    for (const unit of processed.units) {
+      const segment = nodeSegment(node, unit.contentStartCodeUnit, unit.contentEndCodeUnit);
+      if (unit.kind === "soft-hyphen") continue;
+      if (unit.kind === "forced-break" || unit.kind === "tab" || unit.collapsibleSpace) separator(segment);
+      else append(unit.text, segment);
     }
   };
   const pending: ({ readonly phase: "enter"; readonly id: FormattingNodeId }
@@ -212,13 +233,17 @@ export function buildTextSearchIndex(tree: FormattingTree, signal?: AbortSignal)
     if (entry === undefined) continue;
     const node = tree.node(entry.id);
     if (entry.phase === "exit") {
-      if (node.outer === "block") separator(nodeSegment(node, 0, 0));
+      if (node.outer === "block") {
+        separator(nodeSegment(node, 0, 0));
+      }
       continue;
     }
-    if (node.outer === "block") separator(nodeSegment(node, 0, 0));
+    if (node.outer === "block") {
+      separator(nodeSegment(node, 0, 0));
+    }
     const logicalText = formattingNodeLogicalText(node, tree);
     if (logicalText !== null) {
-      appendRenderedText(node, logicalText);
+      appendRenderedText(node);
       continue;
     }
     if (node.kind === "forced-line-break") {
@@ -232,4 +257,44 @@ export function buildTextSearchIndex(tree: FormattingTree, signal?: AbortSignal)
     }
   }
   return new ImmutableTextSearchIndex(parts.join(""), segments);
+}
+
+/** Maps logical search matches to the visual text fragments created by layout. */
+export function mapTextSearchMatchesToLayout(
+  index: TextSearchIndex,
+  layout: LayoutFragmentTree,
+  query: string,
+  limit: number
+): readonly TextSearchLayoutSpan[] {
+  const spans: TextSearchLayoutSpan[] = [];
+  for (const match of index.search(query, limit).matches) {
+    for (const slice of match.slices) {
+      for (const fragment of layout.forFormattingNode(slice.formatting)) {
+        const fragmentStart = fragment.contentStartCodeUnit;
+        const fragmentEnd = fragment.contentEndCodeUnit;
+        if (fragmentStart === null || fragmentEnd === null
+          || !(fragment.kind === "text" || (fragment.visualClusters?.length ?? 0) > 0)
+          || slice.contentStart >= fragmentEnd || slice.contentEnd <= fragmentStart) continue;
+        const contentStartCodeUnit = Math.max(slice.contentStart, fragmentStart);
+        const contentEndCodeUnit = Math.min(slice.contentEnd, fragmentEnd);
+        let sourceRange: DocumentSourceRange | null = slice.sourceRange;
+        if (sourceRange !== null && fragment.sourceRange !== null) {
+          const start = Math.max(sourceRange.start, fragment.sourceRange.start);
+          const end = Math.min(sourceRange.end, fragment.sourceRange.end);
+          sourceRange = end > start
+            ? Object.freeze({ start, end, provenance: sourceRange.provenance })
+            : null;
+        }
+        spans.push(Object.freeze({
+          match: match.id,
+          fragment: fragment.id,
+          documentNode: fragment.documentNode,
+          sourceRange,
+          contentStartCodeUnit,
+          contentEndCodeUnit
+        }));
+      }
+    }
+  }
+  return Object.freeze(spans);
 }

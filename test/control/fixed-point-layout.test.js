@@ -20,10 +20,12 @@ import {
   cssRect,
   cssSubtract,
   cssUnion,
-  isSafeCssFixedValue
+  isSafeCssFixedValue,
+  selectLogicalLines
 } from "../../dist/presentation/layout/index.js";
 import { buildTextSearchIndex } from "../../dist/presentation/search/index.js";
 import { resolveStyles } from "../../dist/presentation/style/index.js";
+import { buildInlineItemStreamSet } from "../../dist/presentation/text/index.js";
 import {
   buildTerminalDisplayList,
   rasterizeTerminalDisplayList
@@ -66,10 +68,11 @@ function formatting(html, columns = 80, rows = 24, formattingBudgets) {
 
 function renderFormatting(formattingTree, columns, rows = 24, budgets = {}, capabilities = {}) {
   const textMeasurer = terminalCssTextMeasurer(CELL_WIDTH, ROW_HEIGHT);
-  const searchIndex = buildTextSearchIndex(formattingTree);
+  const inlineItemStreams = buildInlineItemStreamSet(formattingTree);
+  const searchIndex = buildTextSearchIndex(formattingTree, inlineItemStreams);
   const layout = buildLayoutFragmentTree({
     formatting: formattingTree,
-    searchIndex,
+    inlineItemStreams,
     context: {
       viewport: {
         width: cssLengthFromFixed(columns * CELL_WIDTH),
@@ -97,8 +100,8 @@ function renderFormatting(formattingTree, columns, rows = 24, budgets = {}, capa
     ...(budgets.terminal === undefined ? {} : { budgets: budgets.terminal })
   };
   const displayList = buildTerminalDisplayList({ layout, context });
-  const terminal = rasterizeTerminalDisplayList({ displayList });
-  return { formatting: formattingTree, searchIndex, layout, displayList, terminal };
+  const terminal = rasterizeTerminalDisplayList({ displayList, textSearchIndex: searchIndex });
+  return { formatting: formattingTree, inlineItemStreams, searchIndex, layout, displayList, terminal };
 }
 
 function render(html, columns = 80, rows = 24, budgets = {}, capabilities = {}) {
@@ -168,6 +171,7 @@ test("fixed-point arithmetic saturates and invalid layout inputs are rejected by
   assert.throws(() => cssPx(Number.POSITIVE_INFINITY), RangeError);
   const tree = formatting(`<p>text</p>`, 20);
   const textMeasurer = terminalCssTextMeasurer(CELL_WIDTH, ROW_HEIGHT);
+  const inlineItemStreams = buildInlineItemStreamSet(tree);
   const context = {
     viewport: { width: cssPx(160), height: cssPx(160) },
     textMeasurer,
@@ -175,13 +179,13 @@ test("fixed-point arithmetic saturates and invalid layout inputs are rejected by
   };
   const invalidContext = buildLayoutFragmentTree({
     formatting: tree,
-    searchIndex: buildTextSearchIndex(tree),
+    inlineItemStreams,
     context: { ...context, viewport: { width: ZERO, height: cssPx(160) } }
   });
   assert.deepEqual(invalidContext.outcome, { status: "rejected", reason: "invalid-context" });
   const invalidMeasurement = buildLayoutFragmentTree({
     formatting: tree,
-    searchIndex: buildTextSearchIndex(tree),
+    inlineItemStreams,
     context: {
       ...context,
       textMeasurer: { ...textMeasurer, measure() { throw new RangeError("invalid metric"); } }
@@ -190,7 +194,7 @@ test("fixed-point arithmetic saturates and invalid layout inputs are rejected by
   assert.deepEqual(invalidMeasurement.outcome, { status: "rejected", reason: "invalid-fixed-point-input" });
   const unsafeMetrics = buildLayoutFragmentTree({
     formatting: tree,
-    searchIndex: buildTextSearchIndex(tree),
+    inlineItemStreams,
     context: {
       ...context,
       textMeasurer: {
@@ -204,7 +208,7 @@ test("fixed-point arithmetic saturates and invalid layout inputs are rejected by
   assert.deepEqual(unsafeMetrics.outcome, { status: "rejected", reason: "invalid-fixed-point-input" });
   const invalidBudget = buildLayoutFragmentTree({
     formatting: tree,
-    searchIndex: buildTextSearchIndex(tree),
+    inlineItemStreams,
     context: { ...context, budgets: { maxFragments: 0 } }
   });
   assert.deepEqual(invalidBudget.outcome, { status: "rejected", reason: "invalid-budget" });
@@ -218,6 +222,20 @@ test("standards-derived layout cases pin WPT provenance and license", () => {
   assert.match(provenance.commit, /^[0-9a-f]{40}$/u);
   assert.match(provenance.license, /BSD/u);
   assert.ok(provenance.adaptations.length >= 26);
+  assert.ok(provenance.adaptations.every((entry) =>
+    entry.source && entry.behavior && entry.terminalAdjustment && /BSD/u.test(entry.license)
+  ));
+});
+
+test("standards-derived Unicode text cases pin WPT and Unicode provenance", () => {
+  const provenance = JSON.parse(readFileSync(
+    new URL("../fixtures/wpt-text-provenance.json", import.meta.url),
+    "utf8"
+  ));
+  assert.match(provenance.commit, /^[0-9a-f]{40}$/u);
+  assert.equal(provenance.unicodeVersion, "17.0.0");
+  assert.match(provenance.license, /BSD/u);
+  assert.ok(provenance.adaptations.length >= 18);
   assert.ok(provenance.adaptations.every((entry) =>
     entry.source && entry.behavior && entry.terminalAdjustment && /BSD/u.test(entry.license)
   ));
@@ -355,8 +373,17 @@ test("inline formatting creates explicit line boxes with source-linked text frag
   const paragraph = principalFragment(result, elementById(result, "p"));
   assert.ok(paragraph.lineBoxes.length >= 3);
   assert.ok(paragraph.lineBoxes.every((line) => line.rect.height > 0 && line.baseline >= line.rect.y));
+  assert.ok(paragraph.lineBoxes.every((line) => line.usedInlineAdvance > 0));
+  assert.ok(paragraph.lineBoxes.every((line) =>
+    line.embeddingLevels.length === line.logicalItemEnd - line.logicalItemStart
+    && line.sourceRanges.length > 0
+  ));
   assert.ok(paragraph.lineBoxes.flatMap((line) => line.textFragments)
     .every((id) => result.layout.fragment(id).sourceRange !== null));
+  const identityResult = render(`<p id="p"><a href="/next">linked text</a></p>`, 20);
+  const identityLine = principalFragment(identityResult, elementById(identityResult, "p")).lineBoxes[0];
+  assert.equal(identityLine?.actions.some((action) => action.kind === "link"), true);
+  assert.equal(identityLine?.semantics.some((semantic) => semantic.role === "link"), true);
 });
 
 test("line boxes calculate ascent, descent, height, baseline, and vertical alignment", () => {
@@ -414,6 +441,32 @@ test("whitespace modes and forced breaks are resolved during line construction",
   assert.ok(unbreakableBox.overflowRect.width > unbreakableBox.borderRect.width);
 });
 
+test("inline item streams scope collapsible white space to their inline formatting context", () => {
+  const atomic = render(`<p>A<span id="atomic" style="display:inline-block">x </span> B</p>`, 30);
+  assert.equal(renderedText(atomic), "Ax B");
+  assert.equal(atomic.searchIndex.text, "Ax B");
+  const atomicNode = elementById(atomic, "atomic");
+  const atomicFormatting = atomic.formatting.forSource(atomicNode)
+    .find((node) => node.outer === "inline" && node.appliesBoxStyle);
+  assert.ok(atomicFormatting);
+  const outerStream = atomic.inlineItemStreams.streams.find((stream) => stream.items.some(
+    (item) => item.kind === "atomic-inline" && item.formattingNode === atomicFormatting.id
+  ));
+  assert.ok(outerStream);
+  const atomicIndex = outerStream.items.findIndex((item) => item.kind === "atomic-inline");
+  assert.equal(outerStream.items[atomicIndex + 1]?.kind, "text");
+  assert.equal(outerStream.items[atomicIndex + 1]?.text, " ");
+  const innerStream = atomic.inlineItemStreams.streams.find(
+    (stream) => stream.containingFormattingBox === atomicFormatting.id
+  );
+  assert.ok(innerStream);
+  assert.equal(innerStream.collapsibleSpacePending, true);
+
+  const contents = render(`<p>A<span style="display:contents"> B</span> C<br>D<wbr> E</p>`, 30);
+  assert.equal(renderedText(contents), "A B C\nD E");
+  assert.equal(contents.searchIndex.text, "A B C D E");
+});
+
 test("long unbreakable text remains one source-linked overflowing text fragment", () => {
   const text = "x".repeat(100_000);
   const result = render(`<p id="p" style="width:4ch">${text}</p>`, 20);
@@ -447,6 +500,9 @@ test("generated text, list markers, controls, and replaced boxes share line-box 
   const kinds = new Set(result.displayList.commands.map((command) => result.layout.fragment(command.layoutFragment).kind));
   assert.ok(kinds.has("control"));
   assert.ok(kinds.has("replaced"));
+  const controlSearch = result.terminal.search("value");
+  assert.equal(controlSearch.matches.length, 1);
+  assert.ok(controlSearch.matches[0].ranges.length > 0);
 });
 
 test("atomic controls resolve box sizing and min/max constraints in CSS pixels", () => {
@@ -551,7 +607,10 @@ test("cell differences arise only during terminal snapping", () => {
   assert.equal(principalFragment(normal, elementById(normal, "box")).contentRect.width, cssPx(17));
   assert.equal(narrowCells.layout, normal.layout);
   assert.notDeepEqual(
-    rasterizeTerminalDisplayList({ displayList: narrowCells }).cellBuffer,
+    rasterizeTerminalDisplayList({
+      displayList: narrowCells,
+      textSearchIndex: normal.searchIndex
+    }).cellBuffer,
     normal.terminal.cellBuffer
   );
 });
@@ -658,11 +717,43 @@ test("every layout budget finalizes a connected fragment prefix", () => {
       columns: 20,
       budget: { maxDepth: 3 },
       expected: "maxDepth"
+    },
+    {
+      tree: formatting(`<p>abcdef</p>`, 20), columns: 20,
+      budget: { maxCodePointsPerBidiParagraph: 3 }, expected: "maxCodePointsPerBidiParagraph"
+    },
+    {
+      tree: formatting(`<p>abcdef</p>`, 20), columns: 20,
+      budget: { maxBidiItems: 3 }, expected: "maxBidiItems"
+    },
+    {
+      tree: formatting(`<p><span style="direction:rtl;unicode-bidi:embed">abc</span></p>`, 20), columns: 20,
+      budget: { maxBidiEmbeddingDepth: 0 }, expected: "maxBidiEmbeddingDepth"
+    },
+    {
+      tree: formatting(`<p>aאb</p>`, 20), columns: 20,
+      budget: { maxBidiRuns: 1 }, expected: "maxBidiRuns"
+    },
+    {
+      tree: formatting(`<p>abcdef</p>`, 20), columns: 20,
+      budget: { maxGraphemeClusters: 3 }, expected: "maxGraphemeClusters"
+    },
+    {
+      tree: formatting(`<p>abcdef</p>`, 20), columns: 20,
+      budget: { maxBreakOpportunities: 3 }, expected: "maxBreakOpportunities"
+    },
+    {
+      tree: formatting(`<p>aאb</p>`, 20), columns: 20,
+      budget: { maxVisualRuns: 1 }, expected: "maxVisualRuns"
+    },
+    {
+      tree: formatting(`<p style="width:1ch;overflow-wrap:anywhere">abc</p>`, 20), columns: 20,
+      budget: { maxLineFragments: 1 }, expected: "maxLineFragments"
     }
   ];
   for (const fixture of cases) {
     const result = renderFormatting(fixture.tree, fixture.columns, 10, { layout: fixture.budget });
-    assert.equal(result.layout.outcome.status, "truncated");
+    assert.equal(result.layout.outcome.status, "truncated", fixture.expected);
     assert.equal(result.layout.outcome.budget, fixture.expected);
     const reached = reachableFragments(result.layout);
     assert.equal(reached.size, result.layout.outcome.fragments);
@@ -672,6 +763,38 @@ test("every layout budget finalizes a connected fragment prefix", () => {
   }
 });
 
+test("logical line selection retains complete line prefixes and resolves preserved tabs at CSS tab stops", () => {
+  const item = (logicalIndex, advance, breakBefore = "prohibited", tabInterval = null) => ({
+    logicalIndex,
+    advance: cssPx(advance),
+    tabInterval: tabInterval === null ? null : cssPx(tabInterval),
+    breakBefore,
+    forcedBreak: false,
+    collapsibleSpace: false,
+    wrappingAllowed: true
+  });
+  const tabs = selectLogicalLines(
+    [item(0, 1), item(1, 0, "prohibited", 4), item(2, 1)],
+    cssPx(20),
+    cssPx(20)
+  );
+  assert.equal(tabs.outcome.status, "complete");
+  assert.equal(tabs.usedAdvances.get(1), cssPx(3));
+  const zero = selectLogicalLines([item(0, 1)], cssPx(2), cssPx(2), { maxSelectedLines: 0 });
+  assert.deepEqual(zero.outcome, {
+    status: "truncated", lines: 0, budget: "maxSelectedLines", limit: 0
+  });
+  assert.equal(zero.retainedItems, 0);
+  const prefix = selectLogicalLines(
+    [item(0, 2), item(1, 2, "allowed"), item(2, 2, "allowed")],
+    cssPx(2),
+    cssPx(2),
+    { maxSelectedLines: 2 }
+  );
+  assert.equal(prefix.outcome.status, "truncated");
+  assert.equal(prefix.retainedItems, 2);
+});
+
 test("layout, display-list construction, and cell rasterization honor cancellation", () => {
   const tree = formatting(`<p>${"word ".repeat(100)}</p>`, 20);
   const textMeasurer = terminalCssTextMeasurer(CELL_WIDTH, ROW_HEIGHT);
@@ -679,7 +802,7 @@ test("layout, display-list construction, and cell rasterization honor cancellati
   layoutController.abort();
   assert.throws(() => buildLayoutFragmentTree({
     formatting: tree,
-    searchIndex: buildTextSearchIndex(tree),
+    inlineItemStreams: buildInlineItemStreamSet(tree),
     context: {
       viewport: { width: cssPx(160), height: cssPx(160) },
       textMeasurer,
@@ -701,7 +824,11 @@ test("layout, display-list construction, and cell rasterization honor cancellati
     context: complete.displayList.context
   });
   paintController.abort();
-  assert.throws(() => rasterizeTerminalDisplayList({ displayList, signal: paintController.signal }), { name: "AbortError" });
+  assert.throws(() => rasterizeTerminalDisplayList({
+    displayList,
+    textSearchIndex: complete.searchIndex,
+    signal: paintController.signal
+  }), { name: "AbortError" });
 });
 
 test("terminal paint budgets truncate only the cell buffer", () => {
@@ -849,7 +976,11 @@ test("text and border paint-unit generation remain cancellable and prefix determ
     }
   };
   assert.throws(
-    () => rasterizeTerminalDisplayList({ displayList: bordered.displayList, signal }),
+    () => rasterizeTerminalDisplayList({
+      displayList: bordered.displayList,
+      textSearchIndex: bordered.searchIndex,
+      signal
+    }),
     { name: "AbortError" }
   );
 });
@@ -872,14 +1003,14 @@ test("terminal budget validation keeps zero as no-work and rejects malformed lim
       ...zero.displayList.context,
       budgets: undefined,
       cellMeasurer: {
-        width() { return 1; },
-        graphemes(value) {
-          return [{ text: value, startCodeUnit: 0, endCodeUnit: value.length, cells: Number.NaN }];
-        }
+        width() { return Number.NaN; }
       }
     }
   });
-  const malformed = rasterizeTerminalDisplayList({ displayList: malformedList });
+  const malformed = rasterizeTerminalDisplayList({
+    displayList: malformedList,
+    textSearchIndex: zero.searchIndex
+  });
   assert.deepEqual(malformed.cellBuffer.outcome, {
     status: "rejected",
     reason: "invalid-cell-measurement"
@@ -896,22 +1027,22 @@ test("terminal actual values preserve every grapheme at all supported CSS font s
       .join("");
     assert.equal(text, "abcdef", `font-size ${String(size)}px`);
   }
-  for (const sample of [
-    "العربية",
-    "עברית",
-    "e\u0301",
-    "👍🏽",
-    "👩‍👩‍👧‍👦",
-    "🇲🇦",
-    "界",
-    "a界👍🏽b"
+  for (const [sample, actual] of [
+    ["العربية", "ةيبرعلا"],
+    ["עברית", "תירבע"],
+    ["e\u0301", "e\u0301"],
+    ["👍🏽", "👍🏽"],
+    ["👩‍👩‍👧‍👦", "👩‍👩‍👧‍👦"],
+    ["🇲🇦", "🇲🇦"],
+    ["界", "界"],
+    ["a界👍🏽b", "a界👍🏽b"]
   ]) {
     const result = render(`<span>${sample}</span>`, 80, 10);
     const text = result.terminal.cellBuffer.rows.flatMap((row) => row.cells)
       .filter((cell) => result.displayList.commands.find((command) => command.id === cell.command)?.kind === "text")
       .map((cell) => cell.text)
       .join("");
-    assert.equal(text, sample);
+    assert.equal(text, actual);
   }
   const highlighted = render(`<span>a👍🏽b</span>`, 20, 10);
   const highlight = highlighted.terminal.search("👍🏽").ranges[0];
@@ -922,6 +1053,148 @@ test("terminal actual values preserve every grapheme at all supported CSS font s
   assert.doesNotMatch(renderedText(clippedWide), /界/u);
   assert.equal(clippedWide.terminal.cellBuffer.rows.flatMap((row) => row.cells)
     .some((cell) => cell.text === "界"), false);
+});
+
+test("bidi paragraphs span inline boxes while tree paint order retains fragment identities", () => {
+  const result = render(`<p id="mixed">abc <span>אבג</span> 123</p>`, 20);
+  const paragraph = principalFragment(result, elementById(result, "mixed"));
+  assert.equal(paragraph.lineBoxes.length, 1);
+  assert.deepEqual(
+    paragraph.lineBoxes[0].visualRuns.map(({ direction, embeddingLevel }) => [direction, embeddingLevel]),
+    [["ltr", 0], ["ltr", 2], ["rtl", 1]]
+  );
+  assert.equal(renderedText(result), "abc 123 גבא");
+  assert.equal(
+    result.displayList.commands.filter((command) => command.kind === "text").map((command) => command.text).join(""),
+    "abc גבא 123"
+  );
+  const narrow = render(`<p>abc <span>אבג</span> 123</p>`, 8).terminal.search("אבג");
+  const wide = result.terminal.search("אבג");
+  assert.equal(narrow.matches[0]?.id, wide.matches[0]?.id);
+  const oppositeDirection = render(`<p dir="rtl">abc <span>אבג</span> 123</p>`, 20).terminal.search("אבג");
+  assert.equal(oppositeDirection.matches[0]?.id, wide.matches[0]?.id);
+  const acrossRuns = result.terminal.search("c אב");
+  assert.equal(acrossRuns.matches.length, 1);
+  assert.ok(acrossRuns.ranges.length >= 3);
+  assert.equal(wide.ranges.length, 3);
+  assert.equal(
+    [...wide.ranges].sort((left, right) => left.startCodeUnit - right.startCodeUnit)
+      .map((range) => result.terminal.cellBuffer.rows.find((row) => row.row === range.row)?.text
+      .slice(range.startCodeUnit, range.endCodeUnit)).join(""),
+    "גבא"
+  );
+  assert.deepEqual(
+    wide.ranges.map((range) => range.sourceRange && result.formatting.document.sourceText
+      .slice(range.sourceRange.start, range.sourceRange.end)),
+    ["א", "ב", "ג"]
+  );
+});
+
+test("atomic inline visual geometry does not replace CSS tree paint order", () => {
+  const result = render(`<p dir="rtl" style="margin:0"><a id="a" href="/a"
+    style="display:inline-block;padding:8px;border:solid 8px;background:#224466">A</a><a id="b" href="/b"
+    style="display:inline-block;padding:8px;border:solid 8px;background:#662244">B</a></p>`, 20, 10);
+  const first = principalFragment(result, elementById(result, "a"));
+  const second = principalFragment(result, elementById(result, "b"));
+  const paintSequence = result.displayList.commands.flatMap((command) => {
+    if (command.kind === "background" && command.layoutFragment === first.id) return ["background:A"];
+    if (command.kind === "background" && command.layoutFragment === second.id) return ["background:B"];
+    if (command.kind === "text" && (command.text === "A" || command.text === "B")) return [`text:${command.text}`];
+    return [];
+  });
+  assert.deepEqual(paintSequence, ["background:A", "text:A", "background:B", "text:B"]);
+  assert.ok(first.borderRect.x > second.borderRect.x);
+  assert.ok(result.terminal.hitTestIndex.regions.some((region) => region.action.node === elementById(result, "a")));
+  assert.ok(result.terminal.hitTestIndex.regions.some((region) => region.action.node === elementById(result, "b")));
+});
+
+test("bidi inline backgrounds keep their own fragments and CSS paint phases", () => {
+  const result = render(`<p dir="rtl"><span id="red" style="background:red;padding:8px;border:solid 8px">A</span>
+    <span id="blue" style="background:blue;padding:8px;border:solid 8px">B</span></p>`, 30, 10);
+  const redNode = elementById(result, "red");
+  const blueNode = elementById(result, "blue");
+  const red = result.layout.forDocumentNode(redNode).find((fragment) => fragment.kind === "box");
+  const blue = result.layout.forDocumentNode(blueNode).find((fragment) => fragment.kind === "box");
+  assert.ok(red);
+  assert.ok(blue);
+  const descendsFrom = (fragment, ancestor) => {
+    let current = result.layout.fragment(fragment);
+    while (current.id !== ancestor) {
+      const parent = result.layout.parent(current.id);
+      if (parent === null) return false;
+      current = parent;
+    }
+    return true;
+  };
+  assert.ok(red.borderRect.width > 0);
+  assert.ok(blue.borderRect.width > 0);
+  assert.notEqual(red.borderRect.x, blue.borderRect.x);
+  const redCommands = result.displayList.commands.filter((command) => command.documentNode === redNode);
+  const blueCommands = result.displayList.commands.filter((command) => command.documentNode === blueNode);
+  assert.ok(redCommands.length > 0);
+  assert.ok(blueCommands.length > 0);
+  assert.ok(redCommands.every((command) => command.layoutFragment === red.id
+    || result.layout.parent(command.layoutFragment)?.id === red.id));
+  assert.ok(blueCommands.every((command) => command.layoutFragment === blue.id
+    || result.layout.parent(command.layoutFragment)?.id === blue.id));
+  const redBackground = result.displayList.commands.findIndex(
+    (command) => command.kind === "background" && command.layoutFragment === red.id
+  );
+  const redText = result.displayList.commands.findIndex(
+    (command) => command.kind === "text" && descendsFrom(command.layoutFragment, red.id)
+  );
+  const blueBackground = result.displayList.commands.findIndex(
+    (command) => command.kind === "background" && command.layoutFragment === blue.id
+  );
+  const blueText = result.displayList.commands.findIndex(
+    (command) => command.kind === "text" && descendsFrom(command.layoutFragment, blue.id)
+  );
+  assert.ok(redBackground >= 0 && redBackground < redText);
+  assert.ok(blueBackground > redText && blueBackground < blueText);
+});
+
+test("paragraph direction, overrides, logical alignment, and per-line bidi reordering are used during layout", () => {
+  const rtl = render(`<p dir="rtl">אבג (123) abc</p>`, 20);
+  assert.equal(renderedText(rtl).trimStart(), "abc (123) גבא");
+  const overridden = render(`<p><bdo dir="rtl">abc</bdo></p>`, 20);
+  assert.equal(renderedText(overridden), "cba");
+  const wrapped = render(`<p style="width:5ch;overflow-wrap:anywhere">abcאבג123</p>`, 20);
+  assert.deepEqual(wrapped.terminal.cellBuffer.rows.map((row) => row.text), ["abcבא", "123ג"]);
+  assert.deepEqual(
+    wrapped.layout.lineBoxes.map((line) => line.breakCause),
+    ["wrap", "end-of-paragraph"]
+  );
+});
+
+test("wbr and manual soft hyphens create source-linked break opportunities without changing logical search text", () => {
+  const wordBreak = render(`<p style="width:2ch">ab<wbr>cd</p>`, 20);
+  assert.deepEqual(wordBreak.terminal.cellBuffer.rows.map((row) => row.text), ["ab", "cd"]);
+  assert.equal(wordBreak.searchIndex.text.includes("\u200b"), false);
+  assert.equal(wordBreak.terminal.search("abcd").matches.length, 1);
+
+  const brokenHyphen = render(`<p style="width:3ch">ab\u00adcd</p>`, 20);
+  assert.deepEqual(brokenHyphen.terminal.cellBuffer.rows.map((row) => row.text), ["ab-", "cd"]);
+  assert.equal(brokenHyphen.terminal.search("abcd").matches.length, 1);
+  const unbrokenHyphen = render(`<p style="width:10ch">ab\u00adcd</p>`, 20);
+  assert.equal(renderedText(unbrokenHyphen), "abcd");
+  const disabled = render(`<p style="width:3ch;hyphens:none">ab\u00adcd</p>`, 20);
+  assert.equal(renderedText(disabled), "abcd");
+  assert.equal(disabled.layout.lineBoxes.length, 1);
+});
+
+test("preserved tabs use inherited CSS tab-size and plaintext chooses each paragraph base direction", () => {
+  const tabs = render(`<pre style="margin:0;tab-size:4">a\tb</pre>`, 20);
+  assert.equal(renderedText(tabs), "a   b");
+  assert.equal(tabs.terminal.search("a b").matches.length, 1);
+  const plaintext = render(`<pre dir="auto" style="margin:0">abc\nאבג</pre>`, 20);
+  assert.deepEqual(plaintext.terminal.cellBuffer.rows.map((row) => row.text.trimStart()), ["abc", "גבא"]);
+  assert.deepEqual(
+    plaintext.terminal.cellBuffer.rows.map((row) => row.cells.find((cell) => cell.text.length > 0)?.column),
+    [0, 17]
+  );
+
+  const rtlIndent = render(`<p dir="rtl" style="margin:0;width:10ch;text-indent:2ch">אבג</p>`, 20);
+  assert.equal(rtlIndent.terminal.cellBuffer.rows[0]?.cells.find((cell) => cell.text.length > 0)?.column, 5);
 });
 
 test("inline formatting contexts remain atomic line participants", () => {

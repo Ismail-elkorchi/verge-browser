@@ -10,6 +10,10 @@ import {
 } from "./layout/index.js";
 import { buildTextSearchIndex, type TextSearchIndex } from "./search/index.js";
 import {
+  buildInlineItemStreamSet,
+  type InlineItemStreamSet
+} from "./text/index.js";
+import {
   resolveStyles, type MediaEnvironment, type StyleBudgets, type StyleDiagnostic,
   type StylesheetResource, type StyleSnapshot
 } from "./style/index.js";
@@ -41,6 +45,7 @@ export interface RenderDocumentInput {
 export interface RenderPipelineResult {
   readonly styles: StyleSnapshot;
   readonly formatting: FormattingTree;
+  readonly inlineItemStreams: InlineItemStreamSet;
   readonly textSearchIndex: TextSearchIndex;
   readonly layout: LayoutFragmentTree;
   readonly displayList: TerminalDisplayList;
@@ -88,10 +93,11 @@ export function renderDocument(input: RenderDocumentInput): RenderPipelineResult
     ...(input.budgets?.formatting === undefined ? {} : { budgets: input.budgets.formatting }),
     ...(input.signal === undefined ? {} : { signal: input.signal })
   });
-  const textSearchIndex = buildTextSearchIndex(formatting, input.signal);
+  const inlineItemStreams = buildInlineItemStreamSet(formatting, input.signal);
+  const textSearchIndex = buildTextSearchIndex(formatting, inlineItemStreams, input.signal);
   const layout = buildLayoutFragmentTree({
     formatting,
-    searchIndex: textSearchIndex,
+    inlineItemStreams,
     context: {
       ...input.layoutContext,
       ...(input.budgets?.layout === undefined ? {} : { budgets: input.budgets.layout })
@@ -108,7 +114,8 @@ export function renderDocument(input: RenderDocumentInput): RenderPipelineResult
   });
   const terminal = rasterizeTerminalDisplayList({
     displayList,
+    textSearchIndex,
     ...(input.signal === undefined ? {} : { signal: input.signal })
   });
-  return Object.freeze({ styles, formatting, textSearchIndex, layout, displayList, terminal });
+  return Object.freeze({ styles, formatting, inlineItemStreams, textSearchIndex, layout, displayList, terminal });
 }

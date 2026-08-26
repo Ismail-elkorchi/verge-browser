@@ -1,5 +1,6 @@
 export interface TransformedText {
   readonly value: string;
+  readonly sourceMapping: "identity" | "mapped";
   readonly sourceUnits: readonly { readonly start: number; readonly end: number }[];
 }
 
@@ -7,6 +8,9 @@ export function transformTextWithSourceRanges(
   value: string,
   transform: "none" | "uppercase" | "lowercase" | "capitalize"
 ): TransformedText {
+  if (transform === "none") {
+    return Object.freeze({ value, sourceMapping: "identity", sourceUnits: Object.freeze([]) });
+  }
   let output = "";
   const sourceUnits: { readonly start: number; readonly end: number }[] = [];
   let sourceOffset = 0;
@@ -15,7 +19,7 @@ export function transformTextWithSourceRanges(
     let transformed = codePoint;
     if (transform === "uppercase") transformed = codePoint.toUpperCase();
     else if (transform === "lowercase") transformed = codePoint.toLowerCase();
-    else if (transform === "capitalize") {
+    else {
       if (capitalizeNext && /\p{L}/u.test(codePoint)) transformed = codePoint.toUpperCase();
       capitalizeNext = /[\s\p{P}]/u.test(codePoint);
     }
@@ -25,7 +29,7 @@ export function transformTextWithSourceRanges(
     }
     sourceOffset += codePoint.length;
   }
-  return Object.freeze({ value: output, sourceUnits: Object.freeze(sourceUnits) });
+  return Object.freeze({ value: output, sourceMapping: "mapped", sourceUnits: Object.freeze(sourceUnits) });
 }
 
 export function transformedSourceRange(
@@ -33,6 +37,7 @@ export function transformedSourceRange(
   start: number,
   end: number
 ): readonly [number, number] {
+  if (transformed.sourceMapping === "identity") return [start, end];
   const first = transformed.sourceUnits[start];
   const last = transformed.sourceUnits[end - 1];
   return first === undefined || last === undefined ? [start, end] : [first.start, last.end];

@@ -84,7 +84,8 @@ function inlineLevel(node: FormattingNode): boolean {
   return node.outer === "inline"
     || node.kind === "text-sequence"
     || node.kind === "marker"
-    || node.kind === "forced-line-break";
+    || node.kind === "forced-line-break"
+    || node.kind === "line-break-opportunity";
 }
 
 function collapsesEntireTextRun(node: FormattingNode): boolean {
@@ -315,10 +316,10 @@ class FormattingBuilder {
     });
   }
 
-  #break(source: DocumentNodeRef, styleNode: DocumentNodeRef): FormattingNode {
+  #break(source: DocumentNodeRef, styleNode: DocumentNodeRef, forced: boolean): FormattingNode {
     return this.#store({
-      id: this.#id(source, "forced-line-break"),
-      kind: "forced-line-break",
+      id: this.#id(source, forced ? "forced-line-break" : "line-break-opportunity"),
+      kind: forced ? "forced-line-break" : "line-break-opportunity",
       source,
       styleNode,
       pseudo: null,
@@ -670,7 +671,9 @@ class FormattingBuilder {
       else return this.#rawChildren(source, depth);
       return [];
     }
-    if (semantic?.behavior === "forced-break") return [this.#break(source, source)];
+    if (semantic?.behavior === "forced-break" || semantic?.behavior === "break-opportunity") {
+      return [this.#break(source, source, semantic.behavior === "forced-break")];
+    }
     if (semantic?.behavior === "form-control") {
       const control = this.#formControl(source, style);
       return control === null ? [] : [control];

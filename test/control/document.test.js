@@ -19,6 +19,12 @@ function element(document, name) {
   return undefined;
 }
 
+function byId(document, id) {
+  const ref = document.elementById(id);
+  assert.ok(ref, `Missing #${id}`);
+  return ref;
+}
+
 test("document snapshots preserve structure, namespaces, stable references, and source metadata", () => {
   const document = parseWebDocument(`<!doctype html><html><head>
     <base href="/assets/"><title>Structural page</title>
@@ -215,4 +221,57 @@ test("deep documents preserve structure without recursive indexing stack exhaust
     current = child?.kind === "element" ? child : undefined;
   }
   assert.equal(observedDepth, depth);
+});
+
+test("HTML directionality is indexed with Unicode first-strong, isolation, override, and rendered attribute text", () => {
+  const document = parseWebDocument(`<main dir="rtl">
+    <p id="inherited">neutral 123</p>
+    <p id="ltr" dir="LTR">العربية Latin</p>
+    <p id="auto-rtl" dir="auto">123 العربية Latin</p>
+    <p id="auto-ltr" dir="auto">123 Latin العربية</p>
+    <p id="auto-neutral" dir="auto">123</p>
+    <p id="malformed" dir="sideways">text</p>
+    <bdi id="bdi">123 עברית</bdi>
+    <bdi id="bdi-neutral">123</bdi>
+    <bdo id="bdo" dir="rtl">Latin</bdo>
+    <input id="telephone" type="tel" value="العربية">
+    <input id="explicit-telephone" type="tel" dir="rtl" value="123">
+    <input id="control" dir="auto" value="123 עברית" placeholder="Latin placeholder" aria-label="العربية">
+    <textarea id="textarea" dir="auto">123 Latin</textarea>
+    <img id="image" alt="עברית" title="Latin">
+  </main>`, context);
+
+  assert.deepEqual(document.directionality(byId(document, "inherited")), {
+    node: byId(document, "inherited"), direction: "rtl", htmlMode: null,
+    source: "inherited", isolates: false, overrides: false, renderedText: []
+  });
+  assert.equal(document.directionality(byId(document, "ltr")).direction, "ltr");
+  assert.equal(document.directionality(byId(document, "auto-rtl")).direction, "rtl");
+  assert.equal(document.directionality(byId(document, "auto-ltr")).direction, "ltr");
+  assert.equal(document.directionality(byId(document, "auto-neutral")).direction, "ltr");
+  assert.equal(document.directionality(byId(document, "malformed")).direction, "rtl");
+  assert.deepEqual(
+    {
+      direction: document.directionality(byId(document, "bdi")).direction,
+      mode: document.directionality(byId(document, "bdi")).htmlMode,
+      isolates: document.directionality(byId(document, "bdi")).isolates
+    },
+    { direction: "rtl", mode: "auto", isolates: true }
+  );
+  assert.equal(document.directionality(byId(document, "bdi-neutral")).direction, "ltr");
+  assert.equal(document.directionality(byId(document, "bdo")).overrides, true);
+  assert.equal(document.directionality(byId(document, "telephone")).direction, "ltr");
+  assert.equal(document.directionality(byId(document, "explicit-telephone")).direction, "rtl");
+  assert.equal(document.directionality(byId(document, "control")).direction, "rtl");
+  assert.equal(document.directionality(byId(document, "textarea")).direction, "ltr");
+  assert.equal(document.directionForRenderedText(byId(document, "telephone"), "العربية"), "ltr");
+  assert.equal(document.directionForRenderedText(byId(document, "control"), "Latin"), "ltr");
+  assert.deepEqual(
+    document.directionality(byId(document, "control")).renderedText.map(({ kind, direction }) => [kind, direction]),
+    [["placeholder", "ltr"], ["control-value", "rtl"], ["accessible-name", "rtl"]]
+  );
+  assert.deepEqual(
+    document.directionality(byId(document, "image")).renderedText.map(({ kind, direction }) => [kind, direction]),
+    [["alternative-text", "rtl"], ["title", "rtl"]]
+  );
 });

@@ -14,12 +14,18 @@ import type {
 
 export type FormattingNodeId = string & { readonly __formattingNodeId: unique symbol };
 
+export type DocumentActionIdentity =
+  | { readonly kind: "link"; readonly node: DocumentNodeRef; readonly destination: string }
+  | { readonly kind: "form-control"; readonly node: DocumentNodeRef; readonly form: DocumentNodeRef | null }
+  | { readonly kind: "disclosure"; readonly node: DocumentNodeRef; readonly open: boolean };
+
 export type FormattingNodeKind =
   | "root"
   | "block-container"
   | "inline-container"
   | "text-sequence"
   | "forced-line-break"
+  | "line-break-opportunity"
   | "anonymous-block"
   | "anonymous-inline"
   | "list-item"
@@ -89,7 +95,7 @@ export interface FormattingTextNode extends FormattingNodeBase {
 }
 
 export interface FormattingBreakNode extends FormattingNodeBase {
-  readonly kind: "forced-line-break";
+  readonly kind: "forced-line-break" | "line-break-opportunity";
 }
 
 export interface FormattingReplacedNode extends FormattingNodeBase {

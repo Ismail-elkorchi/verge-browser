@@ -5,11 +5,14 @@ import {
   type ParsedDocument,
   type Span
 } from "@ismail-elkorchi/html-parser";
+import { bidiClass } from "../unicode/index.js";
 
 import type {
   DocumentAttribute,
   DocumentChoiceControl,
   DocumentDisclosure,
+  DocumentDirection,
+  DocumentDirectionality,
   DocumentForm,
   DocumentFormControl,
   DocumentHeading,
@@ -23,6 +26,7 @@ import type {
   DocumentOutlineEntry,
   DocumentParserDiagnostic,
   DocumentReplacedContent,
+  RenderedTextKind,
   DocumentSelectOption,
   DocumentSemanticEntry,
   DocumentSemanticRole,
@@ -49,6 +53,17 @@ const KNOWN_INPUT_TYPES = new Set([
   "time", "datetime-local", "number", "range", "color", "checkbox", "radio", "file", "submit",
   "image", "reset", "button"
 ]);
+
+function firstStrongDirection(value: string): DocumentDirection | null {
+  for (const character of value) {
+    const point = character.codePointAt(0);
+    if (point === undefined) continue;
+    const type = bidiClass(point);
+    if (type === "L") return "ltr";
+    if (type === "R" || type === "AL") return "rtl";
+  }
+  return null;
+}
 
 interface SnapshotContext {
   readonly requestUrl: string;
@@ -263,7 +278,9 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
   readonly #headings: ReadonlyMap<DocumentNodeRef, DocumentHeading>;
   readonly #replaced: ReadonlyMap<DocumentNodeRef, DocumentReplacedContent>;
   readonly #disclosures: ReadonlyMap<DocumentNodeRef, DocumentDisclosure>;
+  readonly #directionalities: ReadonlyMap<DocumentNodeRef, DocumentDirectionality>;
   readonly #textRanges: ReadonlyMap<DocumentNodeRef, readonly [number, number]>;
+  readonly #directTextSourceMappings: ReadonlySet<DocumentNodeRef>;
   readonly #documentText: string;
   public constructor(parsed: ParsedDocument, context: SnapshotContext) {
     this.sourceText = parsed.sourceText;
@@ -447,6 +464,16 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
     }
     this.#documentText = textParts.join("");
     this.#textRanges = textRanges;
+    const directTextSourceMappings = new Set<DocumentNodeRef>();
+    if (this.sourceText !== null) {
+      for (const node of nodes.values()) {
+        if (node.kind !== "text" || node.sourceRange === null) continue;
+        if (this.sourceText.slice(node.sourceRange.start, node.sourceRange.end) === node.value) {
+          directTextSourceMappings.add(node.ref);
+        }
+      }
+    }
+    this.#directTextSourceMappings = directTextSourceMappings;
     const text = (ref: DocumentNodeRef, maxCodeUnits = 32_768): string => {
       const range = textRanges.get(ref);
       return range === undefined ? "" : this.#documentText.slice(range[0], Math.min(range[1], range[0] + maxCodeUnits));
@@ -585,8 +612,8 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
         accessibleName: name,
         accessibleDescription: accessibleDescription(element),
         accessibilityHidden: accessibilityHidden.get(element.ref) === true,
-        behavior: element.namespace === HTML_NAMESPACE_URI && element.name === "br"
-          ? "forced-break"
+        behavior: element.namespace === HTML_NAMESPACE_URI && (element.name === "br" || element.name === "wbr")
+          ? element.name === "br" ? "forced-break" : "break-opportunity"
           : isControl
             ? "form-control"
             : isReplaced
@@ -1046,6 +1073,109 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
     this.#replaced = new Map(replaced.map((entry) => [entry.node, entry]));
     this.#disclosures = new Map(disclosures.map((entry) => [entry.node, entry]));
 
+    const htmlMode = (ref: DocumentNodeRef): "ltr" | "rtl" | "auto" | null => {
+      const value = attribute(ref, "dir")?.trim().toLowerCase();
+      return value === "ltr" || value === "rtl" || value === "auto" ? value : null;
+    };
+    const autoText = (element: WebElementNode): string => {
+      if (element.namespace === HTML_NAMESPACE_URI && element.name === "input") return attribute(element.ref, "value") ?? "";
+      if (element.namespace === HTML_NAMESPACE_URI && element.name === "textarea") return text(element.ref);
+      const parts: string[] = [];
+      const pending = [...element.children].reverse();
+      while (pending.length > 0) {
+        const ref = pending.pop();
+        const child = ref === undefined ? undefined : nodes.get(ref);
+        if (child?.kind === "text") {
+          parts.push(child.value);
+          if (firstStrongDirection(child.value) !== null) break;
+          continue;
+        }
+        if (child?.kind !== "element") continue;
+        const isolatesDirection = child.namespace === HTML_NAMESPACE_URI
+          && (child.name === "bdi" || child.name === "script" || child.name === "style" || child.name === "textarea");
+        if (isolatesDirection || htmlMode(child.ref) !== null) continue;
+        for (let index = child.children.length - 1; index >= 0; index -= 1) {
+          const descendant = child.children[index];
+          if (descendant !== undefined) pending.push(descendant);
+        }
+      }
+      return parts.join("");
+    };
+    const directionalities = new Map<DocumentNodeRef, DocumentDirectionality>();
+    const pendingDirection = [{ ref: this.root, inherited: "ltr" as DocumentDirection }];
+    while (pendingDirection.length > 0) {
+      const current = pendingDirection.pop();
+      if (current === undefined) continue;
+      const node = nodes.get(current.ref);
+      if (node === undefined) continue;
+      let direction = current.inherited;
+      let mode: "ltr" | "rtl" | "auto" | null = null;
+      const isBdi = node.kind === "element" && node.namespace === HTML_NAMESPACE_URI && node.name === "bdi";
+      let directionSource: DocumentDirectionality["source"] = node.kind === "document" ? "document-default" : "inherited";
+      if (node.kind === "element") {
+        mode = htmlMode(node.ref);
+        const telephone = node.namespace === HTML_NAMESPACE_URI && node.name === "input"
+          && (attribute(node.ref, "type") ?? "text").trim().toLowerCase() === "tel";
+        if (mode === "ltr" || mode === "rtl") {
+          direction = mode;
+          directionSource = "explicit";
+        } else if (telephone) {
+          direction = "ltr";
+          directionSource = "telephone-input";
+        } else if (mode === "auto" || isBdi) {
+          direction = firstStrongDirection(autoText(node)) ?? "ltr";
+          directionSource = "auto-first-strong";
+          mode ??= "auto";
+        }
+      }
+      const renderedText: { readonly kind: RenderedTextKind; readonly value: string; readonly direction: DocumentDirection }[] = [];
+      if (node.kind === "element") {
+        const candidates = [
+          ["placeholder", "placeholder"],
+          ["alt", "alternative-text"],
+          ["title", "title"],
+          ["value", "control-value"],
+          ["aria-label", "accessible-name"]
+        ] as const;
+        for (const [name, kind] of candidates) {
+          const value = attribute(node.ref, name);
+          if (value !== null) renderedText.push(Object.freeze({
+            kind,
+            value,
+            direction: mode === "auto" && (name === "placeholder" || name === "alt" || name === "title")
+              ? firstStrongDirection(value) ?? "ltr"
+              : direction
+          }));
+        }
+        const label = labelTextByTarget.get(node.ref);
+        if (label !== undefined) renderedText.push(Object.freeze({
+          kind: "label", value: label, direction
+        }));
+        if (node.name === "textarea") {
+          const value = text(node.ref);
+          renderedText.push(Object.freeze({
+            kind: "control-value",
+            value,
+            direction: mode === "auto" ? firstStrongDirection(value) ?? direction : direction
+          }));
+        }
+      }
+      directionalities.set(node.ref, Object.freeze({
+        node: node.ref,
+        direction,
+        htmlMode: mode,
+        source: directionSource,
+        isolates: node.kind === "element" && node.namespace === HTML_NAMESPACE_URI && node.name === "bdi",
+        overrides: node.kind === "element" && node.namespace === HTML_NAMESPACE_URI && node.name === "bdo",
+        renderedText: Object.freeze(renderedText)
+      }));
+      for (let index = node.children.length - 1; index >= 0; index -= 1) {
+        const child = node.children[index];
+        if (child !== undefined) pendingDirection.push({ ref: child, inherited: direction });
+      }
+    }
+    this.#directionalities = directionalities;
+
     this.diagnostics = Object.freeze(parsed.tree.errors.map((error): DocumentParserDiagnostic => Object.freeze({
       id: error.parseErrorId,
       message: error.message,
@@ -1110,8 +1240,7 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
       || startCodeUnit < 0 || endCodeUnit < startCodeUnit || endCodeUnit > node.value.length) {
       throw new RangeError("Text source offsets must be a valid half-open range");
     }
-    const retained = this.sourceText.slice(node.sourceRange.start, node.sourceRange.end);
-    if (retained === node.value) {
+    if (this.#directTextSourceMappings.has(ref)) {
       return Object.freeze({
         start: node.sourceRange.start + startCodeUnit,
         end: node.sourceRange.start + endCodeUnit,
@@ -1172,6 +1301,17 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
 
   public disclosure(ref: DocumentNodeRef): DocumentDisclosure | null {
     return this.#disclosures.get(ref) ?? null;
+  }
+
+  public directionality(ref: DocumentNodeRef): DocumentDirectionality {
+    const entry = this.#directionalities.get(ref);
+    if (entry === undefined) throw new RangeError(`Unknown document node reference: ${ref}`);
+    return entry;
+  }
+
+  public directionForRenderedText(ref: DocumentNodeRef, value: string): DocumentDirection {
+    const entry = this.directionality(ref);
+    return entry.htmlMode === "auto" ? firstStrongDirection(value) ?? "ltr" : entry.direction;
   }
 
 }

@@ -21,6 +21,7 @@ import {
 
 import {
   type DocumentNodeRef,
+  type DocumentState,
   type WebDocumentNode,
   type IndexedWebDocumentSnapshot,
   type WebElementNode
@@ -59,7 +60,8 @@ const DEFAULT_STYLE_BUDGETS: StyleBudgets = Object.freeze({
 const SUPPORTED_PROPERTIES = new Set([
   "display", "visibility", "white-space", "color", "background", "background-color",
   "font-weight", "font-style", "text-decoration", "text-decoration-line", "text-transform",
-  "font-size", "line-height", "vertical-align", "text-align", "text-indent",
+  "font-size", "line-height", "vertical-align", "direction", "unicode-bidi", "text-align", "text-indent",
+  "line-break", "word-break", "overflow-wrap", "hyphens", "tab-size",
   "list-style", "list-style-type", "margin", "margin-top", "margin-right",
   "margin-bottom", "margin-left", "margin-block", "margin-block-start", "margin-block-end",
   "margin-inline", "margin-inline-start", "margin-inline-end", "padding", "padding-top",
@@ -76,7 +78,8 @@ const SUPPORTED_PROPERTIES = new Set([
 
 const INHERITED_PROPERTIES = new Set([
   "visibility", "white-space", "color", "font-weight", "font-style", "font-size", "line-height", "text-transform",
-  "text-align", "text-indent", "list-style", "list-style-type"
+  "direction", "text-align", "text-indent", "line-break", "word-break", "overflow-wrap", "hyphens", "tab-size",
+  "list-style", "list-style-type"
 ]);
 
 const ASCII_INSENSITIVE_ATTRIBUTES = new Set([
@@ -941,7 +944,7 @@ function edges(value: CssLength = ZERO): CssEdges {
   return { top: value, right: value, bottom: value, left: value };
 }
 
-function initialStyle(parent: ComputedStyle | null, replaced: boolean): ComputedStyle {
+function initialStyle(parent: ComputedStyle | null, replaced: boolean, htmlDirection: "ltr" | "rtl" | null): ComputedStyle {
   return {
     display: initialDisplay(replaced),
     visibility: parent?.visibility ?? "visible",
@@ -955,7 +958,14 @@ function initialStyle(parent: ComputedStyle | null, replaced: boolean): Computed
       lineThrough: false,
       textTransform: parent?.text.textTransform ?? "none",
       whiteSpace: parent?.text.whiteSpace ?? "normal",
-      textAlign: parent?.text.textAlign ?? "left",
+      direction: htmlDirection ?? parent?.text.direction ?? "ltr",
+      unicodeBidi: "normal",
+      textAlign: parent?.text.textAlign ?? "start",
+      lineBreak: parent?.text.lineBreak ?? "auto",
+      wordBreak: parent?.text.wordBreak ?? "normal",
+      overflowWrap: parent?.text.overflowWrap ?? "normal",
+      hyphens: parent?.text.hyphens ?? "manual",
+      tabSize: parent?.text.tabSize ?? 8,
       textIndent: parent?.text.textIndent ?? ZERO,
       fontSize: parent?.text.fontSize ?? Object.freeze({ kind: "length", value: 16, unit: "px" }),
       lineHeight: parent?.text.lineHeight ?? Object.freeze({ kind: "normal" }),
@@ -1320,6 +1330,7 @@ function generatedContent(value: string, document: IndexedWebDocumentSnapshot, n
 
 function computeStyle(
   document: IndexedWebDocumentSnapshot,
+  state: DocumentState,
   node: DocumentNodeRef,
   parent: ComputedStyle | null,
   candidates: ReadonlyMap<string, readonly CascadeCandidate[]> | undefined,
@@ -1328,7 +1339,15 @@ function computeStyle(
   rootFontSizePx = 16
 ): ComputedStyle {
   const replaced = document.replaced(node) !== null || document.control(node) !== null;
-  let style = initialStyle(parent, replaced);
+  const htmlDirectionality = pseudo === null ? document.directionality(node) : null;
+  let htmlDirection = htmlDirectionality !== null && htmlDirectionality.source !== "inherited"
+    ? htmlDirectionality.direction : null;
+  const control = pseudo === null ? document.control(node) : null;
+  if (htmlDirectionality?.htmlMode === "auto" && (control?.kind === "text" || control?.kind === "textarea")) {
+    const currentValue = state.controls.get(control.node)?.values[0] ?? control.defaultValue;
+    htmlDirection = document.directionForRenderedText(node, currentValue);
+  }
+  let style = initialStyle(parent, replaced, htmlDirection);
   const variables = customProperties(parent?.customProperties ?? new Map(), candidates);
   style = { ...style, customProperties: variables };
   const value = (names: string | readonly string[]) => validatedValue(candidates, names, variables, diagnostics);
@@ -1362,13 +1381,60 @@ function computeStyle(
       style = { ...style, text: { ...style.text, textTransform: computed as ComputedStyle["text"]["textTransform"] } };
     } else unsupported(transform);
   }
+  const direction = value("direction");
+  if (direction !== null) {
+    const computed = resolvedWide("direction", direction.value, "ltr", parent?.text.direction ?? null);
+    if (computed === "ltr" || computed === "rtl") style = { ...style, text: { ...style.text, direction: computed } };
+    else unsupported(direction);
+  }
+  const unicodeBidi = value("unicode-bidi");
+  if (unicodeBidi !== null) {
+    const computed = resolvedWide("unicode-bidi", unicodeBidi.value, "normal", parent?.text.unicodeBidi ?? null);
+    if (["normal", "embed", "isolate", "bidi-override", "isolate-override", "plaintext"].includes(computed)) {
+      style = { ...style, text: { ...style.text, unicodeBidi: computed as ComputedStyle["text"]["unicodeBidi"] } };
+    } else unsupported(unicodeBidi);
+  }
   const textAlign = value("text-align");
   if (textAlign !== null) {
-    const computed = resolvedWide("text-align", textAlign.value, "left", parent?.text.textAlign ?? null);
-    const aligned = computed === "start" ? "left" : computed === "end" ? "right" : computed;
-    if (aligned === "left" || aligned === "center" || aligned === "right") {
-      style = { ...style, text: { ...style.text, textAlign: aligned } };
+    const computed = resolvedWide("text-align", textAlign.value, "start", parent?.text.textAlign ?? null);
+    if (computed === "start" || computed === "end" || computed === "left" || computed === "center" || computed === "right") {
+      style = { ...style, text: { ...style.text, textAlign: computed } };
     } else unsupported(textAlign);
+  }
+  const keyword = <T extends string>(
+    property: "line-break" | "word-break" | "overflow-wrap" | "hyphens",
+    initial: T,
+    inherited: T,
+    supported: readonly T[]
+  ): T => {
+    const entry = value(property);
+    if (entry === null) return inherited;
+    const computed = resolvedWide(property, entry.value, initial, inherited);
+    if (supported.includes(computed as T)) return computed as T;
+    unsupported(entry);
+    return inherited;
+  };
+  style = {
+    ...style,
+    text: {
+      ...style.text,
+      lineBreak: keyword("line-break", "auto", style.text.lineBreak, ["auto", "normal", "anywhere"]),
+      wordBreak: keyword("word-break", "normal", style.text.wordBreak, ["normal", "break-all", "keep-all", "break-word"]),
+      overflowWrap: keyword("overflow-wrap", "normal", style.text.overflowWrap, ["normal", "anywhere", "break-word"]),
+      hyphens: keyword("hyphens", "manual", style.text.hyphens, ["none", "manual"])
+    }
+  };
+  const tabSize = value("tab-size");
+  if (tabSize !== null) {
+    const wide = cssWide(tabSize.value);
+    const inherited = parent?.text.tabSize ?? 8;
+    const normalized = tabSize.value.trim().toLowerCase();
+    const parsed = /^(?:\d+(?:\.\d+)?|\.\d+)$/u.test(normalized) ? Number(normalized) : Number.NaN;
+    const computed = wide === "inherit" || wide === "unset" ? inherited
+      : wide === "initial" ? 8
+        : Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+    if (computed === null) unsupported(tabSize);
+    else style = { ...style, text: { ...style.text, tabSize: computed } };
   }
   const textIndent = value("text-indent");
   if (textIndent !== null) {
@@ -1512,7 +1578,7 @@ function computeStyle(
     };
   }
 
-  const directionIsRtl = document.attribute(node, "dir")?.trim().toLowerCase() === "rtl";
+  const directionIsRtl = style.text.direction === "rtl";
   const sideSpecs = [
     ["margin-top", ["margin-top", "margin-block-start", "margin-block", "margin"], "top", 0, true],
     ["margin-right", ["margin-right", directionIsRtl ? "margin-inline-start" : "margin-inline-end", "margin-inline", "margin"], "right", 1, true],
@@ -1539,8 +1605,10 @@ function computeStyle(
     const raw = shorthand ? boxParts(entry.value)?.[index]
       : axis ? (() => {
         const parts = entry.value.trim().split(/\s+/u);
-        const end = side === "right" || side === "bottom";
-        return end ? parts[1] ?? parts[0] : parts[0];
+        const logicalEnd = entry.property.endsWith("-block")
+          ? side === "bottom"
+          : directionIsRtl ? side === "left" : side === "right";
+        return logicalEnd ? parts[1] ?? parts[0] : parts[0];
       })() : entry.value;
     const length = raw === undefined ? null : parseLength(raw, margin, margin);
     if (length === null) unsupported({ ...entry, property });
@@ -1887,6 +1955,7 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
     const parentStyle = parentNode?.kind === "element" ? styles.get(parentNode.ref) ?? null : null;
     const style = computeStyle(
       input.document,
+      input.state,
       ref,
       parentStyle,
       candidates.get(styleKey(ref)),
@@ -1901,6 +1970,7 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
       if (pseudoCandidates === undefined) continue;
       pseudos.set(styleKey(ref, pseudo), computeStyle(
         input.document,
+        input.state,
         ref,
         style,
         pseudoCandidates,

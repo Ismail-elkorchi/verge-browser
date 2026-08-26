@@ -1,14 +1,32 @@
-import type { DocumentNodeRef, DocumentSourceRange } from "../../document/index.js";
+import type { DocumentNodeRef } from "../../document/index.js";
 import type {
   FormattingFormControlNode,
   FormattingNode,
   FormattingNodeId,
   FormattingReplacedNode,
   FormattingTextNode,
-  FormattingTree
+  FormattingTree,
+  ControlDisplayTextSegment,
+  DocumentActionIdentity
 } from "../formatting/index.js";
-import { controlDisplayText } from "../formatting/index.js";
-import { transformTextWithSourceRanges, transformedSourceRange } from "../text/index.js";
+import {
+  controlDisplayText,
+  documentActionIdentity,
+  isAtomicInlineBox,
+  isInlineFormattingNode
+} from "../formatting/index.js";
+import {
+  bidiClass,
+  bidiVisualOrderForLine,
+  buildLineBreakMap,
+  mirroredBidiText,
+  resolveBidiParagraphs,
+  type BidiClass,
+  type BidiItem,
+  type BidiParagraphCollection,
+  type BreakOpportunityKind
+} from "../../unicode/index.js";
+import type { InlineItemStream, ProcessedCssText } from "../text/index.js";
 import type { ComputedStyle, CssLength } from "../style/index.js";
 import {
   cssAdd,
@@ -35,27 +53,34 @@ import {
 } from "./fixed.js";
 import type {
   BuildLayoutFragmentTreeInput,
-  DocumentActionIdentity,
   LayoutBoxFragment,
   LayoutBudgets,
   LayoutFragment,
   LayoutFragmentId,
   LayoutFragmentTree,
-  LayoutGrapheme,
   InlineContinuationGeometry,
   LayoutOutcome,
   LayoutPaintStyle,
-  LayoutSearchSpan,
+  LayoutTextCluster,
   LayoutTextFragment,
   LineBox,
   LineBoxId,
   UsedFontMetrics
 } from "./types.js";
+import { selectLogicalLines } from "./line-selection.js";
 
 const DEFAULT_LAYOUT_BUDGETS: LayoutBudgets = Object.freeze({
   maxFragments: 100_000,
   maxLineBoxes: 50_000,
   maxTextFragments: 100_000,
+  maxLineFragments: 100_000,
+  maxCodePointsPerBidiParagraph: 1_000_000,
+  maxBidiItems: 1_000_000,
+  maxBidiEmbeddingDepth: 125,
+  maxBidiRuns: 250_000,
+  maxGraphemeClusters: 1_000_000,
+  maxBreakOpportunities: 1_000_001,
+  maxVisualRuns: 250_000,
   maxDepth: 512
 });
 
@@ -83,17 +108,93 @@ interface InlineLineEntry {
   readonly metrics: UsedFontMetrics;
   readonly lineHeight: CssPixelLength;
   readonly verticalAlign: ComputedStyle["text"]["verticalAlign"];
+  readonly bidiParagraph: number;
+  readonly bidiItemStart: number;
+  readonly bidiItemEnd: number;
+}
+
+interface InlineTextIdentity {
+  readonly formattingNode: FormattingNodeId | null;
+  readonly contentStartCodeUnit: number;
+  readonly contentEndCodeUnit: number;
+  readonly kind: "text" | "atomic-inline" | "structural-control" | "forced-break";
+}
+
+interface InlineBidiPosition {
+  readonly paragraph: number;
+  readonly item: number;
+}
+
+interface InlineTextNodeAnalysis {
+  readonly units: readonly InlineLogicalUnit[];
+}
+
+interface InlineLogicalUnit {
+  readonly logicalIndex: number;
+  readonly kind: "text" | "tab" | "soft-hyphen" | "atomic-inline" | "forced-break" | "break-opportunity";
+  readonly formattingNode: FormattingNodeId;
+  readonly text: string;
+  readonly contentStartCodeUnit: number;
+  readonly contentEndCodeUnit: number;
+  readonly bidiItemStart: number;
+  readonly bidiItemEnd: number;
+  readonly lineStartCodeUnit: number;
+  readonly lineEndCodeUnit: number;
+  readonly collapsibleSpace: boolean;
+}
+
+interface InlineTextAnalysis {
+  readonly bidi: BidiParagraphCollection<InlineTextIdentity>;
+  readonly textNodes: ReadonlyMap<FormattingNodeId, InlineTextNodeAnalysis>;
+  readonly atomicItems: ReadonlyMap<FormattingNodeId, number>;
+  readonly firstUnitByFormatting: ReadonlyMap<FormattingNodeId, number>;
+  readonly positions: readonly InlineBidiPosition[];
+  readonly logicalUnits: readonly InlineLogicalUnit[];
+  readonly unitsByBidiItem: readonly (InlineLogicalUnit | undefined)[];
+  readonly breaksBefore: readonly BreakOpportunityKind[];
+  readonly resourceCounts: {
+    readonly bidiItems: number;
+    readonly bidiRuns: number;
+    readonly graphemeClusters: number;
+    readonly breakOpportunities: number;
+  };
+}
+
+const INLINE_TEXT_ANALYSIS_CACHE = new WeakMap<InlineItemStream, Map<string, InlineTextAnalysis>>();
+const PAINT_STYLE_CACHE = new WeakMap<FormattingTree, Map<FormattingNodeId, LayoutPaintStyle>>();
+const DOCUMENT_SEMANTIC_ANCESTOR_CACHE = new WeakMap<
+  FormattingTree,
+  Map<DocumentNodeRef, readonly NonNullable<LayoutFragment["semantic"]>[]>
+>();
+
+function formattingCache<K, V>(
+  caches: WeakMap<FormattingTree, Map<K, V>>,
+  formatting: FormattingTree
+): Map<K, V> {
+  const cached = caches.get(formatting);
+  if (cached !== undefined) return cached;
+  const created = new Map<K, V>();
+  caches.set(formatting, created);
+  return created;
 }
 
 interface InlineFormattingCursor {
   readonly containingFragment: LayoutFragmentId;
   readonly containingFormattingNode: FormattingNodeId;
   readonly continuationX: CssCoordinate;
-  readonly maxX: CssCoordinate;
+  readonly continuationMaxX: CssCoordinate;
+  maxX: CssCoordinate;
   readonly textAlign: ComputedStyle["text"]["textAlign"];
+  readonly direction: "ltr" | "rtl";
   readonly strutMetrics: UsedFontMetrics;
   readonly strutLineHeight: CssPixelLength;
   readonly clipRect: CssRect;
+  readonly textAnalysis: InlineTextAnalysis;
+  readonly selectedLineBreaks: Set<number>;
+  readonly suppressedUnits: Set<number>;
+  readonly usedUnitAdvances: Map<number, CssPixelLength>;
+  logicalUnitLimit: number;
+  lineSelectionStopped: boolean;
   lineStartX: CssCoordinate;
   x: CssCoordinate;
   y: CssCoordinate;
@@ -122,18 +223,27 @@ interface CollapsibleMarginProfile {
 }
 
 function normalizeBudgets(value: Partial<LayoutBudgets> | undefined): LayoutBudgets | null {
-  const integer = (candidate: number | undefined, fallback: number): number | null => {
+  const integer = (candidate: number | undefined, fallback: number, minimum = 0): number | null => {
     if (candidate === undefined) return fallback;
-    if (Number.isSafeInteger(candidate) && candidate > 0) return candidate;
+    if (Number.isSafeInteger(candidate) && candidate >= minimum) return candidate;
     return null;
   };
   const result = {
-    maxFragments: integer(value?.maxFragments, DEFAULT_LAYOUT_BUDGETS.maxFragments),
+    maxFragments: integer(value?.maxFragments, DEFAULT_LAYOUT_BUDGETS.maxFragments, 1),
     maxLineBoxes: integer(value?.maxLineBoxes, DEFAULT_LAYOUT_BUDGETS.maxLineBoxes),
     maxTextFragments: integer(value?.maxTextFragments, DEFAULT_LAYOUT_BUDGETS.maxTextFragments),
+    maxLineFragments: integer(value?.maxLineFragments, DEFAULT_LAYOUT_BUDGETS.maxLineFragments),
+    maxCodePointsPerBidiParagraph: integer(value?.maxCodePointsPerBidiParagraph, DEFAULT_LAYOUT_BUDGETS.maxCodePointsPerBidiParagraph),
+    maxBidiItems: integer(value?.maxBidiItems, DEFAULT_LAYOUT_BUDGETS.maxBidiItems),
+    maxBidiEmbeddingDepth: integer(value?.maxBidiEmbeddingDepth, DEFAULT_LAYOUT_BUDGETS.maxBidiEmbeddingDepth),
+    maxBidiRuns: integer(value?.maxBidiRuns, DEFAULT_LAYOUT_BUDGETS.maxBidiRuns),
+    maxGraphemeClusters: integer(value?.maxGraphemeClusters, DEFAULT_LAYOUT_BUDGETS.maxGraphemeClusters),
+    maxBreakOpportunities: integer(value?.maxBreakOpportunities, DEFAULT_LAYOUT_BUDGETS.maxBreakOpportunities),
+    maxVisualRuns: integer(value?.maxVisualRuns, DEFAULT_LAYOUT_BUDGETS.maxVisualRuns),
     maxDepth: integer(value?.maxDepth, DEFAULT_LAYOUT_BUDGETS.maxDepth)
   };
   for (const candidate of Object.values(result)) if (candidate === null) return null;
+  if ((result.maxBidiEmbeddingDepth ?? 126) > 125) return null;
   return Object.freeze(result as LayoutBudgets);
 }
 
@@ -161,6 +271,18 @@ function sum(...values: readonly CssPixelLength[]): CssPixelLength {
   let total: CssPixelLength = ZERO;
   for (const value of values) total = cssAdd(total, value);
   return total;
+}
+
+function unionOverflowRect(base: CssRect, candidate: CssRect): CssRect {
+  if (candidate.width === 0 || candidate.height === 0) return base;
+  if (base.width === 0 || base.height === 0) return candidate;
+  const baseEdge = cssCoordinateAdd(base.x, base.width);
+  const baseBottom = cssCoordinateAdd(base.y, base.height);
+  const candidateEdge = cssCoordinateAdd(candidate.x, candidate.width);
+  const candidateBottom = cssCoordinateAdd(candidate.y, candidate.height);
+  if (candidate.x >= base.x && candidate.y >= base.y
+    && candidateEdge <= baseEdge && candidateBottom <= baseBottom) return base;
+  return cssUnion([base, candidate], base);
 }
 
 function collapseMargins(...values: readonly CssPixelLength[]): CssPixelLength {
@@ -221,24 +343,15 @@ function rootFontMetrics(input: BuildLayoutFragmentTreeInput): UsedFontMetrics {
   return checkedFontMetrics(input.context.textMeasurer.fontMetrics(size));
 }
 
-function isInlineFormatting(node: FormattingNode): boolean {
-  return node.outer === "inline"
-    || node.kind === "text-sequence"
-    || node.kind === "generated-text"
-    || node.kind === "marker"
-    || node.kind === "forced-line-break"
-    || node.kind === "form-control"
-    || node.kind === "replaced-element"
-    || node.kind === "image-fallback";
-}
-
 class LayoutBuilder {
   readonly #input: BuildLayoutFragmentTreeInput;
   readonly #formatting: FormattingTree;
   readonly #budgets: LayoutBudgets;
   readonly #rootFontMetrics: UsedFontMetrics;
   readonly #fontMetricsCache = new Map<CssPixelLength, UsedFontMetrics>();
+  readonly #textAdvanceCache = new Map<string, CssNonNegativeLength>();
   readonly #fragments = new Map<LayoutFragmentId, LayoutFragment>();
+  readonly #parentIndex = new Map<LayoutFragmentId, LayoutFragmentId>();
   readonly #formattingIndex = new Map<FormattingNodeId, LayoutFragmentId[]>();
   readonly #documentIndex = new Map<DocumentNodeRef, LayoutFragmentId[]>();
   readonly #lineBoxes: LineBox[] = [];
@@ -250,11 +363,18 @@ class LayoutBuilder {
   }>();
   readonly #ordinals = new Map<string, number>();
   readonly #decorationCache = new Map<FormattingNodeId, { readonly underline: boolean; readonly lineThrough: boolean }>();
-  readonly #documentActionCache = new Map<DocumentNodeRef, DocumentActionIdentity | null>();
+  readonly #paintStyleCache: Map<FormattingNodeId, LayoutPaintStyle>;
+  readonly #documentSemanticAncestorCache: Map<DocumentNodeRef, readonly NonNullable<LayoutFragment["semantic"]>[]>;
   readonly #marginProfileCache = new Map<string, CollapsibleMarginProfile>();
   #reserved = 0;
   #reservedLineBoxes = 0;
   #textFragments = 0;
+  #lineFragments = 0;
+  #visualRuns = 0;
+  #bidiItems = 0;
+  #bidiRuns = 0;
+  #graphemeClusters = 0;
+  #breakOpportunities = 0;
   #visualOrder = 0;
   #paintOrder = 0;
   #truncated: keyof LayoutBudgets | null = null;
@@ -263,6 +383,8 @@ class LayoutBuilder {
     this.#input = input;
     this.#formatting = input.formatting;
     this.#budgets = budgets;
+    this.#paintStyleCache = formattingCache(PAINT_STYLE_CACHE, input.formatting);
+    this.#documentSemanticAncestorCache = formattingCache(DOCUMENT_SEMANTIC_ANCESTOR_CACHE, input.formatting);
     this.#rootFontMetrics = rootFontMetrics(input);
     this.#fontMetricsCache.set(this.#rootFontMetrics.fontSize, this.#rootFontMetrics);
   }
@@ -296,6 +418,7 @@ class LayoutBuilder {
       this.#textFragments += 1;
     }
     this.#fragments.set(value.id, value);
+    for (const child of value.children) this.#parentIndex.set(child, value.id);
     const byFormatting = this.#formattingIndex.get(value.formattingNode) ?? [];
     byFormatting.push(value.id);
     this.#formattingIndex.set(value.formattingNode, byFormatting);
@@ -312,6 +435,325 @@ class LayoutBuilder {
     return node.pseudo === null
       ? this.#formatting.styles.style(node.styleNode)
       : this.#formatting.styles.pseudo(node.styleNode, node.pseudo) ?? this.#formatting.styles.style(node.styleNode);
+  }
+
+  #reserveInlineTextAnalysis(analysis: InlineTextAnalysis): void {
+    const counts = analysis.resourceCounts;
+    const checks = [
+      ["maxBidiItems", this.#bidiItems, counts.bidiItems],
+      ["maxBidiRuns", this.#bidiRuns, counts.bidiRuns],
+      ["maxGraphemeClusters", this.#graphemeClusters, counts.graphemeClusters],
+      ["maxBreakOpportunities", this.#breakOpportunities, counts.breakOpportunities]
+    ] as const;
+    for (const [budget, retained, added] of checks) {
+      if (added > this.#budgets[budget] - retained) {
+        this.#truncated ??= budget;
+        throw new LayoutBudgetExhausted();
+      }
+    }
+    this.#bidiItems += counts.bidiItems;
+    this.#bidiRuns += counts.bidiRuns;
+    this.#graphemeClusters += counts.graphemeClusters;
+    this.#breakOpportunities += counts.breakOpportunities;
+  }
+
+  #inlineTextAnalysis(
+    containingFormattingBox: FormattingNodeId,
+    ids: readonly FormattingNodeId[],
+    direction: "ltr" | "rtl" | "auto"
+  ): InlineTextAnalysis {
+    const stream = this.#input.inlineItemStreams.stream(containingFormattingBox, ids);
+    let cache = INLINE_TEXT_ANALYSIS_CACHE.get(stream);
+    if (cache === undefined) {
+      cache = new Map<string, InlineTextAnalysis>();
+      INLINE_TEXT_ANALYSIS_CACHE.set(stream, cache);
+    }
+    const cacheKey = [
+      direction,
+      this.#budgets.maxCodePointsPerBidiParagraph,
+      this.#budgets.maxBidiItems,
+      this.#budgets.maxBidiEmbeddingDepth,
+      this.#budgets.maxBidiRuns,
+      this.#budgets.maxGraphemeClusters,
+      this.#budgets.maxBreakOpportunities
+    ].join("\u0000");
+    const cached = cache.get(cacheKey);
+    if (cached !== undefined) {
+      this.#reserveInlineTextAnalysis(cached);
+      return cached;
+    }
+    const items: BidiItem<InlineTextIdentity>[] = [];
+    const textNodeRecords = new Map<FormattingNodeId, {
+      readonly units: InlineLogicalUnit[];
+    }>();
+    const atomicItems = new Map<FormattingNodeId, number>();
+    const firstUnitByFormatting = new Map<FormattingNodeId, number>();
+    const logicalUnits: InlineLogicalUnit[] = [];
+    let logicalText = "";
+    const graphemeClusters = stream.graphemeClusters;
+    if (graphemeClusters > this.#budgets.maxGraphemeClusters - this.#graphemeClusters) {
+      this.#truncated ??= "maxGraphemeClusters";
+      throw new LayoutBudgetExhausted();
+    }
+    let paragraphCodePoints = 0;
+    const append = (
+      bidiType: BidiClass,
+      text: string,
+      codePoint: number | null,
+      identity: InlineTextIdentity
+    ): number => {
+      if (items.length >= this.#budgets.maxBidiItems - this.#bidiItems) {
+        this.#truncated ??= "maxBidiItems";
+        throw new LayoutBudgetExhausted();
+      }
+      if (codePoint !== null && paragraphCodePoints >= this.#budgets.maxCodePointsPerBidiParagraph) {
+        this.#truncated ??= "maxCodePointsPerBidiParagraph";
+        throw new LayoutBudgetExhausted();
+      }
+      const logicalIndex = items.length;
+      items.push(Object.freeze({
+        logicalIndex,
+        kind: identity.kind === "text" ? "code-point"
+          : identity.kind === "atomic-inline" ? "atomic-inline" : "structural-control",
+        text,
+        codePoint,
+        bidiClass: bidiType,
+        sourceStartCodeUnit: identity.contentStartCodeUnit,
+        sourceEndCodeUnit: identity.contentEndCodeUnit,
+        identity
+      }));
+      if (codePoint !== null) paragraphCodePoints += 1;
+      if (bidiType === "B") paragraphCodePoints = 0;
+      return logicalIndex;
+    };
+    const appendUnit = (
+      node: FormattingNode,
+      kind: InlineLogicalUnit["kind"],
+      text: string,
+      contentStartCodeUnit: number,
+      contentEndCodeUnit: number,
+      collapsibleSpace: boolean
+    ): InlineLogicalUnit => {
+      const bidiItemStart = items.length;
+      if (kind === "forced-break") {
+        append("B", "", null, {
+          formattingNode: node.id,
+          contentStartCodeUnit,
+          contentEndCodeUnit,
+          kind: "forced-break"
+        });
+      } else if (kind === "break-opportunity") {
+        append("BN", "", null, {
+          formattingNode: node.id,
+          contentStartCodeUnit,
+          contentEndCodeUnit,
+          kind: "structural-control"
+        });
+      } else if (kind === "atomic-inline") {
+        append("ON", text, 0xfffc, {
+          formattingNode: node.id,
+          contentStartCodeUnit,
+          contentEndCodeUnit,
+          kind
+        });
+      } else {
+        for (const character of text) {
+          const codePoint = character.codePointAt(0);
+          if (codePoint === undefined) continue;
+          append(bidiClass(codePoint), character, codePoint, {
+            formattingNode: node.id,
+            contentStartCodeUnit,
+            contentEndCodeUnit,
+            kind: "text"
+          });
+        }
+      }
+      const lineValue = kind === "forced-break" ? "\n" : kind === "break-opportunity" ? "\u200b" : text;
+      const unit = Object.freeze({
+        logicalIndex: logicalUnits.length,
+        kind,
+        formattingNode: node.id,
+        text,
+        contentStartCodeUnit,
+        contentEndCodeUnit,
+        bidiItemStart,
+        bidiItemEnd: items.length,
+        lineStartCodeUnit: logicalText.length,
+        lineEndCodeUnit: logicalText.length + lineValue.length,
+        collapsibleSpace
+      });
+      logicalUnits.push(unit);
+      if (!firstUnitByFormatting.has(node.id)) firstUnitByFormatting.set(node.id, unit.logicalIndex);
+      logicalText += lineValue;
+      return unit;
+    };
+    const control = (type: BidiClass): void => {
+      append(type, "", null, {
+        formattingNode: null,
+        contentStartCodeUnit: 0,
+        contentEndCodeUnit: 0,
+        kind: "structural-control"
+      });
+    };
+    for (const item of stream.items) {
+      this.#input.signal?.throwIfAborted();
+      if (item.kind === "structural-bidi-control") {
+        control(item.bidiClass);
+        continue;
+      }
+      if (item.kind === "block-boundary") {
+        control("B");
+        continue;
+      }
+      if (item.formattingNode === null) continue;
+      const node = this.#formatting.node(item.formattingNode);
+      if (item.kind === "atomic-inline") {
+        const unit = appendUnit(node, "atomic-inline", "\ufffc", 0, 0, false);
+        atomicItems.set(node.id, unit.bidiItemStart);
+        continue;
+      }
+      if (item.kind === "forced-line-break") {
+        const record = textNodeRecords.get(node.id) ?? { units: [] as InlineLogicalUnit[] };
+        textNodeRecords.set(node.id, record);
+        record.units.push(appendUnit(
+          node,
+          "forced-break",
+          "",
+          item.contentStartCodeUnit,
+          item.contentEndCodeUnit,
+          false
+        ));
+        continue;
+      }
+      if (item.kind === "break-opportunity") {
+        appendUnit(node, "break-opportunity", "", 0, 0, false);
+        continue;
+      }
+      const record = textNodeRecords.get(node.id) ?? { units: [] as InlineLogicalUnit[] };
+      textNodeRecords.set(node.id, record);
+      record.units.push(appendUnit(
+        node,
+        item.kind === "soft-hyphen" ? "soft-hyphen" : item.kind === "tab" ? "tab" : "text",
+        item.text,
+        item.contentStartCodeUnit,
+        item.contentEndCodeUnit,
+        item.collapsibleSpace
+      ));
+    }
+    const graphemeClusterBoundaries = [0, ...logicalUnits.map((unit) => unit.lineEndCodeUnit)];
+    let tailoringUnit = 0;
+    const lineBreakMap = buildLineBreakMap(logicalText, ({ codeUnitOffset }) => {
+      while (tailoringUnit + 1 < logicalUnits.length
+        && (logicalUnits[tailoringUnit + 1]?.lineStartCodeUnit ?? Number.MAX_SAFE_INTEGER) <= codeUnitOffset) {
+        tailoringUnit += 1;
+      }
+      let unit = logicalUnits[tailoringUnit];
+      if (unit !== undefined && unit.lineEndCodeUnit <= codeUnitOffset) {
+        unit = logicalUnits[tailoringUnit + 1] ?? unit;
+      }
+      const formattingNode = unit === undefined ? null : this.#formatting.node(unit.formattingNode);
+      const style = formattingNode === null ? null : this.#computed(formattingNode);
+      const breakWord = style?.text.wordBreak === "break-word";
+      return {
+        lineBreak: style?.text.lineBreak ?? "auto",
+        wordBreak: breakWord ? "normal" : style?.text.wordBreak ?? "normal",
+        overflowWrap: breakWord ? "anywhere" : style?.text.overflowWrap ?? "normal",
+        hyphens: style?.text.hyphens ?? "manual",
+        language: formattingNode === null ? null : this.#language(formattingNode),
+        preserveGraphemeClusters: true
+      };
+    }, {
+      maxBreakOpportunities: Math.max(0, this.#budgets.maxBreakOpportunities - this.#breakOpportunities),
+      graphemeClusterBoundaries
+    }, this.#input.signal);
+    if (lineBreakMap.outcome.status === "rejected") throw new RangeError("Line-break input was rejected.");
+    if (lineBreakMap.outcome.status === "truncated") {
+      this.#truncated ??= "maxBreakOpportunities";
+      throw new LayoutBudgetExhausted();
+    }
+    const paragraphDirection = (itemStart: number, itemEnd: number): "ltr" | "rtl" | "auto" => {
+      for (let item = itemStart; item < itemEnd; item += 1) {
+        const formattingNode = items[item]?.identity.formattingNode;
+        if (formattingNode !== null && formattingNode !== undefined
+          && this.#computed(this.#formatting.node(formattingNode))?.text.unicodeBidi === "plaintext") return "auto";
+      }
+      return direction;
+    };
+    const bidi = resolveBidiParagraphs(items, paragraphDirection, {
+      maxCodePointsPerParagraph: this.#budgets.maxCodePointsPerBidiParagraph,
+      maxBidiItems: this.#budgets.maxBidiItems,
+      maxEmbeddingDepth: this.#budgets.maxBidiEmbeddingDepth,
+      maxBidiRuns: Math.max(0, this.#budgets.maxBidiRuns - this.#bidiRuns)
+    }, this.#input.signal);
+    const positions: InlineBidiPosition[] = [];
+    let bidiRuns = 0;
+    for (const [paragraphIndex, slice] of bidi.paragraphs.entries()) {
+      if (slice.paragraph.outcome.status === "rejected") throw new RangeError("Bidi paragraph input was rejected.");
+      if (slice.paragraph.outcome.status === "truncated") {
+        const budget = slice.paragraph.outcome.budget === "maxCodePointsPerParagraph"
+          ? "maxCodePointsPerBidiParagraph"
+          : slice.paragraph.outcome.budget === "maxEmbeddingDepth"
+            ? "maxBidiEmbeddingDepth"
+            : slice.paragraph.outcome.budget;
+        this.#truncated ??= budget;
+        throw new LayoutBudgetExhausted();
+      }
+      bidiRuns += slice.paragraph.outcome.runs;
+      for (let item = 0; item < slice.paragraph.items.length; item += 1) {
+        const globalItem = slice.itemStart + item;
+        positions[globalItem] = Object.freeze({ paragraph: paragraphIndex, item });
+      }
+    }
+    const textNodes = new Map<FormattingNodeId, InlineTextNodeAnalysis>();
+    for (const [id, record] of textNodeRecords) {
+      textNodes.set(id, Object.freeze({
+        units: Object.freeze(record.units)
+      }));
+    }
+    const unitsByBidiItem = new Array<InlineLogicalUnit | undefined>(items.length).fill(undefined);
+    for (const unit of logicalUnits) {
+      for (let item = unit.bidiItemStart; item < unit.bidiItemEnd; item += 1) unitsByBidiItem[item] = unit;
+    }
+    const breaksBefore: BreakOpportunityKind[] = [];
+    let opportunityIndex = 0;
+    for (const unit of logicalUnits) {
+      while ((lineBreakMap.opportunities[opportunityIndex]?.codeUnitOffset ?? Number.MAX_SAFE_INTEGER)
+        < unit.lineStartCodeUnit) opportunityIndex += 1;
+      const opportunity = lineBreakMap.opportunities[opportunityIndex];
+      breaksBefore.push(opportunity?.codeUnitOffset === unit.lineStartCodeUnit ? opportunity.kind : "prohibited");
+    }
+    const analysis = Object.freeze({
+      bidi,
+      textNodes,
+      atomicItems,
+      firstUnitByFormatting,
+      positions: Object.freeze(positions),
+      logicalUnits: Object.freeze(logicalUnits),
+      unitsByBidiItem: Object.freeze(unitsByBidiItem),
+      breaksBefore: Object.freeze(breaksBefore),
+      resourceCounts: Object.freeze({
+        bidiItems: items.length,
+        bidiRuns,
+        graphemeClusters,
+        breakOpportunities: lineBreakMap.opportunities.length
+      })
+    });
+    this.#reserveInlineTextAnalysis(analysis);
+    cache.set(cacheKey, analysis);
+    return analysis;
+  }
+
+  #language(node: FormattingNode): string | null {
+    let current = node.styleNode === null ? null : this.#formatting.document.node(node.styleNode);
+    while (current !== null) {
+      if (current.kind === "element") {
+        const language = this.#formatting.document.attribute(current.ref, "lang")
+          ?? this.#formatting.document.attribute(current.ref, "lang", "http://www.w3.org/XML/1998/namespace");
+        if (language !== null && language.trim().length > 0) return language.trim().toLowerCase();
+      }
+      current = this.#formatting.document.parent(current.ref);
+    }
+    return null;
   }
 
   #boxComputed(node: FormattingNode): ComputedStyle | null {
@@ -335,33 +777,16 @@ class LayoutBuilder {
   }
 
   #measure(text: string, fontSize: CssPixelLength): CssNonNegativeLength {
+    const cacheKey = text.length <= 32 ? `${String(fontSize)}:${text}` : null;
+    const cached = cacheKey === null ? undefined : this.#textAdvanceCache.get(cacheKey);
+    if (cached !== undefined) return cached;
     const advance = this.#input.context.textMeasurer.measure(text, fontSize);
     if (!Number.isSafeInteger(advance) || advance < 0) {
       throw new RangeError("CSS text advance must be a non-negative safe fixed-point integer.");
     }
-    return nonNegative(advance);
-  }
-
-  #graphemes(text: string, fontSize: CssPixelLength): readonly LayoutGrapheme[] {
-    const graphemes = this.#input.context.textMeasurer.graphemes(text, fontSize);
-    let previousEnd = 0;
-    for (const grapheme of graphemes) {
-      if (!Number.isSafeInteger(grapheme.startCodeUnit)
-        || !Number.isSafeInteger(grapheme.endCodeUnit)
-        || grapheme.startCodeUnit !== previousEnd
-        || grapheme.endCodeUnit <= grapheme.startCodeUnit
-        || grapheme.endCodeUnit > text.length
-        || grapheme.text !== text.slice(grapheme.startCodeUnit, grapheme.endCodeUnit)
-        || !Number.isSafeInteger(grapheme.advance)
-        || grapheme.advance < 0) {
-        throw new RangeError("CSS grapheme metrics must form a complete source-linked fixed-point sequence.");
-      }
-      previousEnd = grapheme.endCodeUnit;
-    }
-    if (previousEnd !== text.length) {
-      throw new RangeError("CSS grapheme metrics must cover the complete measured text.");
-    }
-    return graphemes;
+    const checked = nonNegative(advance);
+    if (cacheKey !== null && this.#textAdvanceCache.size < 4_096) this.#textAdvanceCache.set(cacheKey, checked);
+    return checked;
   }
 
   #usedLength(
@@ -508,8 +933,8 @@ class LayoutBuilder {
       return profile;
     }
     const children = node.children.map((child) => this.#formatting.node(child));
-    const hasInlineContent = children.some((child) => isInlineFormatting(child) && this.#createsLineContent(child));
-    const blockChildren = hasInlineContent ? [] : children.filter((child) => !isInlineFormatting(child));
+    const hasInlineContent = children.some((child) => isInlineFormattingNode(child) && this.#createsLineContent(child));
+    const blockChildren = hasInlineContent ? [] : children.filter((child) => !isInlineFormattingNode(child));
     const profiles = blockChildren.map((child) => this.#collapsibleMargins(
       child.id,
       dimensions.contentWidth,
@@ -548,6 +973,8 @@ class LayoutBuilder {
   }
 
   #paintStyle(node: FormattingNode): LayoutPaintStyle {
+    const cachedPaintStyle = this.#paintStyleCache.get(node.id);
+    if (cachedPaintStyle !== undefined) return cachedPaintStyle;
     const style = this.#computed(node);
     let underline = false;
     let lineThrough = false;
@@ -571,7 +998,7 @@ class LayoutBuilder {
       lineThrough ||= computed?.text.lineThrough === true;
       this.#decorationCache.set(entry.id, { underline, lineThrough });
     }
-    return Object.freeze({
+    const paintStyle = Object.freeze({
       visible: style?.visibility === "visible",
       foreground: style?.text.color ?? null,
       background: node.appliesBoxStyle ? style?.text.background ?? null : null,
@@ -582,48 +1009,32 @@ class LayoutBuilder {
       borderColor: node.appliesBoxStyle ? style?.box.borderColor ?? style?.text.color ?? null : null,
       borderStyle: node.appliesBoxStyle ? style?.box.borderStyle ?? "none" : "none"
     });
-  }
-
-  #documentAction(source: DocumentNodeRef): DocumentActionIdentity | null {
-    if (this.#documentActionCache.has(source)) return this.#documentActionCache.get(source) ?? null;
-    const visited: DocumentNodeRef[] = [];
-    let current: DocumentNodeRef | null = source;
-    let action: DocumentActionIdentity | null = null;
-    while (current !== null) {
-      if (this.#documentActionCache.has(current)) {
-        action = this.#documentActionCache.get(current) ?? null;
-        break;
-      }
-      visited.push(current);
-      const link = this.#formatting.document.link(current);
-      if (link !== null) {
-        action = Object.freeze({ kind: "link", node: link.node, destination: link.destination });
-        break;
-      }
-      const control = this.#formatting.document.control(current);
-      if (control !== null) {
-        action = Object.freeze({ kind: "form-control", node: control.node, form: control.form });
-        break;
-      }
-      const parent = this.#formatting.document.parent(current);
-      const disclosure = parent === null ? null : this.#formatting.document.disclosure(parent.ref);
-      if (disclosure?.kind === "details" && disclosure.summary === current) {
-        action = Object.freeze({
-          kind: "disclosure",
-          node: disclosure.node,
-          open: this.#formatting.state.open.has(disclosure.node)
-        });
-        break;
-      }
-      current = parent?.ref ?? null;
-    }
-    for (const node of visited) this.#documentActionCache.set(node, action);
-    return action;
+    this.#paintStyleCache.set(node.id, paintStyle);
+    return paintStyle;
   }
 
   #action(node: FormattingNode): DocumentActionIdentity | null {
     if (this.#computed(node)?.visibility !== "visible" || node.source === null) return null;
-    return this.#documentAction(node.source);
+    return documentActionIdentity(this.#formatting, node.source);
+  }
+
+  #documentSemanticAncestors(source: DocumentNodeRef): readonly NonNullable<LayoutFragment["semantic"]>[] {
+    const cached = this.#documentSemanticAncestorCache.get(source);
+    if (cached !== undefined) return cached;
+    const result: NonNullable<LayoutFragment["semantic"]>[] = [];
+    let current: DocumentNodeRef | null = source;
+    while (current !== null) {
+      const semantic = this.#formatting.document.semantic(current);
+      if (semantic?.accessibilityHidden === true) {
+        result.length = 0;
+        break;
+      }
+      if (semantic !== null) result.push(semantic);
+      current = this.#formatting.document.parent(current)?.ref ?? null;
+    }
+    const immutable = Object.freeze(result);
+    this.#documentSemanticAncestorCache.set(source, immutable);
+    return immutable;
   }
 
   #clip(node: FormattingNode, paddingRect: CssRect, borderRect: CssRect, inherited: CssRect): CssRect {
@@ -745,6 +1156,13 @@ class LayoutBuilder {
     cursor.lineReserved = true;
   }
 
+  #ensureLineFragmentCapacity(cursor: InlineFormattingCursor): void {
+    if (this.#lineFragments + cursor.entries.length >= this.#budgets.maxLineFragments) {
+      this.#truncated ??= "maxLineFragments";
+      throw new LayoutBudgetExhausted();
+    }
+  }
+
   #releaseLineReservation(cursor: InlineFormattingCursor): void {
     if (!cursor.lineReserved) return;
     cursor.lineReserved = false;
@@ -799,7 +1217,11 @@ class LayoutBuilder {
     }
   }
 
-  #finalizeLine(cursor: InlineFormattingCursor, force = false): void {
+  #finalizeLine(
+    cursor: InlineFormattingCursor,
+    force = false,
+    breakCause: LineBox["breakCause"] = force ? "forced" : "wrap"
+  ): void {
     if (cursor.entries.length === 0 && !force) return;
     if (cursor.entries.length === 0) this.#ensureLineCapacity(cursor);
     this.#releaseLineReservation(cursor);
@@ -807,7 +1229,51 @@ class LayoutBuilder {
       this.#truncated ??= "maxLineBoxes";
       throw new LayoutBudgetExhausted();
     }
-    const entries = [...cursor.entries];
+    const logicalEntries = [...cursor.entries];
+    const paragraphIndex = logicalEntries[0]?.bidiParagraph ?? 0;
+    let logicalItemStart = logicalEntries[0]?.bidiItemStart ?? 0;
+    let logicalItemEnd = logicalEntries[0]?.bidiItemEnd ?? logicalItemStart;
+    for (const entry of logicalEntries) {
+      logicalItemStart = Math.min(logicalItemStart, entry.bidiItemStart);
+      logicalItemEnd = Math.max(logicalItemEnd, entry.bidiItemEnd);
+    }
+    const paragraph = cursor.textAnalysis.bidi.paragraphs[paragraphIndex]?.paragraph;
+    while (paragraph !== undefined && logicalItemStart > 0
+      && paragraph.items[logicalItemStart - 1]?.identity.kind === "structural-control") {
+      logicalItemStart -= 1;
+    }
+    while (paragraph !== undefined && logicalItemEnd < paragraph.items.length
+      && paragraph.items[logicalItemEnd]?.identity.kind === "structural-control") {
+      logicalItemEnd += 1;
+    }
+    const remainingVisualRuns = Math.max(0, this.#budgets.maxVisualRuns - this.#visualRuns);
+    const bidiOrder = paragraph === undefined
+      ? Object.freeze({ itemIndices: Object.freeze([]), runs: Object.freeze([]) })
+      : bidiVisualOrderForLine(
+          paragraph,
+          logicalItemStart,
+          logicalItemEnd,
+          Math.min(Number.MAX_SAFE_INTEGER, remainingVisualRuns + 1),
+          this.#input.signal
+        );
+    if (bidiOrder.runs.length > remainingVisualRuns) {
+      this.#truncated ??= "maxVisualRuns";
+      throw new LayoutBudgetExhausted();
+    }
+    const visualRank = new Int32Array(Math.max(0, logicalItemEnd - logicalItemStart)).fill(-1);
+    for (const [rank, item] of bidiOrder.itemIndices.entries()) {
+      const local = item - logicalItemStart;
+      if (local >= 0 && local < visualRank.length) visualRank[local] = rank;
+    }
+    const entryRank = (entry: InlineLineEntry): number => {
+      let rank = Number.POSITIVE_INFINITY;
+      for (let item = entry.bidiItemStart; item < entry.bidiItemEnd; item += 1) {
+        const candidate = visualRank[item - logicalItemStart] ?? -1;
+        if (candidate >= 0) rank = Math.min(rank, candidate);
+      }
+      return rank;
+    };
+    const entries = [...logicalEntries].sort((left, right) => entryRank(left) - entryRank(right));
     const strut = this.#inlineExtents(cursor.strutMetrics, cursor.strutLineHeight);
     const ascent = entries.reduce((maximum, entry) => {
       const node = this.#formatting.node(this.#fragments.get(entry.fragment)?.formattingNode ?? this.#formatting.root);
@@ -836,9 +1302,13 @@ class LayoutBuilder {
       cssCoordinateDifference(cursor.maxX, cursor.lineStartX),
       negate(usedWidth)
     ));
-    const inlineOffset = cursor.textAlign === "center" ? cssDivide(freeInlineSize, 2)
-      : cursor.textAlign === "right" ? freeInlineSize : ZERO;
+    const lineDirection = paragraph === undefined ? cursor.direction : (paragraph.baseLevel & 1) === 0 ? "ltr" : "rtl";
+    const physicalAlign = cursor.textAlign === "start" ? (lineDirection === "rtl" ? "right" : "left")
+      : cursor.textAlign === "end" ? (lineDirection === "rtl" ? "left" : "right") : cursor.textAlign;
+    const inlineOffset = physicalAlign === "center" ? cssDivide(freeInlineSize, 2)
+      : physicalAlign === "right" ? freeInlineSize : ZERO;
     const usedIds: LayoutFragmentId[] = [];
+    let visualX = cursor.lineStartX;
     for (const entry of entries) {
       const fragment = this.#fragments.get(entry.fragment);
       if (fragment === undefined) continue;
@@ -862,14 +1332,18 @@ class LayoutBuilder {
       }
       const referenceY = fragment.kind === "text" ? fragment.contentRect.y : fragment.marginRect.y;
       const deltaY = cssCoordinateDifference(y, referenceY);
+      const horizontalReference = fragment.kind === "text" ? fragment.contentRect.x : fragment.marginRect.x;
+      const entryWidth = fragment.kind === "text" ? fragment.contentRect.width : fragment.marginRect.width;
+      const visualOffset = cssCoordinateDifference(visualX, horizontalReference);
       this.#translateInlineSubtree(
         fragment.id,
-        inlineOffset,
+        sum(inlineOffset, visualOffset),
         deltaY,
         cursor.clipRect,
         y,
         entry.lineHeight
       );
+      visualX = point(visualX, entryWidth);
       const moved = this.#fragments.get(fragment.id);
       if (moved !== undefined) {
         this.#fragments.set(fragment.id, {
@@ -878,6 +1352,32 @@ class LayoutBuilder {
         });
       }
       usedIds.push(fragment.id);
+    }
+    const fragmentsForRun = (logicalStart: number, logicalEnd: number): readonly LayoutFragmentId[] => {
+      let low = 0;
+      let high = logicalEntries.length;
+      while (low < high) {
+        const middle = low + Math.floor((high - low) / 2);
+        if ((logicalEntries[middle]?.bidiItemEnd ?? 0) <= logicalStart) low = middle + 1;
+        else high = middle;
+      }
+      const fragments: LayoutFragmentId[] = [];
+      for (let index = low; index < logicalEntries.length; index += 1) {
+        const entry = logicalEntries[index];
+        if (entry === undefined || entry.bidiItemStart >= logicalEnd) break;
+        if (entry.bidiItemEnd > logicalStart) fragments.push(entry.fragment);
+      }
+      return Object.freeze(fragments);
+    };
+    const lineFragments = logicalEntries.map((entry) => this.#fragments.get(entry.fragment))
+      .filter((fragment): fragment is LayoutFragment => fragment !== undefined);
+    const lineSemantics = new Map<DocumentNodeRef, NonNullable<LayoutFragment["semantic"]>>();
+    for (const fragment of lineFragments) {
+      if (fragment.semantic !== null) lineSemantics.set(fragment.semantic.node, fragment.semantic);
+      if (fragment.documentNode === null) continue;
+      for (const semantic of this.#documentSemanticAncestors(fragment.documentNode)) {
+        lineSemantics.set(semantic.node, semantic);
+      }
     }
     const line = Object.freeze({
       id: lineBoxId(`line-box:${cursor.containingFragment}:${String(this.#lineBoxes.length + 1)}`),
@@ -891,50 +1391,142 @@ class LayoutBuilder {
       baseline,
       ascent,
       descent,
-      fragments: Object.freeze(usedIds),
-      textFragments: Object.freeze(usedIds.filter((id) => this.#fragments.get(id)?.kind === "text")),
-      visualOrder: Object.freeze(usedIds)
+      usedInlineAdvance: usedWidth,
+      fragments: Object.freeze(logicalEntries.map((entry) => entry.fragment)),
+      textFragments: Object.freeze(logicalEntries.map((entry) => entry.fragment)
+        .filter((id) => this.#fragments.get(id)?.kind === "text")),
+      visualOrder: Object.freeze(usedIds),
+      logicalItemStart,
+      logicalItemEnd,
+      embeddingLevels: Object.freeze(paragraph?.embeddingLevels.slice(logicalItemStart, logicalItemEnd) ?? []),
+      sourceRanges: Object.freeze(lineFragments.flatMap((fragment) =>
+        fragment.sourceRange === null ? [] : [fragment.sourceRange])),
+      actions: Object.freeze([...new Set(lineFragments.flatMap((fragment) =>
+        fragment.action === null ? [] : [fragment.action]))]),
+      semantics: Object.freeze([...lineSemantics.values()]),
+      breakCause,
+      visualRuns: Object.freeze(bidiOrder.runs.map((run) => Object.freeze({
+        embeddingLevel: run.level,
+        direction: run.direction,
+        logicalItemStart: run.logicalStart,
+        logicalItemEnd: run.logicalEnd,
+        fragments: fragmentsForRun(run.logicalStart, run.logicalEnd)
+      })))
     });
     this.#lineBoxPositions.set(line.id, this.#lineBoxes.length);
     this.#lineBoxes.push(line);
+    this.#lineFragments += logicalEntries.length;
+    this.#visualRuns += bidiOrder.runs.length;
     cursor.lineBoxes.push(line);
     cursor.entries.length = 0;
     cursor.y = point(cursor.y, height);
     cursor.x = cursor.continuationX;
     cursor.lineStartX = cursor.continuationX;
+    cursor.maxX = cursor.continuationMaxX;
     cursor.collapsedSpace = false;
   }
 
   #textFragment(
     node: FormattingNode,
     cursor: InlineFormattingCursor,
-    text: string,
-    start: number,
-    end: number,
-    clip: CssRect
+    unit: InlineLogicalUnit,
+    clip: CssRect,
+    logicalUnitEnd = unit.logicalIndex + 1
   ): LayoutTextFragment | null {
     const style = this.#computed(node);
     if (style === null) return null;
     const metrics = this.#metrics(style);
+    const text = unit.kind === "soft-hyphen" ? "-" : unit.text;
     if (text.length === 0) return null;
     this.#ensureLineCapacity(cursor);
-    const advance = this.#measure(text, metrics.fontSize);
+    this.#ensureLineFragmentCapacity(cursor);
     const usedLineHeight = this.#lineHeight(style, metrics);
-    const sourceRange = node.source === null || node.sourceRange === null
-      ? null
-      : this.#formatting.document.textSourceRange(node.source, start, end);
-    const box = cssRect(cursor.x, cursor.y, advance, usedLineHeight);
+    const sourceRange = node.kind !== "text-sequence" || node.source === null || node.sourceRange === null
+      ? node.sourceRange
+      : this.#formatting.document.textSourceRange(
+          node.source,
+          unit.contentStartCodeUnit,
+          unit.contentEndCodeUnit
+        );
     const visible = style.visibility === "visible";
+    const globalStart = unit.bidiItemStart;
+    const globalEnd = unit.bidiItemEnd;
+    const position = globalStart < 0 ? undefined : cursor.textAnalysis.positions[globalStart];
+    const paragraphSlice = position === undefined ? undefined : cursor.textAnalysis.bidi.paragraphs[position.paragraph];
+    const bidiItemStart = position?.item ?? 0;
+    const bidiItemEnd = globalEnd >= globalStart && position !== undefined ? bidiItemStart + globalEnd - globalStart : bidiItemStart;
+    const embeddingLevel = paragraphSlice?.paragraph.embeddingLevels[bidiItemStart] ?? 0;
+    let advance: CssPixelLength = ZERO;
+    for (let index = unit.logicalIndex; index < logicalUnitEnd; index += 1) {
+      const candidate = cursor.textAnalysis.logicalUnits[index];
+      if (candidate === undefined || candidate.bidiItemStart >= globalEnd) break;
+      if ((candidate.kind === "text" || candidate.kind === "tab" || candidate.kind === "soft-hyphen")
+        && candidate.bidiItemStart >= globalStart && candidate.bidiItemEnd <= globalEnd) {
+        const candidateText = candidate.kind === "soft-hyphen" ? "-"
+          : candidate.kind === "tab" ? " " : candidate.text;
+        advance = cssAdd(
+          advance,
+          cursor.usedUnitAdvances.get(candidate.logicalIndex) ?? this.#measure(candidateText, metrics.fontSize)
+        );
+      }
+    }
+    const box = cssRect(cursor.x, cursor.y, advance, usedLineHeight);
+    // Text fragments are grouped only across adjacent units with one resolved
+    // embedding level. UAX #9 L2 therefore reverses their grapheme-unit order
+    // exactly when that level is odd; line-wide run reordering remains owned by
+    // #finalizeLine().
+    const visualClusters: LayoutTextCluster[] = [];
+    let visualText = "";
+    const reverse = (embeddingLevel & 1) !== 0;
+    const unitCount = logicalUnitEnd - unit.logicalIndex;
+    for (let offset = 0; offset < unitCount; offset += 1) {
+      const logicalIndex = reverse ? logicalUnitEnd - 1 - offset : unit.logicalIndex + offset;
+      const candidate = cursor.textAnalysis.logicalUnits[logicalIndex];
+      if (candidate === undefined || candidate.bidiItemStart < globalStart || candidate.bidiItemEnd > globalEnd
+        || (candidate.kind !== "text" && candidate.kind !== "tab" && candidate.kind !== "soft-hyphen")) continue;
+      let clusterText = candidate.kind === "soft-hyphen" ? "-" : candidate.kind === "tab" ? " " : candidate.text;
+      if (paragraphSlice !== undefined && candidate.kind !== "soft-hyphen" && candidate.kind !== "tab") {
+        clusterText = "";
+        const localStart = candidate.bidiItemStart - paragraphSlice.itemStart;
+        const localEnd = candidate.bidiItemEnd - paragraphSlice.itemStart;
+        for (let item = localStart; item < localEnd; item += 1) {
+          clusterText += mirroredBidiText(paragraphSlice.paragraph, item);
+        }
+      }
+      const visualStartCodeUnit = visualText.length;
+      visualText += clusterText;
+      const clusterSourceRange = node.kind !== "text-sequence" || node.source === null || node.sourceRange === null
+        ? node.sourceRange
+        : this.#formatting.document.textSourceRange(
+            node.source,
+            candidate.contentStartCodeUnit,
+            candidate.contentEndCodeUnit
+          );
+      visualClusters.push(Object.freeze({
+        text: clusterText,
+        visualStartCodeUnit,
+        visualEndCodeUnit: visualText.length,
+        contentStartCodeUnit: candidate.contentStartCodeUnit,
+        contentEndCodeUnit: candidate.contentEndCodeUnit,
+        sourceRange: clusterSourceRange,
+        advance: cursor.usedUnitAdvances.get(candidate.logicalIndex) ?? this.#measure(clusterText, metrics.fontSize)
+      }));
+    }
+    if (visualText.length === 0) visualText = text;
     const fragment = this.#store<LayoutTextFragment>({
-      id: this.#newId(node.id, `text:${String(start)}`),
+      id: this.#newId(node.id, `text:${String(unit.contentStartCodeUnit)}:${String(unit.logicalIndex)}`),
       kind: "text",
       formattingNode: node.id,
       documentNode: node.source,
       pseudoElement: node.pseudo,
       sourceRange,
-      contentStartCodeUnit: start,
-      contentEndCodeUnit: end,
+      contentStartCodeUnit: unit.contentStartCodeUnit,
+      contentEndCodeUnit: unit.contentEndCodeUnit,
       text: visible ? text : "",
+      visualText: visible ? visualText : "",
+      visualClusters: visible ? Object.freeze(visualClusters) : Object.freeze([]),
+      bidiParagraph: position?.paragraph ?? 0,
+      embeddingLevel,
       contentRect: box,
       paddingRect: box,
       borderRect: box,
@@ -959,91 +1551,300 @@ class LayoutBuilder {
       lineHeight: usedLineHeight,
       verticalAlign: this.#formatting.parent(node.id)?.id === cursor.containingFormattingNode
         ? { kind: "keyword", value: "baseline" }
-        : style.text.verticalAlign
+        : style.text.verticalAlign,
+      bidiParagraph: position?.paragraph ?? 0,
+      bidiItemStart,
+      bidiItemEnd
     });
     cursor.x = point(cursor.x, advance);
     return fragment;
   }
 
-  #placeText(node: FormattingTextNode, cursor: InlineFormattingCursor, clip: CssRect): LayoutResult {
-    const computed = this.#computed(node);
-    const mapped = transformTextWithSourceRanges(node.text, computed?.text.textTransform ?? "none");
-    const wraps = node.whiteSpace !== "nowrap" && node.whiteSpace !== "pre";
-    const preservesSpaces = node.whiteSpace === "pre" || node.whiteSpace === "pre-wrap" || node.whiteSpace === "break-spaces";
-    const preservesNewlines = node.whiteSpace !== "normal" && node.whiteSpace !== "nowrap";
-    const children: LayoutFragmentId[] = [];
-    let codeUnit = 0;
-    const tokens = mapped.value.match(/\r\n|\r|\n|[^\S\r\n]+|[^\s]+/gu) ?? [];
-    for (const [tokenIndex, token] of tokens.entries()) {
+  #breakBeforeUnit(cursor: InlineFormattingCursor, unit: InlineLogicalUnit): BreakOpportunityKind {
+    return cursor.textAnalysis.breaksBefore[unit.logicalIndex] ?? "prohibited";
+  }
+
+  #logicalUnitAdvance(cursor: InlineFormattingCursor, unit: InlineLogicalUnit): CssPixelLength {
+    const node = this.#formatting.node(unit.formattingNode);
+    if (unit.kind === "text") return this.#measure(unit.text, this.#fontSize(this.#computed(node)));
+    if (unit.kind === "soft-hyphen") return ZERO;
+    if (unit.kind === "tab") return ZERO;
+    if (unit.kind === "atomic-inline") {
+      return this.#atomicInlineAdvance(
+        node,
+        nonNegative(cssCoordinateDifference(cursor.maxX, cursor.continuationX))
+      );
+    }
+    return ZERO;
+  }
+
+  #logicalUnitForBidiItem(cursor: InlineFormattingCursor, item: number): InlineLogicalUnit | undefined {
+    return cursor.textAnalysis.unitsByBidiItem[item];
+  }
+
+  #selectInlineLineBreaks(cursor: InlineFormattingCursor): void {
+    const selection = selectLogicalLines(
+      cursor.textAnalysis.logicalUnits.map((unit) => {
+        const node = this.#formatting.node(unit.formattingNode);
+        const wrappingAllowed = node.kind !== "text-sequence" && node.kind !== "generated-text" && node.kind !== "marker"
+          ? true : node.whiteSpace !== "nowrap" && node.whiteSpace !== "pre";
+        return Object.freeze({
+          logicalIndex: unit.logicalIndex,
+          advance: this.#logicalUnitAdvance(cursor, unit),
+          tabInterval: unit.kind === "tab"
+            ? cssMultiply(this.#metrics(this.#computed(node)).chAdvance, this.#computed(node)?.text.tabSize ?? 8)
+            : null,
+          breakBefore: this.#breakBeforeUnit(cursor, unit),
+          forcedBreak: unit.kind === "forced-break",
+          collapsibleSpace: unit.collapsibleSpace,
+          wrappingAllowed
+        });
+      }),
+      nonNegative(cssCoordinateDifference(cursor.maxX, cursor.lineStartX)),
+      nonNegative(cssCoordinateDifference(cursor.continuationMaxX, cursor.continuationX)),
+      { maxSelectedLines: Math.max(0, this.#budgets.maxLineBoxes - this.#lineBoxes.length) },
+      this.#input.signal
+    );
+    if (selection.outcome.status === "rejected") throw new RangeError("Logical line-selection input was rejected.");
+    if (selection.outcome.status === "truncated") {
+      this.#truncated ??= "maxLineBoxes";
+    }
+    cursor.logicalUnitLimit = selection.retainedItems;
+    for (const [index, advance] of selection.usedAdvances) cursor.usedUnitAdvances.set(index, advance);
+    for (const index of selection.breaksBefore) cursor.selectedLineBreaks.add(index);
+    for (const index of selection.suppressed) cursor.suppressedUnits.add(index);
+  }
+
+  #atomicVisualClusters(
+    node: FormattingNode,
+    processed: ProcessedCssText,
+    baseDirection: "ltr" | "rtl" | "auto",
+    directionalSegments: readonly ControlDisplayTextSegment[],
+    metrics: UsedFontMetrics
+  ): readonly LayoutTextCluster[] {
+    const items: BidiItem<number>[] = [];
+    const ranges: { readonly unit: ProcessedCssText["units"][number]; readonly start: number; readonly end: number }[] = [];
+    const graphemeClusters = processed.outcome.status === "complete" ? processed.outcome.graphemeClusters : 0;
+    if (graphemeClusters > this.#budgets.maxGraphemeClusters - this.#graphemeClusters) {
+      this.#truncated ??= "maxGraphemeClusters";
+      throw new LayoutBudgetExhausted();
+    }
+    let paragraphCodePoints = 0;
+    const append = (item: BidiItem<number>): void => {
+      if (items.length >= this.#budgets.maxBidiItems - this.#bidiItems) {
+        this.#truncated ??= "maxBidiItems";
+        throw new LayoutBudgetExhausted();
+      }
+      if (item.kind === "code-point" && paragraphCodePoints >= this.#budgets.maxCodePointsPerBidiParagraph) {
+        this.#truncated ??= "maxCodePointsPerBidiParagraph";
+        throw new LayoutBudgetExhausted();
+      }
+      items.push(Object.freeze(item));
+      if (item.kind === "code-point") paragraphCodePoints += 1;
+      if (item.bidiClass === "B") paragraphCodePoints = 0;
+    };
+    let activeSegment = -1;
+    let segmentIndex = 0;
+    const structuralControl = (bidiType: "LRI" | "RLI" | "PDI", contentOffset: number): void => {
+      append({
+        logicalIndex: items.length,
+        kind: "structural-control",
+        text: "",
+        codePoint: null,
+        bidiClass: bidiType,
+        sourceStartCodeUnit: contentOffset,
+        sourceEndCodeUnit: contentOffset,
+        identity: ranges.length
+      });
+    };
+    for (const unit of processed.units) {
       this.#input.signal?.throwIfAborted();
-      const tokenStart = codeUnit;
-      codeUnit += token.length;
-      const newline = token === "\n" || token === "\r" || token === "\r\n";
-      if (newline) {
-        if (preservesNewlines) this.#finalizeLine(cursor, true);
-        else if (cursor.x > cursor.lineStartX && !cursor.collapsedSpace) {
-          const source = transformedSourceRange(mapped, tokenStart, codeUnit);
-          const placed = this.#textFragment(node, cursor, " ", source[0], source[1], clip);
+      while ((directionalSegments[segmentIndex]?.contentEndCodeUnit ?? Number.MAX_SAFE_INTEGER)
+        <= unit.contentStartCodeUnit) segmentIndex += 1;
+      const segment = directionalSegments[segmentIndex];
+      if (segmentIndex !== activeSegment && segment !== undefined
+        && unit.contentStartCodeUnit >= segment.contentStartCodeUnit
+        && unit.contentStartCodeUnit < segment.contentEndCodeUnit) {
+        if (activeSegment >= 0) structuralControl("PDI", unit.contentStartCodeUnit);
+        structuralControl(segment.direction === "rtl" ? "RLI" : "LRI", unit.contentStartCodeUnit);
+        activeSegment = segmentIndex;
+      }
+      const start = items.length;
+      if (unit.kind === "forced-break") {
+        append({
+          logicalIndex: items.length,
+          kind: "structural-control",
+          text: "",
+          codePoint: null,
+          bidiClass: "B",
+          sourceStartCodeUnit: unit.contentStartCodeUnit,
+          sourceEndCodeUnit: unit.contentEndCodeUnit,
+          identity: ranges.length
+        });
+      } else {
+        for (const character of unit.text) {
+          const codePoint = character.codePointAt(0);
+          if (codePoint === undefined) continue;
+          append({
+            logicalIndex: items.length,
+            kind: "code-point",
+            text: character,
+            codePoint,
+            bidiClass: bidiClass(codePoint),
+            sourceStartCodeUnit: unit.contentStartCodeUnit,
+            sourceEndCodeUnit: unit.contentEndCodeUnit,
+            identity: ranges.length
+          });
+        }
+      }
+      ranges.push(Object.freeze({ unit, start, end: items.length }));
+    }
+    if (activeSegment >= 0) structuralControl("PDI", processed.transformed.value.length);
+    const paragraphs = resolveBidiParagraphs(
+      items,
+      baseDirection,
+      {
+      maxCodePointsPerParagraph: this.#budgets.maxCodePointsPerBidiParagraph,
+      maxBidiItems: this.#budgets.maxBidiItems,
+      maxEmbeddingDepth: this.#budgets.maxBidiEmbeddingDepth,
+      maxBidiRuns: Math.max(0, this.#budgets.maxBidiRuns - this.#bidiRuns)
+      },
+      this.#input.signal
+    );
+    const clusters: LayoutTextCluster[] = [];
+    let visualCodeUnitOffset = 0;
+    let visualAdvance: CssPixelLength = ZERO;
+    let bidiRuns = 0;
+    let visualRuns = 0;
+    for (const slice of paragraphs.paragraphs) {
+      if (slice.paragraph.outcome.status === "rejected") throw new RangeError("Atomic inline bidi input was rejected.");
+      if (slice.paragraph.outcome.status === "truncated") {
+        this.#truncated ??= slice.paragraph.outcome.budget === "maxCodePointsPerParagraph"
+          ? "maxCodePointsPerBidiParagraph"
+          : slice.paragraph.outcome.budget === "maxEmbeddingDepth"
+            ? "maxBidiEmbeddingDepth"
+            : slice.paragraph.outcome.budget;
+        throw new LayoutBudgetExhausted();
+      }
+      bidiRuns += slice.paragraph.outcome.runs;
+      const remainingVisualRuns = Math.max(0, this.#budgets.maxVisualRuns - this.#visualRuns - visualRuns);
+      const order = bidiVisualOrderForLine(
+        slice.paragraph,
+        0,
+        slice.paragraph.items.length,
+        Math.min(Number.MAX_SAFE_INTEGER, remainingVisualRuns + 1),
+        this.#input.signal
+      );
+      if (order.runs.length > remainingVisualRuns) {
+        this.#truncated ??= "maxVisualRuns";
+        throw new LayoutBudgetExhausted();
+      }
+      visualRuns += order.runs.length;
+      const rank = new Map<number, number>();
+      for (const [visualIndex, item] of order.itemIndices.entries()) rank.set(item, visualIndex);
+      const paragraphRanges = ranges.filter((range) => range.start >= slice.itemStart && range.end <= slice.itemEnd
+        && range.unit.kind === "text");
+      paragraphRanges.sort((left, right) =>
+        (rank.get(left.start - slice.itemStart) ?? Number.MAX_SAFE_INTEGER)
+        - (rank.get(right.start - slice.itemStart) ?? Number.MAX_SAFE_INTEGER)
+      );
+      for (const range of paragraphRanges) {
+        let text = "";
+        for (let item = range.start - slice.itemStart; item < range.end - slice.itemStart; item += 1) {
+          text += mirroredBidiText(slice.paragraph, item);
+        }
+        const clusterText = range.unit.kind === "tab" ? " " : text;
+        const tabInterval = cssMultiply(metrics.chAdvance, this.#computed(node)?.text.tabSize ?? 8);
+        const remainder = tabInterval === 0 ? 0 : visualAdvance % tabInterval;
+        const advance = range.unit.kind === "tab"
+          ? tabInterval === 0 ? ZERO : (remainder === 0 ? tabInterval : tabInterval - remainder) as CssPixelLength
+          : this.#measure(range.unit.text, metrics.fontSize);
+        clusters.push(Object.freeze({
+          text: clusterText,
+          visualStartCodeUnit: visualCodeUnitOffset,
+          visualEndCodeUnit: visualCodeUnitOffset + clusterText.length,
+          contentStartCodeUnit: range.unit.contentStartCodeUnit,
+          contentEndCodeUnit: range.unit.contentEndCodeUnit,
+          sourceRange: node.sourceRange,
+          advance
+        }));
+        visualCodeUnitOffset += clusterText.length;
+        visualAdvance = cssAdd(visualAdvance, advance);
+      }
+    }
+    this.#bidiItems += items.length;
+    this.#bidiRuns += bidiRuns;
+    this.#graphemeClusters += graphemeClusters;
+    this.#visualRuns += visualRuns;
+    return Object.freeze(clusters);
+  }
+
+  #placeText(node: FormattingTextNode, cursor: InlineFormattingCursor, clip: CssRect): LayoutResult {
+    const children: LayoutFragmentId[] = [];
+    const analyzed = cursor.textAnalysis.textNodes.get(node.id);
+    const units = analyzed?.units ?? [];
+    for (let index = 0; index < units.length;) {
+      this.#input.signal?.throwIfAborted();
+      const unit = units[index];
+      if (unit === undefined) break;
+      if (unit.logicalIndex >= cursor.logicalUnitLimit) {
+        cursor.lineSelectionStopped = true;
+        break;
+      }
+      if (unit.kind === "forced-break") {
+        this.#finalizeLine(cursor, true, "forced");
+        index += 1;
+        continue;
+      }
+      if (unit.kind === "soft-hyphen") {
+        const following = cursor.textAnalysis.logicalUnits[unit.logicalIndex + 1];
+        if (following !== undefined && cursor.selectedLineBreaks.has(following.logicalIndex)
+          && this.#computed(node)?.text.hyphens === "manual") {
+          const placed = this.#textFragment(node, cursor, unit, clip);
           if (placed !== null) children.push(placed.id);
-          cursor.collapsedSpace = true;
         }
+        index += 1;
         continue;
       }
-      const whitespace = /^\s+$/u.test(token);
-      const rendered = whitespace && !preservesSpaces ? " " : token;
-      if (whitespace && !preservesSpaces && (cursor.x === cursor.continuationX || cursor.collapsedSpace)) continue;
-      const following = tokens[tokenIndex + 1];
-      const followingIsWord = following !== undefined && !/^\s+$/u.test(following);
-      if (whitespace && !preservesSpaces && wraps && followingIsWord
-        && cursor.x > cursor.continuationX
-        && point(
-          cursor.x,
-          sum(
-            this.#measure(rendered, this.#fontSize(computed)),
-            this.#measure(following, this.#fontSize(computed))
-          )
-        ) > cursor.maxX) {
-        this.#finalizeLine(cursor);
+      if (cursor.selectedLineBreaks.has(unit.logicalIndex) && cursor.entries.length > 0) {
+        this.#finalizeLine(cursor, false, "wrap");
+      }
+      if (cursor.suppressedUnits.has(unit.logicalIndex)) {
+        index += 1;
         continue;
       }
-      const tokenAdvance = this.#measure(rendered, this.#fontSize(computed));
-      if (wraps && !whitespace && cursor.x > cursor.continuationX && point(cursor.x, tokenAdvance) > cursor.maxX) {
-        this.#finalizeLine(cursor);
+      const firstPosition = cursor.textAnalysis.positions[unit.bidiItemStart];
+      const firstParagraph = firstPosition === undefined
+        ? undefined : cursor.textAnalysis.bidi.paragraphs[firstPosition.paragraph]?.paragraph;
+      const firstLevel = firstPosition === undefined ? null : firstParagraph?.embeddingLevels[firstPosition.item] ?? null;
+      let end = index + 1;
+      while (unit.kind === "text" && end < units.length) {
+        const candidate = units[end];
+        if (candidate === undefined || candidate.kind !== "text"
+          || candidate.collapsibleSpace !== unit.collapsibleSpace
+          || cursor.suppressedUnits.has(candidate.logicalIndex)
+          || cursor.selectedLineBreaks.has(candidate.logicalIndex)) break;
+        const position = cursor.textAnalysis.positions[candidate.bidiItemStart];
+        const paragraph = position === undefined
+          ? undefined : cursor.textAnalysis.bidi.paragraphs[position.paragraph]?.paragraph;
+        const level = position === undefined ? null : paragraph?.embeddingLevels[position.item] ?? null;
+        if (position?.paragraph !== firstPosition?.paragraph || level !== firstLevel) break;
+        end += 1;
       }
-      const breaksInsideToken = whitespace && preservesSpaces;
-      if (!breaksInsideToken) {
-        const source = transformedSourceRange(mapped, tokenStart, codeUnit);
-        const placed = this.#textFragment(node, cursor, rendered, source[0], source[1], clip);
-        if (placed !== null) children.push(placed.id);
-        cursor.collapsedSpace = whitespace && !preservesSpaces;
-        continue;
-      }
-      let chunk = "";
-      let chunkStart = tokenStart;
-      let chunkEnd = tokenStart;
-      let chunkAdvance: CssPixelLength = ZERO;
-      const flush = (): void => {
-        if (chunk.length === 0) return;
-        const source = transformedSourceRange(mapped, chunkStart, chunkEnd);
-        const placed = this.#textFragment(node, cursor, chunk, source[0], source[1], clip);
-        if (placed !== null) children.push(placed.id);
-        chunk = "";
-        chunkAdvance = ZERO;
-      };
-      for (const grapheme of this.#graphemes(rendered, this.#fontSize(computed))) {
-        if (wraps && (cursor.x > cursor.continuationX || chunk.length > 0)
-          && point(cursor.x, sum(chunkAdvance, grapheme.advance)) > cursor.maxX) {
-          flush();
-          this.#finalizeLine(cursor);
-          chunkStart = tokenStart + grapheme.startCodeUnit;
-        }
-        if (chunk.length === 0) chunkStart = tokenStart + grapheme.startCodeUnit;
-        chunk += grapheme.text;
-        chunkAdvance = cssAdd(chunkAdvance, grapheme.advance);
-        chunkEnd = tokenStart + grapheme.endCodeUnit;
-      }
-      flush();
-      cursor.collapsedSpace = false;
+      const last = units[end - 1] ?? unit;
+      let text = "";
+      for (let cursorIndex = index; cursorIndex < end; cursorIndex += 1) text += units[cursorIndex]?.text ?? "";
+      const grouped = Object.freeze({
+        ...unit,
+        text,
+        contentEndCodeUnit: last.contentEndCodeUnit,
+        bidiItemEnd: last.bidiItemEnd,
+        lineEndCodeUnit: last.lineEndCodeUnit
+      });
+      const placed = this.#textFragment(node, cursor, grouped, clip, last.logicalIndex + 1);
+      if (placed !== null) children.push(placed.id);
+      cursor.collapsedSpace = unit.collapsibleSpace;
+      index = end;
     }
     const fallback = cssRect(cursor.x, cursor.y, ZERO, ZERO);
     return this.#container(node, fallback, fallback, fallback, fallback, clip, children, []);
@@ -1055,10 +1856,44 @@ class LayoutBuilder {
     clip: CssRect
   ): LayoutResult {
     this.#ensureLineCapacity(cursor);
+    this.#ensureLineFragmentCapacity(cursor);
     const control = node.kind === "form-control" ? controlDisplayText(node, this.#formatting) : null;
-    const text = node.kind === "form-control" ? control?.text ?? "" : node.fallbackText;
+    const logicalText = node.kind === "form-control" ? control?.text ?? "" : node.fallbackText;
+    const processedText = this.#input.inlineItemStreams.textForFormattingNode(node.id);
+    if (processedText === null || processedText.outcome.status !== "complete") {
+      throw new RangeError("Inline item streams do not contain logical text for an atomic inline box.");
+    }
     const style = this.#boxComputed(node) ?? this.#computed(node);
     const metrics = this.#metrics(style);
+    const controlDirectionText = node.kind !== "form-control" ? logicalText
+      : control?.value || (node.control.kind === "text" || node.control.kind === "textarea"
+        ? node.control.placeholder ?? "" : "");
+    const htmlDirection = node.source === null
+      ? style?.text.direction ?? "ltr"
+      : this.#formatting.document.directionForRenderedText(
+          node.source,
+          controlDirectionText
+        );
+    const baseDirection = style?.text.unicodeBidi === "plaintext"
+      ? htmlDirection
+      : style?.text.direction ?? "ltr";
+    const directionalSegments = style?.text.unicodeBidi === "plaintext"
+      ? Object.freeze([])
+      : control?.segments ?? (logicalText.length === 0 ? Object.freeze([]) : Object.freeze([{
+          kind: "control-value" as const,
+          text: logicalText,
+          contentStartCodeUnit: 0,
+          contentEndCodeUnit: logicalText.length,
+          direction: htmlDirection
+        }]));
+    const visualClusters = this.#atomicVisualClusters(
+      node,
+      processedText,
+      baseDirection,
+      directionalSegments,
+      metrics
+    );
+    const text = visualClusters.map((cluster) => cluster.text).join("");
     const lineHeight = this.#lineHeight(style, metrics);
     const containingWidth = nonNegative(cssCoordinateDifference(cursor.maxX, cursor.continuationX));
     const { margin, padding, border } = this.#edges(style, containingWidth);
@@ -1066,7 +1901,7 @@ class LayoutBuilder {
     const verticalChrome = sum(padding.top, padding.bottom, border.top, border.bottom);
     const intrinsicWidth = node.kind !== "form-control" && node.intrinsicWidth !== null
       ? cssPx(node.intrinsicWidth)
-      : this.#measure(text, metrics.fontSize);
+      : visualClusters.reduce<CssPixelLength>((advance, cluster) => cssAdd(advance, cluster.advance), ZERO);
     const specifiedWidth = style === null ? null : this.#usedLength(style.box.width, containingWidth, style);
     const toContentWidth = (value: CssPixelLength): CssPixelLength => style?.box.boxSizing === "border-box"
       ? nonNegative(sum(value, negate(horizontalChrome))) : value;
@@ -1092,7 +1927,10 @@ class LayoutBuilder {
       maximumHeight === null ? null : toContentHeight(maximumHeight)
     );
     const advance = sum(margin.left, border.left, padding.left, contentWidth, padding.right, border.right, margin.right);
-    if (cursor.x > cursor.continuationX && point(cursor.x, advance) > cursor.maxX) this.#finalizeLine(cursor);
+    const globalItem = cursor.textAnalysis.atomicItems.get(node.id) ?? -1;
+    const atomicUnit = this.#logicalUnitForBidiItem(cursor, globalItem);
+    if (atomicUnit !== undefined && cursor.selectedLineBreaks.has(atomicUnit.logicalIndex)
+      && cursor.entries.length > 0) this.#finalizeLine(cursor, false, "wrap");
     const marginRect = cssRect(cursor.x, cursor.y, advance, sum(margin.top, verticalChrome, contentHeight, margin.bottom));
     const borderRect = cssRect(
       point(cursor.x, margin.left), point(cursor.y, margin.top),
@@ -1116,7 +1954,7 @@ class LayoutBuilder {
       pseudoElement: node.pseudo,
       sourceRange: node.sourceRange,
       contentStartCodeUnit: 0,
-      contentEndCodeUnit: text.length,
+      contentEndCodeUnit: logicalText.length,
       contentRect,
       paddingRect,
       borderRect,
@@ -1136,21 +1974,29 @@ class LayoutBuilder {
       maxContentContribution: intrinsicWidth
     } as const;
     const fragment: LayoutBoxFragment = node.kind === "form-control" && control !== null
-      ? { ...common, kind: "control", controlLabel: control.label, controlValue: control.value, controlText: control.text }
-      : { ...common, kind: "replaced", replacedText: text };
+      ? {
+          ...common, kind: "control", controlLabel: control.label, controlValue: control.value,
+          controlText: visible ? text : "", visualClusters: visible ? Object.freeze(visualClusters) : Object.freeze([])
+        }
+      : {
+          ...common, kind: "replaced", replacedText: visible ? text : "",
+          visualClusters: visible ? Object.freeze(visualClusters) : Object.freeze([])
+        };
     this.#store(fragment, true);
     const atomicLineHeight = cssMax(lineHeight, borderRect.height);
-    cursor.entries.push({ fragment: fragment.id, metrics, lineHeight: atomicLineHeight, verticalAlign: style?.text.verticalAlign ?? { kind: "keyword", value: "baseline" } });
+    const bidiPosition = globalItem < 0 ? undefined : cursor.textAnalysis.positions[globalItem];
+    cursor.entries.push({
+      fragment: fragment.id,
+      metrics,
+      lineHeight: atomicLineHeight,
+      verticalAlign: style?.text.verticalAlign ?? { kind: "keyword", value: "baseline" },
+      bidiParagraph: bidiPosition?.paragraph ?? 0,
+      bidiItemStart: bidiPosition?.item ?? 0,
+      bidiItemEnd: (bidiPosition?.item ?? 0) + 1
+    });
     cursor.x = point(cursor.x, advance);
     cursor.collapsedSpace = false;
     return { fragment: fragment.id, borderRect, marginRect };
-  }
-
-  #isAtomicInline(node: FormattingNode): boolean {
-    if (node.outer !== "inline") return false;
-    if (node.kind === "form-control" || node.kind === "replaced-element" || node.kind === "image-fallback") return true;
-    const display = this.#boxComputed(node)?.display;
-    return display?.box === "principal" && (display.replaced || display.inner !== "flow");
   }
 
   #atomicInlineAdvance(node: FormattingNode, containingWidth: CssPixelLength): CssPixelLength {
@@ -1176,9 +2022,13 @@ class LayoutBuilder {
     depth: number
   ): LayoutResult {
     this.#ensureLineCapacity(cursor);
+    this.#ensureLineFragmentCapacity(cursor);
     const containingWidth = nonNegative(cssCoordinateDifference(cursor.maxX, cursor.continuationX));
     const expectedAdvance = this.#atomicInlineAdvance(node, containingWidth);
-    if (cursor.x > cursor.continuationX && point(cursor.x, expectedAdvance) > cursor.maxX) this.#finalizeLine(cursor);
+    const globalItem = cursor.textAnalysis.atomicItems.get(node.id) ?? -1;
+    const atomicUnit = this.#logicalUnitForBidiItem(cursor, globalItem);
+    if (atomicUnit !== undefined && cursor.selectedLineBreaks.has(atomicUnit.logicalIndex)
+      && cursor.entries.length > 0) this.#finalizeLine(cursor, false, "wrap");
     const firstInnerLine = this.#lineBoxes.length;
     const result = this.#layoutNode(node.id, cursor.x, cursor.y, expectedAdvance, clip, depth + 1);
     const fragment = this.#fragments.get(result.fragment);
@@ -1201,11 +2051,15 @@ class LayoutBuilder {
       baseline: cssMin(fragment.marginRect.height, baseline)
     });
     this.#fragments.set(fragment.id, { ...fragment, baseline: atomicMetrics.baseline, usedFontMetrics: atomicMetrics });
+    const bidiPosition = globalItem < 0 ? undefined : cursor.textAnalysis.positions[globalItem];
     cursor.entries.push({
       fragment: fragment.id,
       metrics: atomicMetrics,
       lineHeight: fragment.marginRect.height,
-      verticalAlign: style?.text.verticalAlign ?? { kind: "keyword", value: "baseline" }
+      verticalAlign: style?.text.verticalAlign ?? { kind: "keyword", value: "baseline" },
+      bidiParagraph: bidiPosition?.paragraph ?? 0,
+      bidiItemStart: bidiPosition?.item ?? 0,
+      bidiItemEnd: (bidiPosition?.item ?? 0) + 1
     });
     cursor.x = point(cursor.x, fragment.marginRect.width);
     cursor.collapsedSpace = false;
@@ -1229,7 +2083,7 @@ class LayoutBuilder {
     const onlyChild = children.length === 1 && children[0] !== undefined
       ? this.#fragments.get(children[0]) : undefined;
     const overflowRect = children.length === 0 ? borderRect
-      : onlyChild !== undefined ? cssUnion([borderRect, onlyChild.overflowRect], borderRect)
+      : onlyChild !== undefined ? unionOverflowRect(borderRect, onlyChild.overflowRect)
         : cssUnion((function* (builder: LayoutBuilder): Generator<CssRect> {
             yield borderRect;
             for (const id of children) {
@@ -1282,7 +2136,7 @@ class LayoutBuilder {
 
   #inline(id: FormattingNodeId, cursor: InlineFormattingCursor, clip: CssRect, depth: number): LayoutResult {
     const node = this.#formatting.node(id);
-    if (this.#isAtomicInline(node)
+    if (isAtomicInlineBox(this.#formatting, node)
       && node.kind !== "form-control" && node.kind !== "replaced-element" && node.kind !== "image-fallback") {
       return this.#atomicFormattingContext(node, cursor, clip, depth);
     }
@@ -1418,10 +2272,14 @@ class LayoutBuilder {
       this.#finalizeLine(cursor, true);
       return this.#container(node, box, box, box, box, clip, [], []);
     }
+    if (node.kind === "line-break-opportunity") {
+      const box = cssRect(cursor.x, cursor.y, ZERO, ZERO);
+      return this.#container(node, box, box, box, box, clip, [], []);
+    }
     if (node.kind === "form-control" || node.kind === "replaced-element" || node.kind === "image-fallback") {
       return this.#atomic(node, cursor, clip);
     }
-    if (!isInlineFormatting(node)) {
+    if (!isInlineFormattingNode(node)) {
       if (cursor.x > cursor.continuationX) this.#finalizeLine(cursor);
       const result = this.#layoutNode(
         id,
@@ -1467,6 +2325,12 @@ class LayoutBuilder {
   }
 
   #tryInline(id: FormattingNodeId, cursor: InlineFormattingCursor, clip: CssRect, depth: number): LayoutResult | null {
+    if (cursor.lineSelectionStopped) return null;
+    const firstUnit = cursor.textAnalysis.firstUnitByFormatting.get(id);
+    if (firstUnit !== undefined && firstUnit >= cursor.logicalUnitLimit) {
+      cursor.lineSelectionStopped = true;
+      return null;
+    }
     try { return this.#inline(id, cursor, clip, depth); }
     catch (error) { if (error instanceof LayoutBudgetExhausted) return null; throw error; }
   }
@@ -1474,24 +2338,63 @@ class LayoutBuilder {
   #intrinsicWidth(id: FormattingNodeId, maximum: CssPixelLength): CssPixelLength {
     const pending = [id];
     let total: CssPixelLength = ZERO;
+    let trailingCollapsibleAdvance: CssPixelLength = ZERO;
+    const appendProcessed = (processed: ProcessedCssText, style: ComputedStyle | null): void => {
+      if (processed.outcome.status !== "complete") {
+        throw new RangeError("Inline item stream contains incomplete logical text.");
+      }
+      const metrics = this.#metrics(style);
+      const tabInterval = cssMultiply(metrics.chAdvance, style?.text.tabSize ?? 8);
+      for (const unit of processed.units) {
+        this.#input.signal?.throwIfAborted();
+        if (unit.kind === "forced-break") {
+          total = nonNegative(cssAdd(total, negate(trailingCollapsibleAdvance)));
+          trailingCollapsibleAdvance = ZERO;
+          continue;
+        }
+        if (unit.kind === "soft-hyphen") continue;
+        let advance: CssPixelLength;
+        if (unit.kind === "tab") {
+          const remainder = tabInterval === 0 ? 0 : total % tabInterval;
+          advance = tabInterval === 0
+            ? ZERO
+            : (remainder === 0 ? tabInterval : tabInterval - remainder) as CssPixelLength;
+        } else advance = this.#measure(unit.text, metrics.fontSize);
+        total = cssAdd(total, advance);
+        if (unit.collapsibleSpace) trailingCollapsibleAdvance = cssAdd(trailingCollapsibleAdvance, advance);
+        else trailingCollapsibleAdvance = ZERO;
+      }
+    };
     while (pending.length > 0 && total <= maximum) {
       const current = pending.pop();
       if (current === undefined) continue;
       const node = this.#formatting.node(current);
       const style = this.#computed(node);
       if (node.kind === "text-sequence" || node.kind === "generated-text" || node.kind === "marker") {
-        const text = transformTextWithSourceRanges(node.text, style?.text.textTransform ?? "none").value.replace(/\s+/gu, " ");
-        total = cssAdd(total, this.#measure(text, this.#fontSize(style)));
+        const processed = this.#input.inlineItemStreams.textForFormattingNode(node.id);
+        if (processed === null) throw new RangeError("Inline item streams do not contain logical text for intrinsic sizing.");
+        appendProcessed(processed, style);
       } else if (node.kind === "form-control") {
-        total = cssAdd(total, this.#measure(controlDisplayText(node, this.#formatting).text, this.#fontSize(style)));
+        const processed = this.#input.inlineItemStreams.textForFormattingNode(node.id);
+        if (processed === null) throw new RangeError("Inline item streams do not contain control text for intrinsic sizing.");
+        appendProcessed(processed, style);
       } else if (node.kind === "replaced-element" || node.kind === "image-fallback") {
         const intrinsic = node.intrinsicWidth === null ? null : cssPx(node.intrinsicWidth);
-        total = cssAdd(total, intrinsic ?? this.#measure(node.fallbackText, this.#fontSize(style)));
+        const processed = intrinsic === null ? this.#input.inlineItemStreams.textForFormattingNode(node.id) : null;
+        if (intrinsic === null && processed === null) {
+          throw new RangeError("Inline item streams do not contain replaced fallback text for intrinsic sizing.");
+        }
+        if (intrinsic === null) appendProcessed(processed as ProcessedCssText, style);
+        else {
+          total = cssAdd(total, intrinsic);
+          trailingCollapsibleAdvance = ZERO;
+        }
       } else for (let index = node.children.length - 1; index >= 0; index -= 1) {
         const child = node.children[index];
         if (child !== undefined) pending.push(child);
       }
     }
+    total = nonNegative(cssAdd(total, negate(trailingCollapsibleAdvance)));
     return cssMin(maximum, cssMax(this.#metrics(null).chAdvance, total));
   }
 
@@ -1577,23 +2480,45 @@ class LayoutBuilder {
     let pendingBottomMargin: CssPixelLength = ZERO;
     let inlineRun: FormattingNodeId[] = [];
     let firstInline = true;
+    let layoutStopped = false;
     const ownedLineBoxes: LineBox[] = [];
-    const flushInline = (): void => {
-      if (inlineRun.length === 0) return;
+    const flushInline = (): boolean => {
+      if (inlineRun.length === 0) return !layoutStopped;
       const style = this.#boxComputed(node) ?? this.#computed(node);
       const indent = firstInline && style !== null
         ? this.#usedLength(style.text.textIndent, dimensions.contentWidth, style) ?? ZERO
         : ZERO;
-      const startX = point(contentX, indent);
+      const continuationMaxX = point(contentX, dimensions.contentWidth);
+      const startX = style?.text.direction === "rtl" ? contentX : point(contentX, indent);
+      const firstLineMaxX = style?.text.direction === "rtl"
+        ? point(continuationMaxX, negate(indent))
+        : continuationMaxX;
+      let textAnalysis: InlineTextAnalysis;
+      const paragraphDirection = style?.text.unicodeBidi === "plaintext" ? "auto" : style?.text.direction ?? "ltr";
+      try { textAnalysis = this.#inlineTextAnalysis(node.id, inlineRun, paragraphDirection); }
+      catch (error) {
+        if (!(error instanceof LayoutBudgetExhausted)) throw error;
+        inlineRun = [];
+        layoutStopped = true;
+        return false;
+      }
       const cursor: InlineFormattingCursor = {
         containingFragment: containerId,
         containingFormattingNode: node.id,
         continuationX: contentX,
-        maxX: point(contentX, dimensions.contentWidth),
-        textAlign: style?.text.textAlign ?? "left",
+        continuationMaxX,
+        maxX: firstLineMaxX,
+        textAlign: style?.text.textAlign ?? "start",
+        direction: style?.text.direction ?? "ltr",
         strutMetrics: this.#metrics(style),
         strutLineHeight: this.#lineHeight(style, this.#metrics(style)),
         clipRect: childClip,
+        textAnalysis,
+        selectedLineBreaks: new Set<number>(),
+        suppressedUnits: new Set<number>(),
+        usedUnitAdvances: new Map<number, CssPixelLength>(),
+        logicalUnitLimit: Number.MAX_SAFE_INTEGER,
+        lineSelectionStopped: false,
         lineStartX: startX,
         x: startX,
         y: currentBottom,
@@ -1602,12 +2527,16 @@ class LayoutBuilder {
         entries: [],
         lineBoxes: []
       };
+      this.#selectInlineLineBreaks(cursor);
       for (const child of inlineRun) {
         const result = this.#tryInline(child, cursor, childClip, depth + 1);
-        if (result === null) break;
+        if (result === null) {
+          layoutStopped = true;
+          break;
+        }
         children.push(result.fragment);
       }
-      try { this.#finalizeLine(cursor); }
+      try { this.#finalizeLine(cursor, false, "end-of-paragraph"); }
       catch (error) { if (!(error instanceof LayoutBudgetExhausted)) throw error; }
       this.#releaseLineReservation(cursor);
       for (const line of cursor.lineBoxes) ownedLineBoxes.push(line);
@@ -1615,6 +2544,8 @@ class LayoutBuilder {
       pendingBottomMargin = ZERO;
       inlineRun = [];
       firstInline = false;
+      layoutStopped ||= cursor.lineSelectionStopped;
+      return !layoutStopped;
     };
     const columnFlex = node.kind === "flex-container"
       && (this.#boxComputed(node)?.box.flexDirection === "column"
@@ -1667,8 +2598,8 @@ class LayoutBuilder {
       }
     } else for (const childId of node.children) {
       const child = this.#formatting.node(childId);
-      if (isInlineFormatting(child)) { inlineRun.push(childId); continue; }
-      flushInline();
+      if (isInlineFormattingNode(child)) { inlineRun.push(childId); continue; }
+      if (!flushInline()) break;
       const childMargins = this.#collapsibleMargins(
         childId,
         dimensions.contentWidth,
@@ -1984,21 +2915,33 @@ class LayoutBuilder {
         return this.#container(node, empty, empty, empty, empty, empty, [], []);
       }
       if (node.kind === "text-sequence" || node.kind === "generated-text" || node.kind === "marker"
-        || node.kind === "forced-line-break" || node.kind === "form-control"
+        || node.kind === "forced-line-break" || node.kind === "line-break-opportunity" || node.kind === "form-control"
         || node.kind === "replaced-element" || node.kind === "image-fallback") {
         const cursor: InlineFormattingCursor = {
           containingFragment: this.#newId(node.id, "atomic-context"),
           containingFormattingNode: node.id,
-          continuationX: x, maxX: point(x, width), x, y,
-          textAlign: this.#computed(node)?.text.textAlign ?? "left",
+          continuationX: x, continuationMaxX: point(x, width), maxX: point(x, width), x, y,
+          textAlign: this.#computed(node)?.text.textAlign ?? "start",
+          direction: this.#computed(node)?.text.direction ?? "ltr",
           strutMetrics: this.#metrics(this.#computed(node)),
           strutLineHeight: this.#lineHeight(this.#computed(node), this.#metrics(this.#computed(node))),
           clipRect: clip,
+          textAnalysis: this.#inlineTextAnalysis(
+            node.id,
+            [id],
+            this.#computed(node)?.text.unicodeBidi === "plaintext"
+              ? "auto"
+              : this.#computed(node)?.text.direction ?? "ltr"
+          ),
+          selectedLineBreaks: new Set<number>(),
+          suppressedUnits: new Set<number>(),
           lineStartX: x,
-          collapsedSpace: false, lineReserved: false, entries: [], lineBoxes: []
+          collapsedSpace: false, lineReserved: false, logicalUnitLimit: Number.MAX_SAFE_INTEGER,
+          lineSelectionStopped: false, usedUnitAdvances: new Map<number, CssPixelLength>(), entries: [], lineBoxes: []
         };
+        this.#selectInlineLineBreaks(cursor);
         const result = this.#inlineReserved(id, cursor, clip, depth + 1);
-        try { this.#finalizeLine(cursor); }
+        try { this.#finalizeLine(cursor, false, "end-of-paragraph"); }
         catch (error) { if (!(error instanceof LayoutBudgetExhausted)) throw error; }
         this.#releaseLineReservation(cursor);
         return result;
@@ -2070,13 +3013,11 @@ class LayoutBuilder {
         ? contentRect : this.#unionContinuationRectangles(continuations, "borderRect", paddingRect);
       const marginRect = undecorated
         ? contentRect : this.#unionContinuationRectangles(continuations, "marginRect", borderRect);
-      const overflowRect = cssUnion((function* (builder: LayoutBuilder): Generator<CssRect> {
-        yield borderRect;
-        for (const child of fragment.children) {
-          const overflow = builder.#fragments.get(child)?.overflowRect;
-          if (overflow !== undefined) yield overflow;
-        }
-      })(this), borderRect);
+      let overflowRect = borderRect;
+      for (const child of fragment.children) {
+        const childOverflow = this.#fragments.get(child)?.overflowRect;
+        if (childOverflow !== undefined) overflowRect = unionOverflowRect(overflowRect, childOverflow);
+      }
       this.#fragments.set(id, {
         ...fragment,
         contentRect,
@@ -2157,7 +3098,7 @@ class LayoutBuilder {
         };
     return new ImmutableLayoutFragmentTree(
       this.#input, root.fragment, this.#fragments, this.#formattingIndex,
-      this.#documentIndex, this.#lineBoxes, outcome, this.#rootFontMetrics
+      this.#documentIndex, this.#parentIndex, this.#lineBoxes, outcome, this.#rootFontMetrics
     );
   }
 }
@@ -2166,7 +3107,6 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
   readonly formatting: FormattingTree;
   readonly context: BuildLayoutFragmentTreeInput["context"];
   readonly rootFontMetrics: UsedFontMetrics;
-  readonly searchIndex: BuildLayoutFragmentTreeInput["searchIndex"];
   readonly root: LayoutFragmentId;
   readonly lineBoxes: readonly LineBox[];
   readonly outcome: LayoutOutcome;
@@ -2181,6 +3121,7 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
     fragments: ReadonlyMap<LayoutFragmentId, LayoutFragment>,
     formattingIndex: ReadonlyMap<FormattingNodeId, readonly LayoutFragmentId[]>,
     documentIndex: ReadonlyMap<DocumentNodeRef, readonly LayoutFragmentId[]>,
+    parentIndex: ReadonlyMap<LayoutFragmentId, LayoutFragmentId>,
     lineBoxes: readonly LineBox[],
     outcome: LayoutOutcome,
     rootMetrics: UsedFontMetrics
@@ -2192,7 +3133,6 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
       initialContainingBlock: Object.freeze({ ...input.context.initialContainingBlock })
     });
     this.rootFontMetrics = Object.freeze({ ...rootMetrics });
-    this.searchIndex = input.searchIndex;
     this.root = root;
     const complete = outcome.status === "complete";
     const reachable = new Set<LayoutFragmentId>();
@@ -2241,11 +3181,9 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
       : outcome.status === "truncated"
         ? { ...outcome, fragments: reachable.size, lineBoxes: retainedLines.length }
         : outcome);
-    const parents = new Map<LayoutFragmentId, LayoutFragmentId>();
-    for (const fragment of this.#fragments.values()) {
-      for (const child of fragment.children) parents.set(child, fragment.id);
-    }
-    this.#parents = parents;
+    this.#parents = complete
+      ? parentIndex
+      : new Map([...parentIndex].filter(([child, parent]) => reachable.has(child) && reachable.has(parent)));
     Object.freeze(this);
   }
 
@@ -2266,7 +3204,7 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
       minContentContribution: ZERO, maxContentContribution: ZERO
     });
     return new ImmutableLayoutFragmentTree(
-      input, id, new Map([[id, fragment]]), new Map(), new Map(), [],
+      input, id, new Map([[id, fragment]]), new Map(), new Map(), new Map(), [],
       { status: "rejected", reason }, REJECTED_FONT_METRICS
     );
   }
@@ -2294,38 +3232,12 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
     return (this.#documentIndex.get(node) ?? []).map((id) => this.fragment(id));
   }
 
-  public searchSpans(query: string, limit: number): readonly LayoutSearchSpan[] {
-    const spans: LayoutSearchSpan[] = [];
-    for (const match of this.searchIndex.search(query, limit).matches) {
-      for (const slice of match.slices) {
-        for (const fragment of this.forFormattingNode(slice.formatting)) {
-          if (fragment.kind !== "text"
-            || slice.contentStart >= fragment.contentEndCodeUnit
-            || slice.contentEnd <= fragment.contentStartCodeUnit) continue;
-          const contentStartCodeUnit = Math.max(slice.contentStart, fragment.contentStartCodeUnit);
-          const contentEndCodeUnit = Math.min(slice.contentEnd, fragment.contentEndCodeUnit);
-          let sourceRange: DocumentSourceRange | null = slice.sourceRange;
-          if (sourceRange !== null && fragment.sourceRange !== null) {
-            const start = Math.max(sourceRange.start, fragment.sourceRange.start);
-            const end = Math.min(sourceRange.end, fragment.sourceRange.end);
-            sourceRange = end > start ? Object.freeze({ start, end, provenance: sourceRange.provenance }) : null;
-          }
-          spans.push(Object.freeze({
-            match: match.id,
-            fragment: fragment.id,
-            documentNode: fragment.documentNode,
-            sourceRange,
-            contentStartCodeUnit,
-            contentEndCodeUnit
-          }));
-        }
-      }
-    }
-    return Object.freeze(spans);
-  }
 }
 
 export function buildLayoutFragmentTree(input: BuildLayoutFragmentTreeInput): LayoutFragmentTree {
+  if (input.inlineItemStreams.formatting !== input.formatting) {
+    return ImmutableLayoutFragmentTree.rejected(input, "invalid-context");
+  }
   const budgets = normalizeBudgets(input.context.budgets);
   if (budgets === null) return ImmutableLayoutFragmentTree.rejected(input, "invalid-budget");
   try { return new LayoutBuilder(input, budgets).build(); }
