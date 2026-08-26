@@ -14,6 +14,11 @@ import type {
 
 export type FormattingNodeId = string & { readonly __formattingNodeId: unique symbol };
 
+export type DocumentActionIdentity =
+  | { readonly kind: "link"; readonly node: DocumentNodeRef; readonly destination: string }
+  | { readonly kind: "form-control"; readonly node: DocumentNodeRef; readonly form: DocumentNodeRef | null }
+  | { readonly kind: "disclosure"; readonly node: DocumentNodeRef; readonly open: boolean };
+
 export type FormattingNodeKind =
   | "root"
   | "block-container"

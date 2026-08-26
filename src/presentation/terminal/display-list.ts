@@ -3,8 +3,7 @@ import {
   cssCoordinateDifference,
   cssMax,
   cssPx,
-  type LayoutFragment,
-  type LayoutFragmentId
+  type LayoutFragment
 } from "../layout/index.js";
 import type {
   BuildTerminalDisplayListInput,
@@ -152,29 +151,13 @@ export function buildTerminalDisplayList(input: BuildTerminalDisplayListInput): 
     });
   }
   const commands: TerminalPaintCommand[] = [];
-  const lineForFragment = new Map<LayoutFragmentId, number>();
-  const visualLineFragments = new Map<number, readonly LayoutFragmentId[]>();
-  const visualLineCursor = new Map<number, number>();
-  for (const [lineIndex, line] of input.layout.lineBoxes.entries()) {
-    visualLineFragments.set(lineIndex, line.visualOrder);
-    for (const fragment of line.fragments) lineForFragment.set(fragment, lineIndex);
-  }
-  const visualFragment = (fragment: LayoutFragment): LayoutFragment => {
-    const lineIndex = lineForFragment.get(fragment.id);
-    if (lineIndex === undefined) return fragment;
-    const visual = visualLineFragments.get(lineIndex) ?? [];
-    const cursor = visualLineCursor.get(lineIndex) ?? 0;
-    const visualId = visual[cursor];
-    visualLineCursor.set(lineIndex, cursor + 1);
-    return visualId === undefined ? fragment : input.layout.fragment(visualId);
-  };
   const pending = [input.layout.root];
   let truncated = false;
   while (pending.length > 0) {
     input.signal?.throwIfAborted();
     const id = pending.pop();
     if (id === undefined) continue;
-    const fragment = visualFragment(input.layout.fragment(id));
+    const fragment = input.layout.fragment(id);
     const group = commandGroup(fragment);
     if (commands.length + group.length > budgets.maxDisplayListCommands) {
       truncated = true;

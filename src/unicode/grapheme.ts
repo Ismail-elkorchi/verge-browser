@@ -3,7 +3,7 @@ import {
   indicConjunctBreak,
   isExtendedPictographic,
   type GraphemeBreakClass
-} from "./unicode-properties.js";
+} from "./properties.js";
 
 export interface GraphemeCluster {
   readonly text: string;

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { buildLineBreakMap } from "../../dist/presentation/text/index.js";
+import { buildLineBreakMap } from "../../dist/unicode/index.js";
 
 const FIXTURE = new globalThis.URL("../fixtures/unicode/17.0.0/LineBreakTest.txt", import.meta.url);
 

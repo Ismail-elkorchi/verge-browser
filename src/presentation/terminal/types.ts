@@ -1,10 +1,10 @@
 import type { DocumentNodeRef, DocumentSemanticEntry, DocumentSourceRange } from "../../document/index.js";
-import type { FormattingNodeId } from "../formatting/index.js";
+import type { DocumentActionIdentity, FormattingNodeId } from "../formatting/index.js";
 import type {
-  CssEdges, CssPixelLength, CssRect, DocumentActionIdentity, LayoutFragmentId,
+  CssEdges, CssPixelLength, CssRect, LayoutFragmentId,
   LayoutFragmentTree, LayoutPaintStyle, LayoutTextCluster
 } from "../layout/index.js";
-import type { TextSearchMatchId } from "../search/index.js";
+import type { TextSearchIndex, TextSearchMatchId } from "../search/index.js";
 
 export interface TerminalCellRect {
   readonly row: number;
@@ -281,5 +281,6 @@ export interface BuildTerminalDisplayListInput {
 
 export interface RasterizeTerminalDisplayListInput {
   readonly displayList: TerminalDisplayList;
+  readonly textSearchIndex: TextSearchIndex;
   readonly signal?: AbortSignal;
 }

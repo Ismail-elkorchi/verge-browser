@@ -121,6 +121,44 @@ test("dir=auto control direction follows current document state during style res
   assert.equal(styles.style(document.elementById("control")).text.direction, "ltr");
 });
 
+test("physical and logical box properties cascade through computed horizontal direction", () => {
+  const { document, styles } = setup(`<style>
+    #ltr { margin-left:1px; margin-inline-start:2px; padding-inline:3px 4px }
+    #rtl { direction:rtl; margin-right:1px; margin-inline-start:2px; padding-inline:3px 4px }
+    #important { margin-left:5px !important; margin-inline-start:6px }
+  </style>
+  <div id="ltr"></div>
+  <div id="rtl"></div>
+  <section dir="rtl"><div id="inherited-side" style="margin-inline-start:7px"></div></section>
+  <div id="auto-side" dir="auto" style="margin-inline-start:8px">עברית</div>
+  <div id="css-override" dir="rtl" style="direction:ltr;margin-inline-start:9px"></div>
+  <div id="ordered-one" style="margin-inline-start:11px;margin-left:12px"></div>
+  <div id="ordered-two" style="margin-left:13px;margin-inline-start:14px"></div>
+  <div id="important"></div>
+  <div id="block-axis" style="margin-block:15px 16px;padding-block:17px 18px"></div>`);
+  const box = (id) => styles.style(document.elementById(id)).box;
+  assert.deepEqual(box("ltr").margin.left, { kind: "length", value: 2, unit: "px" });
+  assert.deepEqual(box("ltr").padding, {
+    top: { kind: "zero" }, right: { kind: "length", value: 4, unit: "px" },
+    bottom: { kind: "zero" }, left: { kind: "length", value: 3, unit: "px" }
+  });
+  assert.deepEqual(box("rtl").margin.right, { kind: "length", value: 2, unit: "px" });
+  assert.deepEqual(box("rtl").padding, {
+    top: { kind: "zero" }, right: { kind: "length", value: 3, unit: "px" },
+    bottom: { kind: "zero" }, left: { kind: "length", value: 4, unit: "px" }
+  });
+  assert.deepEqual(box("inherited-side").margin.right, { kind: "length", value: 7, unit: "px" });
+  assert.deepEqual(box("auto-side").margin.right, { kind: "length", value: 8, unit: "px" });
+  assert.deepEqual(box("css-override").margin.left, { kind: "length", value: 9, unit: "px" });
+  assert.deepEqual(box("ordered-one").margin.left, { kind: "length", value: 12, unit: "px" });
+  assert.deepEqual(box("ordered-two").margin.left, { kind: "length", value: 14, unit: "px" });
+  assert.deepEqual(box("important").margin.left, { kind: "length", value: 5, unit: "px" });
+  assert.deepEqual(box("block-axis").margin.top, { kind: "length", value: 15, unit: "px" });
+  assert.deepEqual(box("block-axis").margin.bottom, { kind: "length", value: 16, unit: "px" });
+  assert.deepEqual(box("block-axis").padding.top, { kind: "length", value: 17, unit: "px" });
+  assert.deepEqual(box("block-axis").padding.bottom, { kind: "length", value: 18, unit: "px" });
+});
+
 test("unsupported CSS text tailoring values produce typed diagnostics instead of approximations", () => {
   const { document, styles } = setup(`<p style="line-break:strict;hyphens:auto">text</p>`);
   const paragraph = styles.style(named(document, "p"));

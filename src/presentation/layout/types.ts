@@ -3,10 +3,14 @@ import type {
   DocumentSemanticEntry,
   DocumentSourceRange
 } from "../../document/index.js";
-import type { FormattingNodeId, FormattingTree } from "../formatting/index.js";
-import type { TextSearchIndex, TextSearchMatchId } from "../search/index.js";
+import type {
+  DocumentActionIdentity,
+  FormattingNodeId,
+  FormattingTree
+} from "../formatting/index.js";
 import type { CssColor, PseudoElementIdentity } from "../style/index.js";
-import type { BidiLevel } from "../text/index.js";
+import type { InlineItemStreamSet } from "../text/index.js";
+import type { BidiLevel } from "../../unicode/index.js";
 import type { CssPixelLength, CssRect, CssSize } from "./fixed.js";
 
 export type LayoutFragmentId = string & { readonly __layoutFragmentId: unique symbol };
@@ -49,11 +53,6 @@ export interface LayoutContext {
   readonly initialContainingBlock: CssRect;
   readonly budgets?: Partial<LayoutBudgets>;
 }
-
-export type DocumentActionIdentity =
-  | { readonly kind: "link"; readonly node: DocumentNodeRef; readonly destination: string }
-  | { readonly kind: "form-control"; readonly node: DocumentNodeRef; readonly form: DocumentNodeRef | null }
-  | { readonly kind: "disclosure"; readonly node: DocumentNodeRef; readonly open: boolean };
 
 export interface LayoutPaintStyle {
   readonly visible: boolean;
@@ -182,15 +181,6 @@ export interface LayoutVisualRun {
   readonly fragments: readonly LayoutFragmentId[];
 }
 
-export interface LayoutSearchSpan {
-  readonly match: TextSearchMatchId;
-  readonly fragment: LayoutFragmentId;
-  readonly documentNode: DocumentNodeRef | null;
-  readonly sourceRange: DocumentSourceRange | null;
-  readonly contentStartCodeUnit: number;
-  readonly contentEndCodeUnit: number;
-}
-
 export type LayoutOutcome =
   | { readonly status: "complete"; readonly fragments: number; readonly lineBoxes: number }
   | {
@@ -208,8 +198,8 @@ export type LayoutOutcome =
 
 export interface BuildLayoutFragmentTreeInput {
   readonly formatting: FormattingTree;
+  readonly inlineItemStreams: InlineItemStreamSet;
   readonly context: LayoutContext;
-  readonly searchIndex: TextSearchIndex;
   readonly signal?: AbortSignal;
 }
 
@@ -217,7 +207,6 @@ export interface LayoutFragmentTree {
   readonly formatting: FormattingTree;
   readonly context: LayoutContext;
   readonly rootFontMetrics: UsedFontMetrics;
-  readonly searchIndex: TextSearchIndex;
   readonly root: LayoutFragmentId;
   readonly lineBoxes: readonly LineBox[];
   readonly outcome: LayoutOutcome;
@@ -226,5 +215,4 @@ export interface LayoutFragmentTree {
   children(id: LayoutFragmentId): readonly LayoutFragment[];
   forFormattingNode(node: FormattingNodeId): readonly LayoutFragment[];
   forDocumentNode(node: DocumentNodeRef): readonly LayoutFragment[];
-  searchSpans(query: string, limit: number): readonly LayoutSearchSpan[];
 }

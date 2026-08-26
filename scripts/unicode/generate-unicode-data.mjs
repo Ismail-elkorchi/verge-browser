@@ -5,7 +5,7 @@ import { basename, resolve } from "node:path";
 
 const UNICODE_VERSION = "17.0.0";
 const ROOT = resolve(import.meta.dirname, "../..");
-const GENERATED_PATH = resolve(ROOT, "src/presentation/text/generated/unicode-17.ts");
+const GENERATED_PATH = resolve(ROOT, "src/unicode/generated/unicode-17.ts");
 const FIXTURE_DIRECTORY = resolve(ROOT, "test/fixtures/unicode/17.0.0");
 
 const SOURCES = Object.freeze({

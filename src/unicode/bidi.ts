@@ -4,7 +4,7 @@ import {
   bidiPairedBracket,
   canonicalBidiBracket,
   type BidiClass
-} from "./unicode-properties.js";
+} from "./properties.js";
 
 export type BidiLevel = number & { readonly __bidiLevel: unique symbol };
 export type BidiParagraphDirection = "ltr" | "rtl" | "auto";

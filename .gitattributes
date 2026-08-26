@@ -1,2 +1,2 @@
 test/fixtures/unicode/** text eol=lf
-src/presentation/text/generated/** text eol=lf
+src/unicode/generated/** text eol=lf

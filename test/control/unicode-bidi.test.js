@@ -6,7 +6,7 @@ import {
   bidiItemsFromText,
   resolveBidiParagraph,
   resolveBidiText
-} from "../../dist/presentation/text/index.js";
+} from "../../dist/unicode/index.js";
 
 const CHARACTER_FIXTURE = new globalThis.URL("../fixtures/unicode/17.0.0/BidiCharacterTest.txt", import.meta.url);
 const TYPE_FIXTURE = new globalThis.URL("../fixtures/unicode/17.0.0/BidiTest.txt", import.meta.url);

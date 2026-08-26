@@ -1,4 +1,4 @@
-import { segmentGraphemeClusters } from "./grapheme.js";
+import { segmentGraphemeClusters } from "../../unicode/index.js";
 import { transformTextWithSourceRanges, transformedSourceRange, type TransformedText } from "./text-transform.js";
 
 export type CssWhiteSpaceMode = "normal" | "nowrap" | "pre" | "pre-wrap" | "pre-line" | "break-spaces";

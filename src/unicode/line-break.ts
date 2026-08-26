@@ -6,7 +6,7 @@ import {
   lineBreakClass,
   type GeneralCategory,
   type LineBreakClass
-} from "./unicode-properties.js";
+} from "./properties.js";
 
 export type BreakOpportunityKind = "prohibited" | "allowed" | "mandatory";
 export type CssLineBreak = "auto" | "normal" | "anywhere";

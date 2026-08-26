@@ -3,10 +3,10 @@ import type { Rect } from "@ismail-elkorchi/terminal-ui/renderer";
 import type { DocumentForm, DocumentFormControl, DocumentLink, DocumentNodeRef } from "../document/index.js";
 import type { DocumentState } from "../document/index.js";
 import type { IndexedPageSnapshot } from "../app/types.js";
+import type { DocumentActionIdentity } from "../presentation/formatting/index.js";
 import { renderDocument, type RenderPipelineResult } from "../presentation/pipeline.js";
 import {
-  cssCoordinate, cssLengthFromFixed, cssNonNegativeLength, cssPixels, cssPx, cssRect,
-  type DocumentActionIdentity
+  cssCoordinate, cssLengthFromFixed, cssNonNegativeLength, cssPixels, cssPx, cssRect
 } from "../presentation/layout/index.js";
 import type { MediaEnvironment } from "../presentation/style/index.js";
 import type { TerminalRenderResult } from "../presentation/terminal/index.js";

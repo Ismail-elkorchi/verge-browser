@@ -43,6 +43,16 @@ test("parser and framework imports obey rendering ownership boundaries", async (
     if (path.startsWith("src/presentation/layout/")) {
       assert.doesNotMatch(text, /(?:presentation\/terminal|terminal-ui|Terminal(?:Cell|Row|Column|Profile|Viewport|Style))/u, `${path} crosses into terminal rendering`);
     }
+    if (path.startsWith("src/document/")) {
+      assert.doesNotMatch(text, /from\s+["'][^"']*presentation\//u, `${path} imports the rendering hierarchy`);
+    }
+    if (path.startsWith("src/unicode/")) {
+      assert.doesNotMatch(
+        text,
+        /from\s+["'][^"']*(?:document|presentation|ui|app)\//u,
+        `${path} imports a browser-engine subsystem`
+      );
+    }
   }
 });
 
@@ -67,6 +77,8 @@ test("layout, display-list, and cell-rasterizer boundaries are explicit", async 
   assert.match(displayList, /LayoutFragment/u);
   assert.match(displayList, /inlineContinuations/u);
   assert.match(displayList, /buildTerminalDisplayList/u);
+  assert.match(displayList, /input\.layout\.fragment\(id\)/u);
+  assert.doesNotMatch(displayList, /visualFragment|visualLineFragments|lineForFragment/u);
   assert.doesNotMatch(displayList, /FormattingTree|CssLength/u);
   assert.match(rasterizer, /TerminalPaintCommand/u);
   assert.match(rasterizer, /rasterizeTerminalDisplayList/u);
@@ -91,6 +103,7 @@ test("rendering cancellation and text ownership have one precise boundary", asyn
   const layoutTypes = await source("src/presentation/layout/types.ts");
   const terminalTypes = await source("src/presentation/terminal/types.ts");
   const search = await source("src/presentation/search/text-search-index.ts");
+  const inlineItems = await source("src/presentation/text/inline-item-stream.ts");
   const formattingText = await source("src/presentation/formatting/control-display-text.ts");
   const sharedText = await source("src/presentation/text/css-text.ts");
   assert.match(pipeline, /interface RenderDocumentInput[\s\S]*signal\?: AbortSignal/u);
@@ -99,7 +112,11 @@ test("rendering cancellation and text ownership have one precise boundary", asyn
   assert.doesNotMatch(search, /FormattingFormControlNode|controlDisplayText/u);
   assert.match(search, /formattingNodeLogicalText/u);
   assert.match(formattingText, /controlDisplayText/u);
-  assert.match(search, /processCssText/u);
+  assert.match(search, /InlineItemStreamSet/u);
+  assert.doesNotMatch(search, /processCssText|processedText\(/u);
+  assert.match(inlineItems, /processCssText/u);
+  assert.match(layoutTypes, /InlineItemStreamSet/u);
+  assert.doesNotMatch(layoutTypes, /TextSearchIndex/u);
   assert.match(sharedText, /transformTextWithSourceRanges/u);
   assert.doesNotMatch(search, /matchAll\(\/\\s\+\|\\S\+/u);
 });
@@ -110,7 +127,7 @@ test("Unicode text analysis has one pinned internal ownership path", async () =>
   const layout = await source("src/presentation/layout/layout.ts");
   const displayList = await source("src/presentation/terminal/display-list.ts");
   const rasterizer = await source("src/presentation/terminal/rasterizer.ts");
-  const generated = await source("src/presentation/text/generated/unicode-17.ts");
+  const generated = await source("src/unicode/generated/unicode-17.ts");
   const rootDeclaration = await source("dist/mod.d.ts");
   assert.match(document, /DocumentDirectionality/u);
   assert.match(document, /bidiClass/u);
@@ -119,10 +136,11 @@ test("Unicode text analysis has one pinned internal ownership path", async () =>
   assert.match(layout, /resolveBidiParagraphs/u);
   assert.match(layout, /buildLineBreakMap/u);
   assert.match(layout, /bidiVisualOrderForLine/u);
-  assert.match(displayList, /lineBoxes/u);
-  assert.match(displayList, /visualOrder/u);
+  assert.doesNotMatch(displayList, /visualFragment|visualLineFragments|lineForFragment/u);
   assert.doesNotMatch(rasterizer, /segmentGraphemeClusters|resolveBidi|buildLineBreakMap|bidiClass/u);
   assert.match(generated, /UNICODE_VERSION = "17\.0\.0"/u);
+  const generatedOwners = (await sourcePaths()).filter((path) => path.endsWith("generated/unicode-17.ts"));
+  assert.deepEqual(generatedOwners, ["src/unicode/generated/unicode-17.ts"]);
   assert.doesNotMatch(rootDeclaration, /\b(?:BidiParagraph|BidiRun|LineBreakMap|GraphemeClusterStream|ProcessedCssText)\b/u);
 });
 
@@ -145,6 +163,6 @@ test("the root API does not publish document construction, editing, or mutable s
   }
   assert.doesNotMatch(
     declaration,
-    /\b(?:StyleSnapshot|FormattingTree|LayoutFragmentTree|TerminalDisplayList|TerminalCellBuffer|TextSearchIndex|RenderPipelineResult|ReaderDocument)\b/u
+    /\b(?:StyleSnapshot|FormattingTree|InlineItemStreamSet|LayoutFragmentTree|TerminalDisplayList|TerminalCellBuffer|TextSearchIndex|RenderPipelineResult|ReaderDocument)\b/u
   );
 });

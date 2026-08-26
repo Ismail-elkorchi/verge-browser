@@ -20,14 +20,17 @@ HTML directionality
 → terminal cell buffer
 ```
 
-`src/document/` indexes HTML `dir` behavior, including inherited direction,
+`src/unicode/` owns the generated property tables and engine-neutral UAX #9,
+UAX #14, and UAX #29 primitives. `src/document/` indexes HTML `dir` behavior,
+including inherited direction,
 Unicode first-strong `dir=auto`, default `bdi` isolation, `bdo` override intent,
 telephone controls, and rendered attribute text. `src/presentation/style/`
 owns the computed `direction`, `unicode-bidi`, logical `text-align`,
 `line-break`, `word-break`, `overflow-wrap`, `hyphens`, and `tab-size` values.
-`src/presentation/text/` owns Unicode algorithms and property data. Layout owns
-line selection and visual-run geometry. Terminal code only paints and snaps the
-already resolved visual clusters.
+`src/presentation/text/` owns CSS-transformed `InlineItemStreamSet`
+construction. Layout consumes those streams directly for line selection and
+visual-run geometry; `TextSearchIndex` independently consumes the same streams.
+Terminal code only paints and snaps the already resolved visual clusters.
 
 HTML `dir=auto` is recalculated from current input and textarea values during
 style resolution. `pre[dir=auto]`, text controls, and textareas use
@@ -50,9 +53,10 @@ the Unicode license and source manifest. Focused WPT adaptations are recorded
 in `test/fixtures/wpt-text-provenance.json`; they copy no WPT source.
 
 Logical document order remains authoritative for search, accessibility text,
-copying, form values, and diagnostics. Visual order is used only for line
-placement, display-list text commands, terminal cells, and the geometry of
-visual fragments. Each painted grapheme retains its logical content range and
+copying, form values, and diagnostics. Visual order is used for line placement,
+terminal cells, and the geometry and text content of visual fragments. The
+display list retains CSS tree paint order and never substitutes layout-fragment
+identities. Each painted grapheme retains its logical content range and
 document source range, so highlighting can cross inline boxes, bidi runs, and
 wrapped lines without reordering the search string.
 

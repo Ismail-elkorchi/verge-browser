@@ -1578,7 +1578,7 @@ function computeStyle(
     };
   }
 
-  const directionIsRtl = document.attribute(node, "dir")?.trim().toLowerCase() === "rtl";
+  const directionIsRtl = style.text.direction === "rtl";
   const sideSpecs = [
     ["margin-top", ["margin-top", "margin-block-start", "margin-block", "margin"], "top", 0, true],
     ["margin-right", ["margin-right", directionIsRtl ? "margin-inline-start" : "margin-inline-end", "margin-inline", "margin"], "right", 1, true],
@@ -1605,8 +1605,10 @@ function computeStyle(
     const raw = shorthand ? boxParts(entry.value)?.[index]
       : axis ? (() => {
         const parts = entry.value.trim().split(/\s+/u);
-        const end = side === "right" || side === "bottom";
-        return end ? parts[1] ?? parts[0] : parts[0];
+        const logicalEnd = entry.property.endsWith("-block")
+          ? side === "bottom"
+          : directionIsRtl ? side === "left" : side === "right";
+        return logicalEnd ? parts[1] ?? parts[0] : parts[0];
       })() : entry.value;
     const length = raw === undefined ? null : parseLength(raw, margin, margin);
     if (length === null) unsupported({ ...entry, property });

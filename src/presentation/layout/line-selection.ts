@@ -1,4 +1,4 @@
-import type { BreakOpportunityKind } from "../text/index.js";
+import type { BreakOpportunityKind } from "../../unicode/index.js";
 import { cssAdd, cssPx, type CssPixelLength } from "./fixed.js";
 
 export interface LogicalLineSelectionItem {

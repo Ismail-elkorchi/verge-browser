@@ -5,7 +5,7 @@ import {
   type ParsedDocument,
   type Span
 } from "@ismail-elkorchi/html-parser";
-import { bidiClass } from "../presentation/text/unicode-properties.js";
+import { bidiClass } from "../unicode/index.js";
 
 import type {
   DocumentAttribute,

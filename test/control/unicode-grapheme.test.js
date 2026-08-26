@@ -5,7 +5,7 @@ import test from "node:test";
 import {
   segmentGraphemeClusters,
   UNICODE_VERSION
-} from "../../dist/presentation/text/index.js";
+} from "../../dist/unicode/index.js";
 
 const FIXTURE = new globalThis.URL("../fixtures/unicode/17.0.0/GraphemeBreakTest.txt", import.meta.url);
 

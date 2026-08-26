@@ -5,7 +5,8 @@ import type {
   FormattingTree
 } from "../formatting/index.js";
 import { formattingNodeLogicalText } from "../formatting/index.js";
-import { processCssText, type ProcessedCssText } from "../text/index.js";
+import type { InlineItemStreamSet } from "../text/index.js";
+import type { LayoutFragmentId, LayoutFragmentTree } from "../layout/index.js";
 
 export type TextSearchMatchId = string & { readonly __textSearchMatchId: unique symbol };
 
@@ -29,10 +30,18 @@ export interface TextSearchResult {
   readonly truncated: boolean;
 }
 
+export interface TextSearchLayoutSpan {
+  readonly match: TextSearchMatchId;
+  readonly fragment: LayoutFragmentId;
+  readonly documentNode: DocumentNodeRef | null;
+  readonly sourceRange: DocumentSourceRange | null;
+  readonly contentStartCodeUnit: number;
+  readonly contentEndCodeUnit: number;
+}
+
 export interface TextSearchIndex {
   readonly text: string;
   search(query: string, limit: number): TextSearchResult;
-  processedText(formatting: FormattingNodeId): ProcessedCssText | null;
 }
 
 interface TextSearchSegment {
@@ -76,21 +85,14 @@ function foldedBoundaries(value: string, targets: readonly number[]): ReadonlyMa
 class ImmutableTextSearchIndex implements TextSearchIndex {
   readonly text: string;
   readonly #segments: readonly TextSearchSegment[];
-  readonly #processedText: ReadonlyMap<FormattingNodeId, ProcessedCssText>;
 
   public constructor(
     text: string,
-    segments: readonly TextSearchSegment[],
-    processedText: ReadonlyMap<FormattingNodeId, ProcessedCssText>
+    segments: readonly TextSearchSegment[]
   ) {
     this.text = text;
     this.#segments = Object.freeze(segments.map((segment) => Object.freeze(segment)));
-    this.#processedText = new Map(processedText);
     Object.freeze(this);
-  }
-
-  public processedText(formatting: FormattingNodeId): ProcessedCssText | null {
-    return this.#processedText.get(formatting) ?? null;
   }
 
   public search(query: string, limit: number): TextSearchResult {
@@ -157,12 +159,17 @@ class ImmutableTextSearchIndex implements TextSearchIndex {
   }
 }
 
-export function buildTextSearchIndex(tree: FormattingTree, signal?: AbortSignal): TextSearchIndex {
+export function buildTextSearchIndex(
+  tree: FormattingTree,
+  inlineItemStreams: InlineItemStreamSet,
+  signal?: AbortSignal
+): TextSearchIndex {
+  if (inlineItemStreams.formatting !== tree) {
+    throw new RangeError("Inline item streams and text search must use the same box tree.");
+  }
   const parts: string[] = [];
   const segments: TextSearchSegment[] = [];
-  const processedText = new Map<FormattingNodeId, ProcessedCssText>();
   let length = 0;
-  let collapsibleSpacePending = false;
   let pendingSeparator: Omit<TextSearchSegment, "start" | "end"> | null = null;
   const append = (
     value: string,
@@ -199,24 +206,15 @@ export function buildTextSearchIndex(tree: FormattingTree, signal?: AbortSignal)
       sourceRange
     };
   };
-  const appendRenderedText = (node: FormattingNode, raw: string): void => {
+  const appendRenderedText = (node: FormattingNode): void => {
     const style = node.styleNode === null ? null : node.pseudo === null
       ? tree.styles.style(node.styleNode)
       : tree.styles.pseudo(node.styleNode, node.pseudo) ?? tree.styles.style(node.styleNode);
     if (style === null) return;
-    const whiteSpace = node.kind === "text-sequence" || node.kind === "generated-text" || node.kind === "marker"
-      ? node.whiteSpace : style.text.whiteSpace;
-    const processed = processCssText(
-      raw,
-      style.text.textTransform,
-      whiteSpace,
-      collapsibleSpacePending,
-      {},
-      signal
-    );
-    if (processed.outcome.status !== "complete") throw new RangeError("Logical search text exceeded its grapheme-cluster budget.");
-    processedText.set(node.id, processed);
-    collapsibleSpacePending = processed.collapsibleSpacePending;
+    const processed = inlineItemStreams.textForFormattingNode(node.id);
+    if (processed === null || processed.outcome.status !== "complete") {
+      throw new RangeError("Inline item streams do not contain logical text for a retained formatting node.");
+    }
     if (style.visibility !== "visible") return;
     for (const unit of processed.units) {
       const segment = nodeSegment(node, unit.contentStartCodeUnit, unit.contentEndCodeUnit);
@@ -237,22 +235,19 @@ export function buildTextSearchIndex(tree: FormattingTree, signal?: AbortSignal)
     if (entry.phase === "exit") {
       if (node.outer === "block") {
         separator(nodeSegment(node, 0, 0));
-        collapsibleSpacePending = false;
       }
       continue;
     }
     if (node.outer === "block") {
       separator(nodeSegment(node, 0, 0));
-      collapsibleSpacePending = false;
     }
     const logicalText = formattingNodeLogicalText(node, tree);
     if (logicalText !== null) {
-      appendRenderedText(node, logicalText);
+      appendRenderedText(node);
       continue;
     }
     if (node.kind === "forced-line-break") {
       separator(nodeSegment(node, 0, 0));
-      collapsibleSpacePending = false;
       continue;
     }
     pending.push({ phase: "exit", id: node.id });
@@ -261,5 +256,45 @@ export function buildTextSearchIndex(tree: FormattingTree, signal?: AbortSignal)
       if (child !== undefined) pending.push({ phase: "enter", id: child });
     }
   }
-  return new ImmutableTextSearchIndex(parts.join(""), segments, processedText);
+  return new ImmutableTextSearchIndex(parts.join(""), segments);
+}
+
+/** Maps logical search matches to the visual text fragments created by layout. */
+export function mapTextSearchMatchesToLayout(
+  index: TextSearchIndex,
+  layout: LayoutFragmentTree,
+  query: string,
+  limit: number
+): readonly TextSearchLayoutSpan[] {
+  const spans: TextSearchLayoutSpan[] = [];
+  for (const match of index.search(query, limit).matches) {
+    for (const slice of match.slices) {
+      for (const fragment of layout.forFormattingNode(slice.formatting)) {
+        const fragmentStart = fragment.contentStartCodeUnit;
+        const fragmentEnd = fragment.contentEndCodeUnit;
+        if (fragmentStart === null || fragmentEnd === null
+          || !(fragment.kind === "text" || (fragment.visualClusters?.length ?? 0) > 0)
+          || slice.contentStart >= fragmentEnd || slice.contentEnd <= fragmentStart) continue;
+        const contentStartCodeUnit = Math.max(slice.contentStart, fragmentStart);
+        const contentEndCodeUnit = Math.min(slice.contentEnd, fragmentEnd);
+        let sourceRange: DocumentSourceRange | null = slice.sourceRange;
+        if (sourceRange !== null && fragment.sourceRange !== null) {
+          const start = Math.max(sourceRange.start, fragment.sourceRange.start);
+          const end = Math.min(sourceRange.end, fragment.sourceRange.end);
+          sourceRange = end > start
+            ? Object.freeze({ start, end, provenance: sourceRange.provenance })
+            : null;
+        }
+        spans.push(Object.freeze({
+          match: match.id,
+          fragment: fragment.id,
+          documentNode: fragment.documentNode,
+          sourceRange,
+          contentStartCodeUnit,
+          contentEndCodeUnit
+        }));
+      }
+    }
+  }
+  return Object.freeze(spans);
 }

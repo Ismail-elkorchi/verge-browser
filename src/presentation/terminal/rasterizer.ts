@@ -6,7 +6,11 @@ import {
   type LayoutFragment,
   type LayoutFragmentId
 } from "../layout/index.js";
-import type { TextSearchMatchId } from "../search/index.js";
+import {
+  mapTextSearchMatchesToLayout,
+  type TextSearchIndex,
+  type TextSearchMatchId
+} from "../search/index.js";
 import { terminalPaintBudgets, validTerminalRenderContext } from "./display-list.js";
 import type {
   RasterizeTerminalDisplayListInput,
@@ -498,11 +502,13 @@ class ImmutableTerminalRenderResult implements TerminalRenderResult {
   readonly #cellRectsForDocumentNode: (node: DocumentNodeRef) => readonly TerminalCellRect[];
   readonly #spansByFragment: ReadonlyMap<LayoutFragmentId, readonly { readonly row: number; readonly span: TerminalCellSpan }[]>;
   readonly #searchCache = new Map<string, TerminalSearchResult>();
+  readonly #textSearchIndex: TextSearchIndex;
   readonly #maxLogicalSearchMatches: number;
   readonly #maxRetainedSearchCellSpans: number;
 
   public constructor(
     displayList: TerminalDisplayList,
+    textSearchIndex: TextSearchIndex,
     cellBuffer: TerminalCellBuffer,
     hitTestIndex: TerminalHitTestIndex,
     focusMap: TerminalFocusMap,
@@ -513,6 +519,7 @@ class ImmutableTerminalRenderResult implements TerminalRenderResult {
     budgets: TerminalPaintBudgets | null
   ) {
     this.layout = displayList.layout;
+    this.#textSearchIndex = textSearchIndex;
     this.displayList = displayList;
     this.cellBuffer = cellBuffer;
     this.hitTestIndex = hitTestIndex;
@@ -543,8 +550,13 @@ class ImmutableTerminalRenderResult implements TerminalRenderResult {
     const bounded = query.slice(0, 1_024);
     const cached = this.#searchCache.get(bounded);
     if (cached !== undefined) return cached;
-    const indexed = this.layout.searchIndex.search(bounded, this.#maxLogicalSearchMatches);
-    const spans = this.layout.searchSpans(bounded, this.#maxLogicalSearchMatches);
+    const indexed = this.#textSearchIndex.search(bounded, this.#maxLogicalSearchMatches);
+    const spans = mapTextSearchMatchesToLayout(
+      this.#textSearchIndex,
+      this.layout,
+      bounded,
+      this.#maxLogicalSearchMatches
+    );
     const byMatch = new Map<TextSearchMatchId, TerminalSearchRange[]>();
     let retainedRanges = 0;
     let cellSpanTruncated = false;
@@ -870,7 +882,11 @@ function geometryAndIndexes(
   };
 }
 
-function emptyRenderResult(list: TerminalDisplayList, reason: "invalid-context" | "invalid-budget"): TerminalRenderResult {
+function emptyRenderResult(
+  list: TerminalDisplayList,
+  textSearchIndex: TextSearchIndex,
+  reason: "invalid-context" | "invalid-budget"
+): TerminalRenderResult {
   const buffer: TerminalCellBuffer = Object.freeze({
     columns: Math.max(0, safeInteger(list.context.columns)),
     viewportRows: Math.max(0, safeInteger(list.context.rows)),
@@ -879,6 +895,7 @@ function emptyRenderResult(list: TerminalDisplayList, reason: "invalid-context" 
   });
   return new ImmutableTerminalRenderResult(
     list,
+    textSearchIndex,
     buffer,
     new ImmutableHitTestIndex([]),
     new ImmutableFocusMap([]),
@@ -1129,8 +1146,8 @@ export function buildTerminalIndexes(input: RasterizeTerminalDisplayListInput): 
 export function rasterizeTerminalDisplayList(input: RasterizeTerminalDisplayListInput): TerminalRenderResult {
   const list = input.displayList;
   const budgets = terminalPaintBudgets(list.context.budgets);
-  if (!validTerminalRenderContext(list.context)) return emptyRenderResult(list, "invalid-context");
-  if (budgets === null) return emptyRenderResult(list, "invalid-budget");
+  if (!validTerminalRenderContext(list.context)) return emptyRenderResult(list, input.textSearchIndex, "invalid-context");
+  if (budgets === null) return emptyRenderResult(list, input.textSearchIndex, "invalid-budget");
   const cells = rasterizeTerminalCells(input);
   const indexes = buildTerminalIndexes(input);
   const truncations: TerminalTruncation[] = [];
@@ -1139,6 +1156,7 @@ export function rasterizeTerminalDisplayList(input: RasterizeTerminalDisplayList
   }
   return new ImmutableTerminalRenderResult(
     list,
+    input.textSearchIndex,
     cells.cellBuffer,
     indexes.hitTestIndex,
     indexes.focusMap,
