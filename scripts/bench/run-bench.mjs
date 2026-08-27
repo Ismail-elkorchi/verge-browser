@@ -17,7 +17,7 @@ import {
   selectLogicalLines
 } from "../../dist/presentation/layout/index.js";
 import { buildTextSearchIndex } from "../../dist/presentation/search/index.js";
-import { resolveStyles } from "../../dist/presentation/style/index.js";
+import { embeddedStylesheetSources, resolveStyles } from "../../dist/presentation/style/index.js";
 import { buildInlineItemStreamSet } from "../../dist/presentation/text/index.js";
 import {
   buildTerminalDisplayList,
@@ -296,7 +296,7 @@ function styles(document, state) {
   return resolveStyles({
     document,
     state,
-    resources: [],
+    resources: embeddedStylesheetSources(document),
     environment: {
       viewportWidthCssPx: 640,
       viewportHeightCssPx: 384,
@@ -558,11 +558,76 @@ for (const [name, formatting] of Object.entries(workloadFormatting)) {
 const compatibilityCorpus = JSON.parse(await readFile(resolve("scripts/compat/corpus.json"), "utf8"));
 const realPageCompatibilityMetrics = {};
 const realPageCompatibilitySamples = [];
-for (const fixture of compatibilityCorpus.fixtures) {
+const compatibilityFormatting = async (fixture) => {
   const html = await readFile(resolve("scripts/compat", fixture.file), "utf8");
+  const requestUrl = fixture.requestUrl ?? `https://compat.verge.test/${fixture.id}/index.html`;
+  const declaredResources = fixture.resources
+    ?? compatibilityCorpus.resourceSets?.[fixture.resourceSet]
+    ?? [];
+  const resourceByUrl = new Map(declaredResources.map((resource) => [resource.requestUrl, resource]));
+  const session = new BrowserSession({
+    defaultParseMode: "text",
+    ...(fixture.stylesheetPolicy === undefined ? {} : { stylesheetPolicy: fixture.stylesheetPolicy }),
+    loader: async (url) => ({
+      requestUrl: url,
+      finalUrl: url,
+      status: 200,
+      statusText: "OK",
+      contentType: "text/html",
+      html,
+      responseFields: [],
+      networkOutcome: {
+        kind: "ok", finalUrl: url, status: 200, statusText: "OK",
+        detailCode: "HTTP_200", detailMessage: "200 OK"
+      },
+      fetchedAtIso: "2026-08-27T00:00:00.000Z"
+    }),
+    streamLoader: async () => {
+      throw new Error("Compatibility benchmarks use buffered offline fixtures.");
+    },
+    stylesheetLoader: async (url) => {
+      const resource = resourceByUrl.get(url);
+      if (resource === undefined) throw new Error(`Unexpected compatibility stylesheet request: ${url}`);
+      return {
+        requestUrl: url,
+        finalUrl: resource.finalUrl ?? url,
+        contentType: "text/css",
+        bytes: await readFile(resolve("scripts/compat", resource.file)),
+        responseFields: [],
+        ...(resource.transportEncodingLabel === undefined
+          ? {}
+          : { transportEncodingLabel: resource.transportEncodingLabel })
+      };
+    }
+  });
+  try {
+    const snapshot = await session.open(requestUrl);
+    const state = createDocumentState(snapshot.document);
+    const style = resolveStyles({
+      document: snapshot.document,
+      state,
+      resources: snapshot.stylesheets,
+      initialDiagnostics: snapshot.styleDiagnostics,
+      environment: {
+        viewportWidthCssPx: 960,
+        viewportHeightCssPx: 384,
+        mediaType: "screen",
+        prefersColorScheme: "dark",
+        reducedMotion: false,
+        hover: "hover",
+        pointer: "fine"
+      }
+    });
+    return buildFormattingTree({ document: snapshot.document, state, styles: style });
+  } finally {
+    await session.close();
+  }
+};
+for (const fixture of compatibilityCorpus.fixtures) {
+  const formatting = await compatibilityFormatting(fixture);
+  const streams = inlineItemStreams(formatting);
   const render = () => {
-    const formatting = formattingFixture(html, `compat-${fixture.id}`);
-    const layout = layoutFragments(formatting, 120);
+    const layout = layoutFragments(formatting, 120, streams);
     const terminal = cellBuffer(displayList(layout, 120));
     if (layout.outcome.status === "rejected" || terminal.cellBuffer.outcome.status === "rejected") {
       throw new Error(`${fixture.id} compatibility benchmark was rejected`);

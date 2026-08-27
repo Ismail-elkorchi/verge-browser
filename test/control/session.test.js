@@ -350,11 +350,13 @@ test("stylesheet dependencies load recursively in cascade order with cycles and 
   const requests = [];
   const sources = new Map([
     ["https://styles.example/root.css", `@import "a.css" layer(base); @import "b.css" supports(display:flex) screen;
-      @import "unsupported.css" supports(writing-mode:vertical-rl); @import "file:///private.css"; p{color:black}`],
+      @import "unsupported.css" supports(writing-mode:vertical-rl); @import "file:///private.css";
+      @import "redirect-cycle.css"; p{color:black}`],
     ["https://styles.example/a.css", `@import "nested.css"; p{color:red}`],
     ["https://styles.example/nested.css", `@import "a.css"; p{font-style:italic}`],
     ["https://styles.example/b.css", `p{font-weight:700}`],
-    ["https://styles.example/unsupported.css", `p{padding-left:99px}`]
+    ["https://styles.example/unsupported.css", `p{padding-left:99px}`],
+    ["https://styles.example/redirect-cycle.css", `p{padding-left:99px}`]
   ]);
   const session = new BrowserSession({
     defaultParseMode: "text",
@@ -375,7 +377,7 @@ test("stylesheet dependencies load recursively in cascade order with cycles and 
       assert.ok(source);
       return {
         requestUrl,
-        finalUrl: requestUrl,
+        finalUrl: requestUrl.endsWith("redirect-cycle.css") ? "https://styles.example/root.css" : requestUrl,
         contentType: "text/css",
         bytes: new TextEncoder().encode(source),
         responseFields: htmlFields()
@@ -388,25 +390,119 @@ test("stylesheet dependencies load recursively in cascade order with cycles and 
     "https://styles.example/a.css",
     "https://styles.example/nested.css",
     "https://styles.example/b.css",
-    "https://styles.example/unsupported.css"
+    "https://styles.example/redirect-cycle.css"
   ]);
   assert.ok(requests.every((entry) => entry.maxRedirects === 5));
   assert.deepEqual(snapshot.stylesheets.map((entry) => entry.finalUrl), [
     "https://styles.example/nested.css",
     "https://styles.example/a.css",
     "https://styles.example/b.css",
-    "https://styles.example/unsupported.css",
     "https://styles.example/root.css"
   ]);
   assert.ok(snapshot.styleDiagnostics.some((entry) => entry.code === "stylesheet-cycle"));
   assert.ok(snapshot.styleDiagnostics.some((entry) => entry.code === "stylesheet-import" && /local-file/u.test(entry.detail)));
-  assert.deepEqual(snapshot.stylesheets.map((entry) => entry.importDepth), [2, 1, 1, 1, 0]);
-  assert.deepEqual(snapshot.stylesheets.map((entry) => entry.importLayer), ["base", "base", null, null, null]);
+  assert.deepEqual(snapshot.stylesheets.map((entry) => entry.importDepth), [2, 1, 1, 0]);
+  assert.deepEqual(snapshot.stylesheets.map((entry) => entry.importLayer), [["base"], ["base"], null, null]);
   assert.deepEqual(snapshot.stylesheets.map((entry) => entry.supportsConditions), [
-    [], [], ["display:flex"], ["writing-mode:vertical-rl"], []
+    [], [], ["display:flex"], []
   ]);
   assert.deepEqual(snapshot.stylesheets.map((entry) => entry.predeclaredLayers), [
-    ["base"], ["base"], [], [], []
+    [["base"]], [["base"]], [], []
+  ]);
+});
+
+test("false import supports conditions avoid stylesheet requests", async () => {
+  const requests = [];
+  const root = `
+    @import "true.css" supports((display:flex) and (not (writing-mode:vertical-rl)));
+    @import "false-property.css" supports(writing-mode:vertical-rl);
+    @import "false-value.css" supports(content:url(image.png));
+    @import "false-selector.css" supports(selector(a::first-line));
+    @import "false-composite.css" supports((display:flex) and (writing-mode:vertical-rl));
+    @import "invalid-not.css" supports(not (display:flex) and (position:sticky));
+    p { color:black }
+  `;
+  const session = new BrowserSession({
+    defaultParseMode: "text",
+    loader: async (requestUrl) => ({
+      requestUrl,
+      finalUrl: requestUrl,
+      status: 200,
+      statusText: "OK",
+      contentType: "text/html",
+      html: `<link rel="stylesheet" href="/root.css"><p>text</p>`,
+      responseFields: htmlFields(),
+      networkOutcome: { kind: "ok", finalUrl: requestUrl, status: 200, statusText: "OK", detailCode: "HTTP_200", detailMessage: "200 OK" },
+      fetchedAtIso: "2026-01-01T00:00:00.000Z"
+    }),
+    stylesheetLoader: async (requestUrl) => {
+      requests.push(requestUrl);
+      const css = requestUrl.endsWith("root.css") ? root : `p { font-weight:700 }`;
+      return {
+        requestUrl, finalUrl: requestUrl, contentType: "text/css",
+        bytes: new TextEncoder().encode(css), responseFields: htmlFields()
+      };
+    }
+  });
+  const snapshot = await session.open("https://supports.example/");
+  assert.deepEqual(requests, [
+    "https://supports.example/root.css",
+    "https://supports.example/true.css"
+  ]);
+  assert.deepEqual(snapshot.stylesheets.map((source) => source.finalUrl), [
+    "https://supports.example/true.css",
+    "https://supports.example/root.css"
+  ]);
+});
+
+test("root, embedded, imported, redirected, and repeated stylesheet sources retain document order", async () => {
+  const requests = [];
+  const session = new BrowserSession({
+    defaultParseMode: "text",
+    loader: async (requestUrl) => ({
+      requestUrl,
+      finalUrl: requestUrl,
+      status: 200,
+      statusText: "OK",
+      contentType: "text/html",
+      html: `<link rel="stylesheet" href="/first.css">
+        <style>@layer embedded { p { color:green } }</style>
+        <link rel="stylesheet" href="/second.css"><p>text</p>`,
+      responseFields: htmlFields(),
+      networkOutcome: { kind: "ok", finalUrl: requestUrl, status: 200, statusText: "OK", detailCode: "HTTP_200", detailMessage: "200 OK" },
+      fetchedAtIso: "2026-01-01T00:00:00.000Z"
+    }),
+    stylesheetLoader: async (requestUrl) => {
+      requests.push(requestUrl);
+      const css = requestUrl.endsWith("first.css")
+        ? `@import "shared.css" layer(outer.inner);p{color:red}`
+        : requestUrl.endsWith("second.css")
+          ? `@import "shared.css" layer(outer);p{color:blue}`
+          : `p{font-weight:700}`;
+      return {
+        requestUrl,
+        finalUrl: requestUrl.endsWith("shared.css") ? "https://order.example/final/shared.css" : requestUrl,
+        contentType: "text/css",
+        bytes: new TextEncoder().encode(css),
+        responseFields: htmlFields()
+      };
+    }
+  });
+  const snapshot = await session.open("https://order.example/");
+  assert.deepEqual(requests, [
+    "https://order.example/first.css",
+    "https://order.example/shared.css",
+    "https://order.example/second.css",
+    "https://order.example/shared.css"
+  ]);
+  assert.deepEqual(snapshot.stylesheets.map((source) => [
+    source.sourceKind, source.rootOrder, source.importDepth, source.importLayer, source.importedFrom
+  ]), [
+    ["imported", 0, 1, ["outer", "inner"], "https://order.example/first.css"],
+    ["linked", 0, 0, null, null],
+    ["embedded", 1, 0, null, null],
+    ["imported", 2, 1, ["outer"], "https://order.example/second.css"],
+    ["linked", 2, 0, null, null]
   ]);
 });
 
@@ -466,6 +562,28 @@ test("each stylesheet dependency-graph budget stops work at a resource boundary"
 
   const rules = await open({ maxParsedRules: 1 });
   assert.deepEqual(rules.snapshot.stylesheets.map((entry) => entry.finalUrl), [
+    "https://budget.example/deep.css"
+  ]);
+  const noRules = await open({ maxParsedRules: 0 });
+  assert.deepEqual(noRules.requests.map((entry) => entry.requestUrl), [
+    "https://budget.example/root.css"
+  ]);
+  assert.deepEqual(noRules.snapshot.stylesheets, []);
+  const admittedPrefixes = [];
+  for (const maxParsedRules of [1, 3, 7]) {
+    const result = await open({ maxParsedRules });
+    admittedPrefixes.push(result.snapshot.stylesheets.map((entry) => entry.finalUrl));
+  }
+  for (let index = 1; index < admittedPrefixes.length; index += 1) {
+    assert.deepEqual(
+      admittedPrefixes[index - 1],
+      admittedPrefixes[index].slice(0, admittedPrefixes[index - 1].length)
+    );
+  }
+  assert.deepEqual(admittedPrefixes.at(-1), [
+    "https://budget.example/deep.css",
+    "https://budget.example/a.css",
+    "https://budget.example/b.css",
     "https://budget.example/root.css"
   ]);
 

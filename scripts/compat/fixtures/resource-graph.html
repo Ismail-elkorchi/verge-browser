@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <base href="https://compat.verge.test/assets/">
+  <title>Offline resource graph</title>
+  <link rel="stylesheet" href="root.css">
+  <style>@layer page { main { padding-inline: 1rem; } }</style>
+  <link rel="stylesheet" href="after.css">
+</head>
+<body>
+  <header><h1>Offline resource graph</h1></header>
+  <main>
+    <p class="lead">Linked and imported styles remain deterministic.</p>
+    <nav><a href="/resource-details">Resource details</a></nav>
+    <form><label>Filter <input name="filter" value="all"></label><button>Apply filter</button></form>
+    <section class="long"><h2>Scrollable results</h2><p>Sticky and fixed geometry use the live scrollport.</p></section>
+  </main>
+  <aside class="sticky">Pinned summary</aside>
+  <footer class="fixed">Offline corpus footer</footer>
+</body>
+</html>

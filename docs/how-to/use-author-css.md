@@ -62,7 +62,9 @@ rasterization. The currently supported CSS slice includes:
 Grid spanning and auto-placement, table spans and border collapse, vertical
 writing modes, multi-column layout, web fonts, raster image decoding, and page
 JavaScript remain explicit gaps. Supported positioned clipping retains document
-semantics while its actual paint and pointer geometry stays clipped.
+semantics while its actual paint and pointer geometry stays clipped. Sticky
+positioning uses the root terminal scrollport; nested scrolling boxes remain
+typed unsupported.
 
 HTML meaning remains available when a rule cannot be represented. Unsupported
 selectors, properties, and values are ignored and aggregated in the browser's

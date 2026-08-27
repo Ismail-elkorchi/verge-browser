@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { createDocumentState, parseWebDocument } from "../../dist/document/index.js";
 import { buildFormattingTree } from "../../dist/presentation/formatting/index.js";
-import { resolveStyles } from "../../dist/presentation/style/index.js";
+import { embeddedStylesheetSources, resolveStyles } from "../../dist/presentation/style/index.js";
 
 const environment = {
   viewportWidthCssPx: 800,
@@ -24,7 +24,7 @@ function formatted(html, budgets, styleBudgets) {
   const styles = resolveStyles({
     document,
     state,
-    resources: [],
+    resources: embeddedStylesheetSources(document),
     environment,
     ...(styleBudgets ? { budgets: styleBudgets } : {})
   });
@@ -297,7 +297,7 @@ test("form controls, replaced content, flex, and grid retain structural node kin
   assert.ok(kinds.filter((kind) => kind === "form-control").length >= 2);
 });
 
-test("flex and grid form one anonymous item for contiguous text and discard collapsed whitespace-only runs", () => {
+test("flex and grid blockify principal items and form one anonymous item for contiguous text", () => {
   for (const [display, containerKind, itemKind] of [
     ["flex", "flex-container", "flex-item"],
     ["grid", "grid-container", "grid-item"]
@@ -313,11 +313,50 @@ test("flex and grid form one anonymous item for contiguous text and discard coll
       text: item.children.filter((child) => child.kind === "text-sequence").map((child) => child.text).join("")
     })), [
       { kind: itemKind, children: ["text-sequence", "text-sequence", "text-sequence"], text: "alpha beta gamma" },
-      { kind: itemKind, children: ["inline-container"], text: "" },
-      { kind: itemKind, children: ["inline-container"], text: "" },
+      { kind: itemKind, children: ["block-container"], text: "" },
+      { kind: itemKind, children: ["block-container"], text: "" },
       { kind: itemKind, children: ["text-sequence"], text: " tail" }
     ]);
   }
+});
+
+test("blockification precedes flex/grid item generation and excludes out-of-flow boxes", () => {
+  for (const display of ["flex", "grid"]) {
+    const { document, formatting } = formatted(`<div id="container" style="display:${display}">
+      <span id="normal">normal</span>
+      <span id="absolute" style="position:absolute">absolute</span>
+      <a id="fixed" style="position:fixed">fixed</a>
+    </div>`);
+    const containerSource = document.elementById("container");
+    const containerNode = formatting.forSource(containerSource)
+      .find((node) => node.appliesBoxStyle && node.pseudo === null);
+    assert.ok(containerNode);
+    const children = containerNode.children.map((child) => formatting.node(child));
+    const itemKind = display === "flex" ? "flex-item" : "grid-item";
+    assert.equal(children.filter((child) => child.kind === itemKind).length, 1);
+    const directSources = children
+      .filter((child) => child.source !== null)
+      .map((child) => document.attribute(child.source, "id"));
+    assert.deepEqual(directSources, ["absolute", "fixed"]);
+    for (const child of children.filter((entry) => entry.source !== null)) {
+      assert.equal(child.kind, "block-container");
+    }
+  }
+
+  const { document, formatting } = formatted(`<span id="float" style="float:left">float</span>
+    <span id="absolute" style="position:absolute">absolute</span>
+    <a id="fixed" style="position:fixed">fixed</a>`);
+  for (const id of ["float", "absolute", "fixed"]) {
+    const source = document.elementById(id);
+    const principal = formatting.forSource(source).find((node) => node.source === source);
+    assert.equal(principal?.kind, "block-container");
+    assert.equal(principal?.outer, "block");
+  }
+
+  const internal = formatted(`<span id="internal" style="display:table-cell;float:left">cell</span>`);
+  const internalBox = internal.formatting.forSource(internal.document.elementById("internal"))
+    .find((node) => node.appliesBoxStyle);
+  assert.equal(internalBox?.kind, "block-container");
 });
 
 test("anonymous table repair preserves row, group, column, caption, and cell order", () => {

@@ -514,7 +514,7 @@ class FormattingBuilder {
     return output;
   }
 
-  #independentFormattingItems(
+  #formattingContextItems(
     children: readonly FormattingNode[],
     kind: "flex-item" | "grid-item"
   ): readonly FormattingNodeId[] {
@@ -538,7 +538,17 @@ class FormattingBuilder {
         continue;
       }
       flushText();
-      output.push(this.#anonymousContainer(kind, child.styleNode, [child.id], "block").id);
+      const style = child.styleNode === null ? null
+        : child.pseudo === null
+          ? this.#styles.style(child.styleNode)
+          : this.#styles.pseudo(child.styleNode, child.pseudo) ?? this.#styles.style(child.styleNode);
+      if (style?.box.position === "absolute" || style?.box.position === "fixed") {
+        // Out-of-flow principal boxes remain children of the flex/grid container,
+        // but they do not generate flex-item or grid-item boxes.
+        output.push(child.id);
+      } else {
+        output.push(this.#anonymousContainer(kind, child.styleNode, [child.id], "block").id);
+      }
     }
     flushText();
     return output;
@@ -712,7 +722,7 @@ class FormattingBuilder {
     const rawChildren = this.#contentStopped ? [] : this.#rawChildren(source, depth);
     let children = this.#transformConnectedPrefix(rawChildren, (retained) => {
       if (kind === "flex-container" || kind === "grid-container") {
-        return this.#independentFormattingItems(
+        return this.#formattingContextItems(
           retained,
           kind === "flex-container" ? "flex-item" : "grid-item"
         );

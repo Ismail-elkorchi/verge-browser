@@ -13,23 +13,32 @@ export interface CssColor {
 
 export type CssLengthUnit = "px" | "em" | "rem" | "ch" | "%" | "vw" | "vh";
 
-export type CssMathExpression =
-  | { readonly kind: "value"; readonly value: number; readonly unit: CssLengthUnit | "number" }
-  | { readonly kind: "negate"; readonly value: CssMathExpression }
-  | { readonly kind: "sum"; readonly left: CssMathExpression; readonly right: CssMathExpression }
-  | { readonly kind: "product"; readonly value: CssMathExpression; readonly factor: number }
-  | { readonly kind: "minimum"; readonly values: readonly CssMathExpression[] }
-  | { readonly kind: "maximum"; readonly values: readonly CssMathExpression[] }
+export type CssLengthPercentageExpression =
+  | { readonly kind: "value"; readonly value: number; readonly unit: CssLengthUnit }
+  | { readonly kind: "negate"; readonly value: CssLengthPercentageExpression }
+  | {
+      readonly kind: "sum";
+      readonly left: CssLengthPercentageExpression;
+      readonly right: CssLengthPercentageExpression;
+    }
+  | { readonly kind: "product"; readonly value: CssLengthPercentageExpression; readonly factor: number }
+  | { readonly kind: "minimum"; readonly values: readonly CssLengthPercentageExpression[] }
+  | { readonly kind: "maximum"; readonly values: readonly CssLengthPercentageExpression[] }
   | {
       readonly kind: "clamp";
-      readonly minimum: CssMathExpression;
-      readonly preferred: CssMathExpression;
-      readonly maximum: CssMathExpression;
+      readonly minimum: CssLengthPercentageExpression;
+      readonly preferred: CssLengthPercentageExpression;
+      readonly maximum: CssLengthPercentageExpression;
     };
+
+export interface CssLengthPercentageCalculation {
+  readonly expression: CssLengthPercentageExpression;
+  readonly percentageDependence: "none" | "percentage" | "mixed";
+}
 
 export type CssLength =
   | { readonly kind: "length"; readonly value: number; readonly unit: CssLengthUnit }
-  | { readonly kind: "calculation"; readonly expression: CssMathExpression }
+  | { readonly kind: "calculation"; readonly calculation: CssLengthPercentageCalculation }
   | { readonly kind: "zero" }
   | { readonly kind: "auto" }
   | { readonly kind: "none" };
@@ -177,34 +186,40 @@ export interface ComputedStyle {
 
 export type PseudoElementIdentity = "before" | "after" | "marker";
 
+/** A qualified cascade-layer name, ordered one nesting level at a time. */
+export type CascadeLayerPath = readonly string[];
+
 export interface StylesheetResource {
+  readonly sourceKind: "embedded" | "linked" | "imported";
   readonly owner: DocumentNodeRef;
   readonly requestUrl: string;
   readonly finalUrl: string;
   readonly contentType: string | null;
   readonly bytes: Uint8Array;
-  readonly media: string | null;
   readonly transportEncodingLabel: string | null;
   /** Document stylesheet order shared by the root sheet and all recursive imports. */
-  readonly rootOrder?: number;
+  readonly rootOrder: number;
   /** Depth-first cascade order within one document stylesheet root. */
-  readonly dependencyOrder?: number;
-  readonly importDepth?: number;
-  readonly importedFrom?: string | null;
-  readonly importLayer?: string | null;
-  readonly mediaConditions?: readonly string[];
-  readonly supportsConditions?: readonly string[];
+  readonly dependencyOrder: number;
+  readonly importDepth: number;
+  readonly importedFrom: string | null;
+  readonly importLayer: CascadeLayerPath | null;
+  readonly mediaConditions: readonly string[];
+  readonly supportsConditions: readonly string[];
   /** Qualified layer names established before this imported source enters the cascade. */
-  readonly predeclaredLayers?: readonly string[];
+  readonly predeclaredLayers: readonly CascadeLayerPath[];
+  /** Rule count verified when this source was admitted to the dependency graph. */
+  readonly parsedRules: number;
 }
 
 export interface StylesheetImportDependency {
   readonly request: string;
   readonly media: string | null;
-  readonly layer: string | null;
+  /** null is unlayered, [] requests a fresh anonymous import layer. */
+  readonly layer: CascadeLayerPath | null;
   readonly supports: string | null;
   readonly order: number;
-  readonly precedingLayers: readonly string[];
+  readonly precedingLayers: readonly CascadeLayerPath[];
 }
 
 export type StylesheetDependencyInspection =

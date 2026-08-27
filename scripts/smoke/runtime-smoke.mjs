@@ -5,6 +5,7 @@ import {
   parseWebDocumentStream
 } from "../../dist/document/index.js";
 import { renderDocument } from "../../dist/presentation/pipeline.js";
+import { embeddedStylesheetSources } from "../../dist/presentation/style/index.js";
 import {
   cssCoordinate,
   cssLengthFromFixed,
@@ -97,7 +98,7 @@ async function runSmoke(expectedRuntime) {
   const renderPipeline = renderDocument({
     document: fromText,
     state: createDocumentState(fromText),
-    resources: [],
+    resources: embeddedStylesheetSources(fromText),
     mediaEnvironment: {
       viewportWidthCssPx: cssPixels(viewportWidth),
       viewportHeightCssPx: cssPixels(viewportHeight),

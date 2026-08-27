@@ -8,8 +8,10 @@ import {
   type IndexedWebDocumentSnapshot
 } from "../document/index.js";
 import {
+  implementationSupportsCondition,
   inspectStylesheetBytes,
   inspectStylesheetText,
+  type CascadeLayerPath,
   type StyleDiagnostic,
   type StylesheetDependencyInspection,
   type StylesheetResource
@@ -435,6 +437,7 @@ export class BrowserSession {
     let dependencyEdges = 0;
     let parsedRules = 0;
     let dependencyOrder = 0;
+    let ruleBudgetExhausted = false;
     const allowedExternalOwners = new Set(
       externalRoots.slice(0, this.#stylesheetPolicy.maxStylesheets).map((entry) => entry.owner)
     );
@@ -502,7 +505,7 @@ export class BrowserSession {
       }
       return fetched;
     };
-    const inspect = (
+    const completeInspection = (
       inspection: StylesheetDependencyInspection,
       sourceUrl: string
     ): inspection is Extract<StylesheetDependencyInspection, { readonly status: "complete" }> => {
@@ -510,15 +513,34 @@ export class BrowserSession {
         diagnostics.push(stylesheetDiagnostic("stylesheet-parse", sourceUrl, "Stylesheet dependency syntax could not be inspected."));
         return false;
       }
-      if (parsedRules + inspection.parsedRules > this.#stylesheetPolicy.maxParsedRules) {
+      return true;
+    };
+    const admitRules = (sourceUrl: string, ruleCount: number): boolean => {
+      if (ruleBudgetExhausted || parsedRules + ruleCount > this.#stylesheetPolicy.maxParsedRules) {
+        ruleBudgetExhausted = true;
         diagnostics.push(stylesheetDiagnostic(
           "stylesheet-limit", sourceUrl,
           `Stylesheet rule budget reached ${String(this.#stylesheetPolicy.maxParsedRules)}.`
         ));
         return false;
       }
-      parsedRules += inspection.parsedRules;
+      parsedRules += ruleCount;
       return true;
+    };
+    const qualifyLayer = (
+      parent: CascadeLayerPath | null,
+      child: CascadeLayerPath
+    ): CascadeLayerPath => Object.freeze([...(parent ?? []), ...child]);
+    const uniqueLayerPaths = (paths: readonly CascadeLayerPath[]): readonly CascadeLayerPath[] => {
+      const seen = new Set<string>();
+      const result: CascadeLayerPath[] = [];
+      for (const path of paths) {
+        const identity = JSON.stringify(path);
+        if (seen.has(identity)) continue;
+        seen.add(identity);
+        result.push(Object.freeze([...path]));
+      }
+      return Object.freeze(result);
     };
     const loadImported = async (
       owner: DocumentNodeRef,
@@ -527,14 +549,17 @@ export class BrowserSession {
       inspection: Extract<StylesheetDependencyInspection, { readonly status: "complete" }>,
       depth: number,
       parentUrl: string,
-      inheritedLayer: string | null,
+      inheritedLayer: CascadeLayerPath | null,
       mediaConditions: readonly string[],
       supportsConditions: readonly string[],
-      inheritedPredeclaredLayers: readonly string[],
+      inheritedPredeclaredLayers: readonly CascadeLayerPath[],
       active: ReadonlySet<string>
     ): Promise<void> => {
       for (const dependency of inspection.imports) {
         requestOptions.signal?.throwIfAborted();
+        if (ruleBudgetExhausted) return;
+        if (parsedRules >= this.#stylesheetPolicy.maxParsedRules) return;
+        if (dependency.supports !== null && !implementationSupportsCondition(dependency.supports)) continue;
         dependencyEdges += 1;
         if (dependencyEdges > this.#stylesheetPolicy.maxDependencyEdges) {
           diagnostics.push(stylesheetDiagnostic(
@@ -591,14 +616,15 @@ export class BrowserSession {
         totalBytes += fetched.bytes.byteLength;
         const layer = dependency.layer === null ? inheritedLayer
           : dependency.layer.length === 0
-            ? `${inheritedLayer === null ? "" : `${inheritedLayer}.`}__anonymous_${String(rootOrder)}_${String(dependencyEdges)}`
-            : inheritedLayer === null ? dependency.layer : `${inheritedLayer}.${dependency.layer}`;
-        const predeclaredLayers = Object.freeze([...new Set([
+            ? qualifyLayer(inheritedLayer, Object.freeze([
+                `__anonymous_import_${String(rootOrder)}_${String(dependencyEdges)}`
+              ]))
+            : qualifyLayer(inheritedLayer, dependency.layer);
+        const predeclaredLayers = uniqueLayerPaths([
           ...inheritedPredeclaredLayers,
-          ...dependency.precedingLayers.map((name) =>
-            inheritedLayer === null ? name : `${inheritedLayer}.${name}`),
+          ...dependency.precedingLayers.map((path) => qualifyLayer(inheritedLayer, path)),
           ...(layer === null ? [] : [layer])
-        ])]);
+        ]);
         const nestedMedia = dependency.media === null
           ? mediaConditions : Object.freeze([...mediaConditions, dependency.media]);
         const nestedSupports = dependency.supports === null
@@ -610,19 +636,19 @@ export class BrowserSession {
         );
         const nextActive = new Set(active);
         nextActive.add(finalIdentity);
-        if (inspect(importedInspection, finalIdentity)) {
-          await loadImported(
-            owner, rootOrder, finalIdentity, importedInspection, depth + 1, finalIdentity,
-            layer, nestedMedia, nestedSupports, predeclaredLayers, nextActive
-          );
-        }
+        if (!completeInspection(importedInspection, finalIdentity)) continue;
+        await loadImported(
+          owner, rootOrder, finalIdentity, importedInspection, depth + 1, finalIdentity,
+          layer, nestedMedia, nestedSupports, predeclaredLayers, nextActive
+        );
+        if (!admitRules(finalIdentity, importedInspection.parsedRules)) return;
         resources.push(Object.freeze({
+          sourceKind: "imported",
           owner,
           requestUrl: fetched.requestUrl,
           finalUrl: fetched.finalUrl,
           contentType: fetched.contentType,
           bytes: fetched.bytes,
-          media: dependency.media,
           transportEncodingLabel: fetched.transportEncodingLabel ?? null,
           rootOrder,
           dependencyOrder: dependencyOrder++,
@@ -631,7 +657,8 @@ export class BrowserSession {
           importLayer: layer,
           mediaConditions: Object.freeze(nestedMedia),
           supportsConditions: Object.freeze(nestedSupports),
-          predeclaredLayers
+          predeclaredLayers,
+          parsedRules: importedInspection.parsedRules
         }));
       }
     };
@@ -639,16 +666,33 @@ export class BrowserSession {
       requestOptions.signal?.throwIfAborted();
       const rootMedia = reference.media === null ? Object.freeze([]) : Object.freeze([reference.media]);
       if (reference.kind === "embedded") {
+        const bytes = new TextEncoder().encode(reference.cssText);
         const inspection = inspectStylesheetText(reference.cssText, requestOptions.signal);
-        if (inspect(inspection, document.finalUrl)) {
-          await loadImported(
-            reference.owner, reference.order, document.finalUrl, inspection, 1,
-            `${document.finalUrl}#style-${String(reference.order)}`, null, rootMedia,
-            Object.freeze([]),
-            Object.freeze([]),
-            new Set([document.finalUrl])
-          );
-        }
+        const sourceUrl = `${document.finalUrl}#style-${String(reference.order)}`;
+        if (!completeInspection(inspection, sourceUrl)) continue;
+        await loadImported(
+          reference.owner, reference.order, document.finalUrl, inspection, 1,
+          sourceUrl, null, rootMedia, Object.freeze([]), Object.freeze([]), new Set([sourceUrl])
+        );
+        if (!admitRules(sourceUrl, inspection.parsedRules)) continue;
+        resources.push(Object.freeze({
+          sourceKind: "embedded",
+          owner: reference.owner,
+          requestUrl: sourceUrl,
+          finalUrl: sourceUrl,
+          contentType: "text/css",
+          bytes,
+          transportEncodingLabel: "utf-8",
+          rootOrder: reference.order,
+          dependencyOrder: dependencyOrder++,
+          importDepth: 0,
+          importedFrom: null,
+          importLayer: null,
+          mediaConditions: rootMedia,
+          supportsConditions: Object.freeze([]),
+          predeclaredLayers: Object.freeze([]),
+          parsedRules: inspection.parsedRules
+        }));
         continue;
       }
       if (!allowedExternalOwners.has(reference.owner)) continue;
@@ -668,19 +712,19 @@ export class BrowserSession {
       if (fetched === null) continue;
       totalBytes += fetched.bytes.byteLength;
       const inspection = inspectStylesheetBytes(fetched.bytes, fetched.transportEncodingLabel ?? null, requestOptions.signal);
-      if (inspect(inspection, fetched.finalUrl)) {
-        await loadImported(
-          reference.owner, reference.order, fetched.finalUrl, inspection, 1, fetched.finalUrl,
-          null, rootMedia, Object.freeze([]), Object.freeze([]), new Set([fetched.finalUrl])
-        );
-      }
+      if (!completeInspection(inspection, fetched.finalUrl)) continue;
+      await loadImported(
+        reference.owner, reference.order, fetched.finalUrl, inspection, 1, fetched.finalUrl,
+        null, rootMedia, Object.freeze([]), Object.freeze([]), new Set([fetched.finalUrl])
+      );
+      if (!admitRules(fetched.finalUrl, inspection.parsedRules)) continue;
       resources.push(Object.freeze({
+        sourceKind: "linked",
         owner: reference.owner,
         requestUrl: fetched.requestUrl,
         finalUrl: fetched.finalUrl,
         contentType: fetched.contentType,
         bytes: fetched.bytes,
-        media: reference.media,
         transportEncodingLabel: fetched.transportEncodingLabel ?? null,
         rootOrder: reference.order,
         dependencyOrder: dependencyOrder++,
@@ -689,7 +733,8 @@ export class BrowserSession {
         importLayer: null,
         mediaConditions: rootMedia,
         supportsConditions: Object.freeze([]),
-        predeclaredLayers: Object.freeze([])
+        predeclaredLayers: Object.freeze([]),
+        parsedRules: inspection.parsedRules
       }));
     }
     return {
@@ -800,7 +845,7 @@ export class BrowserSession {
         diagnostics: diagnosticsFromDocument(
           document,
           stylesheets.diagnostics,
-          document.stylesheets.filter((entry) => entry.kind === "embedded").length + stylesheets.resources.length,
+          stylesheets.resources.length,
           parseMode,
           options.method ?? "GET",
           {

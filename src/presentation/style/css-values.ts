@@ -5,16 +5,22 @@ import {
   type CssFunction
 } from "@ismail-elkorchi/css-parser";
 
-import type { CssColor, CssLength, CssLengthUnit, CssMathExpression } from "./types.js";
+import type {
+  CssColor,
+  CssLength,
+  CssLengthPercentageExpression,
+  CssLengthUnit
+} from "./types.js";
 
 const LENGTH_UNITS = new Set<CssLengthUnit>(["px", "em", "rem", "ch", "%", "vw", "vh"]);
 
-type NumericDimension = "number" | "length";
-
-interface MathResult {
-  readonly expression: CssMathExpression;
-  readonly dimension: NumericDimension;
-}
+type MathResult =
+  | { readonly dimension: "number"; readonly value: number }
+  | {
+      readonly dimension: "length-percentage";
+      readonly expression: CssLengthPercentageExpression;
+      readonly percentageDependence: "none" | "percentage" | "mixed";
+    };
 
 function compact(values: readonly ComponentValue[]): readonly ComponentValue[] {
   return values.filter((value) => value.kind !== "whitespace");
@@ -44,8 +50,24 @@ export function splitCssComponentValues(
   return result.some((value) => value.length === 0) ? null : Object.freeze(result);
 }
 
-function valueExpression(value: number, unit: CssLengthUnit | "number"): CssMathExpression {
+function valueExpression(value: number, unit: CssLengthUnit): CssLengthPercentageExpression {
   return Object.freeze({ kind: "value", value, unit });
+}
+
+function lengthResult(
+  expression: CssLengthPercentageExpression,
+  percentageDependence: "none" | "percentage" | "mixed"
+): MathResult {
+  return Object.freeze({ dimension: "length-percentage", expression, percentageDependence });
+}
+
+function combinedPercentageDependence(
+  values: readonly ("none" | "percentage" | "mixed")[]
+): "none" | "percentage" | "mixed" {
+  if (values.some((value) => value === "mixed")) return "mixed";
+  const hasAbsolute = values.some((value) => value === "none");
+  const hasPercentage = values.some((value) => value === "percentage");
+  return hasAbsolute && hasPercentage ? "mixed" : hasPercentage ? "percentage" : "none";
 }
 
 class MathParser {
@@ -85,13 +107,21 @@ class MathParser {
       this.#position += 1;
       const right = this.#product();
       if (right === null || left.dimension !== right.dimension) return null;
-      const rightExpression = operator.value === 45
-        ? Object.freeze({ kind: "negate", value: right.expression } as const)
+      if (left.dimension === "number" && right.dimension === "number") {
+        left = Object.freeze({
+          dimension: "number",
+          value: operator.value === 45 ? left.value - right.value : left.value + right.value
+        });
+        continue;
+      }
+      if (left.dimension !== "length-percentage" || right.dimension !== "length-percentage") return null;
+      const rightExpression: CssLengthPercentageExpression = operator.value === 45
+        ? Object.freeze({ kind: "negate", value: right.expression })
         : right.expression;
-      left = Object.freeze({
-        dimension: left.dimension,
-        expression: Object.freeze({ kind: "sum", left: left.expression, right: rightExpression })
-      });
+      left = lengthResult(
+        Object.freeze({ kind: "sum", left: left.expression, right: rightExpression }),
+        combinedPercentageDependence([left.percentageDependence, right.percentageDependence])
+      );
     }
   }
 
@@ -105,33 +135,29 @@ class MathParser {
       const right = this.#unary();
       if (right === null) return null;
       if (operator.value === 42) {
-        if (left.dimension === "number" && right.dimension === "length") {
-          const factor = numericConstant(left.expression);
-          if (factor === null) return null;
-          left = Object.freeze({
-            dimension: "length",
-            expression: Object.freeze({ kind: "product", value: right.expression, factor })
-          });
-        } else if (left.dimension === "length" && right.dimension === "number") {
-          const factor = numericConstant(right.expression);
-          if (factor === null) return null;
-          left = Object.freeze({
-            dimension: "length",
-            expression: Object.freeze({ kind: "product", value: left.expression, factor })
-          });
+        if (left.dimension === "number" && right.dimension === "length-percentage") {
+          left = lengthResult(
+            Object.freeze({ kind: "product", value: right.expression, factor: left.value }),
+            right.percentageDependence
+          );
+        } else if (left.dimension === "length-percentage" && right.dimension === "number") {
+          left = lengthResult(
+            Object.freeze({ kind: "product", value: left.expression, factor: right.value }),
+            left.percentageDependence
+          );
         } else if (left.dimension === "number" && right.dimension === "number") {
-          const a = numericConstant(left.expression);
-          const b = numericConstant(right.expression);
-          if (a === null || b === null) return null;
-          left = Object.freeze({ dimension: "number", expression: valueExpression(a * b, "number") });
+          left = Object.freeze({ dimension: "number", value: left.value * right.value });
         } else return null;
       } else {
-        const divisor = numericConstant(right.expression);
-        if (right.dimension !== "number" || divisor === null || divisor === 0) return null;
-        left = Object.freeze({
-          dimension: left.dimension,
-          expression: Object.freeze({ kind: "product", value: left.expression, factor: 1 / divisor })
-        });
+        if (right.dimension !== "number" || right.value === 0) return null;
+        if (left.dimension === "number") {
+          left = Object.freeze({ dimension: "number", value: left.value / right.value });
+        } else {
+          left = lengthResult(
+            Object.freeze({ kind: "product", value: left.expression, factor: 1 / right.value }),
+            left.percentageDependence
+          );
+        }
       }
     }
   }
@@ -140,10 +166,10 @@ class MathParser {
     if (this.#delimiter(43)) return this.#unary();
     if (this.#delimiter(45)) {
       const value = this.#unary();
-      return value === null ? null : Object.freeze({
-        dimension: value.dimension,
-        expression: Object.freeze({ kind: "negate", value: value.expression })
-      });
+      if (value === null) return null;
+      return value.dimension === "number"
+        ? Object.freeze({ dimension: "number", value: -value.value })
+        : lengthResult(Object.freeze({ kind: "negate", value: value.expression }), value.percentageDependence);
     }
     return this.#primary();
   }
@@ -152,15 +178,15 @@ class MathParser {
     const value = this.#consume();
     if (value === undefined) return null;
     if (value.kind === "number") {
-      return Object.freeze({ dimension: "number", expression: valueExpression(value.value, "number") });
+      return Number.isFinite(value.value) ? Object.freeze({ dimension: "number", value: value.value }) : null;
     }
     if (value.kind === "percentage") {
-      return Object.freeze({ dimension: "length", expression: valueExpression(value.value, "%") });
+      return Number.isFinite(value.value) ? lengthResult(valueExpression(value.value, "%"), "percentage") : null;
     }
     if (value.kind === "dimension") {
       const unit = value.unit.toLowerCase() as CssLengthUnit;
       if (!LENGTH_UNITS.has(unit) || !Number.isFinite(value.value)) return null;
-      return Object.freeze({ dimension: "length", expression: valueExpression(value.value, unit) });
+      return lengthResult(valueExpression(value.value, unit), "none");
     }
     if (value.kind === "simple-block" && value.associatedToken === "open-paren") {
       return new MathParser(value.value).parse();
@@ -171,47 +197,32 @@ class MathParser {
     if (name !== "min" && name !== "max" && name !== "clamp") return null;
     const argumentsList = splitArguments(value.value);
     const parsed = argumentsList.map((argument) => new MathParser(argument).parse());
-    if (parsed.some((entry) => entry === null) || parsed.some((entry) => entry?.dimension !== "length")) return null;
-    const expressions = parsed.map((entry) => (entry as MathResult).expression);
+    if (parsed.some((entry) => entry === null)
+      || parsed.some((entry) => entry?.dimension !== "length-percentage")) return null;
+    const lengths = parsed as readonly Extract<MathResult, { readonly dimension: "length-percentage" }>[];
+    const expressions = lengths.map((entry) => entry.expression);
+    const dependence = combinedPercentageDependence(lengths.map((entry) => entry.percentageDependence));
     if (name === "clamp") {
       if (expressions.length !== 3) return null;
-      return Object.freeze({
-        dimension: "length",
-        expression: Object.freeze({
+      return lengthResult(
+        Object.freeze({
           kind: "clamp",
-          minimum: expressions[0] as CssMathExpression,
-          preferred: expressions[1] as CssMathExpression,
-          maximum: expressions[2] as CssMathExpression
-        })
-      });
+          minimum: expressions[0] as CssLengthPercentageExpression,
+          preferred: expressions[1] as CssLengthPercentageExpression,
+          maximum: expressions[2] as CssLengthPercentageExpression
+        }),
+        dependence
+      );
     }
     if (expressions.length === 0) return null;
-    return Object.freeze({
-      dimension: "length",
-      expression: Object.freeze({
+    return lengthResult(
+      Object.freeze({
         kind: name === "min" ? "minimum" : "maximum",
         values: Object.freeze(expressions)
-      })
-    });
+      }),
+      dependence
+    );
   }
-}
-
-function numericConstant(expression: CssMathExpression): number | null {
-  if (expression.kind === "value") return expression.unit === "number" ? expression.value : null;
-  if (expression.kind === "negate") {
-    const value = numericConstant(expression.value);
-    return value === null ? null : -value;
-  }
-  if (expression.kind === "sum") {
-    const left = numericConstant(expression.left);
-    const right = numericConstant(expression.right);
-    return left === null || right === null ? null : left + right;
-  }
-  if (expression.kind === "product") {
-    const value = numericConstant(expression.value);
-    return value === null ? null : value * expression.factor;
-  }
-  return null;
 }
 
 function splitArguments(values: readonly ComponentValue[]): readonly (readonly ComponentValue[])[] {
@@ -249,8 +260,14 @@ export function parseCssLength(
     }
   }
   const math = new MathParser(parsed.value).parse();
-  if (math?.dimension !== "length") return null;
-  return Object.freeze({ kind: "calculation", expression: math.expression });
+  if (math?.dimension !== "length-percentage") return null;
+  return Object.freeze({
+    kind: "calculation",
+    calculation: Object.freeze({
+      expression: math.expression,
+      percentageDependence: math.percentageDependence
+    })
+  });
 }
 
 function variableNameAndFallback(value: CssFunction): {

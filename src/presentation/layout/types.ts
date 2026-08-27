@@ -44,6 +44,7 @@ export interface LayoutBudgets {
   readonly maxGraphemeClusters: number;
   readonly maxBreakOpportunities: number;
   readonly maxVisualRuns: number;
+  readonly maxFlexSizingWork: number;
   readonly maxDepth: number;
 }
 
@@ -154,6 +155,24 @@ export interface LayoutBoxFragment {
 
 export type LayoutFragment = LayoutTextFragment | LayoutBoxFragment;
 
+export type LayoutPaintPhase =
+  | "context-background-border"
+  | "negative-stack-level"
+  | "in-flow-block"
+  | "float"
+  | "inline"
+  | "positioned-auto-zero"
+  | "positive-stack-level";
+
+export interface LayoutStackingMetadata {
+  readonly establishesStackingContext: boolean;
+  readonly stackLevel: number | null;
+  readonly sourceOrder: number;
+  readonly containingStackingContext: LayoutFragmentId | null;
+  readonly positionedDescendantsRemainInAncestor: boolean;
+  readonly paintPhase: LayoutPaintPhase;
+}
+
 export interface LineBox {
   readonly id: LineBoxId;
   readonly containingFragment: LayoutFragmentId;
@@ -215,6 +234,7 @@ export interface LayoutFragmentTree {
   fragment(id: LayoutFragmentId): LayoutFragment;
   parent(id: LayoutFragmentId): LayoutFragment | null;
   children(id: LayoutFragmentId): readonly LayoutFragment[];
+  stacking(id: LayoutFragmentId): LayoutStackingMetadata;
   forFormattingNode(node: FormattingNodeId): readonly LayoutFragment[];
   forDocumentNode(node: DocumentNodeRef): readonly LayoutFragment[];
 }

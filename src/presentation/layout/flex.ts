@@ -31,6 +31,8 @@ export interface FlexItemInput<Identity> {
   readonly hypotheticalMainSize: CssNonNegativeLength;
   readonly minimumMainSize: CssNonNegativeLength;
   readonly maximumMainSize: CssNonNegativeLength | null;
+  /** Padding and border on the main axis; targetMainSize remains the content-box size. */
+  readonly mainBorderPadding: CssNonNegativeLength;
   readonly flexGrow: number;
   readonly flexShrink: number;
   readonly marginMainStart: CssPixelLength;
@@ -62,6 +64,30 @@ export interface ResolveFlexLinesInput<Identity> {
   readonly wrap: "nowrap" | "wrap" | "wrap-reverse";
   readonly reverse: boolean;
   readonly justifyContent: "start" | "center" | "end" | "space-between" | "space-around" | "space-evenly";
+  readonly maxSizingWork?: number;
+  readonly signal?: AbortSignal;
+}
+
+export class FlexSizingBudgetExceeded extends Error {
+  public readonly limit: number;
+
+  public constructor(limit: number) {
+    super(`Flex sizing work budget reached ${String(limit)}.`);
+    this.name = "FlexSizingBudgetExceeded";
+    this.limit = limit;
+  }
+}
+
+interface FlexSizingWork {
+  readonly signal: AbortSignal | undefined;
+  readonly limit: number;
+  used: number;
+}
+
+function consume(work: FlexSizingWork, units = 1): void {
+  work.signal?.throwIfAborted();
+  if (units > work.limit - work.used) throw new FlexSizingBudgetExceeded(work.limit);
+  work.used += units;
 }
 
 interface MutableFlexItem<Identity> {
@@ -82,17 +108,22 @@ function clampMainSize<Identity>(item: FlexItemInput<Identity>, value: CssPixelL
 function outerHypotheticalSize<Identity>(item: FlexItemInput<Identity>): CssPixelLength {
   return sum(
     item.hypotheticalMainSize,
+    item.mainBorderPadding,
     item.autoMarginMainStart ? ZERO : item.marginMainStart,
     item.autoMarginMainEnd ? ZERO : item.marginMainEnd
   );
 }
 
-function collectLines<Identity>(input: ResolveFlexLinesInput<Identity>): readonly (readonly FlexItemInput<Identity>[])[] {
+function collectLines<Identity>(
+  input: ResolveFlexLinesInput<Identity>,
+  work: FlexSizingWork
+): readonly (readonly FlexItemInput<Identity>[])[] {
   const ordered = [...input.items].sort((left, right) => left.order - right.order || left.sourceIndex - right.sourceIndex);
   const lines: FlexItemInput<Identity>[][] = [];
   let line: FlexItemInput<Identity>[] = [];
   let occupied: CssPixelLength = ZERO;
   for (const item of ordered) {
+    consume(work);
     const next = sum(
       occupied,
       line.length === 0 ? ZERO : input.gap,
@@ -116,14 +147,17 @@ function collectLines<Identity>(input: ResolveFlexLinesInput<Identity>): readonl
 
 function sumOuterTargets<Identity>(items: readonly MutableFlexItem<Identity>[], gap: CssPixelLength): CssPixelLength {
   let total = cssMultiply(gap, Math.max(0, items.length - 1));
-  for (const item of items) total = sum(total, item.target, item.marginStart, item.marginEnd);
+  for (const item of items) total = sum(
+    total, item.target, item.input.mainBorderPadding, item.marginStart, item.marginEnd
+  );
   return total;
 }
 
 function resolveFlexibleLengths<Identity>(
   inputs: readonly FlexItemInput<Identity>[],
   containerMainSize: CssNonNegativeLength,
-  gap: CssNonNegativeLength
+  gap: CssNonNegativeLength,
+  work: FlexSizingWork
 ): MutableFlexItem<Identity>[] {
   const items = inputs.map((input) => ({
     input,
@@ -135,13 +169,15 @@ function resolveFlexibleLengths<Identity>(
   let hypotheticalTotal = cssMultiply(gap, Math.max(0, items.length - 1));
   let baseTotal = hypotheticalTotal;
   for (const item of items) {
+    consume(work);
     hypotheticalTotal = sum(
       hypotheticalTotal,
       item.input.hypotheticalMainSize,
+      item.input.mainBorderPadding,
       item.marginStart,
       item.marginEnd
     );
-    baseTotal = sum(baseTotal, item.input.flexBaseSize, item.marginStart, item.marginEnd);
+    baseTotal = sum(baseTotal, item.input.flexBaseSize, item.input.mainBorderPadding, item.marginStart, item.marginEnd);
   }
   const growing = hypotheticalTotal < containerMainSize;
   const initialFreeSpace = cssAdd(containerMainSize, cssMultiply(baseTotal, -1));
@@ -154,11 +190,15 @@ function resolveFlexibleLengths<Identity>(
     }
   }
   while (items.some((item) => !item.frozen)) {
+    consume(work, items.length);
     let used = cssMultiply(gap, Math.max(0, items.length - 1));
     let flexFactorTotal = 0;
     let scaledFactorTotal = 0;
     for (const item of items) {
-      used = sum(used, item.marginStart, item.marginEnd, item.frozen ? item.target : item.input.flexBaseSize);
+      used = sum(
+        used, item.marginStart, item.marginEnd, item.input.mainBorderPadding,
+        item.frozen ? item.target : item.input.flexBaseSize
+      );
       if (!item.frozen) {
         const factor = growing ? item.input.flexGrow : item.input.flexShrink;
         flexFactorTotal = scalarSum(flexFactorTotal, factor);
@@ -227,12 +267,14 @@ function justifyOffsets(
 
 function resolveLine<Identity>(
   inputs: readonly FlexItemInput<Identity>[],
-  context: ResolveFlexLinesInput<Identity>
+  context: ResolveFlexLinesInput<Identity>,
+  work: FlexSizingWork
 ): ResolvedFlexLine<Identity> {
-  const items = resolveFlexibleLengths(inputs, context.containerMainSize, context.gap);
+  const items = resolveFlexibleLengths(inputs, context.containerMainSize, context.gap, work);
   let remaining = cssAdd(context.containerMainSize, cssMultiply(sumOuterTargets(items, context.gap), -1));
   let autoMargins = 0;
   for (const item of items) {
+    consume(work);
     if (item.input.autoMarginMainStart) autoMargins += 1;
     if (item.input.autoMarginMainEnd) autoMargins += 1;
   }
@@ -240,6 +282,7 @@ function resolveLine<Identity>(
     let unallocated = remaining;
     let remainingMargins = autoMargins;
     for (const item of items) {
+      consume(work);
       if (item.input.autoMarginMainStart) {
         item.marginStart = cssDivide(unallocated, remainingMargins);
         unallocated = cssAdd(unallocated, cssMultiply(item.marginStart, -1));
@@ -268,12 +311,20 @@ function resolveLine<Identity>(
         marginMainStart: item.marginStart,
         marginMainEnd: item.marginEnd
       }));
-      cursor = sum(cursor, item.target, item.marginEnd, context.gap, justification.extraBetween);
+      cursor = sum(
+        cursor, item.target, item.input.mainBorderPadding, item.marginEnd,
+        context.gap, justification.extraBetween
+      );
     }
   } else {
     let cursor = cssAdd(context.containerMainSize, cssMultiply(justification.leading, -1));
     for (const item of items) {
-      cursor = sum(cursor, cssMultiply(item.marginStart, -1), cssMultiply(item.target, -1));
+      cursor = sum(
+        cursor,
+        cssMultiply(item.marginStart, -1),
+        cssMultiply(item.target, -1),
+        cssMultiply(item.input.mainBorderPadding, -1)
+      );
       resolved.push(Object.freeze({
         identity: item.input.identity,
         sourceIndex: item.input.sourceIndex,
@@ -306,5 +357,10 @@ export function resolveFlexLines<Identity>(input: ResolveFlexLinesInput<Identity
       throw new RangeError("Flex item order and flex factors must be finite and valid.");
     }
   }
-  return Object.freeze(collectLines(input).map((line) => resolveLine(line, input)));
+  const limit = input.maxSizingWork ?? 2_000_000;
+  if (!Number.isSafeInteger(limit) || limit < 0) throw new RangeError("Flex sizing work budget must be a non-negative safe integer.");
+  const work: FlexSizingWork = { signal: input.signal, limit, used: 0 };
+  const result: ResolvedFlexLine<Identity>[] = [];
+  for (const line of collectLines(input, work)) result.push(resolveLine(line, input, work));
+  return Object.freeze(result);
 }

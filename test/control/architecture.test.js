@@ -78,9 +78,10 @@ test("layout, display-list, and cell-rasterizer boundaries are explicit", async 
   assert.match(displayList, /inlineContinuations/u);
   assert.match(displayList, /buildTerminalDisplayList/u);
   assert.match(displayList, /input\.layout\.fragment\(childId\)/u);
+  assert.match(displayList, /input\.layout\.stacking\(/u);
   assert.match(displayList, /paintStackingContext/u);
   assert.doesNotMatch(displayList, /visualFragment|visualLineFragments|lineForFragment/u);
-  assert.doesNotMatch(displayList, /FormattingTree|CssLength/u);
+  assert.doesNotMatch(displayList, /FormattingTree|ComputedStyle|CssLength/u);
   assert.match(rasterizer, /TerminalPaintCommand/u);
   assert.match(rasterizer, /rasterizeTerminalDisplayList/u);
   assert.match(rasterizer, /rasterizeTerminalCells/u);
@@ -91,6 +92,7 @@ test("layout, display-list, and cell-rasterizer boundaries are explicit", async 
   const layout = await source("src/presentation/layout/layout.ts");
   assert.doesNotMatch(fixed, /Math\.(?:min|max)\(\.\.\./u);
   assert.doesNotMatch(layout, /\.\.\.profiles\.flatMap/u);
+  assert.doesNotMatch(layout, /stretchFlexItemCrossSize|stretch.*Rect(?:angle)?/u);
   assert.ok(!terminalFiles.includes("layout.ts"));
   assert.ok(!terminalFiles.includes("visible-text.ts"));
   const formerHelpers = /\b(?:buildFragmentTree|FragmentTree|TerminalFragment|TerminalRow|estimatedHeight|InlineCursor|buildVisibleTextIndex|VisibleTextIndex)\b/u;
@@ -149,6 +151,7 @@ test("web compatibility tooling and CSS ownership remain outside the runtime ren
   const manifest = JSON.parse(await source("package.json"));
   const lockfile = await source("package-lock.json");
   const application = await source("src/app/session.ts");
+  const styleTypes = await source("src/presentation/style/types.ts");
   const dependencyInspection = await source("src/presentation/style/stylesheet-dependencies.ts");
   const valueEvaluator = await source("src/presentation/style/css-values.ts");
   const flexLayout = await source("src/presentation/layout/flex.ts");
@@ -161,12 +164,25 @@ test("web compatibility tooling and CSS ownership remain outside the runtime ren
     assert.doesNotMatch(text, /(?:playwright|puppeteer|chromium)/iu, `${path} contains a browser-backed runtime path`);
   }
   assert.match(application, /inspectStylesheetBytes/u);
+  assert.match(application, /implementationSupportsCondition/u);
+  assert.doesNotMatch(application, /(?:supportedProperties|SUPPORTED_PROPERTIES|implementationSupportsDeclaration)/u);
+  for (const field of [
+    "rootOrder", "dependencyOrder", "importDepth", "importedFrom", "importLayer",
+    "mediaConditions", "supportsConditions", "predeclaredLayers", "parsedRules"
+  ]) {
+    assert.match(styleTypes, new RegExp(`readonly ${field}:`, "u"));
+    assert.doesNotMatch(styleTypes, new RegExp(`readonly ${field}\\?:`, "u"));
+  }
   assert.doesNotMatch(dependencyInspection, /(?:fetch\(|Http|Cookie|node:)/u);
   assert.match(valueEvaluator, /parseComponentValues/u);
   assert.match(valueEvaluator, /resolveCssVariables/u);
   assert.match(flexLayout, /resolveFlexibleLengths/u);
   assert.match(flexLayout, /collectLines/u);
   assert.doesNotMatch(terminal, /(?:flexBaseSize|resolveFlexLines|positionedContainingBlock|float:\s*["'])/u);
+  const compatibilityHarness = await source("scripts/compat/run.mjs");
+  assert.match(compatibilityHarness, /BrowserSession/u);
+  assert.match(compatibilityHarness, /paintedCellMeaningfulTextRecall/u);
+  assert.doesNotMatch(compatibilityHarness, /parseWebDocument/u);
 });
 
 test("the document barrel exposes no concrete snapshot or parser implementation", async () => {

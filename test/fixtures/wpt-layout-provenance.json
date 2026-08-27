@@ -221,14 +221,92 @@
     },
     {
       "source": "css/css-cascade/parsing/supports-import-parsing.html",
-      "behavior": "stylesheet imports retain supports conditions separately from layer and media modifiers",
-      "terminalAdjustment": "the application fetches the offline resource while style decides whether its rules apply",
+      "behavior": "stylesheet imports retain supports conditions separately from layer and media modifiers, and false implementation-support conditions prevent request scheduling",
+      "terminalAdjustment": "an offline request counter verifies that unsupported property/value and selector conditions perform no fetch",
       "license": "WPT 3-clause BSD"
     },
     {
       "source": "css/css-values/clamp-length-computed.html",
       "behavior": "nested clamp and length-percentage math remains typed through computed-value processing",
       "terminalAdjustment": "mixed terms resolve only during fixed-point layout against a CSS-pixel basis",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-cascade/layer-basic.html",
+      "behavior": "nested layer paths retain ordering at each hierarchy level and direct declarations occupy the implicit final sublayer",
+      "terminalAdjustment": "the computed color is asserted without graphical-browser painting",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-cascade/layer-vs-inline-style.html",
+      "behavior": "element-attached normal and important declarations retain author-origin precedence independent of selector specificity",
+      "terminalAdjustment": "computed values are inspected directly on the immutable computed style map",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-flexbox/parsing/flex-shorthand.html",
+      "behavior": "the flex shorthand accepts grammar-valid grow, shrink, and basis orderings and rejects duplicate dimensions",
+      "terminalAdjustment": "the adapted test inspects typed computed flex components",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-flexbox/abspos/flexbox-abspos-child-002.html",
+      "behavior": "an absolute child remains an out-of-flow descendant and does not enter flex line collection or flexible sizing",
+      "terminalAdjustment": "fixed-point item widths, gaps, paint identity, and hit-test identity are asserted",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-flexbox/abspos/flex-abspos-staticpos-justify-content-001.html",
+      "behavior": "an out-of-flow flex child keeps its flex-container static position under main-axis justification",
+      "terminalAdjustment": "the static border-box position is asserted in CSS pixels before cell snapping",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-position/position-absolute-dynamic-static-position-inline.html",
+      "behavior": "positioned descendants retain static-position input without participating in normal-flow size",
+      "terminalAdjustment": "the terminal renderer consumes the resulting layout-fragment geometry unchanged",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/normal-flow/child-bottom-margin-in-unresolvable-percentage-height.html",
+      "behavior": "percentage-dependent block sizes remain unresolved when the containing block size is indefinite",
+      "terminalAdjustment": "mixed calc/min terms are resolved as used values only when the percentage basis is definite",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/floats/intrinsic-size-float-and-line.html",
+      "behavior": "a block formatting context owns float exclusions while each overlapping line box queries its available inline range",
+      "terminalAdjustment": "paragraph border and line-box rectangles are inspected in fixed-point CSS pixels",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-flexbox/flexbox_rtl-flow-reverse.html",
+      "behavior": "computed direction and flex-direction jointly determine physical main-start and reverse item placement",
+      "terminalAdjustment": "fixed-point border-box coordinates are compared for LTR and RTL row and row-reverse cases",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-flexbox/flex-item-z-ordering-001.html",
+      "behavior": "a static flex item with an integer z-index participates as a stacking context",
+      "terminalAdjustment": "background paint-command order is asserted rather than graphical pixel color",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/floats/floats-wrap-bfc-008.html",
+      "behavior": "an in-flow child establishing a block formatting context avoids sibling floats while its own lines use its complete content width",
+      "terminalAdjustment": "the child border box and line boxes are asserted in fixed-point CSS pixels",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/floats/negative-margin-float-positioning.html",
+      "behavior": "negative float margins affect the retained float margin rectangle and following float placement",
+      "terminalAdjustment": "float margin rectangles and clearance edges are inspected before cell snapping",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/CSS2/positioning/position-relative-001.xht",
+      "behavior": "relative positioning offsets inline box continuations and descendants without changing their normal-flow allocation",
+      "terminalAdjustment": "layout fragments, background paint commands, hit regions, and source-linked search spans are compared before and after an eight-CSS-pixel offset",
       "license": "WPT 3-clause BSD"
     }
   ]

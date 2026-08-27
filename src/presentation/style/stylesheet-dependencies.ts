@@ -7,19 +7,31 @@ import {
   type CssBlockItem
 } from "@ismail-elkorchi/css-parser";
 
+import type { IndexedWebDocumentSnapshot } from "../../document/index.js";
+
 import type {
+  CascadeLayerPath,
   StylesheetDependencyInspection,
-  StylesheetImportDependency
+  StylesheetImportDependency,
+  StylesheetResource
 } from "./types.js";
 
 function significant(values: readonly ComponentValue[]): readonly ComponentValue[] {
   return values.filter((value) => value.kind !== "whitespace");
 }
 
+function layerPath(values: readonly ComponentValue[]): CascadeLayerPath | null {
+  const serialized = serializeCssComponentValues(values).trim();
+  if (serialized.length === 0) return null;
+  const segments = serialized.split(/\s*\.\s*/u);
+  return segments.length > 0 && segments.every((segment) => segment.length > 0)
+    ? Object.freeze(segments) : null;
+}
+
 function importDependency(
   rule: CssAtRule,
   order: number,
-  precedingLayers: readonly string[]
+  precedingLayers: readonly CascadeLayerPath[]
 ): StylesheetImportDependency | null {
   const values = significant(rule.prelude);
   const location = values[0];
@@ -33,14 +45,15 @@ function importDependency(
         })()
       : null;
   if (request === null || request.length === 0) return null;
-  let layer: string | null = null;
+  let layer: CascadeLayerPath | null = null;
   let mediaStart = 1;
   const modifier = values[1];
   if (modifier?.kind === "ident" && modifier.value.toLowerCase() === "layer") {
-    layer = "";
+    layer = Object.freeze([]);
     mediaStart = 2;
   } else if (modifier?.kind === "function-block" && modifier.name.toLowerCase() === "layer") {
-    layer = serializeCssComponentValues(modifier.value).trim();
+    layer = layerPath(modifier.value);
+    if (layer === null) return null;
     mediaStart = 2;
   }
   const supportsFunction = values.slice(mediaStart).find((value) =>
@@ -61,13 +74,13 @@ function importDependency(
   });
 }
 
-function layerStatementNames(rule: CssAtRule): readonly string[] {
+function layerStatementNames(rule: CssAtRule): readonly CascadeLayerPath[] {
   if (rule.name.toLowerCase() !== "layer" || rule.block !== null) return Object.freeze([]);
-  const names: string[] = [];
+  const names: CascadeLayerPath[] = [];
   let current: ComponentValue[] = [];
   const finish = (): void => {
-    const name = serializeCssComponentValues(current).trim();
-    if (name.length > 0) names.push(name);
+    const name = layerPath(current);
+    if (name !== null) names.push(name);
     current = [];
   };
   for (const value of rule.prelude) {
@@ -97,7 +110,7 @@ function inspectParsed(
   const imports: StylesheetImportDependency[] = [];
   let importOrder = 0;
   let importsAllowed = true;
-  const precedingLayers: string[] = [];
+  const precedingLayers: CascadeLayerPath[] = [];
   for (const rule of parsed.value.rules) {
     if (rule.kind === "at-rule") precedingLayers.push(...layerStatementNames(rule));
     if (rule.kind !== "at-rule" || rule.name.toLowerCase() !== "import") {
@@ -148,4 +161,40 @@ export function inspectStylesheetBytes(
     signal?.throwIfAborted();
     return Object.freeze({ status: "rejected", reason: "encoding" });
   }
+}
+
+/** Builds complete source records for embedded roots when no resource loader is involved. */
+export function embeddedStylesheetSources(
+  document: IndexedWebDocumentSnapshot,
+  signal?: AbortSignal
+): readonly StylesheetResource[] {
+  const encoder = new TextEncoder();
+  const resources: StylesheetResource[] = [];
+  let dependencyOrder = 0;
+  for (const reference of document.stylesheets) {
+    signal?.throwIfAborted();
+    if (reference.kind !== "embedded") continue;
+    const sourceUrl = `${document.finalUrl}#style-${String(reference.order)}`;
+    const inspection = inspectStylesheetText(reference.cssText, signal);
+    if (inspection.status !== "complete") continue;
+    resources.push(Object.freeze({
+      sourceKind: "embedded",
+      owner: reference.owner,
+      requestUrl: sourceUrl,
+      finalUrl: sourceUrl,
+      contentType: "text/css",
+      bytes: encoder.encode(reference.cssText),
+      transportEncodingLabel: "utf-8",
+      rootOrder: reference.order,
+      dependencyOrder: dependencyOrder++,
+      importDepth: 0,
+      importedFrom: null,
+      importLayer: null,
+      mediaConditions: Object.freeze(reference.media === null ? [] : [reference.media]),
+      supportsConditions: Object.freeze([]),
+      predeclaredLayers: Object.freeze([]),
+      parsedRules: inspection.parsedRules
+    }));
+  }
+  return Object.freeze(resources);
 }

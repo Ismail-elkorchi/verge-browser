@@ -1,0 +1,2 @@
+@layer components { nav { display: flex; gap: 1ch; } }
+@media screen and (min-width: 20rem) { main { max-width: 70rem; } }

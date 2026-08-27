@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { createDocumentState, parseWebDocument } from "../../dist/document/index.js";
 import { renderDocument } from "../../dist/presentation/pipeline.js";
+import { embeddedStylesheetSources } from "../../dist/presentation/style/index.js";
 import {
   cssCoordinate,
   cssLengthFromFixed,
@@ -160,7 +161,7 @@ function evaluate(html) {
   const renderPipeline = renderDocument({
     document,
     state: createDocumentState(document),
-    resources: [],
+    resources: embeddedStylesheetSources(document),
     mediaEnvironment: {
       viewportWidthCssPx: cssPixels(viewportWidth),
       viewportHeightCssPx: cssPixels(viewportHeight),

@@ -5,7 +5,6 @@ import {
   cssPx,
   type LayoutFragment
 } from "../layout/index.js";
-import type { ComputedStyle } from "../style/index.js";
 import type {
   BuildTerminalDisplayListInput,
   TerminalDisplayList,
@@ -138,31 +137,6 @@ function commandGroup(fragment: LayoutFragment): readonly Omit<TerminalPaintComm
   return commands;
 }
 
-function computedStyle(fragment: LayoutFragment, list: BuildTerminalDisplayListInput["layout"]): ComputedStyle | null {
-  let formattingNode = list.formatting.node(fragment.formattingNode);
-  let computed: ComputedStyle | null = null;
-  for (;;) {
-    const source = formattingNode.source;
-    if (source !== null && list.formatting.document.node(source).kind === "element") {
-      computed = formattingNode.pseudo === null
-        ? list.formatting.styles.style(source)
-        : list.formatting.styles.pseudo(source, formattingNode.pseudo);
-    }
-    const parent = list.formatting.parent(formattingNode.id);
-    if (computed !== null || parent === null) break;
-    formattingNode = parent;
-  }
-  return computed;
-}
-
-function positionedZIndex(
-  fragment: LayoutFragment,
-  layout: BuildTerminalDisplayListInput["layout"]
-): number | null {
-  const computed = computedStyle(fragment, layout);
-  return computed !== null && computed.box.position !== "static" ? computed.box.zIndex ?? 0 : null;
-}
-
 export function buildTerminalDisplayList(input: BuildTerminalDisplayListInput): TerminalDisplayList {
   const context = Object.freeze({ ...input.context });
   const budgets = terminalPaintBudgets(context.budgets);
@@ -190,41 +164,54 @@ export function buildTerminalDisplayList(input: BuildTerminalDisplayListInput): 
   };
   const paintStackingContext = (root: LayoutFragment): boolean => {
     if (!append(root)) return false;
-    const positioned: { readonly fragment: LayoutFragment; readonly zIndex: number; readonly sourceOrder: number }[] = [];
-    let sourceOrder = 0;
-    const scan = (parent: LayoutFragment): void => {
+    const contexts: LayoutFragment[] = [];
+    const participants: {
+      readonly fragment: LayoutFragment;
+      readonly phase: "in-flow-block" | "float" | "inline" | "positioned-auto-zero";
+    }[] = [];
+    const scan = (
+      parent: LayoutFragment,
+      inheritedPhase: "float" | "positioned-auto-zero" | null = null
+    ): void => {
       for (const childId of parent.children) {
         input.signal?.throwIfAborted();
         const child = input.layout.fragment(childId);
-        const zIndex = positionedZIndex(child, input.layout);
-        const order = sourceOrder++;
-        if (zIndex === null) scan(child);
-        else positioned.push({ fragment: child, zIndex, sourceOrder: order });
+        const metadata = input.layout.stacking(child.id);
+        if (metadata.establishesStackingContext) contexts.push(child);
+        else {
+          const phase = inheritedPhase ?? (metadata.paintPhase === "float"
+            || metadata.paintPhase === "inline" || metadata.paintPhase === "positioned-auto-zero"
+            ? metadata.paintPhase : "in-flow-block");
+          participants.push({ fragment: child, phase });
+          scan(child, phase === "float" || phase === "positioned-auto-zero" ? phase : null);
+        }
       }
     };
     scan(root);
-    const ordered = (predicate: (zIndex: number) => boolean): readonly typeof positioned[number][] =>
-      positioned.filter((entry) => predicate(entry.zIndex)).sort((left, right) =>
-        left.zIndex - right.zIndex || left.sourceOrder - right.sourceOrder
+    const orderedContexts = (predicate: (level: number) => boolean): readonly LayoutFragment[] =>
+      contexts.filter((fragment) => predicate(input.layout.stacking(fragment.id).stackLevel ?? 0))
+        .sort((left, right) =>
+          (input.layout.stacking(left.id).stackLevel ?? 0) - (input.layout.stacking(right.id).stackLevel ?? 0)
+          || input.layout.stacking(left.id).sourceOrder - input.layout.stacking(right.id).sourceOrder
       );
-    for (const entry of ordered((zIndex) => zIndex < 0)) {
-      if (!paintStackingContext(entry.fragment)) return false;
+    for (const context of orderedContexts((level) => level < 0)) {
+      if (!paintStackingContext(context)) return false;
     }
-    const paintNormal = (parent: LayoutFragment): boolean => {
-      for (const childId of parent.children) {
-        input.signal?.throwIfAborted();
-        const child = input.layout.fragment(childId);
-        if (positionedZIndex(child, input.layout) !== null) continue;
-        if (!append(child) || !paintNormal(child)) return false;
+    const phaseOrder = ["in-flow-block", "float", "inline", "positioned-auto-zero"] as const;
+    for (const phase of phaseOrder) {
+      const phaseParticipants = participants
+        .filter((entry) => entry.phase === phase)
+        .sort((left, right) => input.layout.stacking(left.fragment.id).sourceOrder
+          - input.layout.stacking(right.fragment.id).sourceOrder);
+      for (const entry of phaseParticipants) {
+        if (!append(entry.fragment)) return false;
       }
-      return true;
-    };
-    if (!paintNormal(root)) return false;
-    for (const entry of ordered((zIndex) => zIndex === 0)) {
-      if (!paintStackingContext(entry.fragment)) return false;
     }
-    for (const entry of ordered((zIndex) => zIndex > 0)) {
-      if (!paintStackingContext(entry.fragment)) return false;
+    for (const context of orderedContexts((level) => level === 0)) {
+      if (!paintStackingContext(context)) return false;
+    }
+    for (const context of orderedContexts((level) => level > 0)) {
+      if (!paintStackingContext(context)) return false;
     }
     return true;
   };

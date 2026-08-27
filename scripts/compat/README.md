@@ -4,18 +4,29 @@ The corpus contains independently authored, MIT-licensed structural fixtures
 for articles, documentation, forums, search results, product listings, forms,
 dashboards, responsive layouts, multilingual LTR and RTL content,
 progressive enhancement, and script-dependent shells. `corpus.json` pins every
-fixture by SHA-256. Normal qualification performs no network access.
+fixture and stylesheet source by SHA-256. The original twelve seed fixtures are
+regressions, not evidence of broad web compatibility by themselves. Resource
+fixtures add linked and embedded stylesheets, nested imports, redirects, cycles,
+encoding evidence, base URLs, media/supports conditions, layers, and resource
+budget rejection. Normal qualification performs no network access.
 
-Run `npm run compat:check` to build Verge, render every fixture through the
+Run `npm run compat:check` to build Verge, load every fixture through the same
+`BrowserSession` resource path as the CLI, and render it through the
 native document tree → computed style map → box tree → layout fragment tree →
-display list → cell buffer pipeline, write `reports/compatibility.json`, and
-enforce the static-corpus gates. The report records visible-text, heading,
-landmark, link, form-control, and reading-order metrics plus unsupported CSS,
-resource failures, and typed layout or terminal truncation.
+display list → cell buffer pipeline. Each applicable fixture runs at narrow,
+medium, and wide terminal widths; positioned-resource fixtures also run at a
+nonzero scroll position. The report separately records logical meaningful-text
+recall and source-linked painted-cell recall, semantic and action recall,
+reading order, request contracts, unsupported CSS, resource failures,
+determinism, and every typed layout/display-list/cell-buffer truncation.
 
-`baseline-before.json` records the same corpus against protected main at the
-start of this milestone; `baseline-after.json` records the final native gates.
-They are evidence, not expected-output snapshots.
+`compat:check` rejects any diagnostic not allowed by that individual fixture.
+There is no global unsupported-feature allowlist.
+
+`baseline-before.json` records the original seed-corpus measurement against
+protected main and explicitly identifies the metrics that old harness did not
+measure. `baseline-after.json` records the strengthened native matrix. They are
+evidence, not expected-output snapshots.
 
 ## Optional Chromium comparison
 

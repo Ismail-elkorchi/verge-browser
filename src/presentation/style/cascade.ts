@@ -41,7 +41,8 @@ import type {
   CssGridTrack,
   CssLegacyClip,
   CssLength,
-  CssMathExpression,
+  CssLengthPercentageExpression,
+  CascadeLayerPath,
   PseudoElementIdentity,
   ResolveStylesInput,
   StyleBudgets,
@@ -106,7 +107,6 @@ const AUTO: CssLength = Object.freeze({ kind: "auto" });
 const NONE: CssLength = Object.freeze({ kind: "none" });
 const MEDIUM_BORDER: CssLength = Object.freeze({ kind: "length", value: 3, unit: "px" });
 const TRANSPARENT: CssColor = Object.freeze({ r: 0, g: 0, b: 0, a: 0 });
-const UTF8 = new TextEncoder();
 
 const NAMED_COLORS: Readonly<Record<string, CssColor>> = Object.freeze({
   aliceblue: { r: 240, g: 248, b: 255, a: 1 },
@@ -143,11 +143,15 @@ interface StylesheetSource {
   readonly sourceUrl: string;
   readonly origin: "user-agent" | "author";
   readonly stylesheet: CssStylesheet;
-  readonly media: string | null;
   readonly mediaConditions: readonly string[];
   readonly supportsConditions: readonly string[];
-  readonly layer: string | null;
-  readonly predeclaredLayers: readonly string[];
+  readonly layer: CascadeLayerPath | null;
+  readonly predeclaredLayers: readonly CascadeLayerPath[];
+}
+
+interface CascadeLayerPosition {
+  readonly identity: string;
+  readonly orderPath: readonly number[];
 }
 
 interface CascadeCandidate {
@@ -155,11 +159,10 @@ interface CascadeCandidate {
   readonly sourceUrl: string;
   readonly origin: "user-agent" | "author";
   readonly important: boolean;
-  readonly inline: boolean;
+  readonly elementAttached: boolean;
   readonly specificity: SelectorSpecificity;
   readonly sourceOrder: number;
-  readonly layer: string | null;
-  readonly layerOrder: number | null;
+  readonly layer: CascadeLayerPosition | null;
 }
 
 type CandidateMap = Map<string, Map<string, CascadeCandidate[]>>;
@@ -235,23 +238,34 @@ function compareSpecificity(left: SelectorSpecificity, right: SelectorSpecificit
   return left.a - right.a || left.b - right.b || left.c - right.c;
 }
 
+function compareLayerPosition(left: CascadeLayerPosition, right: CascadeLayerPosition): number {
+  const length = Math.max(left.orderPath.length, right.orderPath.length);
+  for (let index = 0; index < length; index += 1) {
+    // Direct declarations occupy their parent's implicit final sublayer.
+    const leftOrder = left.orderPath[index] ?? Number.MAX_SAFE_INTEGER;
+    const rightOrder = right.orderPath[index] ?? Number.MAX_SAFE_INTEGER;
+    if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+  }
+  return 0;
+}
+
 function outranks(left: CascadeCandidate, right: CascadeCandidate): boolean {
   if (left.important !== right.important) return left.important;
   if (left.origin !== right.origin) {
     if (left.important) return left.origin === "user-agent";
     return left.origin === "author";
   }
+  if (left.elementAttached !== right.elementAttached) return left.elementAttached;
   if (left.layer !== right.layer) {
     if (left.important) {
       if (left.layer === null) return false;
       if (right.layer === null) return true;
-      return (left.layerOrder ?? Number.MAX_SAFE_INTEGER) < (right.layerOrder ?? Number.MAX_SAFE_INTEGER);
+      return compareLayerPosition(left.layer, right.layer) < 0;
     }
     if (left.layer === null) return true;
     if (right.layer === null) return false;
-    return (left.layerOrder ?? -1) > (right.layerOrder ?? -1);
+    return compareLayerPosition(left.layer, right.layer) > 0;
   }
-  if (left.inline !== right.inline) return left.inline;
   const specificity = compareSpecificity(left.specificity, right.specificity);
   return specificity === 0 ? left.sourceOrder >= right.sourceOrder : specificity > 0;
 }
@@ -505,103 +519,59 @@ function stylesheetSources(
   if (!ua.ok) throw new Error("The built-in user-agent stylesheet is invalid.");
   sources.push({
     sourceUrl: USER_AGENT_STYLESHEET_SOURCE, origin: "user-agent", stylesheet: ua.value,
-    media: null, mediaConditions: Object.freeze([]), supportsConditions: Object.freeze([]), layer: null,
+    mediaConditions: Object.freeze([]), supportsConditions: Object.freeze([]), layer: null,
     predeclaredLayers: Object.freeze([])
   });
-  const resourcesFor = (order: number, owner: DocumentNodeRef): readonly StylesheetResource[] => {
-    const metadata = input.resources.filter((resource) => resource.rootOrder === order);
-    const matching = metadata.length > 0 ? metadata
-      : input.resources.filter((resource) => resource.rootOrder === undefined && resource.owner === owner);
-    return [...matching].sort((left, right) =>
-      (left.dependencyOrder ?? 0) - (right.dependencyOrder ?? 0)
-    );
-  };
   let authorSources = 0;
   let authorBytes = 0;
-  for (const reference of input.document.stylesheets) {
+  const orderedResources = [...input.resources].sort((left, right) =>
+    left.rootOrder - right.rootOrder || left.dependencyOrder - right.dependencyOrder
+  );
+  for (const resource of orderedResources) {
     input.signal?.throwIfAborted();
     if (authorSources >= limits.maxStylesheetSources) {
       truncate("maxStylesheetSources");
-      diagnostics.add("stylesheet-limit", input.document.finalUrl, "Author stylesheet source budget exhausted.");
+      diagnostics.add("stylesheet-limit", resource.finalUrl, "Author stylesheet source budget exhausted.");
       break;
     }
-    if (!terminalMediaMayApply(reference.media)) {
-      diagnostics.add("stylesheet-media", input.document.finalUrl, "Stylesheet cannot apply to screen media.");
+    const embedded = resource.sourceKind === "embedded";
+    if (embedded && resource.bytes.byteLength > limits.maxInlineStylesheetBytes) {
+      truncate("maxInlineStylesheetBytes");
+      diagnostics.add("stylesheet-limit", resource.finalUrl, "Embedded stylesheet byte budget exhausted.");
       continue;
     }
-    const dependencies = resourcesFor(reference.order, reference.owner);
-    const addResource = (resource: StylesheetResource): boolean => {
-      if (authorSources >= limits.maxStylesheetSources) {
-        truncate("maxStylesheetSources");
-        diagnostics.add("stylesheet-limit", resource.finalUrl, "Author stylesheet source budget exhausted.");
-        return false;
-      }
-      if (authorBytes + resource.bytes.byteLength > limits.maxStylesheetBytes) {
-        truncate("maxStylesheetBytes");
-        diagnostics.add("stylesheet-limit", resource.finalUrl, "Author stylesheet byte budget exhausted.");
-        return false;
-      }
-      const parsed = parseStylesheetBytes(resource.bytes, {
-        ...(resource.transportEncodingLabel === null ? {} : { transportEncodingLabel: resource.transportEncodingLabel }),
-        limits: {
-          maxInputBytes: resource.bytes.byteLength,
-          maxTokens: 200_000,
-          maxNodes: 100_000,
-          maxDepth: 128,
-          maxSteps: 2_000_000
-        },
-        ...(input.signal === undefined ? {} : { signal: input.signal })
-      });
-      if (!parsed.ok) {
-        diagnostics.add("stylesheet-parse", resource.finalUrl, "External stylesheet was rejected by the CSS parser.");
-        return true;
-      }
-      for (const error of parsed.errors) diagnostics.add("stylesheet-parse", resource.finalUrl, error.message);
-      sources.push({
-        sourceUrl: resource.finalUrl,
-        origin: "author",
-        stylesheet: parsed.value,
-        media: null,
-        mediaConditions: resource.mediaConditions ?? Object.freeze(resource.media === null ? [] : [resource.media]),
-        supportsConditions: resource.supportsConditions ?? Object.freeze([]),
-        layer: resource.importLayer ?? null,
-        predeclaredLayers: resource.predeclaredLayers ?? Object.freeze([])
-      });
-      authorSources += 1;
-      authorBytes += resource.bytes.byteLength;
-      return true;
-    };
-    if (reference.kind === "embedded") {
-      for (const resource of dependencies) if (!addResource(resource)) return sources;
-      const byteLength = UTF8.encode(reference.cssText).byteLength;
-      if (byteLength > limits.maxInlineStylesheetBytes || authorBytes + byteLength > limits.maxStylesheetBytes) {
-        truncate(byteLength > limits.maxInlineStylesheetBytes ? "maxInlineStylesheetBytes" : "maxStylesheetBytes");
-        diagnostics.add("stylesheet-limit", input.document.finalUrl, "Embedded stylesheet byte budget exhausted.");
-        continue;
-      }
-      const parsed = parseStylesheet(reference.cssText, {
-        ...(input.signal === undefined ? {} : { signal: input.signal })
-      });
-      if (!parsed.ok) {
-        diagnostics.add("stylesheet-parse", input.document.finalUrl, "Embedded stylesheet was rejected by the CSS parser.");
-        continue;
-      }
-      for (const error of parsed.errors) diagnostics.add("stylesheet-parse", input.document.finalUrl, error.message);
-      sources.push({
-        sourceUrl: `${input.document.finalUrl}#style-${String(reference.order)}`,
-        origin: "author",
-        stylesheet: parsed.value,
-        media: null,
-        mediaConditions: Object.freeze(reference.media === null ? [] : [reference.media]),
-        supportsConditions: Object.freeze([]),
-        layer: null,
-        predeclaredLayers: Object.freeze([])
-      });
-      authorSources += 1;
-      authorBytes += byteLength;
+    if (authorBytes + resource.bytes.byteLength > limits.maxStylesheetBytes) {
+      truncate("maxStylesheetBytes");
+      diagnostics.add("stylesheet-limit", resource.finalUrl, "Author stylesheet byte budget exhausted.");
+      break;
+    }
+    const parsed = parseStylesheetBytes(resource.bytes, {
+      ...(resource.transportEncodingLabel === null ? {} : { transportEncodingLabel: resource.transportEncodingLabel }),
+      limits: {
+        maxInputBytes: resource.bytes.byteLength,
+        maxTokens: 200_000,
+        maxNodes: 100_000,
+        maxDepth: 128,
+        maxSteps: 2_000_000
+      },
+      ...(input.signal === undefined ? {} : { signal: input.signal })
+    });
+    if (!parsed.ok) {
+      diagnostics.add("stylesheet-parse", resource.finalUrl, "Admitted stylesheet was rejected by the CSS parser.");
       continue;
     }
-    for (const resource of dependencies) if (!addResource(resource)) return sources;
+    for (const error of parsed.errors) diagnostics.add("stylesheet-parse", resource.finalUrl, error.message);
+    sources.push({
+      sourceUrl: resource.finalUrl,
+      origin: "author",
+      stylesheet: parsed.value,
+      mediaConditions: resource.mediaConditions,
+      supportsConditions: resource.supportsConditions,
+      layer: resource.importLayer,
+      predeclaredLayers: resource.predeclaredLayers
+    });
+    authorSources += 1;
+    authorBytes += resource.bytes.byteLength;
   }
   return sources;
 }
@@ -613,9 +583,8 @@ function recordCandidate(
   source: StylesheetSource,
   specificity: SelectorSpecificity,
   sourceOrder: number,
-  inline: boolean,
-  layer: string | null,
-  layerOrder: number | null
+  elementAttached: boolean,
+  layer: CascadeLayerPosition | null
 ): void {
   const property = canonicalProperty(declaration.name) ?? declaration.name.toLowerCase();
   const byProperty = candidates.get(key) ?? new Map<string, CascadeCandidate[]>();
@@ -624,15 +593,16 @@ function recordCandidate(
     sourceUrl: source.sourceUrl,
     origin: source.origin,
     important: declaration.important,
-    inline,
+    elementAttached,
     specificity,
-    sourceOrder
-    , layer
-    , layerOrder
+    sourceOrder,
+    layer
   };
   const entries = byProperty.get(property) ?? [];
   const sameBucket = entries.findIndex((entry) => entry.origin === next.origin
-    && entry.important === next.important && entry.layer === next.layer);
+    && entry.important === next.important
+    && entry.elementAttached === next.elementAttached
+    && entry.layer?.identity === next.layer?.identity);
   if (sameBucket < 0) entries.push(next);
   else {
     const current = entries[sameBucket];
@@ -848,16 +818,64 @@ function implementationSupportsDeclaration(source: string): boolean {
     case "clear": return keyword("none", "left", "right", "both", "inline-start", "inline-end");
     case "clip": return parseLegacyClip(value) !== null;
     case "clip-path": return parseClipPath(value) !== null;
-    case "content": return value === "none" || value === "normal"
-      || parseComponentValues(value).ok;
+    case "content": {
+      if (value === "none" || value === "normal") return true;
+      const content = parseComponentValues(value);
+      if (!content.ok) return false;
+      const components = content.value.filter((component) => component.kind !== "whitespace");
+      return components.length > 0 && components.every((component) => {
+        if (component.kind === "string") return true;
+        if (component.kind !== "function-block" || component.name.toLowerCase() !== "attr") return false;
+        const argument = component.value.filter((entry) => entry.kind !== "whitespace");
+        return argument.length === 1 && argument[0]?.kind === "ident";
+      });
+    }
     default: return false;
   }
+}
+
+const IMPLEMENTED_PSEUDO_CLASSES = new Set([
+  "active", "any-link", "checked", "disabled", "empty", "enabled", "first-child",
+  "first-of-type", "focus", "focus-visible", "focus-within", "has", "hover", "is",
+  "last-child", "last-of-type", "link", "not", "nth-child", "nth-last-child",
+  "nth-last-of-type", "nth-of-type", "only-child", "only-of-type", "open", "root",
+  "scope", "target", "visited", "where"
+]);
+
+const IMPLEMENTED_NAMESPACE_PREFIXES = new Set(["html", "svg", "math", "xlink", "xml", "xmlns"]);
+
+function selectorImplementationSupported(selector: SelectorList): boolean {
+  const complexSupported = (complex: ComplexSelector): boolean => complex.compounds.every((compound) => {
+    const typeNamespace = compound.type?.namespace ?? null;
+    if (typeNamespace !== null && typeNamespace !== "*"
+      && typeNamespace !== "" && !IMPLEMENTED_NAMESPACE_PREFIXES.has(typeNamespace)) return false;
+    return compound.simples.every((simple) => {
+      if (simple.kind === "nesting") return false;
+      if (simple.kind === "attribute") {
+        return simple.namespace === null || simple.namespace === "*" || simple.namespace === ""
+          || IMPLEMENTED_NAMESPACE_PREFIXES.has(simple.namespace);
+      }
+      if (simple.kind === "pseudo-element") {
+        return simple.argument.kind === "none" && ["before", "after", "marker"].includes(simple.name);
+      }
+      if (simple.kind !== "pseudo-class" || !IMPLEMENTED_PSEUDO_CLASSES.has(simple.name)) {
+        return simple.kind !== "pseudo-class";
+      }
+      if (simple.argument.kind === "selector-list") {
+        return simple.argument.selectors.every(complexSupported);
+      }
+      if (simple.argument.kind === "nth") return simple.argument.of.every(complexSupported);
+      return simple.argument.kind === "none";
+    });
+  });
+  return selector.selectors.every(complexSupported);
 }
 
 function supportsCondition(values: readonly ComponentValue[]): boolean {
   const compact = values.filter((value) => value.kind !== "whitespace");
   if (compact[0]?.kind === "ident" && compact[0].value.toLowerCase() === "not") {
-    return !supportsCondition(compact.slice(1));
+    return compact.length === 2 && compact[1] !== undefined
+      && !supportsCondition([compact[1]]);
   }
   let operator: "and" | "or" | null = null;
   const groups: ComponentValue[][] = [[]];
@@ -870,6 +888,7 @@ function supportsCondition(values: readonly ComponentValue[]): boolean {
     } else groups.at(-1)?.push(value);
   }
   if (groups.length > 1) {
+    if (groups.some((group) => group.length === 0)) return false;
     const results = groups.map((group) => supportsCondition(group));
     return operator === "and" ? results.every(Boolean) : results.some(Boolean);
   }
@@ -877,19 +896,23 @@ function supportsCondition(values: readonly ComponentValue[]): boolean {
   const condition = compact[0];
   if (condition?.kind === "simple-block" && condition.associatedToken === "open-paren") {
     const declaration = serializeCssComponentValues(condition.value).trim();
-    return declaration.includes(":")
+    return condition.value.some((value) => value.kind === "colon")
       ? implementationSupportsDeclaration(declaration)
       : supportsCondition(condition.value);
   }
   if (condition?.kind === "function-block" && condition.name.toLowerCase() === "selector") {
-    return parseSelectorList(serializeCssComponentValues(condition.value)).ok;
+    const selector = parseSelectorList(serializeCssComponentValues(condition.value));
+    return selector.ok && selectorImplementationSupported(selector.value);
   }
   return false;
 }
 
-function serializedSupportsConditionApplies(value: string): boolean {
-  const parsed = parseComponentValues(`(${value})`);
-  return parsed.ok && supportsCondition(parsed.value);
+/** Pure style-owned implementation-support contract used by cascade and resource admission. */
+export function implementationSupportsCondition(value: string): boolean {
+  const parsed = parseComponentValues(value);
+  if (parsed.ok && supportsCondition(parsed.value)) return true;
+  const declaration = parseComponentValues(`(${value})`);
+  return declaration.ok && supportsCondition(declaration.value);
 }
 
 function collectCandidates(
@@ -910,26 +933,63 @@ function collectCandidates(
   let queryCount = 0;
   let selectorSteps = 0;
   let exhausted = false;
-  const layerOrders = new Map<string, number>();
-  const registerLayer = (name: string): number => {
-    const current = layerOrders.get(name);
-    if (current !== undefined) return current;
-    const order = layerOrders.size;
-    layerOrders.set(name, order);
-    return order;
+  interface LayerNode {
+    readonly name: string;
+    readonly path: CascadeLayerPath;
+    readonly identity: string;
+    readonly order: number;
+    readonly parent: LayerNode | null;
+    readonly children: Map<string, LayerNode>;
+    readonly position: CascadeLayerPosition;
+  }
+  const rootLayers = new Map<string, LayerNode>();
+  const registerLayer = (path: CascadeLayerPath): LayerNode => {
+    let children = rootLayers;
+    let parent: LayerNode | null = null;
+    const orderPath: number[] = [];
+    const identity: string[] = [];
+    for (const segment of path) {
+      let node = children.get(segment);
+      if (node === undefined) {
+        const order = children.size;
+        identity.push(segment);
+        orderPath.push(order);
+        const currentIdentity = JSON.stringify(identity);
+        node = {
+          name: segment,
+          path: Object.freeze([...identity]),
+          identity: currentIdentity,
+          order,
+          parent,
+          children: new Map(),
+          position: Object.freeze({ identity: currentIdentity, orderPath: Object.freeze([...orderPath]) })
+        };
+        children.set(segment, node);
+      } else {
+        identity.push(segment);
+        orderPath.push(node.order);
+      }
+      parent = node;
+      children = node.children;
+    }
+    if (parent === null) throw new Error("Cascade layer path must not be empty.");
+    return parent;
+  };
+  const layerPathFromSource = (value: string): CascadeLayerPath | null => {
+    const segments = value.trim().split(/\s*\.\s*/u);
+    return segments.length > 0 && segments.every((segment) => segment.length > 0)
+      ? Object.freeze(segments) : null;
   };
   const selectorExhaustion = new Set<"maxSelectorQueries" | "maxSelectorSteps">();
   for (const source of sources) {
     if (selectorExhaustion.size > 0) break;
     if (!source.mediaConditions.every((condition) => mediaApplies(condition, input, diagnostics, source.sourceUrl))) continue;
-    if (!source.supportsConditions.every(serializedSupportsConditionApplies)) continue;
-    if (!mediaApplies(source.media, input, diagnostics, source.sourceUrl)) continue;
+    if (!source.supportsConditions.every(implementationSupportsCondition)) continue;
     for (const layer of source.predeclaredLayers) registerLayer(layer);
-    const sourceLayer = source.layer;
-    if (sourceLayer !== null) registerLayer(sourceLayer);
+    const sourceLayer = source.layer === null ? null : registerLayer(source.layer);
     const sourceOrdinal = stylesheetOrdinal++;
     let anonymousLayer = 0;
-    const visitRules = (rules: readonly CssRule[], inheritedLayer: string | null): void => {
+    const visitRules = (rules: readonly CssRule[], inheritedLayer: LayerNode | null): void => {
       for (const rule of rules) {
         if (exhausted) return;
         input.signal?.throwIfAborted();
@@ -948,12 +1008,19 @@ function collectCandidates(
           } else if (name === "layer") {
             const rawNames = splitCssComponentValues(serializeCssComponentValues(rule.prelude), "comma") ?? [];
             if (rule.block === null) {
-              for (const raw of rawNames) registerLayer(inheritedLayer === null ? raw : `${inheritedLayer}.${raw}`);
+              for (const raw of rawNames) {
+                const local = layerPathFromSource(raw);
+                if (local !== null) registerLayer(Object.freeze([
+                  ...(inheritedLayer?.path ?? []),
+                  ...local
+                ]));
+              }
             } else {
-              const local = rawNames[0]
-                ?? `__anonymous_${String(sourceOrdinal)}_${String(anonymousLayer++)}`;
-              const layer = inheritedLayer === null ? local : `${inheritedLayer}.${local}`;
-              registerLayer(layer);
+              const local = rawNames[0] === undefined
+                ? Object.freeze([`__anonymous_layer_${String(sourceOrdinal)}_${String(anonymousLayer++)}`])
+                : layerPathFromSource(rawNames[0]);
+              if (local === null) continue;
+              const layer = registerLayer(Object.freeze([...(inheritedLayer?.path ?? []), ...local]));
               visitRules(rule.block.items.filter((item): item is CssRule => item.kind !== "declaration"), layer);
             }
           } else diagnostics.add("unsupported-at-rule", source.sourceUrl, `Unsupported @${rule.name} rule.`);
@@ -1046,7 +1113,7 @@ function collectCandidates(
             for (const [ref, specificity] of matching) {
               recordCandidate(
                 candidates, styleKey(ref, pseudo), declaration, source, specificity, sourceOrder, false,
-                inheritedLayer, inheritedLayer === null ? null : registerLayer(inheritedLayer)
+                inheritedLayer?.position ?? null
               );
             }
           }
@@ -1060,7 +1127,6 @@ function collectCandidates(
     sourceUrl: "inline-style",
     origin: "author",
     stylesheet: sources[0]?.stylesheet ?? (() => { throw new Error("Missing UA stylesheet"); })(),
-    media: null,
     mediaConditions: Object.freeze([]),
     supportsConditions: Object.freeze([]),
     layer: null,
@@ -1091,7 +1157,7 @@ function collectCandidates(
       sourceOrder += 1;
       recordCandidate(
         candidates, styleKey(ref), item, inlineSource, { a: 1, b: 0, c: 0 }, sourceOrder, true,
-        null, null
+        null
       );
     }
   }
@@ -1117,6 +1183,13 @@ function bestCandidate(entries: readonly CascadeCandidate[]): CascadeCandidate |
   return best;
 }
 
+function sameCascadeBucket(left: CascadeCandidate, right: CascadeCandidate): boolean {
+  return left.origin === right.origin
+    && left.important === right.important
+    && left.elementAttached === right.elementAttached
+    && left.layer?.identity === right.layer?.identity;
+}
+
 function cascadedCandidate(entries: readonly CascadeCandidate[]): CascadeCandidate | null {
   let remaining = [...entries];
   while (remaining.length > 0) {
@@ -1126,7 +1199,7 @@ function cascadedCandidate(entries: readonly CascadeCandidate[]): CascadeCandida
     if (wide !== "revert" && wide !== "revert-layer") return candidate;
     remaining = wide === "revert"
       ? remaining.filter((entry) => entry.origin !== candidate.origin)
-      : remaining.filter((entry) => entry.origin !== candidate.origin || entry.layer !== candidate.layer);
+      : remaining.filter((entry) => !sameCascadeBucket(entry, candidate));
   }
   return null;
 }
@@ -1160,36 +1233,30 @@ function validatedValue(
   diagnostics: DiagnosticCollector
 ): { readonly property: string; readonly value: string; readonly sourceUrl: string } | null {
   const properties = typeof names === "string" ? [names] : names;
-  let selectedName: string | null = null;
+  let entries = properties.flatMap((property) => candidates?.get(property) ?? []);
   let selected: { readonly candidate: CascadeCandidate; readonly value: string } | null = null;
-  for (const property of properties) {
-    let entries = [...(candidates?.get(property) ?? [])];
-    let resolved: { readonly candidate: CascadeCandidate; readonly value: string } | null = null;
-    while (entries.length > 0) {
-      const candidate = bestCandidate(entries);
-      if (candidate === null) break;
-      const candidateValue = resolveCssVariables(cssValue(candidate.declaration), variables);
-      if (candidateValue === null) {
-        diagnostics.add("property-invalid", candidate.sourceUrl, `Unresolved custom property in ${property}.`);
-        break;
-      }
-      const wide = cssWide(candidateValue);
-      if (wide === "revert" || wide === "revert-layer") {
-        entries = wide === "revert"
-          ? entries.filter((entry) => entry.origin !== candidate.origin)
-          : entries.filter((entry) => entry.origin !== candidate.origin || entry.layer !== candidate.layer);
-        continue;
-      }
-      resolved = { candidate, value: candidateValue };
+  while (entries.length > 0) {
+    const candidate = bestCandidate(entries);
+    if (candidate === null) break;
+    const candidateValue = resolveCssVariables(cssValue(candidate.declaration), variables);
+    const selectedName = canonicalProperty(candidate.declaration.name) ?? candidate.declaration.name.toLowerCase();
+    if (candidateValue === null) {
+      diagnostics.add("property-invalid", candidate.sourceUrl, `Unresolved custom property in ${selectedName}.`);
       break;
     }
-    if (resolved !== null && (selected === null || outranks(resolved.candidate, selected.candidate))) {
-      selected = resolved;
-      selectedName = property;
+    const wide = cssWide(candidateValue);
+    if (wide === "revert" || wide === "revert-layer") {
+      entries = wide === "revert"
+        ? entries.filter((entry) => entry.origin !== candidate.origin)
+        : entries.filter((entry) => !sameCascadeBucket(entry, candidate));
+      continue;
     }
+    selected = { candidate, value: candidateValue };
+    break;
   }
-  if (selected === null || selectedName === null) return null;
+  if (selected === null) return null;
   const { candidate, value } = selected;
+  const selectedName = canonicalProperty(candidate.declaration.name) ?? candidate.declaration.name.toLowerCase();
   if (selectedName !== "content") {
     const parsed = parseDeclaration(`${selectedName}:${value}`);
     if (!parsed.ok) {
@@ -1360,7 +1427,7 @@ function parseLength(
 }
 
 function evaluateComputedMath(
-  expression: CssMathExpression,
+  expression: CssLengthPercentageExpression,
   basis: number,
   parentPx: number,
   rootPx: number,
@@ -1369,7 +1436,7 @@ function evaluateComputedMath(
 ): number | null {
   if (expression.kind === "value") {
     if (!Number.isFinite(expression.value)) return null;
-    if (expression.unit === "number" || expression.unit === "px") return expression.value;
+    if (expression.unit === "px") return expression.value;
     if (expression.unit === "%") return basis * expression.value / 100;
     if (expression.unit === "em") return parentPx * expression.value;
     if (expression.unit === "rem") return rootPx * expression.value;
@@ -1417,7 +1484,7 @@ function absoluteFontSize(
   if (value.kind === "auto" || value.kind === "none") return null;
   const pixels = value.kind === "calculation"
     ? evaluateComputedMath(
-        value.expression, parentPx, parentPx, rootPx,
+        value.calculation.expression, parentPx, parentPx, rootPx,
         environment.viewportWidthCssPx, environment.viewportHeightCssPx
       )
     : value.unit === "px" ? value.value
@@ -1434,6 +1501,27 @@ function absoluteFontSize(
 function fontSizePixels(style: ComputedStyle | null): number {
   const size = style?.text.fontSize;
   return size?.kind === "length" && size.unit === "px" ? size.value : 16;
+}
+
+function blockifiedStyle(style: ComputedStyle): ComputedStyle {
+  if (style.display.box !== "principal") return style;
+  const display = style.display.internal === null
+    ? style.display.outer === "block"
+      ? style.display
+      : Object.freeze({ ...style.display, outer: "block" as const })
+    : Object.freeze({
+        box: "principal" as const,
+        outer: "block" as const,
+        inner: "flow" as const,
+        listItem: false,
+        internal: null,
+        replaced: style.display.replaced
+      });
+  if (display === style.display) return style;
+  return immutableComputedStyle({
+    ...style,
+    display
+  });
 }
 
 function parseBorderWidth(value: string): CssLength | null {
@@ -1504,25 +1592,34 @@ function parseFlexShorthand(value: string): FlexShorthandValue | null {
   if (normalized === "initial") return { grow: 0, shrink: 1, basis: AUTO };
   const parts = splitTopLevel(normalized, "space");
   if (parts === null || parts.length < 1 || parts.length > 3) return null;
-  const numbers: number[] = [];
-  let basis: CssFlexBasis | null = null;
-  for (const part of parts) {
-    const number = nonNegativeCssNumber(part);
-    if (number !== null && numbers.length < 2 && basis === null) {
-      numbers.push(number);
-      continue;
-    }
-    if (basis !== null) return null;
-    basis = part === "content" ? Object.freeze({ kind: "content" }) : parseLength(part, true, false);
-    if (basis === null) return null;
+  const allNumbers = parts.map(nonNegativeCssNumber);
+  if (parts.length <= 2 && allNumbers.every((part) => part !== null)) {
+    return {
+      grow: allNumbers[0] ?? 1,
+      shrink: allNumbers[1] ?? 1,
+      basis: Object.freeze({ kind: "length", value: 0, unit: "%" })
+    };
   }
-  if (numbers.length === 0 && basis !== null) return { grow: 1, shrink: 1, basis };
-  if (numbers.length === 0) return null;
-  return {
-    grow: numbers[0] ?? 1,
-    shrink: numbers[1] ?? 1,
-    basis: basis ?? Object.freeze({ kind: "length", value: 0, unit: "%" })
-  };
+  // The grammar permits the basis before or after the flex factors. A unitless
+  // zero is a valid basis, but non-zero numbers remain flex factors.
+  for (let basisIndex = parts.length - 1; basisIndex >= 0; basisIndex -= 1) {
+    const token = parts[basisIndex];
+    if (token === undefined) continue;
+    const parsedBasis = token === "content"
+      ? Object.freeze({ kind: "content" as const })
+      : parseLength(token, true, false);
+    if (parsedBasis === null) continue;
+    const factors = parts
+      .filter((_part, index) => index !== basisIndex)
+      .map(nonNegativeCssNumber);
+    if (factors.length > 2 || factors.some((factor) => factor === null)) continue;
+    return {
+      grow: factors[0] ?? 1,
+      shrink: factors[1] ?? 1,
+      basis: parsedBasis
+    };
+  }
+  return null;
 }
 
 function parseGridBreadth(token: string): CssGridBreadth | null {
@@ -2466,7 +2563,7 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
     input.signal?.throwIfAborted();
     const parentNode = input.document.parent(ref);
     const parentStyle = parentNode?.kind === "element" ? styles.get(parentNode.ref) ?? null : null;
-    const style = computeStyle(
+    let style = computeStyle(
       input.document,
       input.state,
       input.environment,
@@ -2477,12 +2574,28 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
       null,
       ref === input.document.documentElement ? 16 : rootFontSizePx
     );
+    if (style.box.float !== "none" || style.box.position === "absolute" || style.box.position === "fixed") {
+      style = blockifiedStyle(style);
+    }
+    let boxParent = input.document.parent(ref);
+    while (boxParent?.kind === "element") {
+      const candidate = styles.get(boxParent.ref);
+      if (candidate?.display.box === "contents") {
+        boxParent = input.document.parent(boxParent.ref);
+        continue;
+      }
+      if (candidate?.display.box === "principal"
+        && (candidate.display.inner === "flex" || candidate.display.inner === "grid")) {
+        style = blockifiedStyle(style);
+      }
+      break;
+    }
     styles.set(ref, style);
     if (ref === input.document.documentElement) rootFontSizePx = fontSizePixels(style);
     for (const pseudo of ["before", "after", "marker"] as const) {
       const pseudoCandidates = candidates.get(styleKey(ref, pseudo));
       if (pseudoCandidates === undefined) continue;
-      pseudos.set(styleKey(ref, pseudo), computeStyle(
+      let pseudoStyle = computeStyle(
         input.document,
         input.state,
         input.environment,
@@ -2492,7 +2605,17 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
         diagnostics,
         pseudo,
         rootFontSizePx
-      ));
+      );
+      if (pseudoStyle.box.float !== "none"
+        || pseudoStyle.box.position === "absolute"
+        || pseudoStyle.box.position === "fixed") {
+        pseudoStyle = blockifiedStyle(pseudoStyle);
+      }
+      if (style.display.box === "principal"
+        && (style.display.inner === "flex" || style.display.inner === "grid")) {
+        pseudoStyle = blockifiedStyle(pseudoStyle);
+      }
+      pseudos.set(styleKey(ref, pseudo), pseudoStyle);
     }
     computedNodes += 1;
   }

@@ -14,14 +14,40 @@ try {
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const corpus = JSON.parse(await readFile(resolve(scriptDirectory, "corpus.json"), "utf8"));
 const browser = await chromium.launch({ executablePath, headless: true });
+const defaultVariants = [{ id: "medium", columns: 80, rows: 90, scrollRow: 0 }];
 const inspect = async (javaScriptEnabled) => {
   const context = await browser.newContext({ javaScriptEnabled });
   const values = [];
   for (const fixture of corpus.fixtures) {
     const path = resolve(scriptDirectory, fixture.file);
-    const page = await context.newPage();
-    await page.goto(pathToFileURL(path).href, { waitUntil: "load" });
-    const inspection = await page.evaluate(() => {
+    for (const variant of fixture.variants ?? defaultVariants) {
+      const page = await context.newPage();
+      await page.setViewportSize({ width: variant.columns * 8, height: variant.rows * 16 });
+      const resources = fixture.resources ?? corpus.resourceSets?.[fixture.resourceSet] ?? [];
+      const resourceByUrl = new Map();
+      for (const resource of resources) {
+        resourceByUrl.set(resource.requestUrl, resource);
+        if (resource.finalUrl !== undefined) resourceByUrl.set(resource.finalUrl, { ...resource, requestUrl: resource.finalUrl });
+      }
+      await page.route("https://compat.verge.test/**", async (route) => {
+        const resource = resourceByUrl.get(route.request().url());
+        if (resource === undefined) {
+          await route.abort("blockedbyclient");
+          return;
+        }
+        if (resource.finalUrl !== undefined && route.request().url() !== resource.finalUrl) {
+          await route.fulfill({ status: 302, headers: { location: resource.finalUrl }, body: "" });
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "text/css",
+          body: await readFile(resolve(scriptDirectory, resource.file))
+        });
+      });
+      await page.goto(pathToFileURL(path).href, { waitUntil: "load" });
+      await page.evaluate((scrollY) => globalThis.scrollTo(0, scrollY), variant.scrollRow * 16);
+      const inspection = await page.evaluate(() => {
       const browserDocument = globalThis.document;
       const computedStyle = globalThis.getComputedStyle;
       const visible = (element) => {
@@ -45,8 +71,9 @@ const inspect = async (javaScriptEnabled) => {
         stylesheets: [...browserDocument.styleSheets].map((sheet) => sheet.href ?? "embedded")
       };
     });
-    values.push({ id: fixture.id, inspection });
-    await page.close();
+      values.push({ id: `${fixture.id}:${variant.id}`, fixture: fixture.id, variant, inspection });
+      await page.close();
+    }
   }
   await context.close();
   return values;
