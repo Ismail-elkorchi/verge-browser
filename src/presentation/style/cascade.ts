@@ -1,5 +1,6 @@
 import {
   parseBlockContents,
+  parseComponentValues,
   parseDeclaration,
   parseSelectorList,
   parseStylesheet,
@@ -10,6 +11,7 @@ import {
   specificitiesOfSelectorList,
   validateCssPropertyValue,
   type ComplexSelector,
+  type ComponentValue,
   type CssDeclaration,
   type CssQualifiedRule,
   type CssRule,
@@ -34,10 +36,13 @@ import type {
   CssColor,
   CssDisplayInternal,
   CssEdges,
+  CssFlexBasis,
   CssGridBreadth,
   CssGridTrack,
   CssLegacyClip,
   CssLength,
+  CssLengthPercentageExpression,
+  CascadeLayerPath,
   PseudoElementIdentity,
   ResolveStylesInput,
   StyleBudgets,
@@ -47,6 +52,12 @@ import type {
   StyleSnapshot,
   StylesheetResource
 } from "./types.js";
+import {
+  parseCssFunctionalColor,
+  parseCssLength,
+  resolveCssVariables,
+  splitCssComponentValues
+} from "./css-values.js";
 
 const DEFAULT_STYLE_BUDGETS: StyleBudgets = Object.freeze({
   maxStylesheetSources: 64,
@@ -68,11 +79,14 @@ const SUPPORTED_PROPERTIES = new Set([
   "padding-right", "padding-bottom", "padding-left", "padding-block", "padding-block-start",
   "padding-block-end", "padding-inline", "padding-inline-start", "padding-inline-end",
   "width", "min-width", "max-width", "height", "min-height", "max-height", "box-sizing", "gap",
-  "row-gap", "column-gap", "flex-direction", "flex-wrap", "justify-content", "align-items",
+  "row-gap", "column-gap", "flex", "flex-grow", "flex-shrink", "flex-basis", "order",
+  "flex-direction", "flex-wrap", "justify-content", "align-items", "align-self", "align-content",
   "grid-template-columns", "grid-column", "border", "border-width", "border-top-width",
   "border-right-width", "border-bottom-width", "border-left-width", "border-style",
   "border-color", "overflow", "overflow-x", "overflow-y",
-  "position", "clip", "clip-path",
+  "position", "top", "right", "bottom", "left", "inset", "inset-block", "inset-block-start",
+  "inset-block-end", "inset-inline", "inset-inline-start", "inset-inline-end", "z-index",
+  "float", "clear", "clip", "clip-path",
   "content"
 ]);
 
@@ -93,7 +107,6 @@ const AUTO: CssLength = Object.freeze({ kind: "auto" });
 const NONE: CssLength = Object.freeze({ kind: "none" });
 const MEDIUM_BORDER: CssLength = Object.freeze({ kind: "length", value: 3, unit: "px" });
 const TRANSPARENT: CssColor = Object.freeze({ r: 0, g: 0, b: 0, a: 0 });
-const UTF8 = new TextEncoder();
 
 const NAMED_COLORS: Readonly<Record<string, CssColor>> = Object.freeze({
   aliceblue: { r: 240, g: 248, b: 255, a: 1 },
@@ -130,7 +143,15 @@ interface StylesheetSource {
   readonly sourceUrl: string;
   readonly origin: "user-agent" | "author";
   readonly stylesheet: CssStylesheet;
-  readonly media: string | null;
+  readonly mediaConditions: readonly string[];
+  readonly supportsConditions: readonly string[];
+  readonly layer: CascadeLayerPath | null;
+  readonly predeclaredLayers: readonly CascadeLayerPath[];
+}
+
+interface CascadeLayerPosition {
+  readonly identity: string;
+  readonly orderPath: readonly number[];
 }
 
 interface CascadeCandidate {
@@ -138,9 +159,10 @@ interface CascadeCandidate {
   readonly sourceUrl: string;
   readonly origin: "user-agent" | "author";
   readonly important: boolean;
-  readonly inline: boolean;
+  readonly elementAttached: boolean;
   readonly specificity: SelectorSpecificity;
   readonly sourceOrder: number;
+  readonly layer: CascadeLayerPosition | null;
 }
 
 type CandidateMap = Map<string, Map<string, CascadeCandidate[]>>;
@@ -216,13 +238,34 @@ function compareSpecificity(left: SelectorSpecificity, right: SelectorSpecificit
   return left.a - right.a || left.b - right.b || left.c - right.c;
 }
 
+function compareLayerPosition(left: CascadeLayerPosition, right: CascadeLayerPosition): number {
+  const length = Math.max(left.orderPath.length, right.orderPath.length);
+  for (let index = 0; index < length; index += 1) {
+    // Direct declarations occupy their parent's implicit final sublayer.
+    const leftOrder = left.orderPath[index] ?? Number.MAX_SAFE_INTEGER;
+    const rightOrder = right.orderPath[index] ?? Number.MAX_SAFE_INTEGER;
+    if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+  }
+  return 0;
+}
+
 function outranks(left: CascadeCandidate, right: CascadeCandidate): boolean {
   if (left.important !== right.important) return left.important;
   if (left.origin !== right.origin) {
     if (left.important) return left.origin === "user-agent";
     return left.origin === "author";
   }
-  if (left.inline !== right.inline) return left.inline;
+  if (left.elementAttached !== right.elementAttached) return left.elementAttached;
+  if (left.layer !== right.layer) {
+    if (left.important) {
+      if (left.layer === null) return false;
+      if (right.layer === null) return true;
+      return compareLayerPosition(left.layer, right.layer) < 0;
+    }
+    if (left.layer === null) return true;
+    if (right.layer === null) return false;
+    return compareLayerPosition(left.layer, right.layer) > 0;
+  }
   const specificity = compareSpecificity(left.specificity, right.specificity);
   return specificity === 0 ? left.sourceOrder >= right.sourceOrder : specificity > 0;
 }
@@ -474,48 +517,29 @@ function stylesheetSources(
     ...(input.signal === undefined ? {} : { signal: input.signal })
   });
   if (!ua.ok) throw new Error("The built-in user-agent stylesheet is invalid.");
-  sources.push({ sourceUrl: USER_AGENT_STYLESHEET_SOURCE, origin: "user-agent", stylesheet: ua.value, media: null });
-  const resourceByOwner = new Map(input.resources.map((resource) => [resource.owner, resource]));
+  sources.push({
+    sourceUrl: USER_AGENT_STYLESHEET_SOURCE, origin: "user-agent", stylesheet: ua.value,
+    mediaConditions: Object.freeze([]), supportsConditions: Object.freeze([]), layer: null,
+    predeclaredLayers: Object.freeze([])
+  });
   let authorSources = 0;
   let authorBytes = 0;
-  for (const reference of input.document.stylesheets) {
+  const orderedResources = [...input.resources].sort((left, right) =>
+    left.rootOrder - right.rootOrder || left.dependencyOrder - right.dependencyOrder
+  );
+  for (const resource of orderedResources) {
     input.signal?.throwIfAborted();
     if (authorSources >= limits.maxStylesheetSources) {
       truncate("maxStylesheetSources");
-      diagnostics.add("stylesheet-limit", input.document.finalUrl, "Author stylesheet source budget exhausted.");
+      diagnostics.add("stylesheet-limit", resource.finalUrl, "Author stylesheet source budget exhausted.");
       break;
     }
-    if (!terminalMediaMayApply(reference.media)) {
-      diagnostics.add("stylesheet-media", input.document.finalUrl, "Stylesheet cannot apply to screen media.");
+    const embedded = resource.sourceKind === "embedded";
+    if (embedded && resource.bytes.byteLength > limits.maxInlineStylesheetBytes) {
+      truncate("maxInlineStylesheetBytes");
+      diagnostics.add("stylesheet-limit", resource.finalUrl, "Embedded stylesheet byte budget exhausted.");
       continue;
     }
-    if (reference.kind === "embedded") {
-      const byteLength = UTF8.encode(reference.cssText).byteLength;
-      if (byteLength > limits.maxInlineStylesheetBytes || authorBytes + byteLength > limits.maxStylesheetBytes) {
-        truncate(byteLength > limits.maxInlineStylesheetBytes ? "maxInlineStylesheetBytes" : "maxStylesheetBytes");
-        diagnostics.add("stylesheet-limit", input.document.finalUrl, "Embedded stylesheet byte budget exhausted.");
-        continue;
-      }
-      const parsed = parseStylesheet(reference.cssText, {
-        ...(input.signal === undefined ? {} : { signal: input.signal })
-      });
-      if (!parsed.ok) {
-        diagnostics.add("stylesheet-parse", input.document.finalUrl, "Embedded stylesheet was rejected by the CSS parser.");
-        continue;
-      }
-      for (const error of parsed.errors) diagnostics.add("stylesheet-parse", input.document.finalUrl, error.message);
-      sources.push({
-        sourceUrl: `${input.document.finalUrl}#style-${String(reference.order)}`,
-        origin: "author",
-        stylesheet: parsed.value,
-        media: reference.media
-      });
-      authorSources += 1;
-      authorBytes += byteLength;
-      continue;
-    }
-    const resource = resourceByOwner.get(reference.owner);
-    if (resource === undefined) continue;
     if (authorBytes + resource.bytes.byteLength > limits.maxStylesheetBytes) {
       truncate("maxStylesheetBytes");
       diagnostics.add("stylesheet-limit", resource.finalUrl, "Author stylesheet byte budget exhausted.");
@@ -533,7 +557,7 @@ function stylesheetSources(
       ...(input.signal === undefined ? {} : { signal: input.signal })
     });
     if (!parsed.ok) {
-      diagnostics.add("stylesheet-parse", resource.finalUrl, "External stylesheet was rejected by the CSS parser.");
+      diagnostics.add("stylesheet-parse", resource.finalUrl, "Admitted stylesheet was rejected by the CSS parser.");
       continue;
     }
     for (const error of parsed.errors) diagnostics.add("stylesheet-parse", resource.finalUrl, error.message);
@@ -541,7 +565,10 @@ function stylesheetSources(
       sourceUrl: resource.finalUrl,
       origin: "author",
       stylesheet: parsed.value,
-      media: resource.media
+      mediaConditions: resource.mediaConditions,
+      supportsConditions: resource.supportsConditions,
+      layer: resource.importLayer,
+      predeclaredLayers: resource.predeclaredLayers
     });
     authorSources += 1;
     authorBytes += resource.bytes.byteLength;
@@ -556,7 +583,8 @@ function recordCandidate(
   source: StylesheetSource,
   specificity: SelectorSpecificity,
   sourceOrder: number,
-  inline: boolean
+  elementAttached: boolean,
+  layer: CascadeLayerPosition | null
 ): void {
   const property = canonicalProperty(declaration.name) ?? declaration.name.toLowerCase();
   const byProperty = candidates.get(key) ?? new Map<string, CascadeCandidate[]>();
@@ -565,16 +593,20 @@ function recordCandidate(
     sourceUrl: source.sourceUrl,
     origin: source.origin,
     important: declaration.important,
-    inline,
+    elementAttached,
     specificity,
-    sourceOrder
+    sourceOrder,
+    layer
   };
   const entries = byProperty.get(property) ?? [];
-  const sameOrigin = entries.findIndex((entry) => entry.origin === next.origin);
-  if (sameOrigin < 0) entries.push(next);
+  const sameBucket = entries.findIndex((entry) => entry.origin === next.origin
+    && entry.important === next.important
+    && entry.elementAttached === next.elementAttached
+    && entry.layer?.identity === next.layer?.identity);
+  if (sameBucket < 0) entries.push(next);
   else {
-    const current = entries[sameOrigin];
-    if (current !== undefined && outranks(next, current)) entries[sameOrigin] = next;
+    const current = entries[sameBucket];
+    if (current !== undefined && outranks(next, current)) entries[sameBucket] = next;
   }
   byProperty.set(property, entries);
   candidates.set(key, byProperty);
@@ -648,6 +680,241 @@ function collectStyleNodes(input: ResolveStylesInput): {
   return { elements: Object.freeze(nodes), totalNodes };
 }
 
+function implementationSupportsDeclaration(source: string): boolean {
+  const parsed = parseDeclaration(source);
+  if (!parsed.ok) return false;
+  const property = canonicalProperty(parsed.value.name);
+  if (property === null || !SUPPORTED_PROPERTIES.has(property)) return false;
+  const validation = validateCssPropertyValue(parsed.value);
+  if (validation.status !== "valid") return false;
+  const value = cssValue(parsed.value).trim().toLowerCase();
+  if (cssWide(value) !== null || value === "revert" || value === "revert-layer") return true;
+  const keyword = (...values: readonly string[]): boolean => values.includes(value);
+  const length = (allowAuto = false, allowNegative = false, allowNone = false): boolean =>
+    parseLength(value, allowAuto, allowNegative, allowNone) !== null;
+  const lengths = (allowAuto: boolean, allowNegative: boolean): boolean => {
+    const parts = boxParts(value);
+    return parts !== null && parts.every((part) => parseLength(part, allowAuto, allowNegative) !== null);
+  };
+  switch (property) {
+    case "display": return parseDisplay(value, initialDisplay(false), null) !== null;
+    case "visibility": return keyword("visible", "hidden", "collapse");
+    case "white-space": return keyword("normal", "nowrap", "pre", "pre-wrap", "pre-line", "break-spaces");
+    case "color":
+    case "background-color": return parseColor(value, TRANSPARENT) !== undefined;
+    case "background": return parseColor(value, TRANSPARENT) !== undefined;
+    case "font-weight": return keyword("normal", "bold", "bolder", "lighter")
+      || (/^\d+$/u.test(value) && Number(value) >= 1 && Number(value) <= 1000);
+    case "font-style": return value === "normal" || value === "italic" || value.startsWith("oblique");
+    case "font-size": return length() || [
+      "xx-small", "x-small", "small", "medium", "large", "x-large", "xx-large", "xxx-large", "smaller", "larger"
+    ].includes(value);
+    case "line-height": return value === "normal" || length() || nonNegativeCssNumber(value) !== null;
+    case "vertical-align": return length(false, true) || keyword(
+      "baseline", "sub", "super", "top", "text-top", "middle", "bottom", "text-bottom"
+    );
+    case "text-decoration":
+    case "text-decoration-line": return splitTopLevel(value, "space")?.every((part) =>
+      ["none", "underline", "line-through"].includes(part)) === true;
+    case "text-transform": return keyword("none", "uppercase", "lowercase", "capitalize");
+    case "direction": return keyword("ltr", "rtl");
+    case "unicode-bidi": return keyword("normal", "embed", "isolate", "bidi-override", "isolate-override", "plaintext");
+    case "text-align": return keyword("start", "end", "left", "right", "center");
+    case "text-indent": return length(false, true);
+    case "line-break": return keyword("auto", "normal", "anywhere");
+    case "word-break": return keyword("normal", "break-all", "keep-all", "break-word");
+    case "overflow-wrap": return keyword("normal", "anywhere", "break-word");
+    case "hyphens": return keyword("none", "manual");
+    case "tab-size": return nonNegativeCssNumber(value) !== null;
+    case "list-style":
+    case "list-style-type": return splitTopLevel(value, "space")?.some((part) => [
+      "none", "disc", "circle", "square", "decimal", "decimal-leading-zero", "lower-alpha", "upper-alpha"
+    ].includes(part)) === true;
+    case "margin": return lengths(true, true);
+    case "margin-block":
+    case "margin-inline": return (splitTopLevel(value, "space") ?? []).every((part) => parseLength(part, true, true) !== null)
+      && (splitTopLevel(value, "space")?.length ?? 0) >= 1 && (splitTopLevel(value, "space")?.length ?? 0) <= 2;
+    case "margin-top":
+    case "margin-right":
+    case "margin-bottom":
+    case "margin-left":
+    case "margin-block-start":
+    case "margin-block-end":
+    case "margin-inline-start":
+    case "margin-inline-end": return length(true, true);
+    case "padding": return lengths(false, false);
+    case "padding-block":
+    case "padding-inline": return (splitTopLevel(value, "space") ?? []).every((part) => parseLength(part, false) !== null)
+      && (splitTopLevel(value, "space")?.length ?? 0) >= 1 && (splitTopLevel(value, "space")?.length ?? 0) <= 2;
+    case "padding-top":
+    case "padding-right":
+    case "padding-bottom":
+    case "padding-left":
+    case "padding-block-start":
+    case "padding-block-end":
+    case "padding-inline-start":
+    case "padding-inline-end": return length();
+    case "width":
+    case "min-width":
+    case "height":
+    case "min-height": return length(true);
+    case "max-width":
+    case "max-height": return length(true, false, true);
+    case "box-sizing": return keyword("content-box", "border-box");
+    case "gap": return (splitTopLevel(value, "space") ?? []).every((part) => parseLength(part, false) !== null)
+      && (splitTopLevel(value, "space")?.length ?? 0) >= 1 && (splitTopLevel(value, "space")?.length ?? 0) <= 2;
+    case "row-gap":
+    case "column-gap": return length();
+    case "flex": return parseFlexShorthand(value) !== null;
+    case "flex-grow":
+    case "flex-shrink": return nonNegativeCssNumber(value) !== null;
+    case "flex-basis": return value === "content" || length(true);
+    case "order": return /^[-+]?\d+$/u.test(value) && Number.isSafeInteger(Number(value));
+    case "flex-direction": return keyword("row", "row-reverse", "column", "column-reverse");
+    case "flex-wrap": return keyword("nowrap", "wrap", "wrap-reverse");
+    case "justify-content": return keyword(
+      "start", "flex-start", "center", "end", "flex-end", "space-between", "space-around", "space-evenly"
+    );
+    case "align-items": return keyword("start", "flex-start", "center", "end", "flex-end", "stretch", "baseline");
+    case "align-self": return keyword("auto", "start", "flex-start", "center", "end", "flex-end", "stretch", "baseline");
+    case "align-content": return keyword(
+      "start", "flex-start", "center", "end", "flex-end", "stretch", "space-between", "space-around", "space-evenly"
+    );
+    case "grid-template-columns": return parseGridTracks(value) !== null;
+    case "grid-column": return /^\d+$/u.test(value) && Number(value) >= 1;
+    case "border": {
+      const parts = splitTopLevel(value, "space");
+      return parts !== null && parts.length > 0 && parts.every((part) =>
+        parseBorderWidth(part) !== null || part === "none" || part === "solid"
+        || parseColor(part, TRANSPARENT) !== undefined);
+    }
+    case "border-width": return (splitTopLevel(value, "space") ?? []).length >= 1
+      && (splitTopLevel(value, "space")?.length ?? 0) <= 4
+      && (splitTopLevel(value, "space") ?? []).every((part) => parseBorderWidth(part) !== null);
+    case "border-top-width":
+    case "border-right-width":
+    case "border-bottom-width":
+    case "border-left-width": return parseBorderWidth(value) !== null;
+    case "border-style": return keyword("none", "solid");
+    case "border-color": return parseColor(value, TRANSPARENT) !== undefined;
+    case "overflow":
+    case "overflow-x":
+    case "overflow-y": return keyword("visible", "hidden", "clip");
+    case "position": return keyword("static", "relative", "absolute", "fixed", "sticky");
+    case "top":
+    case "right":
+    case "bottom":
+    case "left":
+    case "inset-block-start":
+    case "inset-block-end":
+    case "inset-inline-start":
+    case "inset-inline-end": return length(true, true);
+    case "inset": return lengths(true, true);
+    case "inset-block":
+    case "inset-inline": return (splitTopLevel(value, "space") ?? []).every((part) => parseLength(part, true, true) !== null)
+      && (splitTopLevel(value, "space")?.length ?? 0) >= 1 && (splitTopLevel(value, "space")?.length ?? 0) <= 2;
+    case "z-index": return value === "auto" || /^[-+]?\d+$/u.test(value);
+    case "float": return keyword("none", "left", "right", "inline-start", "inline-end");
+    case "clear": return keyword("none", "left", "right", "both", "inline-start", "inline-end");
+    case "clip": return parseLegacyClip(value) !== null;
+    case "clip-path": return parseClipPath(value) !== null;
+    case "content": {
+      if (value === "none" || value === "normal") return true;
+      const content = parseComponentValues(value);
+      if (!content.ok) return false;
+      const components = content.value.filter((component) => component.kind !== "whitespace");
+      return components.length > 0 && components.every((component) => {
+        if (component.kind === "string") return true;
+        if (component.kind !== "function-block" || component.name.toLowerCase() !== "attr") return false;
+        const argument = component.value.filter((entry) => entry.kind !== "whitespace");
+        return argument.length === 1 && argument[0]?.kind === "ident";
+      });
+    }
+    default: return false;
+  }
+}
+
+const IMPLEMENTED_PSEUDO_CLASSES = new Set([
+  "active", "any-link", "checked", "disabled", "empty", "enabled", "first-child",
+  "first-of-type", "focus", "focus-visible", "focus-within", "has", "hover", "is",
+  "last-child", "last-of-type", "link", "not", "nth-child", "nth-last-child",
+  "nth-last-of-type", "nth-of-type", "only-child", "only-of-type", "open", "root",
+  "scope", "target", "visited", "where"
+]);
+
+const IMPLEMENTED_NAMESPACE_PREFIXES = new Set(["html", "svg", "math", "xlink", "xml", "xmlns"]);
+
+function selectorImplementationSupported(selector: SelectorList): boolean {
+  const complexSupported = (complex: ComplexSelector): boolean => complex.compounds.every((compound) => {
+    const typeNamespace = compound.type?.namespace ?? null;
+    if (typeNamespace !== null && typeNamespace !== "*"
+      && typeNamespace !== "" && !IMPLEMENTED_NAMESPACE_PREFIXES.has(typeNamespace)) return false;
+    return compound.simples.every((simple) => {
+      if (simple.kind === "nesting") return false;
+      if (simple.kind === "attribute") {
+        return simple.namespace === null || simple.namespace === "*" || simple.namespace === ""
+          || IMPLEMENTED_NAMESPACE_PREFIXES.has(simple.namespace);
+      }
+      if (simple.kind === "pseudo-element") {
+        return simple.argument.kind === "none" && ["before", "after", "marker"].includes(simple.name);
+      }
+      if (simple.kind !== "pseudo-class" || !IMPLEMENTED_PSEUDO_CLASSES.has(simple.name)) {
+        return simple.kind !== "pseudo-class";
+      }
+      if (simple.argument.kind === "selector-list") {
+        return simple.argument.selectors.every(complexSupported);
+      }
+      if (simple.argument.kind === "nth") return simple.argument.of.every(complexSupported);
+      return simple.argument.kind === "none";
+    });
+  });
+  return selector.selectors.every(complexSupported);
+}
+
+function supportsCondition(values: readonly ComponentValue[]): boolean {
+  const compact = values.filter((value) => value.kind !== "whitespace");
+  if (compact[0]?.kind === "ident" && compact[0].value.toLowerCase() === "not") {
+    return compact.length === 2 && compact[1] !== undefined
+      && !supportsCondition([compact[1]]);
+  }
+  let operator: "and" | "or" | null = null;
+  const groups: ComponentValue[][] = [[]];
+  for (const value of compact) {
+    if (value.kind === "ident" && (value.value.toLowerCase() === "and" || value.value.toLowerCase() === "or")) {
+      const next = value.value.toLowerCase() as "and" | "or";
+      if (operator !== null && operator !== next) return false;
+      operator = next;
+      groups.push([]);
+    } else groups.at(-1)?.push(value);
+  }
+  if (groups.length > 1) {
+    if (groups.some((group) => group.length === 0)) return false;
+    const results = groups.map((group) => supportsCondition(group));
+    return operator === "and" ? results.every(Boolean) : results.some(Boolean);
+  }
+  if (compact.length !== 1) return false;
+  const condition = compact[0];
+  if (condition?.kind === "simple-block" && condition.associatedToken === "open-paren") {
+    const declaration = serializeCssComponentValues(condition.value).trim();
+    return condition.value.some((value) => value.kind === "colon")
+      ? implementationSupportsDeclaration(declaration)
+      : supportsCondition(condition.value);
+  }
+  if (condition?.kind === "function-block" && condition.name.toLowerCase() === "selector") {
+    const selector = parseSelectorList(serializeCssComponentValues(condition.value));
+    return selector.ok && selectorImplementationSupported(selector.value);
+  }
+  return false;
+}
+
+/** Pure style-owned implementation-support contract used by cascade and resource admission. */
+export function implementationSupportsCondition(value: string): boolean {
+  const parsed = parseComponentValues(value);
+  if (parsed.ok && supportsCondition(parsed.value)) return true;
+  const declaration = parseComponentValues(`(${value})`);
+  return declaration.ok && supportsCondition(declaration.value);
+}
+
 function collectCandidates(
   input: ResolveStylesInput,
   sources: readonly StylesheetSource[],
@@ -662,24 +929,99 @@ function collectCandidates(
   const environment = selectorEnvironment(input);
   const root = input.document.node(input.document.root);
   let sourceOrder = 0;
+  let stylesheetOrdinal = 0;
   let queryCount = 0;
   let selectorSteps = 0;
   let exhausted = false;
+  interface LayerNode {
+    readonly name: string;
+    readonly path: CascadeLayerPath;
+    readonly identity: string;
+    readonly order: number;
+    readonly parent: LayerNode | null;
+    readonly children: Map<string, LayerNode>;
+    readonly position: CascadeLayerPosition;
+  }
+  const rootLayers = new Map<string, LayerNode>();
+  const registerLayer = (path: CascadeLayerPath): LayerNode => {
+    let children = rootLayers;
+    let parent: LayerNode | null = null;
+    const orderPath: number[] = [];
+    const identity: string[] = [];
+    for (const segment of path) {
+      let node = children.get(segment);
+      if (node === undefined) {
+        const order = children.size;
+        identity.push(segment);
+        orderPath.push(order);
+        const currentIdentity = JSON.stringify(identity);
+        node = {
+          name: segment,
+          path: Object.freeze([...identity]),
+          identity: currentIdentity,
+          order,
+          parent,
+          children: new Map(),
+          position: Object.freeze({ identity: currentIdentity, orderPath: Object.freeze([...orderPath]) })
+        };
+        children.set(segment, node);
+      } else {
+        identity.push(segment);
+        orderPath.push(node.order);
+      }
+      parent = node;
+      children = node.children;
+    }
+    if (parent === null) throw new Error("Cascade layer path must not be empty.");
+    return parent;
+  };
+  const layerPathFromSource = (value: string): CascadeLayerPath | null => {
+    const segments = value.trim().split(/\s*\.\s*/u);
+    return segments.length > 0 && segments.every((segment) => segment.length > 0)
+      ? Object.freeze(segments) : null;
+  };
   const selectorExhaustion = new Set<"maxSelectorQueries" | "maxSelectorSteps">();
   for (const source of sources) {
     if (selectorExhaustion.size > 0) break;
-    if (!mediaApplies(source.media, input, diagnostics, source.sourceUrl)) continue;
-    const visitRules = (rules: readonly CssRule[]): void => {
+    if (!source.mediaConditions.every((condition) => mediaApplies(condition, input, diagnostics, source.sourceUrl))) continue;
+    if (!source.supportsConditions.every(implementationSupportsCondition)) continue;
+    for (const layer of source.predeclaredLayers) registerLayer(layer);
+    const sourceLayer = source.layer === null ? null : registerLayer(source.layer);
+    const sourceOrdinal = stylesheetOrdinal++;
+    let anonymousLayer = 0;
+    const visitRules = (rules: readonly CssRule[], inheritedLayer: LayerNode | null): void => {
       for (const rule of rules) {
         if (exhausted) return;
         input.signal?.throwIfAborted();
         if (rule.kind === "at-rule") {
           const name = rule.name.toLowerCase();
-          if (name === "namespace" || name === "charset") continue;
+          if (name === "namespace" || name === "charset" || name === "import") continue;
           if (name === "media" && rule.block !== null) {
             const media = serializeCssComponentValues(rule.prelude).trim();
             if (mediaApplies(media, input, diagnostics, source.sourceUrl)) {
-              visitRules(rule.block.items.filter((item): item is CssRule => item.kind !== "declaration"));
+              visitRules(rule.block.items.filter((item): item is CssRule => item.kind !== "declaration"), inheritedLayer);
+            }
+          } else if (name === "supports" && rule.block !== null) {
+            if (supportsCondition(rule.prelude)) {
+              visitRules(rule.block.items.filter((item): item is CssRule => item.kind !== "declaration"), inheritedLayer);
+            }
+          } else if (name === "layer") {
+            const rawNames = splitCssComponentValues(serializeCssComponentValues(rule.prelude), "comma") ?? [];
+            if (rule.block === null) {
+              for (const raw of rawNames) {
+                const local = layerPathFromSource(raw);
+                if (local !== null) registerLayer(Object.freeze([
+                  ...(inheritedLayer?.path ?? []),
+                  ...local
+                ]));
+              }
+            } else {
+              const local = rawNames[0] === undefined
+                ? Object.freeze([`__anonymous_layer_${String(sourceOrdinal)}_${String(anonymousLayer++)}`])
+                : layerPathFromSource(rawNames[0]);
+              if (local === null) continue;
+              const layer = registerLayer(Object.freeze([...(inheritedLayer?.path ?? []), ...local]));
+              visitRules(rule.block.items.filter((item): item is CssRule => item.kind !== "declaration"), layer);
             }
           } else diagnostics.add("unsupported-at-rule", source.sourceUrl, `Unsupported @${rule.name} rule.`);
           continue;
@@ -769,20 +1111,26 @@ function collectCandidates(
           sourceOrder += 1;
           for (const [pseudo, matching] of matchingByPseudo) {
             for (const [ref, specificity] of matching) {
-              recordCandidate(candidates, styleKey(ref, pseudo), declaration, source, specificity, sourceOrder, false);
+              recordCandidate(
+                candidates, styleKey(ref, pseudo), declaration, source, specificity, sourceOrder, false,
+                inheritedLayer?.position ?? null
+              );
             }
           }
         }
       }
     };
-    visitRules(source.stylesheet.rules);
+    visitRules(source.stylesheet.rules, sourceLayer);
   }
 
   const inlineSource: StylesheetSource = {
     sourceUrl: "inline-style",
     origin: "author",
     stylesheet: sources[0]?.stylesheet ?? (() => { throw new Error("Missing UA stylesheet"); })(),
-    media: null
+    mediaConditions: Object.freeze([]),
+    supportsConditions: Object.freeze([]),
+    layer: null,
+    predeclaredLayers: Object.freeze([])
   };
   for (const ref of styleNodes) {
     const value = input.document.attribute(ref, "style");
@@ -807,7 +1155,10 @@ function collectCandidates(
         continue;
       }
       sourceOrder += 1;
-      recordCandidate(candidates, styleKey(ref), item, inlineSource, { a: 1, b: 0, c: 0 }, sourceOrder, true);
+      recordCandidate(
+        candidates, styleKey(ref), item, inlineSource, { a: 1, b: 0, c: 0 }, sourceOrder, true,
+        null
+      );
     }
   }
   return candidates;
@@ -817,10 +1168,10 @@ function cssValue(declaration: CssDeclaration): string {
   return serializeCssComponentValues(declaration.value).trim();
 }
 
-function cssWide(value: string): "initial" | "inherit" | "unset" | "revert" | null {
+function cssWide(value: string): "initial" | "inherit" | "unset" | "revert" | "revert-layer" | null {
   const normalized = value.trim().toLowerCase();
   if (normalized === "initial" || normalized === "inherit" || normalized === "unset") return normalized;
-  if (normalized === "revert" || normalized === "revert-layer" || normalized === "revert-rule") return "revert";
+  if (normalized === "revert" || normalized === "revert-layer") return normalized;
   return null;
 }
 
@@ -832,31 +1183,23 @@ function bestCandidate(entries: readonly CascadeCandidate[]): CascadeCandidate |
   return best;
 }
 
+function sameCascadeBucket(left: CascadeCandidate, right: CascadeCandidate): boolean {
+  return left.origin === right.origin
+    && left.important === right.important
+    && left.elementAttached === right.elementAttached
+    && left.layer?.identity === right.layer?.identity;
+}
+
 function cascadedCandidate(entries: readonly CascadeCandidate[]): CascadeCandidate | null {
   let remaining = [...entries];
   while (remaining.length > 0) {
     const candidate = bestCandidate(remaining);
     if (candidate === null) return null;
-    if (cssWide(cssValue(candidate.declaration)) !== "revert") return candidate;
-    remaining = remaining.filter((entry) => entry.origin !== candidate.origin);
-  }
-  return null;
-}
-
-function resolveVariables(value: string, properties: ReadonlyMap<string, string>, stack = new Set<string>()): string | null {
-  let output = value;
-  for (let pass = 0; pass < 32; pass += 1) {
-    const match = /var\(\s*(--[-\w]+)\s*(?:,\s*([^()]*))?\)/u.exec(output);
-    if (match === null || match[1] === undefined) return output;
-    const name = match[1];
-    if (stack.has(name)) return null;
-    const raw = properties.get(name) ?? match[2] ?? null;
-    if (raw === null) return null;
-    const nextStack = new Set(stack);
-    nextStack.add(name);
-    const replacement = resolveVariables(raw, properties, nextStack);
-    if (replacement === null) return null;
-    output = `${output.slice(0, match.index)}${replacement}${output.slice(match.index + match[0].length)}`;
+    const wide = cssWide(cssValue(candidate.declaration));
+    if (wide !== "revert" && wide !== "revert-layer") return candidate;
+    remaining = wide === "revert"
+      ? remaining.filter((entry) => entry.origin !== candidate.origin)
+      : remaining.filter((entry) => !sameCascadeBucket(entry, candidate));
   }
   return null;
 }
@@ -876,7 +1219,7 @@ function customProperties(
     else if (wide === null) result.set(name, value);
   }
   for (const [name, value] of result) {
-    const resolved = resolveVariables(value, result);
+    const resolved = resolveCssVariables(value, result);
     if (resolved === null) result.delete(name);
     else result.set(name, resolved);
   }
@@ -890,33 +1233,30 @@ function validatedValue(
   diagnostics: DiagnosticCollector
 ): { readonly property: string; readonly value: string; readonly sourceUrl: string } | null {
   const properties = typeof names === "string" ? [names] : names;
-  let selectedName: string | null = null;
+  let entries = properties.flatMap((property) => candidates?.get(property) ?? []);
   let selected: { readonly candidate: CascadeCandidate; readonly value: string } | null = null;
-  for (const property of properties) {
-    let entries = [...(candidates?.get(property) ?? [])];
-    let resolved: { readonly candidate: CascadeCandidate; readonly value: string } | null = null;
-    while (entries.length > 0) {
-      const candidate = bestCandidate(entries);
-      if (candidate === null) break;
-      const candidateValue = resolveVariables(cssValue(candidate.declaration), variables);
-      if (candidateValue === null) {
-        diagnostics.add("property-invalid", candidate.sourceUrl, `Unresolved custom property in ${property}.`);
-        break;
-      }
-      if (cssWide(candidateValue) === "revert") {
-        entries = entries.filter((entry) => entry.origin !== candidate.origin);
-        continue;
-      }
-      resolved = { candidate, value: candidateValue };
+  while (entries.length > 0) {
+    const candidate = bestCandidate(entries);
+    if (candidate === null) break;
+    const candidateValue = resolveCssVariables(cssValue(candidate.declaration), variables);
+    const selectedName = canonicalProperty(candidate.declaration.name) ?? candidate.declaration.name.toLowerCase();
+    if (candidateValue === null) {
+      diagnostics.add("property-invalid", candidate.sourceUrl, `Unresolved custom property in ${selectedName}.`);
       break;
     }
-    if (resolved !== null && (selected === null || outranks(resolved.candidate, selected.candidate))) {
-      selected = resolved;
-      selectedName = property;
+    const wide = cssWide(candidateValue);
+    if (wide === "revert" || wide === "revert-layer") {
+      entries = wide === "revert"
+        ? entries.filter((entry) => entry.origin !== candidate.origin)
+        : entries.filter((entry) => !sameCascadeBucket(entry, candidate));
+      continue;
     }
+    selected = { candidate, value: candidateValue };
+    break;
   }
-  if (selected === null || selectedName === null) return null;
+  if (selected === null) return null;
   const { candidate, value } = selected;
+  const selectedName = canonicalProperty(candidate.declaration.name) ?? candidate.declaration.name.toLowerCase();
   if (selectedName !== "content") {
     const parsed = parseDeclaration(`${selectedName}:${value}`);
     if (!parsed.ok) {
@@ -988,9 +1328,19 @@ function initialStyle(parent: ComputedStyle | null, replaced: boolean, htmlDirec
       borderColor: null,
       flexDirection: "row",
       flexWrap: "nowrap",
+      flexGrow: 0,
+      flexShrink: 1,
+      flexBasis: AUTO,
+      order: 0,
       justifyContent: "start",
       alignItems: "stretch",
+      alignSelf: "auto",
+      alignContent: "stretch",
       position: "static",
+      inset: edges(AUTO),
+      zIndex: null,
+      float: "none",
+      clear: "none",
       legacyClip: { kind: "auto" },
       clipPath: { kind: "none" },
       gridTemplateColumns: [],
@@ -1073,29 +1423,76 @@ function parseLength(
   allowNegative = false,
   allowNone = false
 ): CssLength | null {
-  const normalized = value.trim().toLowerCase();
-  if (allowAuto && normalized === "auto") return AUTO;
-  if (allowNone && normalized === "none") return NONE;
-  if (normalized === "0" || normalized === "+0" || normalized === "-0") return ZERO;
-  const match = /^([+-]?(?:\d+(?:\.\d+)?|\.\d+))(px|em|rem|ch|%|vw|vh)$/u.exec(normalized);
-  if (match?.[1] === undefined || match[2] === undefined) return null;
-  const number = Number(match[1]);
-  if (!Number.isFinite(number) || (!allowNegative && number < 0)) return null;
-  return Object.freeze({
-    kind: "length",
-    value: number,
-    unit: match[2] as "px" | "em" | "rem" | "ch" | "%" | "vw" | "vh"
-  });
+  return parseCssLength(value, { allowAuto, allowNegative, allowNone });
 }
 
-function absoluteFontSize(value: CssLength, parentPx: number, rootPx: number): CssLength | null {
+function evaluateComputedMath(
+  expression: CssLengthPercentageExpression,
+  basis: number,
+  parentPx: number,
+  rootPx: number,
+  viewportWidth: number,
+  viewportHeight: number
+): number | null {
+  if (expression.kind === "value") {
+    if (!Number.isFinite(expression.value)) return null;
+    if (expression.unit === "px") return expression.value;
+    if (expression.unit === "%") return basis * expression.value / 100;
+    if (expression.unit === "em") return parentPx * expression.value;
+    if (expression.unit === "rem") return rootPx * expression.value;
+    if (expression.unit === "ch") return parentPx * 0.5 * expression.value;
+    if (expression.unit === "vw") return viewportWidth * expression.value / 100;
+    return viewportHeight * expression.value / 100;
+  }
+  if (expression.kind === "negate") {
+    const result = evaluateComputedMath(expression.value, basis, parentPx, rootPx, viewportWidth, viewportHeight);
+    return result === null ? null : -result;
+  }
+  if (expression.kind === "sum") {
+    const left = evaluateComputedMath(expression.left, basis, parentPx, rootPx, viewportWidth, viewportHeight);
+    const right = evaluateComputedMath(expression.right, basis, parentPx, rootPx, viewportWidth, viewportHeight);
+    return left === null || right === null ? null : left + right;
+  }
+  if (expression.kind === "product") {
+    const result = evaluateComputedMath(expression.value, basis, parentPx, rootPx, viewportWidth, viewportHeight);
+    return result === null ? null : result * expression.factor;
+  }
+  if (expression.kind === "minimum" || expression.kind === "maximum") {
+    let result: number | null = null;
+    for (const value of expression.values) {
+      const candidate = evaluateComputedMath(value, basis, parentPx, rootPx, viewportWidth, viewportHeight);
+      if (candidate === null) return null;
+      result = result === null ? candidate
+        : expression.kind === "minimum" ? Math.min(result, candidate) : Math.max(result, candidate);
+    }
+    return result;
+  }
+  const minimum = evaluateComputedMath(expression.minimum, basis, parentPx, rootPx, viewportWidth, viewportHeight);
+  const preferred = evaluateComputedMath(expression.preferred, basis, parentPx, rootPx, viewportWidth, viewportHeight);
+  const maximum = evaluateComputedMath(expression.maximum, basis, parentPx, rootPx, viewportWidth, viewportHeight);
+  return minimum === null || preferred === null || maximum === null
+    ? null : Math.max(minimum, Math.min(preferred, maximum));
+}
+
+function absoluteFontSize(
+  value: CssLength,
+  parentPx: number,
+  rootPx: number,
+  environment: ResolveStylesInput["environment"]
+): CssLength | null {
   if (value.kind === "zero") return value;
-  if (value.kind !== "length") return null;
-  const pixels = value.unit === "px" ? value.value
-    : value.unit === "em" || value.unit === "%" ? parentPx * value.value / (value.unit === "%" ? 100 : 1)
-      : value.unit === "rem" ? rootPx * value.value
-        : value.unit === "ch" ? parentPx * 0.5 * value.value
-          : null;
+  if (value.kind === "auto" || value.kind === "none") return null;
+  const pixels = value.kind === "calculation"
+    ? evaluateComputedMath(
+        value.calculation.expression, parentPx, parentPx, rootPx,
+        environment.viewportWidthCssPx, environment.viewportHeightCssPx
+      )
+    : value.unit === "px" ? value.value
+      : value.unit === "em" || value.unit === "%" ? parentPx * value.value / (value.unit === "%" ? 100 : 1)
+        : value.unit === "rem" ? rootPx * value.value
+          : value.unit === "ch" ? parentPx * 0.5 * value.value
+            : value.unit === "vw" ? environment.viewportWidthCssPx * value.value / 100
+              : environment.viewportHeightCssPx * value.value / 100;
   return pixels === null || !Number.isFinite(pixels) || pixels < 0
     ? null
     : Object.freeze({ kind: "length", value: pixels, unit: "px" });
@@ -1104,6 +1501,27 @@ function absoluteFontSize(value: CssLength, parentPx: number, rootPx: number): C
 function fontSizePixels(style: ComputedStyle | null): number {
   const size = style?.text.fontSize;
   return size?.kind === "length" && size.unit === "px" ? size.value : 16;
+}
+
+function blockifiedStyle(style: ComputedStyle): ComputedStyle {
+  if (style.display.box !== "principal") return style;
+  const display = style.display.internal === null
+    ? style.display.outer === "block"
+      ? style.display
+      : Object.freeze({ ...style.display, outer: "block" as const })
+    : Object.freeze({
+        box: "principal" as const,
+        outer: "block" as const,
+        inner: "flow" as const,
+        listItem: false,
+        internal: null,
+        replaced: style.display.replaced
+      });
+  if (display === style.display) return style;
+  return immutableComputedStyle({
+    ...style,
+    display
+  });
 }
 
 function parseBorderWidth(value: string): CssLength | null {
@@ -1131,6 +1549,7 @@ function immutableComputedStyle(style: ComputedStyle): ComputedStyle {
       ...style.box,
       margin: edge(style.box.margin),
       padding: edge(style.box.padding),
+      inset: edge(style.box.inset),
       borderWidths: edge(style.box.borderWidths),
       borderColor: color(style.box.borderColor),
       legacyClip: Object.freeze(style.box.legacyClip.kind === "auto"
@@ -1148,42 +1567,82 @@ function immutableComputedStyle(style: ComputedStyle): ComputedStyle {
 }
 
 function splitTopLevel(value: string, separator: "space" | "comma"): readonly string[] | null {
-  const parts: string[] = [];
-  let depth = 0;
-  let start = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    const character = value[index];
-    if (character === "(") depth += 1;
-    else if (character === ")") {
-      depth -= 1;
-      if (depth < 0) return null;
-    } else if (depth === 0 && (separator === "comma" ? character === "," : /\s/u.test(character ?? ""))) {
-      const part = value.slice(start, index).trim();
-      if (part.length > 0) parts.push(part);
-      start = index + 1;
-    }
+  return splitCssComponentValues(value, separator);
+}
+
+function nonNegativeCssNumber(value: string): number | null {
+  const parsed = parseComponentValues(value);
+  if (!parsed.ok) return null;
+  const components = parsed.value.filter((component) => component.kind !== "whitespace");
+  const number = components.length === 1 && components[0]?.kind === "number"
+    ? components[0].value : Number.NaN;
+  return Number.isFinite(number) && number >= 0 && number <= Number.MAX_SAFE_INTEGER ? number : null;
+}
+
+interface FlexShorthandValue {
+  readonly grow: number;
+  readonly shrink: number;
+  readonly basis: CssFlexBasis;
+}
+
+function parseFlexShorthand(value: string): FlexShorthandValue | null {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "none") return { grow: 0, shrink: 0, basis: AUTO };
+  if (normalized === "auto") return { grow: 1, shrink: 1, basis: AUTO };
+  if (normalized === "initial") return { grow: 0, shrink: 1, basis: AUTO };
+  const parts = splitTopLevel(normalized, "space");
+  if (parts === null || parts.length < 1 || parts.length > 3) return null;
+  const allNumbers = parts.map(nonNegativeCssNumber);
+  if (parts.length <= 2 && allNumbers.every((part) => part !== null)) {
+    return {
+      grow: allNumbers[0] ?? 1,
+      shrink: allNumbers[1] ?? 1,
+      basis: Object.freeze({ kind: "length", value: 0, unit: "%" })
+    };
   }
-  if (depth !== 0) return null;
-  const final = value.slice(start).trim();
-  if (final.length > 0) parts.push(final);
-  return parts;
+  // The grammar permits the basis before or after the flex factors. A unitless
+  // zero is a valid basis, but non-zero numbers remain flex factors.
+  for (let basisIndex = parts.length - 1; basisIndex >= 0; basisIndex -= 1) {
+    const token = parts[basisIndex];
+    if (token === undefined) continue;
+    const parsedBasis = token === "content"
+      ? Object.freeze({ kind: "content" as const })
+      : parseLength(token, true, false);
+    if (parsedBasis === null) continue;
+    const factors = parts
+      .filter((_part, index) => index !== basisIndex)
+      .map(nonNegativeCssNumber);
+    if (factors.length > 2 || factors.some((factor) => factor === null)) continue;
+    return {
+      grow: factors[0] ?? 1,
+      shrink: factors[1] ?? 1,
+      basis: parsedBasis
+    };
+  }
+  return null;
 }
 
 function parseGridBreadth(token: string): CssGridBreadth | null {
-  if (token === "auto") return { kind: "auto" };
-  const fraction = /^((?:\d+(?:\.\d+)?|\.\d+))fr$/u.exec(token);
-  if (fraction?.[1] !== undefined) {
-    const number = Number(fraction[1]);
-    return Number.isFinite(number) && number > 0 ? { kind: "fraction", value: number } : null;
+  const parsed = parseComponentValues(token);
+  if (!parsed.ok) return null;
+  const values = parsed.value.filter((value) => value.kind !== "whitespace");
+  const component = values.length === 1 ? values[0] : undefined;
+  if (component?.kind === "ident" && component.value.toLowerCase() === "auto") return { kind: "auto" };
+  if (component?.kind === "dimension" && component.unit.toLowerCase() === "fr") {
+    return Number.isFinite(component.value) && component.value > 0
+      ? { kind: "fraction", value: component.value } : null;
   }
   const length = parseLength(token, false);
   return length === null ? null : { kind: "length", value: length };
 }
 
 function parseGridTrack(token: string): CssGridTrack | null {
-  const minmax = /^minmax\((.*)\)$/u.exec(token);
-  if (minmax?.[1] !== undefined) {
-    const parts = splitTopLevel(minmax[1], "comma");
+  const parsed = parseComponentValues(token);
+  if (!parsed.ok) return null;
+  const values = parsed.value.filter((value) => value.kind !== "whitespace");
+  const component = values.length === 1 ? values[0] : undefined;
+  if (component?.kind === "function-block" && component.name.toLowerCase() === "minmax") {
+    const parts = splitTopLevel(serializeCssComponentValues(component.value), "comma");
     if (parts?.length !== 2) return null;
     const minimum = parts[0] === undefined ? null : parseGridBreadth(parts[0]);
     const maximum = parts[1] === undefined ? null : parseGridBreadth(parts[1]);
@@ -1203,10 +1662,17 @@ function parseGridTracks(
   if (tokens === null) return null;
   const tracks: CssGridTrack[] = [];
   for (const token of tokens) {
-    const repeat = /^repeat\(\s*(\d+)\s*,(.*)\)$/u.exec(token);
-    if (repeat?.[1] !== undefined && repeat[2] !== undefined) {
-      const count = Number.parseInt(repeat[1], 10);
-      const repeated = parseGridTracks(repeat[2], nestingDepth + 1);
+    const parsed = parseComponentValues(token);
+    const values = parsed.ok ? parsed.value.filter((value) => value.kind !== "whitespace") : [];
+    const component = values.length === 1 ? values[0] : undefined;
+    if (component?.kind === "function-block" && component.name.toLowerCase() === "repeat") {
+      const comma = component.value.findIndex((value) => value.kind === "comma");
+      const prefix = component.value.slice(0, comma).filter((value) => value.kind !== "whitespace");
+      const count = prefix.length === 1 && prefix[0]?.kind === "number" ? prefix[0].value : Number.NaN;
+      const repeated = comma < 0 ? null : parseGridTracks(
+        serializeCssComponentValues(component.value.slice(comma + 1)),
+        nestingDepth + 1
+      );
       if (!Number.isSafeInteger(count) || count < 1 || count > 64 || repeated === null
         || repeated.length === 0 || tracks.length + repeated.length * count > 64) return null;
       for (let index = 0; index < count; index += 1) tracks.push(...repeated);
@@ -1236,9 +1702,15 @@ function fourSides(parts: readonly string[]): readonly [string, string, string, 
 function parseLegacyClip(value: string): CssLegacyClip | null {
   const normalized = value.trim().toLowerCase();
   if (normalized === "auto") return { kind: "auto" };
-  const match = /^rect\((.*)\)$/u.exec(normalized);
-  if (match?.[1] === undefined) return null;
-  const parts = match[1].replaceAll(",", " ").trim().split(/\s+/u);
+  const parsed = parseComponentValues(normalized);
+  if (!parsed.ok) return null;
+  const components = parsed.value.filter((component) => component.kind !== "whitespace");
+  const rectangle = components.length === 1 && components[0]?.kind === "function-block"
+    && components[0].name.toLowerCase() === "rect" ? components[0] : null;
+  if (rectangle === null) return null;
+  const serialized = serializeCssComponentValues(rectangle.value);
+  const parts = splitTopLevel(serialized, rectangle.value.some((component) => component.kind === "comma") ? "comma" : "space");
+  if (parts === null) return null;
   if (parts.length !== 4) return null;
   const values = parts.map((part) => parseLength(part, true, false));
   if (values.some((part) => part === null)) return null;
@@ -1256,9 +1728,14 @@ function parseLegacyClip(value: string): CssLegacyClip | null {
 function parseClipPath(value: string): CssClipPath | null {
   const normalized = value.trim().toLowerCase();
   if (normalized === "none") return { kind: "none" };
-  const match = /^inset\(([^/]*?)\)$/u.exec(normalized);
-  if (match?.[1] === undefined || /\bround\b/u.test(match[1])) return null;
-  const sides = fourSides(match[1].trim().split(/\s+/u));
+  const parsed = parseComponentValues(normalized);
+  if (!parsed.ok) return null;
+  const components = parsed.value.filter((component) => component.kind !== "whitespace");
+  const inset = components.length === 1 && components[0]?.kind === "function-block"
+    && components[0].name.toLowerCase() === "inset" ? components[0] : null;
+  if (inset === null || inset.value.some((component) =>
+    component.kind === "ident" && component.value.toLowerCase() === "round")) return null;
+  const sides = fourSides(splitTopLevel(serializeCssComponentValues(inset.value), "space") ?? []);
   if (sides === null) return null;
   const values = sides.map((part) => parseLength(part, false, false));
   if (values.some((part) => part === null)) return null;
@@ -1274,16 +1751,13 @@ function parseClipPath(value: string): CssClipPath | null {
 }
 
 function boxParts(value: string): readonly string[] | null {
-  const parts = value.trim().split(/\s+/u).filter(Boolean);
+  const parts = splitTopLevel(value.trim(), "space");
+  if (parts === null) return null;
   if (parts.length < 1 || parts.length > 4) return null;
   if (parts.length === 1) return [parts[0] ?? "0", parts[0] ?? "0", parts[0] ?? "0", parts[0] ?? "0"];
   if (parts.length === 2) return [parts[0] ?? "0", parts[1] ?? "0", parts[0] ?? "0", parts[1] ?? "0"];
   if (parts.length === 3) return [parts[0] ?? "0", parts[1] ?? "0", parts[2] ?? "0", parts[1] ?? "0"];
   return parts;
-}
-
-function clampByte(value: number): number {
-  return Math.max(0, Math.min(255, Math.round(value)));
 }
 
 function parseColor(value: string, current: CssColor | null): CssColor | null | undefined {
@@ -1301,16 +1775,20 @@ function parseColor(value: string, current: CssColor | null): CssColor | null | 
       a: expanded.length === 8 ? Number.parseInt(expanded.slice(6), 16) / 255 : 1
     };
   }
-  const rgb = /^rgba?\(\s*([\d.]+%?)\s*[, ]\s*([\d.]+%?)\s*[, ]\s*([\d.]+%?)(?:\s*[,/]\s*([\d.]+%?))?\s*\)$/u.exec(normalized);
-  if (rgb !== null) {
-    const component = (part: string | undefined): number => part?.endsWith("%")
-      ? clampByte(Number(part.slice(0, -1)) * 2.55)
-      : clampByte(Number(part));
-    const alpha = rgb[4]?.endsWith("%") ? Number(rgb[4].slice(0, -1)) / 100 : Number(rgb[4] ?? "1");
-    if (!Number.isFinite(alpha)) return undefined;
-    return { r: component(rgb[1]), g: component(rgb[2]), b: component(rgb[3]), a: Math.max(0, Math.min(1, alpha)) };
+  return parseCssFunctionalColor(value) ?? NAMED_COLORS[normalized];
+}
+
+function colorFromComponentValues(value: string, current: CssColor | null): CssColor | null | undefined {
+  const direct = parseColor(value, current);
+  if (direct !== undefined) return direct;
+  const parsed = parseComponentValues(value);
+  if (!parsed.ok) return undefined;
+  for (const component of parsed.value) {
+    if (component.kind === "whitespace" || component.kind === "comma") continue;
+    const candidate = parseColor(serializeCssComponentValues([component]), current);
+    if (candidate !== undefined) return candidate;
   }
-  return NAMED_COLORS[normalized];
+  return undefined;
 }
 
 function generatedContent(value: string, document: IndexedWebDocumentSnapshot, node: DocumentNodeRef): string | null | undefined {
@@ -1331,6 +1809,7 @@ function generatedContent(value: string, document: IndexedWebDocumentSnapshot, n
 function computeStyle(
   document: IndexedWebDocumentSnapshot,
   state: DocumentState,
+  environment: ResolveStylesInput["environment"],
   node: DocumentNodeRef,
   parent: ComputedStyle | null,
   candidates: ReadonlyMap<string, readonly CascadeCandidate[]> | undefined,
@@ -1473,14 +1952,11 @@ function computeStyle(
   const background = value(["background-color", "background"]);
   if (background !== null) {
     const wide = cssWide(background.value);
-    const candidates = wide === null
-      ? background.value.split(/\s+/u).map((part) => parseColor(part, style.text.color))
-      : [];
     const computed = wide === "inherit"
       ? parent?.text.background ?? null
       : wide === "initial" || wide === "unset"
         ? null
-        : candidates.find((candidate) => candidate !== undefined);
+        : colorFromComponentValues(background.value, style.text.color);
     if (computed === undefined) unsupported(background);
     else style = { ...style, text: { ...style.text, background: computed } };
   }
@@ -1517,7 +1993,7 @@ function computeStyle(
         : keywords[normalized] === undefined
           ? parseLength(normalized, false)
           : Object.freeze({ kind: "length", value: keywords[normalized], unit: "px" } as const);
-    const computed = specified === null ? null : absoluteFontSize(specified, parentPx, rootFontSizePx);
+    const computed = specified === null ? null : absoluteFontSize(specified, parentPx, rootFontSizePx, environment);
     if (computed === null) unsupported(fontSize);
     else style = { ...style, text: { ...style.text, fontSize: computed } };
   }
@@ -1604,7 +2080,7 @@ function computeStyle(
       || entry.property === "padding-block" || entry.property === "padding-inline";
     const raw = shorthand ? boxParts(entry.value)?.[index]
       : axis ? (() => {
-        const parts = entry.value.trim().split(/\s+/u);
+        const parts = splitTopLevel(entry.value, "space") ?? [];
         const logicalEnd = entry.property.endsWith("-block")
           ? side === "bottom"
           : directionIsRtl ? side === "left" : side === "right";
@@ -1650,7 +2126,8 @@ function computeStyle(
   const columnGap = value(["column-gap", "gap"]);
   const rowGap = value(["row-gap", "gap"]);
   if (columnGap !== null) {
-    const part = columnGap.property === "gap" ? columnGap.value.trim().split(/\s+/u)[1] ?? columnGap.value.trim().split(/\s+/u)[0] : columnGap.value;
+    const gapParts = columnGap.property === "gap" ? splitTopLevel(columnGap.value, "space") : null;
+    const part = columnGap.property === "gap" ? gapParts?.[1] ?? gapParts?.[0] : columnGap.value;
     const wide = cssWide(columnGap.value);
     const length = wide === "inherit"
       ? parent?.box.columnGap ?? ZERO
@@ -1661,7 +2138,9 @@ function computeStyle(
     else style = { ...style, box: { ...style.box, columnGap: length } };
   }
   if (rowGap !== null) {
-    const part = rowGap.value.trim().split(/\s+/u)[0] ?? "0";
+    const part = rowGap.property === "gap"
+      ? splitTopLevel(rowGap.value, "space")?.[0] ?? "0"
+      : rowGap.value;
     const wide = cssWide(rowGap.value);
     const length = wide === "inherit"
       ? parent?.box.rowGap ?? ZERO
@@ -1695,6 +2174,52 @@ function computeStyle(
       style = { ...style, box: { ...style.box, flexWrap: computed } };
     } else unsupported(flexWrap);
   }
+  const flexNumber = (
+    field: "flexGrow" | "flexShrink",
+    property: "flex-grow" | "flex-shrink",
+    initial: number
+  ): void => {
+    const entry = value([property, "flex"]);
+    if (entry === null) return;
+    const wide = cssWide(entry.value);
+    let parsed: number | null = null;
+    if (wide === "inherit") parsed = parent?.box[field] ?? initial;
+    else if (wide === "initial" || wide === "unset") parsed = initial;
+    else if (entry.property === "flex") {
+      const shorthand = parseFlexShorthand(entry.value);
+      parsed = shorthand === null ? null : field === "flexGrow" ? shorthand.grow : shorthand.shrink;
+    } else {
+      parsed = nonNegativeCssNumber(entry.value);
+    }
+    if (parsed === null || !Number.isFinite(parsed) || parsed < 0 || parsed > Number.MAX_SAFE_INTEGER) {
+      unsupported({ ...entry, property });
+    }
+    else style = { ...style, box: { ...style.box, [field]: parsed } };
+  };
+  flexNumber("flexGrow", "flex-grow", 0);
+  flexNumber("flexShrink", "flex-shrink", 1);
+  const flexBasis = value(["flex-basis", "flex"]);
+  if (flexBasis !== null) {
+    const wide = cssWide(flexBasis.value);
+    let basis: CssFlexBasis | null;
+    if (wide === "inherit") basis = parent?.box.flexBasis ?? AUTO;
+    else if (wide === "initial" || wide === "unset") basis = AUTO;
+    else if (flexBasis.property === "flex") {
+      basis = parseFlexShorthand(flexBasis.value)?.basis ?? null;
+    } else basis = flexBasis.value.trim().toLowerCase() === "content"
+      ? Object.freeze({ kind: "content" }) : parseLength(flexBasis.value, true, false);
+    if (basis === null) unsupported({ ...flexBasis, property: "flex-basis" });
+    else style = { ...style, box: { ...style.box, flexBasis: basis } };
+  }
+  const order = value("order");
+  if (order !== null) {
+    const wide = cssWide(order.value);
+    const parsed = wide === "inherit" ? parent?.box.order ?? 0
+      : wide === "initial" || wide === "unset" ? 0
+        : /^[-+]?\d+$/u.test(order.value.trim()) ? Number(order.value) : Number.NaN;
+    if (!Number.isSafeInteger(parsed)) unsupported(order);
+    else style = { ...style, box: { ...style.box, order: parsed } };
+  }
   const justifyContent = value("justify-content");
   if (justifyContent !== null) {
     const wide = cssWide(justifyContent.value);
@@ -1704,7 +2229,8 @@ function computeStyle(
         ? "start"
         : justifyContent.value.trim().toLowerCase();
     const computed = raw === "flex-start" ? "start" : raw === "flex-end" ? "end" : raw;
-    if (computed === "start" || computed === "center" || computed === "end" || computed === "space-between") {
+    if (computed === "start" || computed === "center" || computed === "end" || computed === "space-between"
+      || computed === "space-around" || computed === "space-evenly") {
       style = { ...style, box: { ...style.box, justifyContent: computed } };
     } else unsupported(justifyContent);
   }
@@ -1717,9 +2243,25 @@ function computeStyle(
         ? "stretch"
         : alignItems.value.trim().toLowerCase();
     const computed = raw === "flex-start" ? "start" : raw === "flex-end" ? "end" : raw;
-    if (computed === "start" || computed === "center" || computed === "end" || computed === "stretch") {
+    if (computed === "start" || computed === "center" || computed === "end" || computed === "stretch" || computed === "baseline") {
       style = { ...style, box: { ...style.box, alignItems: computed } };
     } else unsupported(alignItems);
+  }
+  for (const [property, field, initial] of [
+    ["align-self", "alignSelf", "auto"],
+    ["align-content", "alignContent", "stretch"]
+  ] as const) {
+    const entry = value(property);
+    if (entry === null) continue;
+    const wide = cssWide(entry.value);
+    const raw = wide === "inherit" ? parent?.box[field] ?? initial
+      : wide === "initial" || wide === "unset" ? initial : entry.value.trim().toLowerCase();
+    const computed = raw === "flex-start" ? "start" : raw === "flex-end" ? "end" : raw;
+    const supported = field === "alignSelf"
+      ? ["auto", "start", "center", "end", "stretch", "baseline"]
+      : ["start", "center", "end", "stretch", "space-between", "space-around", "space-evenly"];
+    if (!supported.includes(computed)) unsupported(entry);
+    else style = { ...style, box: { ...style.box, [field]: computed } };
   }
   const gridTemplate = value("grid-template-columns");
   if (gridTemplate !== null) {
@@ -1773,10 +2315,10 @@ function computeStyle(
     if (wide === "inherit") width = parent?.box.borderWidths[side] ?? MEDIUM_BORDER;
     else if (wide === "initial" || wide === "unset") width = MEDIUM_BORDER;
     else if (entry.property === "border") {
-      const token = entry.value.split(/\s+/u).find((part) => parseBorderWidth(part) !== null);
+      const token = splitTopLevel(entry.value, "space")?.find((part) => parseBorderWidth(part) !== null);
       width = token === undefined ? MEDIUM_BORDER : parseBorderWidth(token);
     } else if (entry.property === "border-width") {
-      const parts = entry.value.trim().split(/\s+/u);
+      const parts = splitTopLevel(entry.value, "space") ?? [];
       const expanded = fourSides(parts);
       width = expanded === null ? null : parseBorderWidth(expanded[index]);
     } else width = parseBorderWidth(entry.value);
@@ -1793,9 +2335,7 @@ function computeStyle(
       ? parent?.box.borderColor ?? null
       : wide === "initial" || wide === "unset"
         ? null
-        : borderColor.value.split(/\s+/u)
-          .map((part) => parseColor(part, style.text.color))
-          .find((part) => part !== undefined);
+        : colorFromComponentValues(borderColor.value, style.text.color);
     if (color !== undefined) style = { ...style, box: { ...style.box, borderColor: color } };
   }
   const overflow = value("overflow");
@@ -1837,6 +2377,66 @@ function computeStyle(
       style = { ...style, box: { ...style.box, position: computed } };
     } else unsupported(position);
   }
+  const insetSpecs = [
+    ["top", ["top", "inset-block-start", "inset-block", "inset"], "top", 0],
+    ["right", ["right", directionIsRtl ? "inset-inline-start" : "inset-inline-end", "inset-inline", "inset"], "right", 1],
+    ["bottom", ["bottom", "inset-block-end", "inset-block", "inset"], "bottom", 2],
+    ["left", ["left", directionIsRtl ? "inset-inline-end" : "inset-inline-start", "inset-inline", "inset"], "left", 3]
+  ] as const;
+  for (const [property, names, side, index] of insetSpecs) {
+    const entry = value(names);
+    if (entry === null) continue;
+    const wide = cssWide(entry.value);
+    let inset: CssLength | null;
+    if (wide === "inherit") inset = parent?.box.inset[side] ?? AUTO;
+    else if (wide === "initial" || wide === "unset") inset = AUTO;
+    else {
+      const shorthand = entry.property === "inset";
+      const axis = entry.property === "inset-block" || entry.property === "inset-inline";
+      const raw = shorthand ? boxParts(entry.value)?.[index]
+        : axis ? (() => {
+          const parts = splitTopLevel(entry.value, "space") ?? [];
+          const logicalEnd = entry.property === "inset-block"
+            ? side === "bottom" : directionIsRtl ? side === "left" : side === "right";
+          return logicalEnd ? parts[1] ?? parts[0] : parts[0];
+        })() : entry.value;
+      inset = raw === undefined ? null : parseLength(raw, true, true);
+    }
+    if (inset === null) unsupported({ ...entry, property });
+    else style = { ...style, box: { ...style.box, inset: { ...style.box.inset, [side]: inset } } };
+  }
+  const zIndex = value("z-index");
+  if (zIndex !== null) {
+    const wide = cssWide(zIndex.value);
+    const normalized = zIndex.value.trim().toLowerCase();
+    const computed = wide === "inherit" ? parent?.box.zIndex ?? null
+      : wide === "initial" || wide === "unset" || normalized === "auto" ? null
+        : /^[-+]?\d+$/u.test(normalized) ? Number(normalized) : Number.NaN;
+    if (computed !== null && !Number.isSafeInteger(computed)) unsupported(zIndex);
+    else style = { ...style, box: { ...style.box, zIndex: computed } };
+  }
+  const float = value("float");
+  if (float !== null) {
+    const wide = cssWide(float.value);
+    const normalized = wide === "inherit" ? parent?.box.float ?? "none"
+      : wide === "initial" || wide === "unset" ? "none" : float.value.trim().toLowerCase();
+    const computed = normalized === "inline-start" ? (directionIsRtl ? "right" : "left")
+      : normalized === "inline-end" ? (directionIsRtl ? "left" : "right") : normalized;
+    if (computed === "none" || computed === "left" || computed === "right") {
+      style = { ...style, box: { ...style.box, float: computed } };
+    } else unsupported(float);
+  }
+  const clear = value("clear");
+  if (clear !== null) {
+    const wide = cssWide(clear.value);
+    const normalized = wide === "inherit" ? parent?.box.clear ?? "none"
+      : wide === "initial" || wide === "unset" ? "none" : clear.value.trim().toLowerCase();
+    const computed = normalized === "inline-start" ? (directionIsRtl ? "right" : "left")
+      : normalized === "inline-end" ? (directionIsRtl ? "left" : "right") : normalized;
+    if (computed === "none" || computed === "left" || computed === "right" || computed === "both") {
+      style = { ...style, box: { ...style.box, clear: computed } };
+    } else unsupported(clear);
+  }
   const legacyClip = value("clip");
   if (legacyClip !== null) {
     const wide = cssWide(legacyClip.value);
@@ -1869,6 +2469,16 @@ function computeStyle(
         : generatedContent(content.value, document, node);
     if (computed === undefined) unsupported(content);
     else style = { ...style, generatedContent: computed };
+  }
+  if (style.display.box === "principal"
+    && (style.box.position === "absolute" || style.box.position === "fixed" || style.box.float !== "none")) {
+    style = {
+      ...style,
+      display: Object.freeze({
+        ...style.display,
+        outer: "block"
+      })
+    };
   }
   return immutableComputedStyle(style);
 }
@@ -1953,9 +2563,10 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
     input.signal?.throwIfAborted();
     const parentNode = input.document.parent(ref);
     const parentStyle = parentNode?.kind === "element" ? styles.get(parentNode.ref) ?? null : null;
-    const style = computeStyle(
+    let style = computeStyle(
       input.document,
       input.state,
+      input.environment,
       ref,
       parentStyle,
       candidates.get(styleKey(ref)),
@@ -1963,21 +2574,48 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
       null,
       ref === input.document.documentElement ? 16 : rootFontSizePx
     );
+    if (style.box.float !== "none" || style.box.position === "absolute" || style.box.position === "fixed") {
+      style = blockifiedStyle(style);
+    }
+    let boxParent = input.document.parent(ref);
+    while (boxParent?.kind === "element") {
+      const candidate = styles.get(boxParent.ref);
+      if (candidate?.display.box === "contents") {
+        boxParent = input.document.parent(boxParent.ref);
+        continue;
+      }
+      if (candidate?.display.box === "principal"
+        && (candidate.display.inner === "flex" || candidate.display.inner === "grid")) {
+        style = blockifiedStyle(style);
+      }
+      break;
+    }
     styles.set(ref, style);
     if (ref === input.document.documentElement) rootFontSizePx = fontSizePixels(style);
     for (const pseudo of ["before", "after", "marker"] as const) {
       const pseudoCandidates = candidates.get(styleKey(ref, pseudo));
       if (pseudoCandidates === undefined) continue;
-      pseudos.set(styleKey(ref, pseudo), computeStyle(
+      let pseudoStyle = computeStyle(
         input.document,
         input.state,
+        input.environment,
         ref,
         style,
         pseudoCandidates,
         diagnostics,
         pseudo,
         rootFontSizePx
-      ));
+      );
+      if (pseudoStyle.box.float !== "none"
+        || pseudoStyle.box.position === "absolute"
+        || pseudoStyle.box.position === "fixed") {
+        pseudoStyle = blockifiedStyle(pseudoStyle);
+      }
+      if (style.display.box === "principal"
+        && (style.display.inner === "flex" || style.display.inner === "grid")) {
+        pseudoStyle = blockifiedStyle(pseudoStyle);
+      }
+      pseudos.set(styleKey(ref, pseudo), pseudoStyle);
     }
     computedNodes += 1;
   }

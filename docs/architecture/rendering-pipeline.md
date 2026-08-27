@@ -62,6 +62,29 @@ layout model.
 
 HTTP, redirects, cookies, local-resource policy, downloads, tabs, history,
 bookmarks, persistence, and browser chrome remain application concerns.
+The application builds the recursive stylesheet dependency graph and applies
+the ordinary page-resource security boundary to every `@import`; style owns CSS
+syntax inspection, dependency metadata, cascade layers, `@supports`, and typed
+computed values. Neither style nor layout performs network access.
+
+The style subsystem exposes one pure implementation-support evaluator. The
+resource loader consults it before scheduling an import, so a false
+`supports()` condition performs no request. Every admitted stylesheet source
+has required root/dependency order, import ancestry, layer path, media/supports
+conditions, predeclared layers, and a verified parsed-rule count. Rule limits
+are admission limits: a source that would exceed the remaining rule budget is
+not added to the cascade. Default graph limits are 32 external roots, 512 KiB
+per source, 2 MiB aggregate stylesheet bytes, depth 16, 64 imported sources,
+2 MiB aggregate imported bytes, 5 redirects per request, 100,000 parsed rules,
+and 256 import edges.
+
+Author cascade layers are paths rather than flat ordinals. Every path segment
+has parent-relative order; direct declarations occupy the parent's implicit
+final sublayer. Normal declarations order layers forward and put unlayered and
+element-attached declarations afterward. Important declarations reverse layer
+order, while important element-attached declarations retain their author-origin
+precedence. `revert` and `revert-layer` remove the complete relevant cascade
+position before the next candidate is selected.
 
 ## Geometry and CSS values
 
@@ -136,6 +159,38 @@ geometry for background and border painting.
 Work-budget exhaustion finalizes open ancestors and keeps a connected
 source-order layout-fragment prefix. Completed fragments are never cleared.
 
+The horizontal-writing-mode flex formatting algorithm computes flex base and
+hypothetical main sizes, automatic minimum sizes, line collection, iterative
+grow/shrink freezing, automatic margins, order-modified placement, reverse
+directions, cross sizes, baseline alignment, wrapping, wrap reversal, gaps,
+and multi-line alignment. Positioned layout resolves positioned containing
+blocks, static positions, opposing insets, shrink-to-fit widths, relative
+offsets, fixed initial-containing-block geometry, sticky scrollport
+constraints, and stacking buckets. Floats are out of normal block flow, shorten
+line boxes, honor computed-direction logical sides and clearance, and contribute
+to formatting-context overflow.
+
+Sticky positioning is currently constrained only against the root terminal
+scrollport and the sticky box's containing block. Nested scrolling boxes remain
+unsupported; values such as `overflow:auto` and `overflow:scroll` therefore
+produce the existing typed unsupported-value diagnostic rather than creating a
+second scroll container.
+
+Computed display is blockified before box generation for floats, absolute and
+fixed positioning, and principal flex/grid items. Absolute and fixed children
+remain out-of-flow descendants of flex/grid containers and never enter item
+wrapping, gap calculation, or flexible sizing. Flex axes map logical main/cross
+starts through horizontal writing mode, computed direction, direction reversal,
+and wrap reversal. Cross-axis stretch triggers descendant relayout at the used
+cross size. Flexible-length iteration is cancellable and bounded by
+`maxFlexSizingWork` (2,000,000 work units by default).
+
+Normal block flow owns one float-exclusion manager per block formatting context.
+The manager retains source-ordered float margin rectangles and final containing
+block geometry; inline formatting contexts query it for every line. An ordinary
+block child keeps its full border-box width while only overlapping line boxes
+are shortened.
+
 ## Terminal contracts
 
 `TerminalDisplayList` contains ordered background-fill, border-side, and text
@@ -194,6 +249,10 @@ prefixes.
   runs. No reordered search string or row-based search path exists.
 - Physical and logical box properties compete in the cascade; horizontal
   logical sides map only after the element's computed `direction` is known.
+- Parser component-value trees—not whitespace or function regular expressions—
+  drive custom-property substitution, CSS math, length-percentage values,
+  colors, and the supported layout shorthands. Used-value math remains in
+  layout.
 - Unicode property lookup is pinned to Unicode 17.0.0 and never depends on the
   host ICU or operating-system Unicode version.
 - Budget, cancellation, unsupported, rejected, and truncated behavior is typed;

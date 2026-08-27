@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 2,
+  "sourceBranch": "feat/web-compatibility-baseline",
+  "corpusManifest": "corpus.json",
+  "fixtureCount": 14,
+  "caseCount": 40,
+  "metrics": {
+    "logicalMeaningfulTextRecall": 1,
+    "paintedCellMeaningfulTextRecall": 1,
+    "headingRecall": 1,
+    "landmarkRecall": 1,
+    "linkRecall": 1,
+    "formControlRecall": 1,
+    "sourceLinkedActionRecall": 1,
+    "readingOrderAgreement": 1,
+    "unexplainedBlankPages": 0,
+    "clippedLogicalText": 0,
+    "clippedPaintedText": 0,
+    "stylesheetRequestContractFailures": 0,
+    "unexpectedDiagnostics": 0,
+    "layoutTruncations": 0,
+    "displayListTruncations": 0,
+    "cellBufferTruncations": 0,
+    "terminalTruncations": 0,
+    "unsupportedSelectors": 0,
+    "unsupportedAtRules": 0,
+    "unsupportedProperties": 0,
+    "unsupportedValues": 0,
+    "stylesheetAndResourceFailures": 0
+  }
+}

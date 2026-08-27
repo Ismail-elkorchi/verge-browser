@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { TextEncoder } from "node:util";
 
 import { applyDocumentAction, createDocumentState, parseWebDocument } from "../../dist/document/index.js";
-import { resolveStyles } from "../../dist/presentation/style/index.js";
+import {
+  embeddedStylesheetSources,
+  implementationSupportsCondition,
+  inspectStylesheetText,
+  resolveStyles
+} from "../../dist/presentation/style/index.js";
 
 const environment = {
   viewportWidthCssPx: 800,
@@ -23,7 +29,7 @@ function setup(html, updateState = (state) => state, budgets, mediaEnvironment =
   const styles = resolveStyles({
     document,
     state,
-    resources: [],
+    resources: embeddedStylesheetSources(document),
     environment: mediaEnvironment,
     ...(budgets ? { budgets } : {})
   });
@@ -191,6 +197,22 @@ test("display computation separates outer and inner values and covers suppressio
   assert.deepEqual(style("x-grid"), { box: "principal", outer: "inline", inner: "grid", listItem: false, internal: null, replaced: false });
 });
 
+test("computed display blockifies floated, absolute, fixed, flex-item, and grid-item principal boxes", () => {
+  const { document, styles } = setup(`<span id="float" style="float:left">float</span>
+    <span id="absolute" style="position:absolute">absolute</span>
+    <a id="fixed" style="position:fixed">fixed</a>
+    <span id="internal" style="display:table-cell;float:left">internal</span>
+    <div style="display:flex"><span id="flex-item">item</span><span id="hidden" style="display:none">hidden</span></div>
+    <div style="display:grid"><span id="grid-item">item</span></div>`);
+  for (const id of ["float", "absolute", "fixed", "flex-item", "grid-item"]) {
+    assert.equal(styles.style(document.elementById(id)).display.outer, "block");
+  }
+  assert.deepEqual(styles.style(document.elementById("internal")).display, {
+    box: "principal", outer: "block", inner: "flow", listItem: false, internal: null, replaced: false
+  });
+  assert.equal(styles.style(document.elementById("hidden")).display.box, "none");
+});
+
 test("CSS-wide display values inherit deliberately and revert to the user-agent origin", () => {
   const inherited = setup(`<style>main{display:grid}span{display:inherit}</style><main><span>child</span></main>`);
   assert.equal(inherited.styles.style(named(inherited.document, "span")).display.inner, "grid");
@@ -265,6 +287,291 @@ test("flex wrapping and alignment retain typed computed values and CSS-wide sema
   assert.equal(child.box.flexWrap, "wrap-reverse");
   assert.equal(child.box.justifyContent, "space-between");
   assert.equal(child.box.alignItems, "stretch");
+});
+
+test("cascade layers, revert-layer, and implementation-backed supports conditions are ordered", () => {
+  const { document, styles } = setup(`<style>
+    @layer reset, theme;
+    @layer reset { #target { color:red !important; background-color:red; padding-top:1px } }
+    @layer theme { #target { color:blue !important; background-color:blue; padding-top:2px } }
+    @layer theme { #target { background-color:revert-layer; padding-top:revert-layer } }
+    #target { color:green !important; background-color:green; margin-left:3px }
+    @supports (display:flex) { #target { padding-left:4px } }
+    @supports (line-break:strict) { #target { padding-right:9px } }
+    @supports (border-style:dashed) { #target { margin-right:9px } }
+    @supports (grid-template-columns:repeat(auto-fit, 1fr)) { #target { margin-bottom:9px } }
+  </style><div id="target"></div>`);
+  const target = styles.style(document.elementById("target"));
+  assert.deepEqual(target.text.color, { r: 255, g: 0, b: 0, a: 1 });
+  assert.deepEqual(target.text.background, { r: 0, g: 128, b: 0, a: 1 });
+  assert.deepEqual(target.box.margin.left, { kind: "length", value: 3, unit: "px" });
+  assert.deepEqual(target.box.padding.left, { kind: "length", value: 4, unit: "px" });
+  assert.deepEqual(target.box.padding.right, { kind: "zero" });
+  assert.deepEqual(target.box.padding.top, { kind: "length", value: 1, unit: "px" });
+  assert.deepEqual(target.box.margin.right, { kind: "zero" });
+  assert.deepEqual(target.box.margin.bottom, { kind: "zero" });
+});
+
+test("implementation supports conditions reflect implemented declarations and selectors", () => {
+  assert.equal(implementationSupportsCondition("display:flex"), true);
+  assert.equal(implementationSupportsCondition("writing-mode:vertical-rl"), false);
+  assert.equal(implementationSupportsCondition("content:url(image.png)"), false);
+  assert.equal(implementationSupportsCondition("selector(main > a:any-link)"), true);
+  assert.equal(implementationSupportsCondition("selector(a::first-line)"), false);
+  assert.equal(implementationSupportsCondition("not (writing-mode:vertical-rl)"), true);
+  assert.equal(implementationSupportsCondition("(display:flex) and (not (writing-mode:vertical-rl))"), true);
+  assert.equal(implementationSupportsCondition("(display:flex) and (writing-mode:vertical-rl)"), false);
+  assert.equal(implementationSupportsCondition("(display:flex) or (writing-mode:vertical-rl)"), true);
+  assert.equal(implementationSupportsCondition(
+    "not ((display:flex) and (writing-mode:vertical-rl))"
+  ), true);
+  assert.equal(implementationSupportsCondition(
+    "((display:flex) and (position:sticky)) or (writing-mode:vertical-rl)"
+  ), true);
+  assert.equal(implementationSupportsCondition("not (display:flex) and (position:sticky)"), false);
+});
+
+test("nested cascade layers retain parent-relative order and implicit final sublayers", () => {
+  const normal = setup(`<style>
+    @layer outer {
+      @layer inner { #target { color:red } }
+      #target { color:blue }
+    }
+  </style><p id="target">text</p>`);
+  assert.deepEqual(normal.styles.style(normal.document.elementById("target")).text.color, {
+    r: 0, g: 0, b: 255, a: 1
+  });
+
+  const important = setup(`<style>
+    @layer outer {
+      @layer inner { #target { color:red!important } }
+      #target { color:blue!important }
+    }
+  </style><p id="target">text</p>`);
+  assert.deepEqual(important.styles.style(important.document.elementById("target")).text.color, {
+    r: 255, g: 0, b: 0, a: 1
+  });
+
+  const attached = setup(`<style>
+    @layer theme { #target { color:red!important } }
+    #target { background:red!important }
+  </style><p id="target" style="color:blue!important;background:blue!important">text</p>`);
+  const attachedStyle = attached.styles.style(attached.document.elementById("target"));
+  assert.deepEqual(attachedStyle.text.color, { r: 0, g: 0, b: 255, a: 1 });
+  assert.deepEqual(attachedStyle.text.background, { r: 0, g: 0, b: 255, a: 1 });
+});
+
+test("revert-layer rolls back only its full cascade position", () => {
+  const layered = setup(`<style>
+    @layer base,theme;
+    @layer base { #target { color:red; margin-left:3px; --tone:red } }
+    @layer theme { #target { color:revert-layer; margin:9px; margin-left:revert-layer; --tone:revert-layer } }
+    #target { background:green }
+  </style><p id="target" style="background:revert-layer">text</p>`);
+  const target = layered.styles.style(layered.document.elementById("target"));
+  assert.deepEqual(target.text.color, { r: 255, g: 0, b: 0, a: 1 });
+  assert.deepEqual(target.text.background, { r: 0, g: 128, b: 0, a: 1 });
+  assert.deepEqual(target.box.margin.left, { kind: "length", value: 3, unit: "px" });
+  assert.equal(target.customProperties.get("--tone"), "red");
+
+  const important = setup(`<style>
+    @layer theme {
+      #target { color:blue; --tone:blue }
+      #target { color:revert-layer !important; --tone:revert-layer !important }
+    }
+  </style><p id="target">text</p>`);
+  const importantTarget = important.styles.style(important.document.elementById("target"));
+  assert.deepEqual(importantTarget.text.color, { r: 0, g: 0, b: 255, a: 1 });
+  assert.equal(importantTarget.customProperties.get("--tone"), "blue");
+
+  const attached = setup(`<style>#target { color:red !important }</style>
+    <p id="target" style="color:blue;color:revert-layer !important">text</p>`);
+  assert.deepEqual(attached.styles.style(attached.document.elementById("target")).text.color, {
+    r: 255, g: 0, b: 0, a: 1
+  });
+});
+
+test("anonymous cascade layers have distinct identities across stylesheet sources", () => {
+  const { document, styles } = setup(`<style>
+    @layer { #target { color:red !important } }
+  </style><style>
+    @layer { #target { color:blue !important } }
+  </style><p id="target">text</p>`);
+  assert.deepEqual(styles.style(document.elementById("target")).text.color, {
+    r: 255, g: 0, b: 0, a: 1
+  });
+});
+
+test("import media, supports, and nested layers participate in the author cascade", () => {
+  const document = parseWebDocument(`<link rel="stylesheet" href="/root.css"><p id="target">text</p>`, {
+    requestUrl: "https://example.test/",
+    finalUrl: "https://example.test/"
+  });
+  const owner = document.stylesheets[0].owner;
+  const resource = (finalUrl, css, dependencyOrder, options = {}) => ({
+    sourceKind: dependencyOrder === 2 ? "linked" : "imported",
+    owner,
+    requestUrl: finalUrl,
+    finalUrl,
+    contentType: "text/css",
+    bytes: new TextEncoder().encode(css),
+    transportEncodingLabel: null,
+    rootOrder: 0,
+    dependencyOrder,
+    importDepth: dependencyOrder === 2 ? 0 : 1,
+    importedFrom: dependencyOrder === 2 ? null : "https://example.test/root.css",
+    importLayer: options.layer ?? null,
+    mediaConditions: options.media ?? [],
+    supportsConditions: options.supports ?? [],
+    predeclaredLayers: options.predeclaredLayers ?? [],
+    parsedRules: inspectStylesheetText(css).parsedRules
+  });
+  const styles = resolveStyles({
+    document,
+    state: createDocumentState(document),
+    environment,
+    resources: [
+      resource("https://example.test/a.css", `#target{color:red}`, 0, { layer: ["outer", "inner"] }),
+      resource("https://example.test/b.css", `#target{padding-left:99px}`, 1, {
+        supports: ["writing-mode:vertical-rl"]
+      }),
+      resource("https://example.test/root.css", `@layer outer { @layer inner { #target{color:blue} } }
+        #target{background:rgb(1 2 3 / 50%)}`, 2)
+    ]
+  });
+  const target = styles.style(document.elementById("target"));
+  assert.deepEqual(target.text.color, { r: 0, g: 0, b: 255, a: 1 });
+  assert.deepEqual(target.text.background, { r: 1, g: 2, b: 3, a: 0.5 });
+  assert.deepEqual(target.box.padding.left, { kind: "zero" });
+
+  const orderedDocument = parseWebDocument(`<link rel="stylesheet" href="/ordered.css"><p id="ordered">text</p>`, {
+    requestUrl: "https://example.test/",
+    finalUrl: "https://example.test/"
+  });
+  const orderedOwner = orderedDocument.stylesheets[0].owner;
+  const encoded = (finalUrl, css, dependencyOrder, importDepth, importLayer, predeclaredLayers) => ({
+    sourceKind: importDepth === 0 ? "linked" : "imported",
+    owner: orderedOwner,
+    requestUrl: finalUrl,
+    finalUrl,
+    contentType: "text/css",
+    bytes: new TextEncoder().encode(css),
+    transportEncodingLabel: null,
+    rootOrder: 0,
+    dependencyOrder,
+    importDepth,
+    importedFrom: importDepth === 0 ? null : "https://example.test/ordered.css",
+    importLayer,
+    mediaConditions: [],
+    supportsConditions: [],
+    predeclaredLayers,
+    parsedRules: inspectStylesheetText(css).parsedRules
+  });
+  const orderedStyles = resolveStyles({
+    document: orderedDocument,
+    state: createDocumentState(orderedDocument),
+    environment,
+    resources: [
+      encoded("https://example.test/theme.css", `#ordered{color:blue!important}`, 0, 1, ["theme"], [["reset"], ["theme"]]),
+      encoded("https://example.test/ordered.css", `@layer reset,theme;
+        @layer reset{#ordered{color:red!important}}`, 1, 0, null, [])
+    ]
+  });
+  assert.deepEqual(orderedStyles.style(orderedDocument.elementById("ordered")).text.color, {
+    r: 255, g: 0, b: 0, a: 1
+  });
+});
+
+test("typed CSS values preserve math, nested custom-property fallback, and functional colors", () => {
+  const { document, styles } = setup(`<style>
+    #target { --gap:var(--missing, calc(10% + 2rem)); width:var(--gap);
+      min-width:min(40px, 8ch); max-width:clamp(60px, 50vw, 500px);
+      color:hsl(120 100% 25%); background-color:rgb(10 20 30 / 50%) }
+  </style><div id="target"></div>`);
+  const target = styles.style(document.elementById("target"));
+  assert.equal(target.box.width.kind, "calculation");
+  assert.equal(target.box.minWidth.kind, "calculation");
+  assert.equal(target.box.maxWidth.kind, "calculation");
+  assert.deepEqual(target.text.color, { r: 0, g: 128, b: 0, a: 1 });
+  assert.deepEqual(target.text.background, { r: 10, g: 20, b: 30, a: 0.5 });
+});
+
+test("flex item and positioned-flow properties retain typed computed values", () => {
+  const { document, styles } = setup(`<div id="item" style="flex:2 3 calc(25% - 1px);order:-2;
+    align-self:baseline;position:absolute;inset:1px 2px 3px 4px;z-index:7;
+    direction:rtl;float:inline-start;clear:inline-end"></div>
+    <div id="basis" style="display:flex;gap:calc(1px + 1px) calc(2px + 2px)">
+      <span style="flex:12px">basis</span><span id="content-basis" style="flex-basis:content">wide content</span></div>`);
+  const item = styles.style(document.elementById("item")).box;
+  assert.equal(item.flexGrow, 2);
+  assert.equal(item.flexShrink, 3);
+  assert.equal(item.flexBasis.kind, "calculation");
+  assert.equal(item.order, -2);
+  assert.equal(item.alignSelf, "baseline");
+  assert.deepEqual(item.inset.left, { kind: "length", value: 4, unit: "px" });
+  assert.equal(item.zIndex, 7);
+  assert.equal(item.float, "right");
+  assert.equal(item.clear, "left");
+  const container = styles.style(document.elementById("basis")).box;
+  const basis = styles.style(named(document, "span")).box;
+  assert.equal(container.rowGap.kind, "calculation");
+  assert.equal(container.columnGap.kind, "calculation");
+  assert.equal(basis.flexGrow, 1);
+  assert.equal(basis.flexShrink, 1);
+  assert.deepEqual(basis.flexBasis, { kind: "length", value: 12, unit: "px" });
+  assert.deepEqual(styles.style(document.elementById("content-basis")).box.flexBasis, { kind: "content" });
+
+  const unsafe = setup(`<div id="unsafe" style="flex-grow:9007199254740992"></div>`);
+  assert.equal(unsafe.styles.style(unsafe.document.elementById("unsafe")).box.flexGrow, 0);
+  assert.ok(unsafe.styles.diagnostics.some((diagnostic) =>
+    diagnostic.code === "value-unsupported" && diagnostic.detail.includes("flex-grow")));
+});
+
+test("flex shorthand accepts every grammar-valid factor and basis ordering", () => {
+  const declarations = [
+    ["a", "2"], ["b", "2 3"], ["c", "10px"], ["d", "2 10px"],
+    ["e", "10px 2"], ["f", "2 3 10px"], ["g", "10px 2 3"],
+    ["h", "calc(20% - 1px) 2 3"], ["i", "none"], ["j", "auto"],
+    ["k", "initial"], ["l", "1 1 0"]
+  ];
+  const { document, styles } = setup(declarations.map(([id, value]) =>
+    `<span id="${id}" style="flex:${value}"></span>`).join(""));
+  const value = (id) => styles.style(document.elementById(id)).box;
+  assert.deepEqual([value("a").flexGrow, value("a").flexShrink], [2, 1]);
+  assert.deepEqual([value("b").flexGrow, value("b").flexShrink], [2, 3]);
+  assert.deepEqual(value("c").flexBasis, { kind: "length", value: 10, unit: "px" });
+  assert.deepEqual([value("d").flexGrow, value("d").flexBasis.value], [2, 10]);
+  assert.deepEqual([value("e").flexGrow, value("e").flexBasis.value], [2, 10]);
+  assert.deepEqual([value("f").flexGrow, value("f").flexShrink, value("f").flexBasis.value], [2, 3, 10]);
+  assert.deepEqual([value("g").flexGrow, value("g").flexShrink, value("g").flexBasis.value], [2, 3, 10]);
+  assert.equal(value("h").flexBasis.kind, "calculation");
+  assert.equal(value("h").flexBasis.calculation.percentageDependence, "mixed");
+  assert.deepEqual([value("i").flexGrow, value("i").flexShrink, value("i").flexBasis.kind], [0, 0, "auto"]);
+  assert.deepEqual([value("j").flexGrow, value("j").flexShrink, value("j").flexBasis.kind], [1, 1, "auto"]);
+  assert.deepEqual([value("k").flexGrow, value("k").flexShrink, value("k").flexBasis.kind], [0, 1, "auto"]);
+  assert.deepEqual([value("l").flexGrow, value("l").flexShrink, value("l").flexBasis.kind], [1, 1, "zero"]);
+
+  const invalid = setup(`<span id="x" style="flex:2 3 4"></span>
+    <span id="y" style="flex:10px 20px"></span><span id="z" style="flex:2 -1 10px"></span>`);
+  for (const id of ["x", "y", "z"]) {
+    const box = invalid.styles.style(invalid.document.elementById(id)).box;
+    assert.deepEqual([box.flexGrow, box.flexShrink, box.flexBasis.kind], [0, 1, "auto"]);
+  }
+});
+
+test("typed length-percentage calculations retain percentage-basis dependence", () => {
+  const { document, styles } = setup(`<div id="target" style="height:calc(50% - 1px);
+    min-height:min(25%,20px);max-height:max(10px,5%);flex-basis:calc(40% - 1rem);
+    top:calc(50% - 2px);width:calc(10px + 2rem);padding-left:calc(25%)"></div>`);
+  const box = styles.style(document.elementById("target")).box;
+  for (const value of [box.height, box.minHeight, box.maxHeight, box.flexBasis, box.inset.top]) {
+    assert.equal(value.kind, "calculation");
+    assert.equal(value.calculation.percentageDependence, "mixed");
+  }
+  assert.equal(box.width.kind, "calculation");
+  assert.equal(box.width.calculation.percentageDependence, "none");
+  assert.equal(box.padding.left.kind, "calculation");
+  assert.equal(box.padding.left.calculation.percentageDependence, "percentage");
 });
 
 test("position and clipping values remain typed until layout used-value resolution", () => {

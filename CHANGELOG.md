@@ -4,6 +4,32 @@ All notable changes are documented in this file.
 
 ## Unreleased
 
+- Add an offline, checksum-pinned, MIT-licensed compatibility corpus for
+  articles, documentation, forums, search, commerce forms, dashboards,
+  responsive pages, multilingual LTR/RTL content, progressive enhancement, and
+  script-dependent shells. Record semantic recall, reading order, unsupported
+  CSS, resource failures, truncation, and deterministic-rendering metrics; keep
+  the optional local Chromium oracle development-only and out of dependencies.
+- Build recursive stylesheet dependency graphs with import media, supports and
+  layer conditions, cycle detection, depth-first cascade order, the existing
+  page-resource security boundary, and explicit depth/source/byte/redirect/rule/
+  edge budgets. Skip imports whose implementation-support condition is false,
+  make parsed rules a stylesheet-source admission limit, and require complete
+  dependency metadata for every internal stylesheet source.
+- Implement normal and important cascade layers, unlayered author ordering,
+  hierarchical nested and anonymous layers, element-attached declaration
+  ordering, `revert`, `revert-layer`, implementation-backed
+  `@supports`, and component-tree CSS values for structural `var()` fallback,
+  `calc()`, `min()`, `max()`, `clamp()`, current color, and common RGB/HSL forms.
+- Replace the initial flex slice with fixed-point flexible-length resolution,
+  iterative freezing, automatic minimum sizes and margins, order, wrapping and
+  wrap reversal, all four directions, cross-size stretching, baseline and
+  multi-line alignment. Add relative, absolute, fixed and sticky positioning,
+  positioned containing blocks, shrink-to-fit sizing, z-index paint buckets,
+  blockification, out-of-flow flex/grid descendants, bounded flex sizing,
+  block-formatting-context float exclusions, line shortening, and clearance in
+  the layout subsystem.
+
 - Pin Unicode 17.0.0 property data and conformance fixtures; add internal UAX
   #9 bidi paragraphs and embedding levels, UAX #14 line-break maps, and UAX #29
   extended grapheme clusters with deterministic offline generation checks.

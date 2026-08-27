@@ -151,27 +151,72 @@ export function buildTerminalDisplayList(input: BuildTerminalDisplayListInput): 
     });
   }
   const commands: TerminalPaintCommand[] = [];
-  const pending = [input.layout.root];
-  let truncated = false;
-  while (pending.length > 0) {
+  const append = (fragment: LayoutFragment): boolean => {
     input.signal?.throwIfAborted();
-    const id = pending.pop();
-    if (id === undefined) continue;
-    const fragment = input.layout.fragment(id);
     const group = commandGroup(fragment);
     if (commands.length + group.length > budgets.maxDisplayListCommands) {
-      truncated = true;
-      break;
+      return false;
     }
     for (const command of group) {
       commands.push(Object.freeze({ ...command, paintOrder: commands.length }) as TerminalPaintCommand);
     }
-    for (let index = fragment.children.length - 1; index >= 0; index -= 1) {
-      const child = fragment.children[index];
-      if (child !== undefined) pending.push(child);
+    return true;
+  };
+  const paintStackingContext = (root: LayoutFragment): boolean => {
+    if (!append(root)) return false;
+    const contexts: LayoutFragment[] = [];
+    const participants: {
+      readonly fragment: LayoutFragment;
+      readonly phase: "in-flow-block" | "float" | "inline" | "positioned-auto-zero";
+    }[] = [];
+    const scan = (
+      parent: LayoutFragment,
+      inheritedPhase: "float" | "positioned-auto-zero" | null = null
+    ): void => {
+      for (const childId of parent.children) {
+        input.signal?.throwIfAborted();
+        const child = input.layout.fragment(childId);
+        const metadata = input.layout.stacking(child.id);
+        if (metadata.establishesStackingContext) contexts.push(child);
+        else {
+          const phase = inheritedPhase ?? (metadata.paintPhase === "float"
+            || metadata.paintPhase === "inline" || metadata.paintPhase === "positioned-auto-zero"
+            ? metadata.paintPhase : "in-flow-block");
+          participants.push({ fragment: child, phase });
+          scan(child, phase === "float" || phase === "positioned-auto-zero" ? phase : null);
+        }
+      }
+    };
+    scan(root);
+    const orderedContexts = (predicate: (level: number) => boolean): readonly LayoutFragment[] =>
+      contexts.filter((fragment) => predicate(input.layout.stacking(fragment.id).stackLevel ?? 0))
+        .sort((left, right) =>
+          (input.layout.stacking(left.id).stackLevel ?? 0) - (input.layout.stacking(right.id).stackLevel ?? 0)
+          || input.layout.stacking(left.id).sourceOrder - input.layout.stacking(right.id).sourceOrder
+      );
+    for (const context of orderedContexts((level) => level < 0)) {
+      if (!paintStackingContext(context)) return false;
     }
-  }
-  const outcome: TerminalDisplayListOutcome = truncated
+    const phaseOrder = ["in-flow-block", "float", "inline", "positioned-auto-zero"] as const;
+    for (const phase of phaseOrder) {
+      const phaseParticipants = participants
+        .filter((entry) => entry.phase === phase)
+        .sort((left, right) => input.layout.stacking(left.fragment.id).sourceOrder
+          - input.layout.stacking(right.fragment.id).sourceOrder);
+      for (const entry of phaseParticipants) {
+        if (!append(entry.fragment)) return false;
+      }
+    }
+    for (const context of orderedContexts((level) => level === 0)) {
+      if (!paintStackingContext(context)) return false;
+    }
+    for (const context of orderedContexts((level) => level > 0)) {
+      if (!paintStackingContext(context)) return false;
+    }
+    return true;
+  };
+  const complete = paintStackingContext(input.layout.fragment(input.layout.root));
+  const outcome: TerminalDisplayListOutcome = !complete
     ? {
         status: "truncated",
         commands: commands.length,

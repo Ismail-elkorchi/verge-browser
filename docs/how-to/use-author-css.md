@@ -20,6 +20,12 @@ External stylesheets use the public HTTP/HTTPS network boundary, including
 across redirects. A remote document cannot trigger a `file:` read through a
 link or document base URL. Use `stylesheetLoader` for trusted fixtures or
 another transport and `stylesheetPolicy` to lower the resource limits.
+Linked and embedded roots may recursively import stylesheets. Verge preserves
+depth-first cascade order, nested media conditions, import layers, and import
+`supports()` conditions while rejecting cycles and bounding import depth,
+source count, aggregate imported bytes, redirects, parsed rules, and dependency
+edges. Every imported URL uses the same public-resource and cookie boundary as
+its root stylesheet.
 
 The browser evaluates responsive styles at the current terminal width while
 retaining stable semantic actions across resize. Style resolution produces a
@@ -29,7 +35,12 @@ the terminal display list, and the terminal cell buffer remain internal.
 Verge resolves used values in fixed-point CSS pixels before terminal cell
 rasterization. The currently supported CSS slice includes:
 
-- inherited custom properties and `var()` fallbacks;
+- inherited custom properties, structural `var()` fallbacks and cycle
+  detection, plus `calc()`, `min()`, `max()`, and `clamp()` length-percentage
+  values;
+- normal and important cascade layers, named and anonymous nested layers,
+  unlayered author rules, `revert`, `revert-layer`, and implementation-backed
+  `@supports` conditions;
 - `screen` and width media queries, using eight CSS pixels per terminal column;
 - visibility, whitespace, colors, text emphasis, decoration, font size, line
   height, vertical alignment, text alignment, and text indentation;
@@ -37,17 +48,23 @@ rasterization. The currently supported CSS slice includes:
   border widths, percentages, viewport units, font-relative units,
   `box-sizing`, and min/max constraints resolved to used CSS-pixel values;
 - block flow with adjoining-margin collapse, inline formatting with explicit
-  line boxes, four flex directions, wrapping, main/cross-axis alignment,
+  line boxes, flexible-length resolution, automatic flex minimum sizes,
+  freezing, order, four directions, wrapping and wrap reversal, automatic
+  margins, baseline and multi-line alignment,
   and grids with explicit auto, length, fraction, fixed `repeat()`, and
   `minmax()` tracks;
-- bounded widths, heights, gaps, solid borders, and overflow clipping.
+- relative, absolute, fixed, and sticky positioning, insets, shrink-to-fit
+  sizing, z-index stacking, left/right/logical floats, clearing, and line boxes
+  shortened around floats;
+- bounded widths, heights, gaps, solid borders, functional RGB/HSL colors,
+  alpha composition, and overflow clipping.
 
-Flex and grid support is intentionally an initial formatting slice. Flex grow,
-shrink, ordering, complete intrinsic sizing, grid spanning, auto-repeated
-tracks, and the full CSS sizing algorithms are not implemented yet. Verge also
-recognizes the common absolutely positioned, one-pixel, overflow-hidden
-`clip`/`clip-path` pattern as visually clipped content while retaining its
-accessibility semantic.
+Grid spanning and auto-placement, table spans and border collapse, vertical
+writing modes, multi-column layout, web fonts, raster image decoding, and page
+JavaScript remain explicit gaps. Supported positioned clipping retains document
+semantics while its actual paint and pointer geometry stays clipped. Sticky
+positioning uses the root terminal scrollport; nested scrolling boxes remain
+typed unsupported.
 
 HTML meaning remains available when a rule cannot be represented. Unsupported
 selectors, properties, and values are ignored and aggregated in the browser's

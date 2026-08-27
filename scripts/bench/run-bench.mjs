@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { setImmediate as yieldImmediate } from "node:timers";
 
@@ -17,7 +17,7 @@ import {
   selectLogicalLines
 } from "../../dist/presentation/layout/index.js";
 import { buildTextSearchIndex } from "../../dist/presentation/search/index.js";
-import { resolveStyles } from "../../dist/presentation/style/index.js";
+import { embeddedStylesheetSources, resolveStyles } from "../../dist/presentation/style/index.js";
 import { buildInlineItemStreamSet } from "../../dist/presentation/text/index.js";
 import {
   buildTerminalDisplayList,
@@ -66,6 +66,7 @@ const LIMITS_MS = Object.freeze({
   hugeBorder: 100,
   manyActionBearingBoxes: 5_000,
   manySplitInlineBoxes: 5_000,
+  compatibilityCorpusP95: 500,
   unicodePropertyLookupP95: 50,
   graphemeSegmentationP95: 250,
   bidiParagraphResolutionP95: 500,
@@ -295,7 +296,7 @@ function styles(document, state) {
   return resolveStyles({
     document,
     state,
-    resources: [],
+    resources: embeddedStylesheetSources(document),
     environment: {
       viewportWidthCssPx: 640,
       viewportHeightCssPx: 384,
@@ -328,7 +329,8 @@ function layoutContext(columns, rows = 24) {
   return {
     viewport: { width, height },
     textMeasurer: CSS_TEXT_MEASURER,
-    initialContainingBlock: cssRect(cssCoordinate(cssPx(0)), cssCoordinate(cssPx(0)), width, height)
+    initialContainingBlock: cssRect(cssCoordinate(cssPx(0)), cssCoordinate(cssPx(0)), width, height),
+    scrollport: cssRect(cssCoordinate(cssPx(0)), cssCoordinate(cssPx(0)), width, height)
   };
 }
 
@@ -553,6 +555,94 @@ for (const [name, formatting] of Object.entries(workloadFormatting)) {
   workloadMetrics[name] = stages.completeRendering.p95;
 }
 
+const compatibilityCorpus = JSON.parse(await readFile(resolve("scripts/compat/corpus.json"), "utf8"));
+const realPageCompatibilityMetrics = {};
+const realPageCompatibilitySamples = [];
+const compatibilityFormatting = async (fixture) => {
+  const html = await readFile(resolve("scripts/compat", fixture.file), "utf8");
+  const requestUrl = fixture.requestUrl ?? `https://compat.verge.test/${fixture.id}/index.html`;
+  const declaredResources = fixture.resources
+    ?? compatibilityCorpus.resourceSets?.[fixture.resourceSet]
+    ?? [];
+  const resourceByUrl = new Map(declaredResources.map((resource) => [resource.requestUrl, resource]));
+  const session = new BrowserSession({
+    defaultParseMode: "text",
+    ...(fixture.stylesheetPolicy === undefined ? {} : { stylesheetPolicy: fixture.stylesheetPolicy }),
+    loader: async (url) => ({
+      requestUrl: url,
+      finalUrl: url,
+      status: 200,
+      statusText: "OK",
+      contentType: "text/html",
+      html,
+      responseFields: [],
+      networkOutcome: {
+        kind: "ok", finalUrl: url, status: 200, statusText: "OK",
+        detailCode: "HTTP_200", detailMessage: "200 OK"
+      },
+      fetchedAtIso: "2026-08-27T00:00:00.000Z"
+    }),
+    streamLoader: async () => {
+      throw new Error("Compatibility benchmarks use buffered offline fixtures.");
+    },
+    stylesheetLoader: async (url) => {
+      const resource = resourceByUrl.get(url);
+      if (resource === undefined) throw new Error(`Unexpected compatibility stylesheet request: ${url}`);
+      return {
+        requestUrl: url,
+        finalUrl: resource.finalUrl ?? url,
+        contentType: "text/css",
+        bytes: await readFile(resolve("scripts/compat", resource.file)),
+        responseFields: [],
+        ...(resource.transportEncodingLabel === undefined
+          ? {}
+          : { transportEncodingLabel: resource.transportEncodingLabel })
+      };
+    }
+  });
+  try {
+    const snapshot = await session.open(requestUrl);
+    const state = createDocumentState(snapshot.document);
+    const style = resolveStyles({
+      document: snapshot.document,
+      state,
+      resources: snapshot.stylesheets,
+      initialDiagnostics: snapshot.styleDiagnostics,
+      environment: {
+        viewportWidthCssPx: 960,
+        viewportHeightCssPx: 384,
+        mediaType: "screen",
+        prefersColorScheme: "dark",
+        reducedMotion: false,
+        hover: "hover",
+        pointer: "fine"
+      }
+    });
+    return buildFormattingTree({ document: snapshot.document, state, styles: style });
+  } finally {
+    await session.close();
+  }
+};
+for (const fixture of compatibilityCorpus.fixtures) {
+  const formatting = await compatibilityFormatting(fixture);
+  const streams = inlineItemStreams(formatting);
+  const render = () => {
+    const layout = layoutFragments(formatting, 120, streams);
+    const terminal = cellBuffer(displayList(layout, 120));
+    if (layout.outcome.status === "rejected" || terminal.cellBuffer.outcome.status === "rejected") {
+      throw new Error(`${fixture.id} compatibility benchmark was rejected`);
+    }
+  };
+  for (let warmup = 0; warmup < 2; warmup += 1) render();
+  const samples = [];
+  for (let sample = 0; sample < 7; sample += 1) time(samples, render);
+  realPageCompatibilitySamples.push(...samples);
+  realPageCompatibilityMetrics[fixture.id] = Object.freeze({
+    p50: percentile(samples, 0.5),
+    p95: percentile(samples, 0.95)
+  });
+}
+
 function repeatedStage(operation, samples = 7) {
   for (let warmup = 0; warmup < 2; warmup += 1) operation();
   const values = [];
@@ -732,6 +822,7 @@ const metrics = {
   unicodeLayoutIntegrationP95: unicodeStageMetrics.unicodeLayoutIntegration.p95,
   unicodeDisplayListConstructionP95: unicodeStageMetrics.unicodeDisplayListConstruction.p95,
   unicodeCellRasterizationP95: unicodeStageMetrics.unicodeCellRasterization.p95,
+  compatibilityCorpusP95: percentile(realPageCompatibilitySamples, 0.95),
   ...workloadMetrics
 };
 const memoryMetrics = {
@@ -764,6 +855,7 @@ const report = {
   nestedDepth,
   metricsMs: metrics,
   stressWorkloadStageMetricsMs: workloadStageMetrics,
+  realPageCompatibilityMetricsMs: realPageCompatibilityMetrics,
   unicodeTextStageMetricsMs: unicodeStageMetrics,
   unicodeStressControlsMs: unicodeStressControls,
   limitsMs: LIMITS_MS,
@@ -782,7 +874,8 @@ const report = {
     existingControls: "PR #129 limits for parsing, indexing, style, formatting, resize, search, nested work, and lifecycle memory are unchanged.",
     fixedPointControls: "PR #130 fixed-point workload limits remain unchanged; cell rasterization and index construction are now measured independently.",
     stressControls: "Every rendering stress workload is warmed and reports p50 and p95 separately for layout fragment construction, display-list construction, cell rasterization, index construction, and complete rendering.",
-    unicodeTextControls: "Unicode stage limits are new workload-specific controls measured after two warmups; PR #130 thresholds remain unchanged. One-shot controls cover one million LTR code points, mixed scripts, isolates, maximum valid embedding depth, CJK, emoji, and repeated resize with cached invariant text analysis."
+    unicodeTextControls: "Unicode stage limits are new workload-specific controls measured after two warmups; PR #130 thresholds remain unchanged. One-shot controls cover one million LTR code points, mixed scripts, isolates, maximum valid embedding depth, CJK, emoji, and repeated resize with cached invariant text analysis.",
+    compatibilityCorpus: "Every offline compatibility fixture is warmed twice and measured over seven complete native renderings; the new 500ms p95 control is above the measured corpus distribution without changing an existing threshold."
   },
   ok: failures.length === 0,
   failures

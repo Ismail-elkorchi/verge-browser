@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 2,
+  "sourceCommit": "163b06ad398fd0f7e1f6500600db752fb6579117",
+  "corpusManifest": "corpus.json",
+  "measurementScope": "The original 12-fixture, one-viewport harness parsed HTML directly and did not exercise BrowserSession stylesheet resources.",
+  "metrics": {
+    "logicalMeaningfulTextRecall": 1,
+    "paintedCellMeaningfulTextRecall": null,
+    "headingRecall": 1,
+    "landmarkRecall": 1,
+    "linkRecall": 1,
+    "formControlRecall": 1,
+    "sourceLinkedActionRecall": null,
+    "readingOrderAgreement": 1,
+    "unexplainedBlankPages": 0,
+    "layoutTruncations": 0,
+    "terminalTruncations": 0,
+    "unsupportedSelectors": 0,
+    "unsupportedAtRules": 0,
+    "unsupportedProperties": 8,
+    "unsupportedValues": 0,
+    "stylesheetFailures": 0,
+    "resourceRequestsMeasured": false
+  }
+}

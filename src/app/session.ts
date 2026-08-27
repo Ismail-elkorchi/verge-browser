@@ -3,10 +3,19 @@ import type { HttpSessionAdapter } from "@ismail-elkorchi/http-client";
 import {
   parseWebDocument,
   parseWebDocumentStream,
+  type DocumentNodeRef,
   type WebDocumentParseOptions,
   type IndexedWebDocumentSnapshot
 } from "../document/index.js";
-import type { StyleDiagnostic, StylesheetResource } from "../presentation/style/index.js";
+import {
+  implementationSupportsCondition,
+  inspectStylesheetBytes,
+  inspectStylesheetText,
+  type CascadeLayerPath,
+  type StyleDiagnostic,
+  type StylesheetDependencyInspection,
+  type StylesheetResource
+} from "../presentation/style/index.js";
 import {
   NetworkFetchError,
   PageNetworkClient,
@@ -40,6 +49,7 @@ export type StylesheetLoader = (
   requestUrl: string,
   requestOptions?: Pick<PageRequestOptions, "headers" | "signal"> & {
     readonly maxContentBytes?: number;
+    readonly maxRedirects?: number;
   }
 ) => Promise<FetchStylesheetResult>;
 
@@ -47,12 +57,24 @@ export interface StylesheetPolicyOptions {
   readonly maxStylesheets?: number;
   readonly maxStylesheetBytes?: number;
   readonly maxTotalStylesheetBytes?: number;
+  readonly maxImportDepth?: number;
+  readonly maxImportedSources?: number;
+  readonly maxAggregateImportedBytes?: number;
+  readonly maxStylesheetRedirects?: number;
+  readonly maxParsedRules?: number;
+  readonly maxDependencyEdges?: number;
 }
 
 const DEFAULT_STYLESHEET_POLICY: Required<StylesheetPolicyOptions> = Object.freeze({
   maxStylesheets: 32,
   maxStylesheetBytes: 512 * 1024,
-  maxTotalStylesheetBytes: 2 * 1024 * 1024
+  maxTotalStylesheetBytes: 2 * 1024 * 1024,
+  maxImportDepth: 16,
+  maxImportedSources: 64,
+  maxAggregateImportedBytes: 2 * 1024 * 1024,
+  maxStylesheetRedirects: 5,
+  maxParsedRules: 100_000,
+  maxDependencyEdges: 256
 });
 
 const DEFAULT_PARSE_OPTIONS: Omit<WebDocumentParseOptions, "signal"> = Object.freeze({
@@ -236,7 +258,13 @@ export class BrowserSession {
         options.stylesheetPolicy?.maxTotalStylesheetBytes,
         DEFAULT_STYLESHEET_POLICY.maxTotalStylesheetBytes,
         "maxTotalStylesheetBytes"
-      )
+      ),
+      maxImportDepth: stylesheetLimit(options.stylesheetPolicy?.maxImportDepth, DEFAULT_STYLESHEET_POLICY.maxImportDepth, "maxImportDepth"),
+      maxImportedSources: stylesheetLimit(options.stylesheetPolicy?.maxImportedSources, DEFAULT_STYLESHEET_POLICY.maxImportedSources, "maxImportedSources"),
+      maxAggregateImportedBytes: stylesheetLimit(options.stylesheetPolicy?.maxAggregateImportedBytes, DEFAULT_STYLESHEET_POLICY.maxAggregateImportedBytes, "maxAggregateImportedBytes"),
+      maxStylesheetRedirects: stylesheetLimit(options.stylesheetPolicy?.maxStylesheetRedirects, DEFAULT_STYLESHEET_POLICY.maxStylesheetRedirects, "maxStylesheetRedirects"),
+      maxParsedRules: stylesheetLimit(options.stylesheetPolicy?.maxParsedRules, DEFAULT_STYLESHEET_POLICY.maxParsedRules, "maxParsedRules"),
+      maxDependencyEdges: stylesheetLimit(options.stylesheetPolicy?.maxDependencyEdges, DEFAULT_STYLESHEET_POLICY.maxDependencyEdges, "maxDependencyEdges")
     });
     this.#parseOptions = {
       ...DEFAULT_PARSE_OPTIONS,
@@ -395,8 +423,8 @@ export class BrowserSession {
   ): Promise<LoadedStylesheets> {
     const resources: StylesheetResource[] = [];
     const diagnostics: StyleDiagnostic[] = [];
-    const links = document.stylesheets.filter((entry) => entry.kind === "external");
-    if (links.length > this.#stylesheetPolicy.maxStylesheets) {
+    const externalRoots = document.stylesheets.filter((entry) => entry.kind === "external");
+    if (externalRoots.length > this.#stylesheetPolicy.maxStylesheets) {
       diagnostics.push(stylesheetDiagnostic(
         "stylesheet-limit",
         document.finalUrl,
@@ -404,39 +432,27 @@ export class BrowserSession {
       ));
     }
     let totalBytes = 0;
-    for (const link of links.slice(0, this.#stylesheetPolicy.maxStylesheets)) {
-      requestOptions.signal?.throwIfAborted();
-      let target: URL;
+    let importedBytes = 0;
+    let importedSources = 0;
+    let dependencyEdges = 0;
+    let parsedRules = 0;
+    let dependencyOrder = 0;
+    let ruleBudgetExhausted = false;
+    const allowedExternalOwners = new Set(
+      externalRoots.slice(0, this.#stylesheetPolicy.maxStylesheets).map((entry) => entry.owner)
+    );
+    const fetchResource = async (target: URL, requestBudget: number): Promise<FetchStylesheetResult | null> => {
+      let fetched: FetchStylesheetResult;
       try {
-        target = new URL(link.destination);
         assertPageInitiatedNavigation(document.finalUrl, target.toString());
         if (!["http:", "https:", "file:"].includes(target.protocol)) {
           throw new Error(`Unsupported stylesheet protocol: ${target.protocol}`);
         }
-      } catch (error) {
-        diagnostics.push(stylesheetDiagnostic(
-          "stylesheet-fetch",
-          link.destination,
-          error instanceof Error ? error.message : String(error)
-        ));
-        continue;
-      }
-      const remainingBytes = this.#stylesheetPolicy.maxTotalStylesheetBytes - totalBytes;
-      if (remainingBytes <= 0) {
-        diagnostics.push(stylesheetDiagnostic(
-          "stylesheet-limit",
-          target.toString(),
-          `Aggregate stylesheet transport budget reached ${String(this.#stylesheetPolicy.maxTotalStylesheetBytes)} bytes.`
-        ));
-        break;
-      }
-      const requestBudget = Math.min(this.#stylesheetPolicy.maxStylesheetBytes, remainingBytes);
-      let fetched: FetchStylesheetResult;
-      try {
         const stylesheetOptions = {
           ...(requestOptions.headers === undefined ? {} : { headers: requestOptions.headers }),
           ...(requestOptions.signal === undefined ? {} : { signal: requestOptions.signal }),
-          maxContentBytes: requestBudget
+          maxContentBytes: requestBudget,
+          maxRedirects: this.#stylesheetPolicy.maxStylesheetRedirects
         };
         fetched = this.#stylesheetLoader === null
           ? await fetchDocumentStylesheet(
@@ -444,7 +460,7 @@ export class BrowserSession {
             target.toString(),
             document.finalUrl,
             undefined,
-            { maxContentBytes: requestBudget },
+            { maxContentBytes: requestBudget, maxRedirects: this.#stylesheetPolicy.maxStylesheetRedirects },
             stylesheetOptions,
             this.#localFileReader
           )
@@ -458,8 +474,7 @@ export class BrowserSession {
           target.toString(),
           error instanceof Error ? error.message : String(error)
         ));
-        if (sizeLimit) break;
-        continue;
+        return null;
       }
       if (fetched.bytes.byteLength > requestBudget) {
         diagnostics.push(stylesheetDiagnostic(
@@ -467,7 +482,7 @@ export class BrowserSession {
           fetched.finalUrl,
           "Stylesheet loader exceeded its explicit transport budget."
         ));
-        break;
+        return null;
       }
       try {
         assertPageInitiatedNavigation(document.finalUrl, fetched.finalUrl);
@@ -477,7 +492,7 @@ export class BrowserSession {
           fetched.finalUrl,
           error instanceof Error ? error.message : String(error)
         ));
-        continue;
+        return null;
       }
       const mediaType = fetched.contentType?.toLowerCase().split(";", 1)[0]?.trim();
       if (mediaType !== undefined && mediaType !== "text/css") {
@@ -486,17 +501,240 @@ export class BrowserSession {
           fetched.finalUrl,
           `Blocked non-CSS content type: ${String(fetched.contentType)}`
         ));
+        return null;
+      }
+      return fetched;
+    };
+    const completeInspection = (
+      inspection: StylesheetDependencyInspection,
+      sourceUrl: string
+    ): inspection is Extract<StylesheetDependencyInspection, { readonly status: "complete" }> => {
+      if (inspection.status !== "complete") {
+        diagnostics.push(stylesheetDiagnostic("stylesheet-parse", sourceUrl, "Stylesheet dependency syntax could not be inspected."));
+        return false;
+      }
+      return true;
+    };
+    const admitRules = (sourceUrl: string, ruleCount: number): boolean => {
+      if (ruleBudgetExhausted || parsedRules + ruleCount > this.#stylesheetPolicy.maxParsedRules) {
+        ruleBudgetExhausted = true;
+        diagnostics.push(stylesheetDiagnostic(
+          "stylesheet-limit", sourceUrl,
+          `Stylesheet rule budget reached ${String(this.#stylesheetPolicy.maxParsedRules)}.`
+        ));
+        return false;
+      }
+      parsedRules += ruleCount;
+      return true;
+    };
+    const qualifyLayer = (
+      parent: CascadeLayerPath | null,
+      child: CascadeLayerPath
+    ): CascadeLayerPath => Object.freeze([...(parent ?? []), ...child]);
+    const uniqueLayerPaths = (paths: readonly CascadeLayerPath[]): readonly CascadeLayerPath[] => {
+      const seen = new Set<string>();
+      const result: CascadeLayerPath[] = [];
+      for (const path of paths) {
+        const identity = JSON.stringify(path);
+        if (seen.has(identity)) continue;
+        seen.add(identity);
+        result.push(Object.freeze([...path]));
+      }
+      return Object.freeze(result);
+    };
+    const loadImported = async (
+      owner: DocumentNodeRef,
+      rootOrder: number,
+      baseUrl: string,
+      inspection: Extract<StylesheetDependencyInspection, { readonly status: "complete" }>,
+      depth: number,
+      parentUrl: string,
+      inheritedLayer: CascadeLayerPath | null,
+      mediaConditions: readonly string[],
+      supportsConditions: readonly string[],
+      inheritedPredeclaredLayers: readonly CascadeLayerPath[],
+      active: ReadonlySet<string>
+    ): Promise<void> => {
+      for (const dependency of inspection.imports) {
+        requestOptions.signal?.throwIfAborted();
+        if (ruleBudgetExhausted) return;
+        if (parsedRules >= this.#stylesheetPolicy.maxParsedRules) return;
+        if (dependency.supports !== null && !implementationSupportsCondition(dependency.supports)) continue;
+        dependencyEdges += 1;
+        if (dependencyEdges > this.#stylesheetPolicy.maxDependencyEdges) {
+          diagnostics.push(stylesheetDiagnostic(
+            "stylesheet-limit", parentUrl,
+            `Stylesheet dependency-edge budget reached ${String(this.#stylesheetPolicy.maxDependencyEdges)}.`
+          ));
+          return;
+        }
+        if (depth > this.#stylesheetPolicy.maxImportDepth) {
+          diagnostics.push(stylesheetDiagnostic(
+            "stylesheet-limit", parentUrl,
+            `Stylesheet import depth reached ${String(this.#stylesheetPolicy.maxImportDepth)}.`
+          ));
+          continue;
+        }
+        if (importedSources >= this.#stylesheetPolicy.maxImportedSources) {
+          diagnostics.push(stylesheetDiagnostic(
+            "stylesheet-limit", parentUrl,
+            `Imported stylesheet source budget reached ${String(this.#stylesheetPolicy.maxImportedSources)}.`
+          ));
+          return;
+        }
+        let target: URL;
+        try {
+          target = new URL(dependency.request, baseUrl);
+          assertPageInitiatedNavigation(document.finalUrl, target.toString());
+        } catch (error) {
+          diagnostics.push(stylesheetDiagnostic(
+            "stylesheet-import", parentUrl,
+            error instanceof Error ? error.message : String(error)
+          ));
+          continue;
+        }
+        if (active.has(target.toString())) {
+          diagnostics.push(stylesheetDiagnostic("stylesheet-cycle", target.toString(), "Stylesheet import cycle was ignored."));
+          continue;
+        }
+        const remainingTotal = this.#stylesheetPolicy.maxTotalStylesheetBytes - totalBytes;
+        const remainingImports = this.#stylesheetPolicy.maxAggregateImportedBytes - importedBytes;
+        const requestBudget = Math.min(this.#stylesheetPolicy.maxStylesheetBytes, remainingTotal, remainingImports);
+        if (requestBudget <= 0) {
+          diagnostics.push(stylesheetDiagnostic("stylesheet-limit", target.toString(), "Aggregate imported stylesheet byte budget was exhausted."));
+          return;
+        }
+        const fetched = await fetchResource(target, requestBudget);
+        if (fetched === null) continue;
+        const finalIdentity = fetched.finalUrl;
+        if (active.has(finalIdentity)) {
+          diagnostics.push(stylesheetDiagnostic("stylesheet-cycle", finalIdentity, "Stylesheet redirect formed an import cycle."));
+          continue;
+        }
+        importedSources += 1;
+        importedBytes += fetched.bytes.byteLength;
+        totalBytes += fetched.bytes.byteLength;
+        const layer = dependency.layer === null ? inheritedLayer
+          : dependency.layer.length === 0
+            ? qualifyLayer(inheritedLayer, Object.freeze([
+                `__anonymous_import_${String(rootOrder)}_${String(dependencyEdges)}`
+              ]))
+            : qualifyLayer(inheritedLayer, dependency.layer);
+        const predeclaredLayers = uniqueLayerPaths([
+          ...inheritedPredeclaredLayers,
+          ...dependency.precedingLayers.map((path) => qualifyLayer(inheritedLayer, path)),
+          ...(layer === null ? [] : [layer])
+        ]);
+        const nestedMedia = dependency.media === null
+          ? mediaConditions : Object.freeze([...mediaConditions, dependency.media]);
+        const nestedSupports = dependency.supports === null
+          ? supportsConditions : Object.freeze([...supportsConditions, dependency.supports]);
+        const importedInspection = inspectStylesheetBytes(
+          fetched.bytes,
+          fetched.transportEncodingLabel ?? null,
+          requestOptions.signal
+        );
+        const nextActive = new Set(active);
+        nextActive.add(finalIdentity);
+        if (!completeInspection(importedInspection, finalIdentity)) continue;
+        await loadImported(
+          owner, rootOrder, finalIdentity, importedInspection, depth + 1, finalIdentity,
+          layer, nestedMedia, nestedSupports, predeclaredLayers, nextActive
+        );
+        if (!admitRules(finalIdentity, importedInspection.parsedRules)) return;
+        resources.push(Object.freeze({
+          sourceKind: "imported",
+          owner,
+          requestUrl: fetched.requestUrl,
+          finalUrl: fetched.finalUrl,
+          contentType: fetched.contentType,
+          bytes: fetched.bytes,
+          transportEncodingLabel: fetched.transportEncodingLabel ?? null,
+          rootOrder,
+          dependencyOrder: dependencyOrder++,
+          importDepth: depth,
+          importedFrom: parentUrl,
+          importLayer: layer,
+          mediaConditions: Object.freeze(nestedMedia),
+          supportsConditions: Object.freeze(nestedSupports),
+          predeclaredLayers,
+          parsedRules: importedInspection.parsedRules
+        }));
+      }
+    };
+    for (const reference of document.stylesheets) {
+      requestOptions.signal?.throwIfAborted();
+      const rootMedia = reference.media === null ? Object.freeze([]) : Object.freeze([reference.media]);
+      if (reference.kind === "embedded") {
+        const bytes = new TextEncoder().encode(reference.cssText);
+        const inspection = inspectStylesheetText(reference.cssText, requestOptions.signal);
+        const sourceUrl = `${document.finalUrl}#style-${String(reference.order)}`;
+        if (!completeInspection(inspection, sourceUrl)) continue;
+        await loadImported(
+          reference.owner, reference.order, document.finalUrl, inspection, 1,
+          sourceUrl, null, rootMedia, Object.freeze([]), Object.freeze([]), new Set([sourceUrl])
+        );
+        if (!admitRules(sourceUrl, inspection.parsedRules)) continue;
+        resources.push(Object.freeze({
+          sourceKind: "embedded",
+          owner: reference.owner,
+          requestUrl: sourceUrl,
+          finalUrl: sourceUrl,
+          contentType: "text/css",
+          bytes,
+          transportEncodingLabel: "utf-8",
+          rootOrder: reference.order,
+          dependencyOrder: dependencyOrder++,
+          importDepth: 0,
+          importedFrom: null,
+          importLayer: null,
+          mediaConditions: rootMedia,
+          supportsConditions: Object.freeze([]),
+          predeclaredLayers: Object.freeze([]),
+          parsedRules: inspection.parsedRules
+        }));
         continue;
       }
+      if (!allowedExternalOwners.has(reference.owner)) continue;
+      let target: URL;
+      try {
+        target = new URL(reference.destination);
+      } catch (error) {
+        diagnostics.push(stylesheetDiagnostic("stylesheet-fetch", reference.destination, error instanceof Error ? error.message : String(error)));
+        continue;
+      }
+      const remainingBytes = this.#stylesheetPolicy.maxTotalStylesheetBytes - totalBytes;
+      if (remainingBytes <= 0) {
+        diagnostics.push(stylesheetDiagnostic("stylesheet-limit", target.toString(), "Aggregate stylesheet transport budget was exhausted."));
+        break;
+      }
+      const fetched = await fetchResource(target, Math.min(this.#stylesheetPolicy.maxStylesheetBytes, remainingBytes));
+      if (fetched === null) continue;
       totalBytes += fetched.bytes.byteLength;
+      const inspection = inspectStylesheetBytes(fetched.bytes, fetched.transportEncodingLabel ?? null, requestOptions.signal);
+      if (!completeInspection(inspection, fetched.finalUrl)) continue;
+      await loadImported(
+        reference.owner, reference.order, fetched.finalUrl, inspection, 1, fetched.finalUrl,
+        null, rootMedia, Object.freeze([]), Object.freeze([]), new Set([fetched.finalUrl])
+      );
+      if (!admitRules(fetched.finalUrl, inspection.parsedRules)) continue;
       resources.push(Object.freeze({
-        owner: link.owner,
+        sourceKind: "linked",
+        owner: reference.owner,
         requestUrl: fetched.requestUrl,
         finalUrl: fetched.finalUrl,
         contentType: fetched.contentType,
         bytes: fetched.bytes,
-        media: link.media,
-        transportEncodingLabel: fetched.transportEncodingLabel ?? null
+        transportEncodingLabel: fetched.transportEncodingLabel ?? null,
+        rootOrder: reference.order,
+        dependencyOrder: dependencyOrder++,
+        importDepth: 0,
+        importedFrom: null,
+        importLayer: null,
+        mediaConditions: rootMedia,
+        supportsConditions: Object.freeze([]),
+        predeclaredLayers: Object.freeze([]),
+        parsedRules: inspection.parsedRules
       }));
     }
     return {
@@ -607,7 +845,7 @@ export class BrowserSession {
         diagnostics: diagnosticsFromDocument(
           document,
           stylesheets.diagnostics,
-          document.stylesheets.filter((entry) => entry.kind === "embedded").length + stylesheets.resources.length,
+          stylesheets.resources.length,
           parseMode,
           options.method ?? "GET",
           {

@@ -1,0 +1,2 @@
+@import "redirect-child.css" layer(child);
+.long { min-height: 45rem; }

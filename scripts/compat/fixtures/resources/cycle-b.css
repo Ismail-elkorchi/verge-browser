@@ -1,0 +1,2 @@
+@import "cycle-a.css";
+form { display: flex; flex-wrap: wrap; gap: 1ch; }

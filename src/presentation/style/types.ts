@@ -12,11 +12,38 @@ export interface CssColor {
 }
 
 export type CssLengthUnit = "px" | "em" | "rem" | "ch" | "%" | "vw" | "vh";
+
+export type CssLengthPercentageExpression =
+  | { readonly kind: "value"; readonly value: number; readonly unit: CssLengthUnit }
+  | { readonly kind: "negate"; readonly value: CssLengthPercentageExpression }
+  | {
+      readonly kind: "sum";
+      readonly left: CssLengthPercentageExpression;
+      readonly right: CssLengthPercentageExpression;
+    }
+  | { readonly kind: "product"; readonly value: CssLengthPercentageExpression; readonly factor: number }
+  | { readonly kind: "minimum"; readonly values: readonly CssLengthPercentageExpression[] }
+  | { readonly kind: "maximum"; readonly values: readonly CssLengthPercentageExpression[] }
+  | {
+      readonly kind: "clamp";
+      readonly minimum: CssLengthPercentageExpression;
+      readonly preferred: CssLengthPercentageExpression;
+      readonly maximum: CssLengthPercentageExpression;
+    };
+
+export interface CssLengthPercentageCalculation {
+  readonly expression: CssLengthPercentageExpression;
+  readonly percentageDependence: "none" | "percentage" | "mixed";
+}
+
 export type CssLength =
   | { readonly kind: "length"; readonly value: number; readonly unit: CssLengthUnit }
+  | { readonly kind: "calculation"; readonly calculation: CssLengthPercentageCalculation }
   | { readonly kind: "zero" }
   | { readonly kind: "auto" }
   | { readonly kind: "none" };
+
+export type CssFlexBasis = CssLength | { readonly kind: "content" };
 
 export interface CssEdges {
   readonly top: CssLength;
@@ -106,9 +133,19 @@ export interface ComputedBoxStyle {
   readonly borderColor: CssColor | null;
   readonly flexDirection: "row" | "row-reverse" | "column" | "column-reverse";
   readonly flexWrap: "nowrap" | "wrap" | "wrap-reverse";
-  readonly justifyContent: "start" | "center" | "end" | "space-between";
-  readonly alignItems: "start" | "center" | "end" | "stretch";
+  readonly flexGrow: number;
+  readonly flexShrink: number;
+  readonly flexBasis: CssFlexBasis;
+  readonly order: number;
+  readonly justifyContent: "start" | "center" | "end" | "space-between" | "space-around" | "space-evenly";
+  readonly alignItems: "start" | "center" | "end" | "stretch" | "baseline";
+  readonly alignSelf: "auto" | "start" | "center" | "end" | "stretch" | "baseline";
+  readonly alignContent: "start" | "center" | "end" | "stretch" | "space-between" | "space-around" | "space-evenly";
   readonly position: "static" | "relative" | "absolute" | "fixed" | "sticky";
+  readonly inset: CssEdges;
+  readonly zIndex: number | null;
+  readonly float: "none" | "left" | "right";
+  readonly clear: "none" | "left" | "right" | "both";
   readonly legacyClip: CssLegacyClip;
   readonly clipPath: CssClipPath;
   readonly gridTemplateColumns: readonly CssGridTrack[];
@@ -149,21 +186,57 @@ export interface ComputedStyle {
 
 export type PseudoElementIdentity = "before" | "after" | "marker";
 
+/** A qualified cascade-layer name, ordered one nesting level at a time. */
+export type CascadeLayerPath = readonly string[];
+
 export interface StylesheetResource {
+  readonly sourceKind: "embedded" | "linked" | "imported";
   readonly owner: DocumentNodeRef;
   readonly requestUrl: string;
   readonly finalUrl: string;
   readonly contentType: string | null;
   readonly bytes: Uint8Array;
-  readonly media: string | null;
   readonly transportEncodingLabel: string | null;
+  /** Document stylesheet order shared by the root sheet and all recursive imports. */
+  readonly rootOrder: number;
+  /** Depth-first cascade order within one document stylesheet root. */
+  readonly dependencyOrder: number;
+  readonly importDepth: number;
+  readonly importedFrom: string | null;
+  readonly importLayer: CascadeLayerPath | null;
+  readonly mediaConditions: readonly string[];
+  readonly supportsConditions: readonly string[];
+  /** Qualified layer names established before this imported source enters the cascade. */
+  readonly predeclaredLayers: readonly CascadeLayerPath[];
+  /** Rule count verified when this source was admitted to the dependency graph. */
+  readonly parsedRules: number;
 }
+
+export interface StylesheetImportDependency {
+  readonly request: string;
+  readonly media: string | null;
+  /** null is unlayered, [] requests a fresh anonymous import layer. */
+  readonly layer: CascadeLayerPath | null;
+  readonly supports: string | null;
+  readonly order: number;
+  readonly precedingLayers: readonly CascadeLayerPath[];
+}
+
+export type StylesheetDependencyInspection =
+  | {
+      readonly status: "complete";
+      readonly imports: readonly StylesheetImportDependency[];
+      readonly parsedRules: number;
+    }
+  | { readonly status: "rejected"; readonly reason: "parse" | "encoding" };
 
 export type StyleDiagnosticCode =
   | "stylesheet-fetch"
   | "stylesheet-limit"
   | "stylesheet-media"
   | "stylesheet-parse"
+  | "stylesheet-cycle"
+  | "stylesheet-import"
   | "unsupported-at-rule"
   | "selector-parse"
   | "selector-unknown"
