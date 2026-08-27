@@ -146,11 +146,13 @@ export function buildTerminalDisplayList(input: BuildTerminalDisplayListInput): 
     return Object.freeze({
       layout: input.layout,
       context,
+      fragmentPaintOrder: Object.freeze([]),
       commands: Object.freeze([]),
       outcome: Object.freeze({ status: "rejected", reason: rejection ?? "invalid-budget" })
     });
   }
   const commands: TerminalPaintCommand[] = [];
+  const fragmentPaintOrder = [] as LayoutFragment["id"][];
   const append = (fragment: LayoutFragment): boolean => {
     input.signal?.throwIfAborted();
     const group = commandGroup(fragment);
@@ -160,6 +162,7 @@ export function buildTerminalDisplayList(input: BuildTerminalDisplayListInput): 
     for (const command of group) {
       commands.push(Object.freeze({ ...command, paintOrder: commands.length }) as TerminalPaintCommand);
     }
+    fragmentPaintOrder.push(fragment.id);
     return true;
   };
   const paintStackingContext = (root: LayoutFragment): boolean => {
@@ -227,6 +230,7 @@ export function buildTerminalDisplayList(input: BuildTerminalDisplayListInput): 
   return Object.freeze({
     layout: input.layout,
     context,
+    fragmentPaintOrder: Object.freeze(fragmentPaintOrder),
     commands: Object.freeze(commands),
     outcome: Object.freeze(outcome)
   });

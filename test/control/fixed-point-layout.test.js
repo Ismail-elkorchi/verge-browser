@@ -24,6 +24,17 @@ import {
   resolveFlexLines,
   selectLogicalLines
 } from "../../dist/presentation/layout/index.js";
+import {
+  expandExplicitGridAxis,
+  placeGridItems,
+  sizeGridTracks
+} from "../../dist/presentation/layout/grid/index.js";
+import {
+  parseGridAreaShorthand,
+  parseGridLine,
+  parseGridTemplateAreas,
+  parseGridTrackList
+} from "../../dist/presentation/style/grid/index.js";
 import { buildTextSearchIndex } from "../../dist/presentation/search/index.js";
 import { embeddedStylesheetSources, resolveStyles } from "../../dist/presentation/style/index.js";
 import { buildInlineItemStreamSet } from "../../dist/presentation/text/index.js";
@@ -590,6 +601,357 @@ test("flex and grid geometry is fixed-point layout-owned", () => {
   assert.equal(items[0].borderRect.y, items[1].borderRect.y);
   assert.ok(items[1].borderRect.width > items[0].borderRect.width);
   assert.equal(items[2].borderRect.y, items[3].borderRect.y);
+});
+
+const GRID_LIMITS = Object.freeze({
+  maxGridItems: 10_000,
+  maxExplicitGridTracks: 1_000,
+  maxImplicitGridTracks: 1_000,
+  maxGridOccupancyIntervals: 50_000,
+  maxGridPlacementSteps: 100_000,
+  maxGridNamedLineResolutions: 50_000,
+  maxGridAutoRepeatTracks: 1_000,
+  maxGridTrackSizingWork: 100_000
+});
+
+function gridAxis(source, available = cssPx(800), gap = ZERO) {
+  const list = parseGridTrackList(source);
+  assert.ok(list);
+  return expandExplicitGridAxis({
+    list,
+    areas: { kind: "none" },
+    areaAxis: "column",
+    automaticTrackSizing: [{ kind: "breadth", breadth: { kind: "auto" } }],
+    availableSize: available,
+    gap,
+    limits: GRID_LIMITS,
+    resolveLength: (value, basis) => {
+      if (value.kind === "zero") return ZERO;
+      if (value.kind !== "length") return null;
+      if (value.unit === "px") return cssPx(value.value);
+      if (value.unit === "%" && basis !== null) return cssMultiply(basis, value.value / 100);
+      return null;
+    },
+    signal: undefined
+  });
+}
+
+function gridLine(source) {
+  const parsed = parseGridLine(source);
+  assert.ok(parsed);
+  return parsed;
+}
+
+test("Grid grammar retains named lines, areas, spans, negative lines, and auto-repeat", () => {
+  const tracks = parseGridTrackList("[content-start] repeat(auto-fit, [card] minmax(10px, 1fr)) [content-end]");
+  assert.equal(tracks.kind, "track-list");
+  assert.equal(tracks.entries[1].kind, "repeat");
+  assert.equal(tracks.entries[1].repetition.kind, "auto-fit");
+  assert.deepEqual(parseGridLine("-2 content"), { kind: "line", span: false, index: -2, name: "content" });
+  assert.deepEqual(parseGridLine("span card 3"), { kind: "line", span: true, index: 3, name: "card" });
+  assert.equal(parseGridLine("0"), null);
+  assert.equal(parseGridLine("span 0"), null);
+  assert.equal(parseGridLine("-1 span"), null);
+  assert.equal(parseGridTrackList("minmax(1fr, 20px)"), null);
+  assert.equal(parseGridTrackList("repeat(auto-fit, 1fr)"), null);
+  assert.equal(parseGridTrackList("subgrid"), null);
+  const areas = parseGridTemplateAreas('"header header" "nav main"');
+  assert.equal(areas.kind, "areas");
+  assert.deepEqual(areas.areas.get("header"), {
+    name: "header", rowStart: 0, rowEnd: 1, columnStart: 0, columnEnd: 2
+  });
+  assert.equal(parseGridTemplateAreas('"a a" "a b"'), null);
+  assert.deepEqual(parseGridTemplateAreas('"1st...auto"'), {
+    kind: "areas",
+    rows: [["1st", null, "auto"]],
+    areas: new Map([
+      ["1st", { name: "1st", rowStart: 0, rowEnd: 1, columnStart: 0, columnEnd: 1 }],
+      ["auto", { name: "auto", rowStart: 0, rowEnd: 1, columnStart: 2, columnEnd: 3 }]
+    ])
+  });
+  assert.equal(parseGridTemplateAreas('"named ! trash"'), null);
+  assert.deepEqual(parseGridAreaShorthand("main"), {
+    rowStart: { kind: "line", span: false, index: null, name: "main" },
+    columnStart: { kind: "line", span: false, index: null, name: "main" },
+    rowEnd: { kind: "line", span: false, index: null, name: "main" },
+    columnEnd: { kind: "line", span: false, index: null, name: "main" }
+  });
+});
+
+test("explicit Grid expansion preserves repeated line names and bounded auto-repeat counts", () => {
+  const axis = gridAxis("[start] repeat(3, [cell] 20px [edge]) [end]");
+  assert.equal(axis.tracks.length, 3);
+  assert.deepEqual(axis.namedLines.get("cell"), [0, 1, 2]);
+  assert.deepEqual(axis.namedLines.get("edge"), [1, 2, 3]);
+  const auto = gridAxis("repeat(auto-fill, minmax(100px, 1fr))", cssPx(450), cssPx(10));
+  assert.equal(auto.tracks.length, 4);
+  assert.equal(gridAxis("repeat(auto-fill, minmax(100px, 200px))", cssPx(450)).tracks.length, 2);
+  assert.equal(gridAxis("repeat(auto-fill, minmax(auto, 100px))", cssPx(450)).tracks.length, 4);
+});
+
+test("Grid placement supports definite overlap, spans, sparse packing, and dense packing", () => {
+  const columns = gridAxis("[first] 20px [middle] 20px [last] 20px [end]");
+  const rows = gridAxis("20px 20px 20px");
+  const auto = { kind: "auto" };
+  const item = (formattingNode, sourceIndex, columnStart, columnEnd, rowStart = auto, rowEnd = auto) => ({
+    formattingNode,
+    sourceIndex,
+    order: 0,
+    columnStart,
+    columnEnd,
+    rowStart,
+    rowEnd
+  });
+  const overlap = placeGridItems({
+    items: [
+      item("a", 0, gridLine("1"), gridLine("3"), gridLine("1"), gridLine("2")),
+      item("b", 1, gridLine("1"), gridLine("span 2"), gridLine("1"), gridLine("2"))
+    ],
+    columns,
+    rows,
+    autoFlow: { axis: "row", packing: "sparse" },
+    limits: GRID_LIMITS,
+    signal: undefined
+  });
+  assert.deepEqual(overlap.items.map(({ columnStart, columnEnd, rowStart, rowEnd }) =>
+    [columnStart, columnEnd, rowStart, rowEnd]), [[0, 2, 0, 1], [0, 2, 0, 1]]);
+
+  const automaticItems = [
+    item("wide-a", 0, auto, gridLine("span 2")),
+    item("wide-b", 1, auto, gridLine("span 2")),
+    item("small", 2, auto, auto)
+  ];
+  const sparse = placeGridItems({
+    items: automaticItems, columns, rows,
+    autoFlow: { axis: "row", packing: "sparse" }, limits: GRID_LIMITS, signal: undefined
+  });
+  const dense = placeGridItems({
+    items: automaticItems, columns, rows,
+    autoFlow: { axis: "row", packing: "dense" }, limits: GRID_LIMITS, signal: undefined
+  });
+  assert.equal(sparse.items.find((entry) => entry.formattingNode === "small").rowStart, 1);
+  assert.equal(dense.items.find((entry) => entry.formattingNode === "small").rowStart, 0);
+  assert.equal(dense.items.find((entry) => entry.formattingNode === "small").columnStart, 2);
+
+  const scarceNamedLines = gridAxis("[slot] 20px 20px");
+  const namedBeyondExplicit = placeGridItems({
+    items: [
+      item("positive", 0, gridLine("2 slot"), gridLine("span 1"), gridLine("1"), gridLine("2")),
+      item("negative", 1, gridLine("-2 slot"), gridLine("span 1"), gridLine("2"), gridLine("3")),
+      item("named-span", 2, gridLine("2"), gridLine("span 2 slot"), gridLine("3"), gridLine("4"))
+    ],
+    columns: scarceNamedLines,
+    rows,
+    autoFlow: { axis: "row", packing: "sparse" },
+    limits: GRID_LIMITS,
+    signal: undefined
+  });
+  assert.deepEqual(namedBeyondExplicit.items.map(({ columnStart, columnEnd }) => [columnStart, columnEnd]), [
+    [3, 4],
+    [-1, 0],
+    [1, 4]
+  ]);
+
+  const automaticNamedSpan = placeGridItems({
+    items: [
+      item("auto-named", 0, auto, gridLine("span 2 slot"), gridLine("1"), gridLine("2"))
+    ],
+    columns: gridAxis("[slot] 20px 20px [slot]"),
+    rows,
+    autoFlow: { axis: "row", packing: "sparse" },
+    limits: GRID_LIMITS,
+    signal: undefined
+  });
+  assert.deepEqual(
+    automaticNamedSpan.items.map(({ columnStart, columnEnd }) => [columnStart, columnEnd]),
+    [[0, 3]]
+  );
+});
+
+test("Grid track sizing honors fixed, intrinsic, spanning, and flexible tracks", () => {
+  const axis = gridAxis("40px minmax(min-content, 1fr) 2fr");
+  const result = sizeGridTracks({
+    tracks: axis.tracks,
+    contributions: [
+      { formattingNode: "middle", start: 1, end: 2, minimumContribution: cssPx(60), minContent: cssPx(60), maxContent: cssPx(80) },
+      { formattingNode: "span", start: 0, end: 3, minimumContribution: cssPx(180), minContent: cssPx(180), maxContent: cssPx(220) }
+    ],
+    availableSize: cssPx(400),
+    gap: cssPx(10),
+    resolveLength: (value, basis) => value.kind === "zero" ? ZERO
+      : value.kind === "length" && value.unit === "px" ? cssPx(value.value)
+        : value.kind === "length" && value.unit === "%" && basis !== null ? cssMultiply(basis, value.value / 100) : null,
+    alignment: "start",
+    maxWork: 10_000,
+    signal: undefined
+  });
+  assert.equal(cssPixels(result.tracks[0].baseSize), 40);
+  assert.ok(result.tracks[1].baseSize >= cssPx(60));
+  assert.ok(result.tracks[2].baseSize > result.tracks[1].baseSize);
+  assert.ok(result.usedSize <= cssPx(400));
+
+  const percentage = gridAxis("50%");
+  const definitePercentage = sizeGridTracks({
+    tracks: percentage.tracks,
+    contributions: [],
+    availableSize: cssPx(200),
+    gap: ZERO,
+    resolveLength: (value, basis) => value.kind === "length" && value.unit === "%" && basis !== null
+      ? cssMultiply(basis, value.value / 100) : null,
+    alignment: "start",
+    maxWork: 100,
+    signal: undefined
+  });
+  assert.equal(definitePercentage.tracks[0].baseSize, cssPx(100));
+  const indefinitePercentage = sizeGridTracks({
+    tracks: percentage.tracks,
+    contributions: [{ formattingNode: "item", start: 0, end: 1, minimumContribution: cssPx(30), minContent: cssPx(30), maxContent: cssPx(30) }],
+    availableSize: null,
+    gap: ZERO,
+    resolveLength: () => null,
+    alignment: "start",
+    maxWork: 100,
+    signal: undefined
+  });
+  assert.equal(indefinitePercentage.tracks[0].baseSize, cssPx(30));
+
+  const indefiniteFlexibleSpan = gridAxis("100px 1fr");
+  const indefiniteFlexibleResult = sizeGridTracks({
+    tracks: indefiniteFlexibleSpan.tracks,
+    contributions: [{ formattingNode: "span", start: 0, end: 2, minimumContribution: cssPx(150), minContent: cssPx(150), maxContent: cssPx(300) }],
+    availableSize: null,
+    gap: ZERO,
+    resolveLength: (value) => value.kind === "length" && value.unit === "px" ? cssPx(value.value) : null,
+    alignment: "start",
+    maxWork: 100,
+    signal: undefined
+  });
+  assert.deepEqual(
+    indefiniteFlexibleResult.tracks.map((track) => cssPixels(track.baseSize)),
+    [100, 200]
+  );
+});
+
+test("Grid layout resolves named areas, spans, RTL flow, dense packing, and responsive auto-fit", () => {
+  const named = render(`<main id="grid" style="display:grid;width:30ch;grid-template:
+      'head head' auto 'nav body' auto / 1fr 2fr;gap:1ch">
+    <header id="head" style="grid-area:head">Header</header>
+    <nav id="nav" style="grid-area:nav">Nav</nav>
+    <section id="body" style="grid-area:body">Body</section>
+  </main>`, 40);
+  const head = principalFragment(named, elementById(named, "head"));
+  const nav = principalFragment(named, elementById(named, "nav"));
+  const body = principalFragment(named, elementById(named, "body"));
+  assert.equal(head.borderRect.x, nav.borderRect.x);
+  assert.ok(head.borderRect.width > nav.borderRect.width);
+  assert.equal(nav.borderRect.y, body.borderRect.y);
+  assert.ok(body.borderRect.x > nav.borderRect.x);
+
+  const span = render(`<div style="display:grid;width:30ch;grid-template-columns:repeat(3,1fr)">
+    <span id="wide" style="grid-column:1 / span 2">wide</span><span id="last">last</span>
+  </div>`, 40);
+  assert.ok(principalFragment(span, elementById(span, "wide")).borderRect.width
+    > principalFragment(span, elementById(span, "last")).borderRect.width);
+
+  const rtl = render(`<div dir="rtl" style="display:grid;width:20ch;grid-template-columns:1fr 1fr">
+    <span id="first">first</span><span id="second">second</span></div>`, 30);
+  assert.ok(principalFragment(rtl, elementById(rtl, "first")).borderRect.x
+    > principalFragment(rtl, elementById(rtl, "second")).borderRect.x);
+
+  const dense = render(`<div style="display:grid;width:30ch;grid-template-columns:repeat(3,1fr);grid-auto-flow:row dense">
+    <span id="one" style="grid-column:span 2">one</span>
+    <span id="two" style="grid-column:span 2">two</span><span id="three">three</span></div>`, 40);
+  assert.equal(principalFragment(dense, elementById(dense, "one")).borderRect.y,
+    principalFragment(dense, elementById(dense, "three")).borderRect.y);
+
+  const narrow = render(`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(20ch,1fr))">
+    <span id="a">a</span><span id="b">b</span><span id="c">c</span><span id="d">d</span></div>`, 40);
+  const wide = render(`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(20ch,1fr))">
+    <span id="a">a</span><span id="b">b</span><span id="c">c</span><span id="d">d</span></div>`, 120);
+  assert.ok(principalFragment(narrow, elementById(narrow, "c")).borderRect.y
+    > principalFragment(narrow, elementById(narrow, "a")).borderRect.y);
+  assert.equal(principalFragment(wide, elementById(wide, "a")).borderRect.y,
+    principalFragment(wide, elementById(wide, "d")).borderRect.y);
+});
+
+test("Grid item alignment relayouts descendants and positioned descendants use Grid lines", () => {
+  const result = render(`<div id="grid" style="display:grid;position:relative;width:30ch;height:128px;
+      grid-template-columns:1fr 2fr;grid-template-rows:1fr 1fr;justify-items:end;align-items:center">
+    <div id="item" style="width:5ch"><span>aligned</span></div>
+    <a id="positioned" href="/next" style="position:absolute;grid-column:2 / 3;grid-row:2 / 3;bottom:0">next</a>
+  </div>`, 40);
+  const grid = principalFragment(result, elementById(result, "grid"));
+  const item = principalFragment(result, elementById(result, "item"));
+  const positioned = principalFragment(result, elementById(result, "positioned"));
+  assert.ok(item.borderRect.x > grid.contentRect.x);
+  assert.ok(positioned.borderRect.x > item.borderRect.x);
+  assert.ok(positioned.borderRect.y > item.borderRect.y);
+  assert.ok(result.terminal.hitTestIndex.regions.some((region) => region.action.kind === "link"));
+});
+
+test("Grid work budgets and cancellation stop placement without unbounded occupancy", () => {
+  const columns = gridAxis("20px");
+  const rows = gridAxis("20px");
+  const auto = { kind: "auto" };
+  assert.throws(() => placeGridItems({
+    items: Array.from({ length: 100 }, (_, sourceIndex) => ({
+      formattingNode: `item-${sourceIndex}`,
+      sourceIndex,
+      order: 0,
+      columnStart: auto,
+      columnEnd: auto,
+      rowStart: auto,
+      rowEnd: auto
+    })),
+    columns,
+    rows,
+    autoFlow: { axis: "row", packing: "dense" },
+    limits: { ...GRID_LIMITS, maxGridPlacementSteps: 10 },
+    signal: undefined
+  }), (error) => error.name === "GridWorkBudgetExceeded" && error.budget === "maxGridPlacementSteps");
+
+  const controller = new globalThis.AbortController();
+  controller.abort();
+  assert.throws(() => placeGridItems({
+    items: [], columns, rows,
+    autoFlow: { axis: "row", packing: "sparse" },
+    limits: GRID_LIMITS,
+    signal: controller.signal
+  }), /abort/iu);
+
+  assert.throws(() => placeGridItems({
+    items: [{
+      formattingNode: "huge-row-span",
+      sourceIndex: 0,
+      order: 0,
+      columnStart: auto,
+      columnEnd: auto,
+      rowStart: auto,
+      rowEnd: { kind: "line", span: true, index: 1_000_000_000, name: null }
+    }],
+    columns,
+    rows,
+    autoFlow: { axis: "row", packing: "dense" },
+    limits: GRID_LIMITS,
+    signal: undefined
+  }), (error) => error.name === "GridWorkBudgetExceeded" && error.budget === "maxImplicitGridTracks");
+
+  assert.throws(() => placeGridItems({
+    items: [{
+      formattingNode: "occupancy-span",
+      sourceIndex: 0,
+      order: 0,
+      columnStart: gridLine("1"),
+      columnEnd: gridLine("2"),
+      rowStart: gridLine("1"),
+      rowEnd: gridLine("span 5")
+    }],
+    columns,
+    rows,
+    autoFlow: { axis: "row", packing: "sparse" },
+    limits: { ...GRID_LIMITS, maxGridOccupancyIntervals: 4 },
+    signal: undefined
+  }), (error) => error.name === "GridWorkBudgetExceeded" && error.budget === "maxGridOccupancyIntervals");
 });
 
 test("flexible lengths use order, freezing, wrapping, and automatic margins", () => {
@@ -1252,7 +1614,7 @@ test("CSS-clipped semantic content stays accessible without synthetic paint or h
 
 test("later display-list paint order wins cell collisions", () => {
   const result = render(`<style>.grid{display:grid;width:4ch;grid-template-columns:4ch 4ch}
-    .first,.second{grid-column:1}</style><div class="grid"><span class="first">AAAA</span>
+    .first,.second{grid-column:1;grid-row:1}</style><div class="grid"><span class="first">AAAA</span>
     <span class="second">BBBB</span></div>`, 20);
   assert.equal(result.terminal.cellBuffer.rows[0]?.text, "BBBB");
   assert.equal(result.terminal.cellBuffer.rows[0]?.spans.length, 1);

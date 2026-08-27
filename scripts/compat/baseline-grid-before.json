@@ -1,12 +1,14 @@
 {
   "schemaVersion": 2,
-  "sourceBranch": "feat/css-grid-layout",
+  "sourceCommit": "d3a976c8b9132e862356e0b3797b0b3b5eb436c8",
+  "sourceTree": "4f75c1c00ae6e875e76a9de74f101a382d584db9",
   "corpusManifest": "corpus.json",
   "fixtureCount": 24,
   "caseCount": 70,
+  "note": "Protected-main baseline using the final 24-fixture corpus and all Grid structural relationships.",
   "metrics": {
     "logicalMeaningfulTextRecall": 1,
-    "paintedCellMeaningfulTextRecall": 1,
+    "paintedCellMeaningfulTextRecall": 0.9949494949494949,
     "headingRecall": 1,
     "landmarkRecall": 1,
     "linkRecall": 1,
@@ -15,18 +17,18 @@
     "readingOrderAgreement": 1,
     "unexplainedBlankPages": 0,
     "clippedLogicalText": 0,
-    "clippedPaintedText": 0,
+    "clippedPaintedText": 2,
     "stylesheetRequestContractFailures": 0,
-    "unexpectedDiagnostics": 0,
+    "unexpectedDiagnostics": 66,
+    "gridStructureFailures": 39,
     "layoutTruncations": 0,
     "displayListTruncations": 0,
     "cellBufferTruncations": 0,
     "terminalTruncations": 0,
     "unsupportedSelectors": 0,
     "unsupportedAtRules": 0,
-    "unsupportedProperties": 0,
-    "unsupportedValues": 0,
-    "stylesheetAndResourceFailures": 0,
-    "gridStructureFailures": 0
+    "unsupportedProperties": 42,
+    "unsupportedValues": 30,
+    "stylesheetAndResourceFailures": 0
   }
 }

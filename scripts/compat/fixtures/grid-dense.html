@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Dense Grid placement</title><style>
+#gallery{display:grid;grid-template-columns:repeat(3,96px);grid-auto-rows:40px;grid-auto-flow:row dense;gap:8px}
+#wide{grid-column:span 2}#fixed{grid-column:2}
+</style></head><body><main><h1>Research gallery</h1><section id="gallery">
+<article id="wide">Wide survey</article><article id="fixed">Fixed sample</article>
+<article id="dense-tail"><a href="/tail">Dense tail sample</a></article><article id="last">Last sample</article>
+</section></main></body></html>

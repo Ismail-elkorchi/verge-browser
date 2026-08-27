@@ -1,0 +1,7 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Overlapping Grid items</title><style>
+#stack{display:grid;width:320px;grid-template-columns:1fr;grid-template-rows:64px}
+#under,#over{grid-column:1;grid-row:1}#under{z-index:1;background:#844}#over{z-index:2;margin-left:80px;background:#448}
+</style></head><body><main><h1>Layered notices</h1><div id="stack">
+<a id="under" href="/routine">Routine notice</a><a id="over" href="/urgent">Urgent notice</a>
+</div></main></body></html>

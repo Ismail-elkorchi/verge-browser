@@ -25,6 +25,23 @@ const DISPLAYS = Object.freeze([
   "block", "inline", "contents", "none", "list-item", "table", "table-row",
   "table-cell", "flex", "grid"
 ]);
+const GRID_TRACK_LISTS = Object.freeze([
+  "[start] 40px [middle] minmax(min-content,1fr) [end]",
+  "repeat(4,[cell] minmax(8px,1fr) [edge])",
+  "repeat(auto-fill,minmax(40px,1fr))",
+  "repeat(auto-fit,minmax(63px,1fr))",
+  "min-content max-content fit-content(120px) 2fr",
+  "[a b c d e f g h i j] 1px [end]",
+  "repeat(2,repeat(3,1fr))",
+  "repeat(auto-fit,1fr)",
+  "minmax(1fr,20px)",
+  "9007199254740990px 1fr"
+]);
+const GRID_PLACEMENTS = Object.freeze([
+  "auto", "1", "-1", "2 / -1", "span 2", "slot / span 3",
+  "-2 name / span name", "span 4096", "span 5000", "0", "-1 span"
+]);
+const GRID_AUTO_FLOWS = Object.freeze(["row", "column", "row dense", "column dense"]);
 const ATTRIBUTES = Object.freeze(["aria-label", "class", "data-k", "hidden", "href", "id", "name", "title", "value"]);
 const WORDS = Object.freeze([
   "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa",
@@ -91,7 +108,21 @@ function openingTag(random, tagName, index) {
     const value = attributeValue(random, name, index + attributeIndex);
     attributes.push(value.length === 0 ? name : `${name}="${value}"`);
   }
-  if (chance(random, 0.25)) attributes.push(`style="display:${pick(random, DISPLAYS)}"`);
+  if (chance(random, 0.35)) {
+    const display = pick(random, DISPLAYS);
+    const declarations = [`display:${display}`];
+    if (display === "grid") {
+      declarations.push(`grid-template-columns:${pick(random, GRID_TRACK_LISTS)}`);
+      declarations.push(`grid-template-rows:${pick(random, GRID_TRACK_LISTS)}`);
+      declarations.push(`grid-auto-flow:${pick(random, GRID_AUTO_FLOWS)}`);
+      declarations.push(`gap:${String(Math.floor(random() * 9))}px`);
+    } else if (chance(random, 0.35)) {
+      declarations.push(`grid-column:${pick(random, GRID_PLACEMENTS)}`);
+      declarations.push(`grid-row:${pick(random, GRID_PLACEMENTS)}`);
+    }
+    attributes.push(`style="${declarations.join(";")}"`);
+  }
+  if (chance(random, 0.08)) attributes.push(`dir="${chance(random, 0.5) ? "rtl" : "ltr"}"`);
   return `<${tagName}${attributes.length === 0 ? "" : ` ${attributes.join(" ")}`}>`;
 }
 

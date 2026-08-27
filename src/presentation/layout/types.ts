@@ -45,6 +45,15 @@ export interface LayoutBudgets {
   readonly maxBreakOpportunities: number;
   readonly maxVisualRuns: number;
   readonly maxFlexSizingWork: number;
+  readonly maxIntrinsicContributionCacheEntries: number;
+  readonly maxGridItems: number;
+  readonly maxExplicitGridTracks: number;
+  readonly maxImplicitGridTracks: number;
+  readonly maxGridOccupancyIntervals: number;
+  readonly maxGridPlacementSteps: number;
+  readonly maxGridNamedLineResolutions: number;
+  readonly maxGridAutoRepeatTracks: number;
+  readonly maxGridTrackSizingWork: number;
   readonly maxDepth: number;
 }
 

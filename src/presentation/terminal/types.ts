@@ -103,6 +103,8 @@ export type TerminalDisplayListOutcome =
 export interface TerminalDisplayList {
   readonly layout: LayoutFragmentTree;
   readonly context: TerminalRenderContext;
+  /** Layout fragments in the CSS paint order used to build this display list. */
+  readonly fragmentPaintOrder: readonly LayoutFragmentId[];
   readonly commands: readonly TerminalPaintCommand[];
   readonly outcome: TerminalDisplayListOutcome;
 }

@@ -182,6 +182,18 @@ constraints, and stacking buckets. Floats are out of normal block flow, shorten
 line boxes, honor computed-direction logical sides and clearance, and contribute
 to formatting-context overflow.
 
+Horizontal-writing-mode Grid uses one typed property model, one placement
+algorithm, and one track-sizing algorithm. Style retains component-tree values
+for explicit and implicit track lists, line names, named areas, line/span
+placements, auto-repeat, flow, gaps, and alignment. Box generation creates Grid
+items only for direct in-flow children and qualifying anonymous text runs;
+absolute and fixed descendants stay out of flow. Layout expands the explicit
+and implicit grids, resolves placements through a sparse row-interval occupancy
+index, calculates shared fixed-point intrinsic contributions, sizes columns and
+then rows after wrapping, relayouts stretch-eligible items, and records Grid
+paint order in ordinary stacking metadata. The detailed internal contract and
+work limits are documented in [CSS Grid layout](./css-grid.md).
+
 Sticky positioning is currently constrained only against the root terminal
 scrollport and the sticky box's containing block. Nested scrolling boxes remain
 unsupported; values such as `overflow:auto` and `overflow:scroll` therefore
@@ -263,7 +275,7 @@ prefixes.
   logical sides map only after the element's computed `direction` is known.
 - Parser component-value trees—not whitespace or function regular expressions—
   drive custom-property substitution, CSS math, length-percentage values,
-  colors, and the supported layout shorthands. Used-value math remains in
+  colors, Grid grammar, and the supported layout shorthands. Used-value math remains in
   layout.
 - Unicode property lookup is pinned to Unicode 17.0.0 and never depends on the
   host ICU or operating-system Unicode version.
