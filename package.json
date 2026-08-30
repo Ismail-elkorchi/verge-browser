@@ -62,10 +62,10 @@
     "unicode:generate": "node scripts/unicode/generate-unicode-data.mjs"
   },
   "dependencies": {
-    "@ismail-elkorchi/css-parser": "0.2.1",
+    "@ismail-elkorchi/css-parser": "0.2.4",
     "@ismail-elkorchi/html-parser": "0.2.1",
     "@ismail-elkorchi/http-client": "0.1.1",
-    "@ismail-elkorchi/terminal-ui": "0.1.3",
+    "@ismail-elkorchi/terminal-ui": "0.1.5",
     "tough-cookie": "6.0.2"
   },
   "devDependencies": {

@@ -1,14 +1,14 @@
 import {
-  commandInputPresentation,
-  contextMenuPresentation,
+  commandInputView,
+  contextMenuView,
   createNumberInputConfiguration,
   createScrollState,
   createTextAreaState,
-  menuTriggerPresentation,
-  numberInputPresentation,
+  menuTriggerView,
+  numberInputView,
   radioGroupReducer,
-  searchPickerPresentation,
-  textInputPresentation
+  searchPickerView,
+  textInputState
 } from "@ismail-elkorchi/terminal-ui/behavior";
 import {
   button,
@@ -31,8 +31,8 @@ import {
   textInput,
   toggleButton,
   toolbar as toolbarComponent,
-  type CheckboxGroupAction,
-  type RadioGroupAction
+  type CheckboxGroupTransition,
+  type RadioGroupTransition
 } from "@ismail-elkorchi/terminal-ui/components";
 import {
   defineComponent,
@@ -107,11 +107,12 @@ interface BrowserDocumentComponentOptions {
 
 interface BrowserControlComponentOptions {
   readonly label: string;
+  readonly node: DocumentNodeRef;
 }
 
 type BrowserDocumentAction = Extract<
   BrowserTuiMessage,
-  { readonly kind: "activateActionAt" | "openLinkMenu" }
+  { readonly kind: "activateActionAt" | "focusDocumentNode" | "openLinkMenu" }
 >;
 
 const browserControlSlots = {
@@ -121,7 +122,7 @@ const browserControlSlots = {
 const browserControlComponent = defineComponent<
   BrowserControlComponentOptions,
   BrowserControlComponentOptions,
-  never,
+  Extract<BrowserTuiMessage, { readonly kind: "focusDocumentNode" }>,
   never,
   readonly [],
   "required",
@@ -153,17 +154,26 @@ const browserControlComponent = defineComponent<
         { ...control, labelledBy: labelId }
       ]
     };
+  },
+  onFocus(event, { model }) {
+    return {
+      kind: "focusDocumentNode",
+      target: event.kind === "focusEnter" ? model.node : null
+    };
   }
 });
 
 function labelledBrowserControl(
   id: string,
+  node: DocumentNodeRef,
   label: string,
   control: Element<BrowserTuiMessage>
 ): Element<BrowserTuiMessage> {
   return browserControlComponent({
     id: `${id}:labelled-control`,
     label,
+    node,
+    onAction: (action): BrowserTuiMessage => action,
     slots: { control }
   });
 }
@@ -201,11 +211,9 @@ function terminalStyle(style: ActualTerminalStyle | undefined): TerminalStyle {
 function rowSegments(
   document: BrowserDocumentComponentModel,
   cellRow: TerminalCellRow,
-  rowIndex: number,
-  focusedActionId: string | undefined
+  rowIndex: number
 ): readonly RenderSpan[] {
   type InlineRowAction = {
-    readonly id: string;
     readonly start: number;
     readonly end: number;
   } & ({ readonly kind: "link"; readonly destination: string } | { readonly kind: "disclosure" });
@@ -216,7 +224,6 @@ function rowSegments(
     const action = commandById.get(entry.command)?.action;
     if (action === undefined || action === null || action.kind === "form-control") return [];
     const range = {
-      id: actionId(action),
       start: entry.startCodeUnit,
       end: entry.endCodeUnit
     };
@@ -274,7 +281,6 @@ function rowSegments(
           underline: true
         }),
       ...authored,
-      ...(inlineAction?.id === focusedActionId ? { inverse: true, bold: true } : {}),
       ...(search === undefined
         ? {}
         : search.active
@@ -321,6 +327,30 @@ function controlGroups(controls: readonly DocumentFormControl[]): readonly Brows
   return groups;
 }
 
+function radioGroupElementId(group: BrowserControlGroup): string | null {
+  const first = group.controls[0];
+  if (first?.kind !== "radio") return null;
+  return `${group.form ?? "document"}:radio:${first.name.length === 0 ? first.node : first.name}`;
+}
+
+function documentNodeForTerminalFocusTarget(
+  document: BrowserDocumentComponentModel,
+  targetId: string
+): DocumentNodeRef | null {
+  const directControl = document.source.snapshot.document.control(targetId as DocumentNodeRef);
+  if (directControl !== null) return directControl.node;
+  for (const group of document.controlGroups) {
+    if (radioGroupElementId(group) !== targetId) continue;
+    return group.controls.find((control) => formControlValues(document, control).length > 0)?.node
+      ?? group.controls[0]?.node
+      ?? null;
+  }
+  const action = document.terminalRender.focusMap.targets.find(
+    (candidate) => actionId(candidate.action) === targetId
+  );
+  return action?.node ?? null;
+}
+
 function formControlValues(document: BrowserDocumentComponentModel, control: DocumentFormControl): readonly string[] {
   const explicit = document.source.documentState.controls.get(control.node)?.values;
   if (explicit !== undefined) return explicit;
@@ -344,7 +374,7 @@ function formControlSelections(
 function radioAction(
   controls: readonly DocumentChoiceControl[],
   selectedId: string | undefined,
-  action: RadioGroupAction
+  transition: RadioGroupTransition
 ): BrowserTuiMessage {
   const options = controls.map((control) => ({
     id: control.node,
@@ -359,7 +389,7 @@ function radioAction(
       ...(selectedId === undefined ? {} : { selectedId })
     }
   };
-  const next = radioGroupReducer(initial, action, options);
+  const next = radioGroupReducer(initial, transition, options);
   const nextId = next.selection.mode === "single" ? next.selection.selectedId : undefined;
   const control = controls.find((entry) => entry.node === nextId) ?? controls[0];
   if (!control) throw new Error("A radio group must contain at least one control.");
@@ -372,9 +402,9 @@ function radioAction(
 
 function multiChoiceAction(
   control: Extract<DocumentFormControl, { readonly kind: "select" }>,
-  action: CheckboxGroupAction
+  transition: CheckboxGroupTransition
 ): BrowserTuiMessage {
-  return { kind: "formCheckboxGroup", controlId: control.node, action };
+  return { kind: "formCheckboxGroup", controlId: control.node, transition };
 }
 
 function inlineFormControl(
@@ -403,7 +433,7 @@ function inlineFormControl(
         };
       const numberOptions = {
         id: control.node,
-        presentation: numberInputPresentation(numberEditor),
+        view: numberInputView(numberEditor),
         ...(control.placeholder === null ? {} : { placeholder: control.placeholder }),
         required: control.required
       };
@@ -412,20 +442,20 @@ function inlineFormControl(
         : numberInput({
           ...numberOptions,
           readOnly: control.readOnly,
-          onAction: (action): BrowserTuiMessage => ({
+          onTransition: (transition): BrowserTuiMessage => ({
             kind: "formNumber",
             controlId: control.node,
-            action
+            transition
           })
         });
-      return labelledBrowserControl(control.node, control.label, input);
+      return input;
     }
-    const presentation = editor?.kind === "text"
-      ? textInputPresentation(editor.state)
+    const inputState = editor?.kind === "text"
+      ? textInputState(editor.state)
       : { value, cursor: value.length };
     const inputOptions = {
       id: control.node,
-      presentation,
+      state: inputState,
       ...(control.placeholder === null ? {} : { placeholder: control.placeholder }),
       required: control.required
     };
@@ -435,10 +465,10 @@ function inlineFormControl(
         : passwordInput({
           ...inputOptions,
           readOnly: control.readOnly,
-          onAction: (action): BrowserTuiMessage => ({
+          onTransition: (transition): BrowserTuiMessage => ({
             kind: "formText",
             controlId: control.node,
-            action
+            transition
           })
         })
       : control.disabled
@@ -446,17 +476,17 @@ function inlineFormControl(
         : textInput({
           ...inputOptions,
           readOnly: control.readOnly,
-          onAction: (action): BrowserTuiMessage => ({
+          onTransition: (transition): BrowserTuiMessage => ({
             kind: "formText",
             controlId: control.node,
-            action
+            transition
           })
         });
-    return labelledBrowserControl(control.node, control.label, input);
+    return input;
   }
   if (control.kind === "textarea") {
     const editor = document.formEditors[control.node];
-    const presentation = editor?.kind === "textarea"
+    const areaState = editor?.kind === "textarea"
       ? editor.state
       : createTextAreaState({
         value: values[0] ?? "",
@@ -464,7 +494,7 @@ function inlineFormControl(
       });
     const areaOptions = {
       id: control.node,
-      presentation,
+      state: areaState,
       wrap: true
     };
     const area = control.disabled
@@ -472,11 +502,11 @@ function inlineFormControl(
       : textArea({
         ...areaOptions,
         readOnly: control.readOnly,
-        onAction: (
-          action: Extract<BrowserTuiMessage, { readonly kind: "formArea" }>["action"]
-        ): BrowserTuiMessage => ({ kind: "formArea", controlId: control.node, action })
+        onTransition: (
+          transition: Extract<BrowserTuiMessage, { readonly kind: "formArea" }>["transition"]
+        ): BrowserTuiMessage => ({ kind: "formArea", controlId: control.node, transition })
       });
-    return labelledBrowserControl(control.node, control.label, area);
+    return area;
   }
   if (control.kind === "checkbox") {
     const checkboxOptions = {
@@ -489,10 +519,10 @@ function inlineFormControl(
       ? checkbox({ ...checkboxOptions, disabled: true })
       : checkbox({
         ...checkboxOptions,
-        onAction: (action): BrowserTuiMessage => ({
+        onTransition: (transition): BrowserTuiMessage => ({
           kind: "formValues",
           controlId: control.node,
-          values: action.checked ? [control.value] : []
+          values: transition.checked ? [control.value] : []
         })
       });
   }
@@ -512,7 +542,7 @@ function inlineFormControl(
           value: option.value,
           disabled: option.disabled
         })),
-        presentation: editor?.kind === "checkboxGroup"
+        state: editor?.kind === "checkboxGroup"
           ? editor.state
           : {
             ...(selectedIds[0] === undefined ? {} : { activeId: selectedIds[0] }),
@@ -524,13 +554,13 @@ function inlineFormControl(
         ? checkboxGroup({ ...groupOptions, disabled: true })
         : checkboxGroup({
           ...groupOptions,
-          onAction: (action): BrowserTuiMessage => multiChoiceAction(control, action)
+          onTransition: (transition): BrowserTuiMessage => multiChoiceAction(control, transition)
         });
     }
     const selectedIndex = control.options.findIndex((option) => selectedNodes.has(option.node));
     const editor = document.formEditors[control.node];
     const selectedId = selectedIndex < 0 ? undefined : `${control.node}:${String(selectedIndex)}`;
-    const closedPresentation = {
+    const closedState = {
       kind: "select" as const,
       open: false as const,
       interaction: {
@@ -556,12 +586,12 @@ function inlineFormControl(
     return control.disabled
       ? combobox({
         ...selectOptions,
-        presentation: closedPresentation,
+        state: closedState,
         disabled: true
       })
       : combobox({
         ...selectOptions,
-        presentation: editor?.kind === "combobox" ? editor.state : closedPresentation,
+        state: editor?.kind === "combobox" ? editor.state : closedState,
         onTransition: (transition): BrowserTuiMessage => ({
           kind: "formComboboxTransition",
           controlId: control.node,
@@ -584,7 +614,7 @@ function inlineFormControl(
       ? button({ ...buttonOptions, disabled: true })
       : button({
         ...buttonOptions,
-        onAction: buttonAction({
+        onPress: buttonAction({
           kind: "submitForm",
           formId,
           submitterId: control.node
@@ -600,10 +630,23 @@ function inlineFormControl(
       ? button({ ...buttonOptions, disabled: true })
       : button({
         ...buttonOptions,
-        onAction: buttonAction({
+        onPress: buttonAction({
           kind: "resetForm",
-          formId
+          formId,
+          resetterId: control.node
         })
+      });
+  }
+  if (control.kind === "button") {
+    const buttonOptions = {
+      id: control.node,
+      label: control.label || control.value || "Button"
+    };
+    return control.disabled
+      ? button({ ...buttonOptions, disabled: true })
+      : button({
+        ...buttonOptions,
+        onPress: buttonAction({ kind: "activateButton", controlId: control.node })
       });
   }
   return null;
@@ -615,13 +658,21 @@ function inlineControlGroup(
 ): Element<BrowserTuiMessage> | null {
   const first = group.controls[0];
   if (first === undefined) return null;
-  if (first.kind !== "radio") return inlineFormControl(document, first, group.form);
+  if (first.kind === "hidden") return null;
+  if (first.kind !== "radio") {
+    const control = inlineFormControl(document, first, group.form);
+    return control === null
+      ? null
+      : labelledBrowserControl(first.node, first.node, first.label, control);
+  }
   const controls = group.controls.filter(
     (control): control is DocumentChoiceControl => control.kind === "radio"
   );
   const selected = controls.find((candidate) => formControlValues(document, candidate).length > 0);
-  return radioGroup({
-    id: `${group.form ?? "document"}:radio:${first.name.length === 0 ? first.node : first.name}`,
+  const id = radioGroupElementId(group);
+  if (id === null) throw new Error("A radio control group requires a radio-group identity.");
+  const control = radioGroup({
+    id,
     label: first.label,
     options: controls.map((candidate) => ({
       id: candidate.node,
@@ -629,7 +680,7 @@ function inlineControlGroup(
       value: candidate.value,
       disabled: candidate.disabled
     })),
-    presentation: {
+    state: {
       ...(selected === undefined ? {} : { activeId: selected.node }),
       selection: {
         mode: "single",
@@ -637,8 +688,10 @@ function inlineControlGroup(
       }
     },
     required: controls.some((candidate) => candidate.required),
-    onAction: (action): BrowserTuiMessage => radioAction(controls, selected?.node, action)
+    onTransition: (transition): BrowserTuiMessage => radioAction(controls, selected?.node, transition)
   });
+  const focusNode = selected?.node ?? controls.find((candidate) => !candidate.disabled)?.node ?? first.node;
+  return labelledBrowserControl(id, focusNode, first.label, control);
 }
 
 function browserDocumentChildBounds(
@@ -736,7 +789,7 @@ const browserDocumentComponent = defineComponent<
       )
     };
   },
-  renderBeforeChildren({ model, bounds, viewport: visibleBounds, target, focusedTargetId }) {
+  renderBeforeChildren({ model, bounds, viewport: visibleBounds, target }) {
     if (bounds.width <= 0 || bounds.height <= 0) return;
     const document = model.document;
     const terminalRender = document.terminalRender;
@@ -752,7 +805,7 @@ const browserDocumentComponent = defineComponent<
       target.write(
         contentBounds.row + rowIndex,
         contentBounds.column,
-        rowSegments(document, cellRow, rowIndex, focusedTargetId)
+        rowSegments(document, cellRow, rowIndex)
       );
     }
   },
@@ -770,6 +823,8 @@ const browserDocumentComponent = defineComponent<
     );
     const visibleSemantic = terminalRender.accessibilityBounds.filter((entry) => {
       if (document.source.snapshot.document.control(entry.documentNode) !== null) return false;
+      if (focusedTargetId === `link:${entry.documentNode}`
+        || focusedTargetId === `disclosure:${entry.documentNode}`) return true;
       if (entry.rect.width === 0 || entry.rect.height === 0) {
         return entry.rect.row >= startIndex && entry.rect.row < endIndexExclusive;
       }
@@ -808,7 +863,9 @@ const browserDocumentComponent = defineComponent<
     const document = model.document;
     const terminalRender = document.terminalRender;
     const contentBounds = documentContentBounds(bounds);
-    return terminalRender.focusMap.targets.map((target) => {
+    return terminalRender.focusMap.targets
+      .filter((target) => target.action.kind !== "form-control")
+      .map((target) => {
       const anchor = terminalRender.scrollAnchors.find((entry) => entry.documentNode === target.node);
       let row = target.rects[0]?.row ?? anchor?.row ?? 0;
       let column = target.rects[0]?.column ?? 0;
@@ -834,7 +891,19 @@ const browserDocumentComponent = defineComponent<
           height: target.rects.length === 0 && anchor === undefined ? 0 : Math.max(1, bottom - row)
         }
       };
-    });
+      });
+  },
+  onFocus(event) {
+    return event.kind === "focusLeave"
+      ? { kind: "focusDocumentNode", target: null }
+      : ignoreMessage();
+  },
+  onFocusTarget(event, { model }) {
+    if (event.kind === "focusTargetLeave") return ignoreMessage();
+    const target = documentNodeForTerminalFocusTarget(model.document, event.targetId);
+    return target === null
+      ? ignoreMessage()
+      : { kind: "focusDocumentNode", target };
   },
   hitTargets({ model, bounds, viewport: visibleBounds }) {
     if (bounds.width <= 0 || bounds.height <= 0) return [];
@@ -957,13 +1026,13 @@ function newTabDashboard(state: BrowserTuiState): Element<BrowserTuiMessage> {
     id: `new-tab-recent-${String(index)}`,
     label: entry.title,
     tone: "ghost",
-    onAction: buttonAction({ kind: "omniboxSubmit", value: entry.url })
+    onPress: buttonAction({ kind: "omniboxSubmit", value: entry.url })
   }));
   const bookmarks = state.bookmarks.slice(0, 5).map((entry, index) => button({
     id: `new-tab-bookmark-${String(index)}`,
     label: `★ ${entry.name}`,
     tone: "ghost",
-    onAction: buttonAction({ kind: "omniboxSubmit", value: entry.url })
+    onPress: buttonAction({ kind: "omniboxSubmit", value: entry.url })
   }));
   return surface(column([
     text({ content: "New Tab", id: "new-tab-title", textRole: "title" }),
@@ -984,7 +1053,7 @@ function panelEntryButton(id: string, label: string, target: string): Element<Br
     id,
     label,
     tone: "ghost",
-    onAction: buttonAction({ kind: "omniboxSubmit", value: target })
+    onPress: buttonAction({ kind: "omniboxSubmit", value: target })
   });
 }
 
@@ -1036,25 +1105,25 @@ function sidePanel(state: BrowserTuiState): Element<BrowserTuiMessage> {
         ? [button({
           id: `download-cancel-${String(index)}`,
           label: "Cancel",
-          onAction: buttonAction({ kind: "cancelDownload", id: download.id })
+          onPress: buttonAction({ kind: "cancelDownload", id: download.id })
         })]
         : download.status === "completed"
           ? [
             button({
               id: `download-open-${String(index)}`,
               label: "Open",
-              onAction: buttonAction({ kind: "openDownload", id: download.id, location: "file" })
+              onPress: buttonAction({ kind: "openDownload", id: download.id, location: "file" })
             }),
             button({
               id: `download-folder-${String(index)}`,
               label: "Folder",
-              onAction: buttonAction({ kind: "openDownload", id: download.id, location: "directory" })
+              onPress: buttonAction({ kind: "openDownload", id: download.id, location: "directory" })
             })
           ]
           : [button({
             id: `download-retry-${String(index)}`,
             label: "Retry",
-            onAction: buttonAction({ kind: "retryDownload", id: download.id })
+            onPress: buttonAction({ kind: "retryDownload", id: download.id })
           })];
       return [
         progress,
@@ -1063,7 +1132,7 @@ function sidePanel(state: BrowserTuiState): Element<BrowserTuiMessage> {
           button({
             id: `download-remove-${String(index)}`,
             label: "Remove",
-            onAction: buttonAction({ kind: "removeDownload", id: download.id })
+            onPress: buttonAction({ kind: "removeDownload", id: download.id })
           })
         ], { gap: 1 })
       ];
@@ -1074,19 +1143,19 @@ function sidePanel(state: BrowserTuiState): Element<BrowserTuiMessage> {
         id: "panel-history",
         label: "History",
         tone: panel === "history" ? "primary" : "ghost",
-        onAction: buttonAction({ kind: "toggleSidePanel", panel: "history" })
+        onPress: buttonAction({ kind: "toggleSidePanel", panel: "history" })
       }),
       button({
         id: "panel-bookmarks",
         label: "Bookmarks",
         tone: panel === "bookmarks" ? "primary" : "ghost",
-        onAction: buttonAction({ kind: "toggleSidePanel", panel: "bookmarks" })
+        onPress: buttonAction({ kind: "toggleSidePanel", panel: "bookmarks" })
       }),
       button({
         id: "panel-downloads",
         label: "Downloads",
         tone: panel === "downloads" ? "primary" : "ghost",
-        onAction: buttonAction({ kind: "toggleSidePanel", panel: "downloads" })
+        onPress: buttonAction({ kind: "toggleSidePanel", panel: "downloads" })
       })
     ], { gap: 1 });
   const panelContent = content.length === 0 ? [text({ content: `No ${panel}.` })] : content;
@@ -1096,7 +1165,7 @@ function sidePanel(state: BrowserTuiState): Element<BrowserTuiMessage> {
       id: "browser-side-panel-scroll",
       offset: { row: state.sidePanelScroll.offsetRow },
       scrollbar: { axis: "vertical", visible: "auto" },
-      onScroll: (event): BrowserTuiMessage => ({ kind: "sidePanelScroll", event })
+      onScroll: (request): BrowserTuiMessage => ({ kind: "sidePanelScroll", request })
     })
   ], {
     sizes: [{ kind: "fixed", cells: 1 }, { kind: "fill" }]
@@ -1119,7 +1188,7 @@ function browserToolbar(
     id: "browser-omnibox",
     prompt: document.loading ? "… " : "⌕ ",
     placeholder: "Search or enter address",
-    presentation: commandInputPresentation(state.omnibox),
+    view: commandInputView(state.omnibox),
     display: "popup",
     placement: "below",
     maxVisibleSuggestions: 8,
@@ -1138,7 +1207,7 @@ function browserToolbar(
       accessibleName: "Back",
       density: "compact",
       tone: "ghost",
-      onAction: buttonAction({ kind: "navigate", operation: "back" })
+      onPress: buttonAction({ kind: "navigate", operation: "back" })
     })
     : button({
       id: "browser-back",
@@ -1155,7 +1224,7 @@ function browserToolbar(
       accessibleName: "Forward",
       density: "compact",
       tone: "ghost",
-      onAction: buttonAction({ kind: "navigate", operation: "forward" })
+      onPress: buttonAction({ kind: "navigate", operation: "forward" })
     })
     : button({
       id: "browser-forward",
@@ -1174,7 +1243,7 @@ function browserToolbar(
       accessibleName: document.loading ? "Stop loading" : "Reload",
       density: "compact",
       tone: "ghost",
-      onAction: buttonAction({ kind: "navigate", operation: document.loading ? "stop" : "reload" })
+      onPress: buttonAction({ kind: "navigate", operation: document.loading ? "stop" : "reload" })
     }),
     button({
       id: "browser-new-tab",
@@ -1182,7 +1251,7 @@ function browserToolbar(
       accessibleName: "New tab",
       density: "compact",
       tone: "ghost",
-      onAction: buttonAction({ kind: "newDocument" })
+      onPress: buttonAction({ kind: "newDocument" })
     }),
     omnibox,
     toggleButton({
@@ -1200,13 +1269,13 @@ function browserToolbar(
           label: "Library",
           density: "compact",
           tone: state.sidePanel === null ? "ghost" : "primary",
-          onAction: buttonAction({ kind: "toggleSidePanel", panel: "history" })
+          onPress: buttonAction({ kind: "toggleSidePanel", panel: "history" })
         })]
       : []),
     menuTrigger({
       id: "browser-menu",
       items: browserMenuItems,
-      presentation: menuTriggerPresentation(
+      view: menuTriggerView(
         browserMenuItems,
         state.overlay?.kind === "browserMenu" ? state.overlay.state : { kind: "closed" }
       ),
@@ -1251,11 +1320,10 @@ function findBar(state: BrowserTuiState): Element<BrowserTuiMessage> | null {
   return row([
     textInput({
       id: "browser-find-input",
-      presentation: textInputPresentation(state.findBar.input),
+      state: textInputState(state.findBar.input),
       placeholder: "Find in page",
-      onAction: (action): BrowserTuiMessage => action.kind === "submit"
-        ? { kind: "findSubmit" }
-        : { kind: "findAction", action },
+      onTransition: (transition): BrowserTuiMessage => ({ kind: "findAction", transition }),
+      onSubmit: (): BrowserTuiMessage => ({ kind: "findSubmit" }),
       meta: { accessibleName: "Find in page" }
     }),
     text({
@@ -1263,9 +1331,9 @@ function findBar(state: BrowserTuiState): Element<BrowserTuiMessage> | null {
         ? "0/0"
         : `${String(search.activeMatchIndex + 1)}/${String(search.matches.length)}${search.truncated ? "+" : ""}`
     }),
-    button({ id: "find-previous", label: "↑", accessibleName: "Previous match", tone: "ghost", onAction: buttonAction({ kind: "moveSearch", direction: "prev" }) }),
-    button({ id: "find-next", label: "↓", accessibleName: "Next match", tone: "ghost", onAction: buttonAction({ kind: "moveSearch", direction: "next" }) }),
-    button({ id: "find-close", label: "×", accessibleName: "Close find", tone: "ghost", onAction: buttonAction({ kind: "closeFind" }) })
+    button({ id: "find-previous", label: "↑", accessibleName: "Previous match", tone: "ghost", onPress: buttonAction({ kind: "moveSearch", direction: "prev" }) }),
+    button({ id: "find-next", label: "↓", accessibleName: "Next match", tone: "ghost", onPress: buttonAction({ kind: "moveSearch", direction: "next" }) }),
+    button({ id: "find-close", label: "×", accessibleName: "Close find", tone: "ghost", onPress: buttonAction({ kind: "closeFind" }) })
   ], {
     id: "browser-find",
     gap: 1,
@@ -1292,6 +1360,9 @@ function baseView(state: BrowserTuiState, columns: number, rows: number): Elemen
   );
   const terminalRender = renderPipeline.terminal;
   const incompleteRendering = renderPipelineIncompleteCauses(renderPipeline);
+  const incompleteStatus = incompleteRendering.length === 0
+    ? null
+    : `${selected.snapshot.finalUrl} — rendering incomplete (${incompleteRendering.join(", ")})`;
   const pagePanel = selected.snapshot.finalUrl === "about:newtab"
     ? newTabDashboard(state)
     : browserDocument(selected, terminalRender);
@@ -1321,7 +1392,7 @@ function baseView(state: BrowserTuiState, columns: number, rows: number): Elemen
   return column([
     tabs({
       id: "browser-tabs",
-      presentation: { activeId: selected.id, selectedId: selected.id },
+      state: { activeId: selected.id, selectedId: selected.id },
       maxTabWidth: 36,
       tabs: state.documents.map((document) => ({
         id: document.id,
@@ -1341,10 +1412,8 @@ function baseView(state: BrowserTuiState, columns: number, rows: number): Elemen
       leading: [{
         id: "status",
         kind: "status",
-        text: selected.error ?? state.status?.text ?? (incompleteRendering.length === 0
-          ? selected.snapshot.finalUrl
-          : `${selected.snapshot.finalUrl} — rendering incomplete (${incompleteRendering.join(", ")})`),
-        status: selected.error !== null || state.status?.tone === "error"
+        text: selected.error ?? incompleteStatus ?? state.status?.text ?? selected.snapshot.finalUrl,
+        status: selected.error !== null || incompleteStatus !== null || state.status?.tone === "error"
           ? "error"
           : state.status?.tone === "success"
             ? "success"
@@ -1376,7 +1445,7 @@ function actionPaletteView(palette: ActionPaletteOverlay): Element<BrowserTuiMes
         id: "browser-action-input",
         prompt: ": ",
         placeholder: "Run browser action",
-        presentation: commandInputPresentation(palette.state),
+        view: commandInputView(palette.state),
         ...(palette.validation === undefined ? {} : { validation: { level: "error" as const, message: palette.validation } }),
         display: "expanded",
         onTransition: (transition): BrowserTuiMessage => ({
@@ -1406,7 +1475,7 @@ function pickerView(picker: PickerOverlay): Element<BrowserTuiMessage> {
       content: searchPicker({
         id: "browser-picker-list",
         searchPickerIndex: picker.index,
-        presentation: searchPickerPresentation(picker.state),
+        view: searchPickerView(picker.state),
         onTransition: (transition): BrowserTuiMessage => ({
           kind: "pickerTransition",
           transition
@@ -1443,7 +1512,7 @@ function linkMenuView(menu: LinkMenuOverlay): Element<BrowserTuiMessage> {
   return contextMenu({
     id: "browser-link-menu",
     title: "Link",
-    presentation: contextMenuPresentation(linkMenuItems, menu.state),
+    view: contextMenuView(linkMenuItems, menu.state),
     placement: "cursor",
     onTransition: (transition): BrowserTuiMessage => ({
       kind: "linkMenuTransition",
@@ -1472,9 +1541,9 @@ function downloadPromptView(prompt: DownloadPromptOverlay): Element<BrowserTuiMe
           id: "download-prompt-confirm",
           label: "Download",
           tone: "primary",
-          onAction: buttonAction({ kind: "download", target: prompt.target })
+          onPress: buttonAction({ kind: "download", target: prompt.target })
         }),
-        button({ id: "download-prompt-cancel", label: "Cancel", onAction: buttonAction({ kind: "dismiss" }) })
+        button({ id: "download-prompt-cancel", label: "Cancel", onPress: buttonAction({ kind: "dismiss" }) })
       ], { gap: 1 })
     },
     width: 64,

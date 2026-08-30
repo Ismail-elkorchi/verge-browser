@@ -55,7 +55,9 @@ block/inline flow, flexible sizing and alignment, positioned layout, floats,
 and grids with explicit CSS-pixel tracks. Verge resolves typed custom-property
 fallbacks and media queries against the CSS viewport before terminal cell
 snapping. Reader view ignores author styling, and page CSS
-never controls browser chrome or focus indication.
+never controls browser chrome. Document focus participates in selector matching
+and computed style; Verge's user-agent stylesheet supplies the default visible
+focus indicator.
 
 Downloads go to `Downloads` unless `VERGE_DOWNLOAD_DIR` is set. Partial files
 are removed after cancellation or failure, and existing files are not

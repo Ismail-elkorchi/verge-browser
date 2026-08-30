@@ -4,6 +4,19 @@ All notable changes are documented in this file.
 
 ## Unreleased
 
+- Reuse one indexed CSS selector-matching session across the author cascade and
+  consume `@ismail-elkorchi/css-parser@0.2.4` for compound candidate indexes,
+  dynamic pseudo-class candidates, and document-order relationship joins. If
+  selector work is exhausted, discard the incomplete author candidate set as
+  one transaction while keeping a total user-agent computed style map.
+- Synchronize terminal focus targets with document focus so `:focus` and
+  `:focus-visible` own page focus styling; consume the target-lifecycle contract
+  in `@ismail-elkorchi/terminal-ui@0.1.5`; and remove the inverse-video overlay
+  that could turn large authored text regions into transient white rectangles.
+- Model ordinary `button` controls without debug prose, keep them out of
+  successful form entries, and report rendering truncation ahead of stale
+  navigation-success status text.
+
 - Add an offline, checksum-pinned, MIT-licensed compatibility corpus for
   articles, documentation, forums, search, commerce forms, dashboards,
   responsive pages, multilingual LTR/RTL content, progressive enhancement, and

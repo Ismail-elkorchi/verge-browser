@@ -1,5 +1,5 @@
 import {
-  applyScrollEvent,
+  applyScrollRequest,
   checkboxGroupReducer,
   commitCombobox,
   comboboxReducer,
@@ -11,8 +11,8 @@ import {
   createSearchPickerState,
   createTextAreaState,
   menuTriggerReducer,
-  prepareCommandSuggestions,
-  prepareSearchPickerIndex,
+  createCommandSuggestions,
+  createSearchPickerIndex,
   numberInputReducer,
   searchPickerReducer,
   searchPickerEntryById,
@@ -21,7 +21,7 @@ import {
   textInputReducer
 } from "@ismail-elkorchi/terminal-ui/behavior";
 import { textDocumentText } from "@ismail-elkorchi/terminal-ui/text";
-import { prepareCollectionInteractionIndex } from "@ismail-elkorchi/terminal-ui/interaction";
+import { createCollectionInteractionIndex } from "@ismail-elkorchi/terminal-ui/interaction";
 import {
   defineTui,
   type TuiContext,
@@ -64,7 +64,7 @@ import type {
 import { browserMenuItems, formComboboxPageSize, linkMenuItems } from "./model.js";
 import { browserView } from "./view.js";
 
-const EMPTY_COMMAND_SUGGESTIONS = prepareCommandSuggestions([]);
+const EMPTY_COMMAND_SUGGESTIONS = createCommandSuggestions([]);
 const MAX_PAGE_SEARCH_MATCHES = 2000;
 const MAX_PAGE_SEARCH_QUERY_CODE_UNITS = 1024;
 
@@ -95,7 +95,7 @@ function replacementCommandSuggestions(
   input: string,
   suggestions: readonly ReplacementCommandSuggestion[]
 ) {
-  return prepareCommandSuggestions(suggestions.map((suggestion) => ({
+  return createCommandSuggestions(suggestions.map((suggestion) => ({
     id: suggestion.id,
     completion: {
       range: { startOffset: 0, endOffsetExclusive: input.length },
@@ -149,6 +149,31 @@ function updateDocument(
     ...state,
     documents: state.documents.map((document) => document.id === documentId ? update(document) : document)
   };
+}
+
+function documentWithFocus(
+  document: BrowserDocumentState,
+  target: DocumentNodeRef | null
+): BrowserDocumentState {
+  if (document.documentState.focus === target) return document;
+  return {
+    ...document,
+    documentState: applyDocumentAction(
+      document.snapshot.document,
+      document.documentState,
+      { kind: "focus", target }
+    )
+  };
+}
+
+function updateDocumentFocus(
+  state: BrowserTuiState,
+  document: BrowserDocumentState,
+  target: DocumentNodeRef | null
+): BrowserTuiState {
+  return updateDocument(state, document.id, (current) =>
+    documentWithFocus(current, target)
+  );
 }
 
 function status(text: string, tone: StatusMessage["tone"] = "info"): StatusMessage {
@@ -353,7 +378,7 @@ function openPicker(
   query = ""
 ): BrowserTuiState {
   const entries = controller.pickerEntries(picker, state.documents, state.activeDocumentIndex, query);
-  const index = prepareSearchPickerIndex(entries);
+  const index = createSearchPickerIndex(entries);
   return {
     ...state,
     overlay: {
@@ -467,29 +492,32 @@ function updateFormControl(
   editor?: BrowserDocumentState["formEditors"][string],
   selectedOptions?: readonly DocumentNodeRef[]
 ): BrowserTuiState {
-  return updateDocument(state, document.id, (current) => ({
-    ...current,
-    documentState: control.kind === "checkbox" || control.kind === "radio"
+  return updateDocument(state, document.id, (current) => {
+    const focused = documentWithFocus(current, control.node);
+    return {
+      ...focused,
+      documentState: control.kind === "checkbox" || control.kind === "radio"
       ? applyDocumentAction(
-        current.snapshot.document,
-        current.documentState,
+        focused.snapshot.document,
+        focused.documentState,
         { kind: "set-checked", target: control.node, checked: values.length > 0 }
       )
       : control.kind === "select"
-        ? applyDocumentAction(current.snapshot.document, current.documentState, {
+        ? applyDocumentAction(focused.snapshot.document, focused.documentState, {
           kind: "set-selected-options",
           target: control.node,
           options: selectedOptions ?? control.options.filter((option) => values.includes(option.value)).map((option) => option.node)
         })
-        : applyDocumentAction(current.snapshot.document, current.documentState, {
+        : applyDocumentAction(focused.snapshot.document, focused.documentState, {
           kind: "set-control-value",
           target: control.node,
           value: values[0] ?? ""
         }),
-    ...(editor === undefined
-      ? {}
-      : { formEditors: { ...current.formEditors, [control.node]: editor } })
-  }));
+      ...(editor === undefined
+        ? {}
+        : { formEditors: { ...focused.formEditors, [control.node]: editor } })
+    };
+  });
 }
 
 function firstMissingRequiredControl(
@@ -671,6 +699,8 @@ export function updateBrowser(
       return { state, exit: { reason: "quit" } };
     case "dismiss":
       return result({ ...state, overlay: null });
+    case "focusDocumentNode":
+      return result(updateDocumentFocus(state, document, message.target));
     case "scroll":
       if (state.overlay?.kind === "detail") {
         return result({ ...state, overlay: { ...state.overlay, scrollRow: Math.max(0, state.overlay.scrollRow + message.rows) } });
@@ -713,7 +743,10 @@ export function updateBrowser(
         : bottom > currentRow + viewportRows
           ? bottom - viewportRows
           : currentRow;
-      const updated = documentWithScrollRow(document, terminalRender, revealedRow, viewportRows);
+      const updated = documentWithFocus(
+        documentWithScrollRow(document, terminalRender, revealedRow, viewportRows),
+        target.node
+      );
       return result(updateDocument(state, document.id, () => updated), {
         focus: target.action.kind === "form-control"
           ? { kind: "element", elementId: target.action.node }
@@ -741,11 +774,13 @@ export function updateBrowser(
     case "activateActionAt": {
       const action = actionById(document, message.actionId);
       if (!action) return result({ ...state, status: status("Focus a link or form first.", "error") });
+      const focusedState = updateDocumentFocus(state, document, action.node);
+      const focusedDocument = activeDocument(focusedState);
       if (action.kind === "form-control") {
-        return result(state, { focus: { kind: "element", elementId: action.node } });
+        return result(focusedState, { focus: { kind: "element", elementId: action.node } });
       }
       if (action.kind === "disclosure") {
-        return result(updateDocument(state, document.id, (current) => ({
+        return result(updateDocument(focusedState, document.id, (current) => ({
           ...current,
           documentState: applyDocumentAction(
             current.snapshot.document,
@@ -756,22 +791,22 @@ export function updateBrowser(
       }
       const disposition = message.disposition ?? "current";
       if (disposition === "newForeground" || disposition === "newBackground") {
-        return result(state, {
+        return result(focusedState, {
           effects: [openNewDocumentEffect(
             controller,
             action.destination,
             disposition === "newBackground",
             false,
-            document
+            focusedDocument
           )]
         });
       }
-      return beginNavigation(state, document, action.destination, effect(
+      return beginNavigation(focusedState, focusedDocument, action.destination, effect(
         `navigation:${document.id}`,
         async (effectContext) => navigationMessage(
           controller,
-          document,
-          await controller.openLink(document, action.index, effectContext.signal),
+          focusedDocument,
+          await controller.openLink(focusedDocument, action.index, effectContext.signal),
           `Opened ${action.label}`
         ),
         "replace",
@@ -792,7 +827,7 @@ export function updateBrowser(
         linkMenuItems
       );
       return result({
-        ...state,
+        ...updateDocumentFocus(state, document, action.node),
         overlay: { kind: "linkMenu", actionId: action.id, state: menu }
       });
     }
@@ -952,7 +987,7 @@ export function updateBrowser(
     case "sidePanelScroll":
       return result({
         ...state,
-        sidePanelScroll: applyScrollEvent(state.sidePanelScroll, message.event)
+        sidePanelScroll: applyScrollRequest(state.sidePanelScroll, message.request)
       });
     case "toggleBookmark":
       return result(state, { effects: [effect("bookmark", async () => ({
@@ -1123,7 +1158,7 @@ export function updateBrowser(
     }
     case "findAction": {
       if (state.findBar === null) return result(state);
-      const reducedInput = textInputReducer(state.findBar.input, message.action);
+      const reducedInput = textInputReducer(state.findBar.input, message.transition);
       const input = reducedInput.text.length <= MAX_PAGE_SEARCH_QUERY_CODE_UNITS
         ? reducedInput
         : {
@@ -1153,7 +1188,7 @@ export function updateBrowser(
       const editor = current?.kind === "text"
         ? current.state
         : { text: controlValues(document, control)[0] ?? "", cursor: (controlValues(document, control)[0] ?? "").length };
-      const next = textInputReducer(editor, message.action);
+      const next = textInputReducer(editor, message.transition);
       return result(updateFormControl(state, document, control, [next.text], { kind: "text", state: next }));
     }
     case "formNumber": {
@@ -1171,7 +1206,7 @@ export function updateBrowser(
             ...(control.step === null ? {} : { step: control.step })
           })
         };
-      const next = numberInputReducer(editor, message.action);
+      const next = numberInputReducer(editor, message.transition);
       return result(updateFormControl(
         state,
         document,
@@ -1190,13 +1225,13 @@ export function updateBrowser(
           value: controlValues(document, control)[0] ?? "",
           scroll: createScrollState()
         });
-      const next = textAreaReducer(editor, message.action);
+      const next = textAreaReducer(editor, message.transition);
       return result(updateFormControl(
         state,
         document,
         control,
-        [textDocumentText(next.document)],
-        { kind: "textarea", state: next }
+        [textDocumentText(next.state.document)],
+        { kind: "textarea", state: next.state }
       ));
     }
     case "formComboboxTransition": {
@@ -1228,7 +1263,7 @@ export function updateBrowser(
         };
       const index = current?.kind === "combobox"
         ? current.index
-        : prepareCollectionInteractionIndex(
+        : createCollectionInteractionIndex(
           options.filter((option) => !option.disabled).map((option) => option.id)
         );
       const next = comboboxReducer(editor, message.transition, {
@@ -1286,7 +1321,7 @@ export function updateBrowser(
           ...(selectedIds[0] === undefined ? {} : { activeId: selectedIds[0] }),
           selection: { mode: "multiple" as const, selectedIds }
         };
-      const next = checkboxGroupReducer(interaction, message.action, options);
+      const next = checkboxGroupReducer(interaction, message.transition, options);
       const nextIds = next.selection.mode === "multiple" ? next.selection.selectedIds : [];
       const nextValues = nextIds.flatMap((id) => {
         const option = options.find((candidate) => candidate.id === id);
@@ -1313,25 +1348,42 @@ export function updateBrowser(
         const groupNodes = new Set(
           document.snapshot.document.radioGroup(control.node).map((entry) => entry.node)
         );
-        return result(updateDocument(state, document.id, (current) => ({
-          ...current,
-          documentState: [...groupNodes].reduce(
-            (next, node) => applyDocumentAction(
-              current.snapshot.document,
-              next,
-              { kind: "set-checked", target: node, checked: node === control.node && message.values.length > 0 }
-            ),
-            current.documentState
-          )
-        })));
+        return result(updateDocument(state, document.id, (current) => {
+          const focused = documentWithFocus(current, control.node);
+          return {
+            ...focused,
+            documentState: [...groupNodes].reduce(
+              (next, node) => applyDocumentAction(
+                focused.snapshot.document,
+                next,
+                { kind: "set-checked", target: node, checked: node === control.node && message.values.length > 0 }
+              ),
+              focused.documentState
+            )
+          };
+        }));
       }
       return result(updateFormControl(state, document, control, message.values));
+    }
+    case "activateButton": {
+      const control = controlById(document, message.controlId);
+      if (control?.kind !== "button" || control.disabled) return result(state);
+      return result({
+        ...updateDocumentFocus(state, document, control.node),
+        status: status("This button has no native HTML action.")
+      });
     }
     case "resetForm": {
       const form = controller.form(document, message.formId);
       if (!form) return result(state);
       const nodes = new Set(form.controls.map((control) => control.node));
-      return result(updateDocument(state, document.id, (current) => ({
+      const resetter = message.resetterId === undefined
+        ? null
+        : document.snapshot.document.control(message.resetterId as DocumentNodeRef);
+      const focusedState = resetter?.kind === "reset"
+        ? updateDocumentFocus(state, document, resetter.node)
+        : state;
+      return result(updateDocument(focusedState, document.id, (current) => ({
         ...current,
         documentState: applyDocumentAction(current.snapshot.document, current.documentState, {
           kind: "reset-form",
@@ -1344,6 +1396,10 @@ export function updateBrowser(
       const form = controller.form(document, message.formId);
       if (!form) return result({ ...state, status: status("The form no longer exists.", "error") });
       const submitter = submitterControl(form, message.submitterId);
+      const focusedState = submitter === undefined
+        ? state
+        : updateDocumentFocus(state, document, submitter.node);
+      const focusedDocument = activeDocument(focusedState);
       const missing = form.noValidate || submitter?.formNoValidate === true
         ? undefined
         : firstMissingRequiredControl(controller, document, form.node);
@@ -1356,19 +1412,19 @@ export function updateBrowser(
           }
           : { kind: "element" as const, elementId: missing.node };
         return result({
-          ...state,
+          ...updateDocumentFocus(focusedState, focusedDocument, missing.node),
           status: status(`${missing.label} is required.`, "error")
         }, { focus });
       }
-      return beginNavigation(state, document, submitter?.formAction ?? form.action, effect(
+      return beginNavigation(focusedState, focusedDocument, submitter?.formAction ?? form.action, effect(
         `navigation:${document.id}`,
         async (effectContext) => navigationMessage(
           controller,
-          document,
+          focusedDocument,
           await controller.submitForm(
-            document,
+            focusedDocument,
             form,
-            document.documentState,
+            focusedDocument.documentState,
             message.submitterId as DocumentNodeRef | undefined,
             effectContext.signal
           ),

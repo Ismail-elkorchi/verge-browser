@@ -71,5 +71,7 @@ selectors, properties, and values are ignored and aggregated in the browser's
 diagnostics view. `stylesheetLoadIssueCount` covers transport and resource-load
 failures; it does not claim to count every cascade diagnostic.
 
-Reader view ignores author styles. Browser chrome and keyboard-focus
-indication are never styled by the page.
+Reader view ignores author styles. Browser chrome is never styled by the page.
+Keyboard focus on document nodes participates in `:focus` and `:focus-visible`
+selector matching, with the default indicator supplied by the user-agent
+stylesheet rather than a terminal inverse-video overlay.

@@ -99,7 +99,7 @@ function initialControlState(control: DocumentFormControl): DocumentControlState
       selected: selectedOptions.map((option) => option.node)
     };
   }
-  if (control.kind === "submit" || control.kind === "reset") {
+  if (control.kind === "submit" || control.kind === "reset" || control.kind === "button") {
     return { values: [control.value], checked: null, selected: [] };
   }
   return { values: [], checked: null, selected: [] };

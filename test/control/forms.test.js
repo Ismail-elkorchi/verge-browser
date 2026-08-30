@@ -55,6 +55,23 @@ test("form submission consumes typed dynamic state and only the activated submit
   assert.equal(submission.requestOptions.bodyText, "user=ismail&pass=updated&intent=login");
 });
 
+test("ordinary buttons are controls but never successful form entries", () => {
+  const document = documentWithForm(`<form action="/save">
+    <input name="title" value="Draft">
+    <button type="button" name="command" value="preview">Preview</button>
+    <button name="intent" value="save">Save</button>
+  </form>`);
+  const form = document.forms[0];
+  const ordinary = form.controls.find((control) => control.kind === "button");
+  const submit = form.controls.find((control) => control.kind === "submit");
+  assert.ok(ordinary && submit);
+  assert.equal(ordinary.label, "Preview");
+  assert.equal(
+    buildGetSubmissionUrl(form, createDocumentState(document), submit.node),
+    "https://example.test/save?title=Draft&intent=save"
+  );
+});
+
 test("unchecked and disabled choices are omitted and invalid selected values are rejected", () => {
   const document = documentWithForm(`<form action="/search">
     <input name="q" value="alpha"><input type="checkbox" name="debug" value="1" checked>

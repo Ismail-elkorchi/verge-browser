@@ -699,6 +699,16 @@ test("dynamic pseudo-class state participates in selector matching", () => {
   assert.deepEqual(link.text.color, { r: 171, g: 205, b: 239, a: 1 });
 });
 
+test("the user-agent focus indicator is computed from document focus", () => {
+  const { document, styles } = setup(
+    `<a href="/next">Next</a>`,
+    (state, snapshot) => ({ ...state, focus: snapshot.links[0].node })
+  );
+  const link = styles.style(document.links[0].node);
+  assert.equal(link.text.fontWeight, 700);
+  assert.equal(link.text.underline, true);
+});
+
 test("URL targets and selected options participate in dynamic selector matching", () => {
   const target = setup(`<style>
     :target { color:#112233 }
@@ -777,6 +787,8 @@ test("style work exhaustion is a typed truncation and retains already-computed U
     limit: 1
   });
   assert.equal(styles.style(named(document, "p")).display.box, "principal");
+  assert.equal(styles.style(named(document, "p")).text.color, null);
+  assert.equal(styles.style(named(document, "div")).text.color, null);
 });
 
 test("author-style exhaustion leaves a total baseline style for every retained element", () => {
@@ -798,6 +810,45 @@ test("author-style exhaustion leaves a total baseline style for every retained e
     assert.doesNotThrow(() => styles.style(node.ref));
   }
   assert.equal(styles.outcome.computedNodes, elements);
+});
+
+test("one indexed selector session admits complex author styles within the default work budget", () => {
+  const count = 1_000;
+  const rules = Array.from(
+    { length: count },
+    (_, index) => `.entry-${String(index)} { color: rgb(${String(index % 256)} 0 0) }`
+  ).join("\n");
+  const elements = Array.from(
+    { length: count },
+    (_, index) => `<span class="entry-${String(index)}">${String(index)}</span>`
+  ).join("");
+  const { document, styles } = setup(`<style>${rules}</style><main>${elements}</main>`);
+  assert.equal(styles.outcome.status, "complete");
+  const last = document.node(named(document, "main")).children.at(-1);
+  assert.ok(last);
+  assert.deepEqual(styles.style(last).text.color, { r: 231, g: 0, b: 0, a: 1 });
+});
+
+test("identical author selectors reuse one verified match result", () => {
+  const rules = Array.from(
+    { length: 100 },
+    (_, index) => `.container a { color:rgb(${String(index)} 0 0) }`
+  ).join("\n");
+  const links = Array.from(
+    { length: 500 },
+    (_, index) => `<a href="/${String(index)}">${String(index)}</a>`
+  ).join("");
+  const { document, styles } = setup(
+    `<style>${rules}</style><main class="container">${links}</main>`,
+    undefined,
+    { maxSelectorSteps: 10_000 }
+  );
+
+  assert.equal(styles.outcome.status, "complete");
+  assert.deepEqual(
+    styles.style(document.links.at(-1).node).text.color,
+    { r: 99, g: 0, b: 0, a: 1 }
+  );
 });
 
 test("user-agent baseline styles remain total beyond the former selector depth bound", () => {

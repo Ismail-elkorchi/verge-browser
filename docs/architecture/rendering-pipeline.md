@@ -78,6 +78,13 @@ per source, 2 MiB aggregate stylesheet bytes, depth 16, 64 imported sources,
 2 MiB aggregate imported bytes, 5 redirects per request, 100,000 parsed rules,
 and 256 import edges.
 
+Style resolution creates one indexed selector-matching session for an author
+cascade and reuses it across qualified rules. Selector work is cumulative and
+bounded. If that work limit is exhausted, the author candidate set is discarded
+as one transaction while the total user-agent baseline remains available for
+every retained element; Verge never exposes a source-order-dependent partial
+author cascade.
+
 Author cascade layers are paths rather than flat ordinals. Every path segment
 has parent-relative order; direct declarations occupy the parent's implicit
 final sublayer. Normal declarations order layers forward and put unlayered and
@@ -128,6 +135,11 @@ and one-shot rendering. `COLORFGBG` and the `VERGE_COLOR_SCHEME` override select
 the preferred color scheme; `VERGE_REDUCED_MOTION` selects reduced motion.
 Terminal Unicode, ambiguous-width, and color-depth capabilities remain confined
 to `TerminalRenderContext`.
+
+Terminal focus-target lifecycle events update the focused document node before
+the next rendering pipeline run. Dynamic pseudo-classes therefore consume the
+same document focus state as layout and paint. The terminal view does not add a
+second inverse-video focus style over authored cells.
 
 ## Layout fragment and line-box contracts
 
