@@ -1,14 +1,15 @@
 import {
+  createSelectorMatchSession,
   parseBlockContents,
   parseComponentValues,
   parseDeclaration,
   parseSelectorList,
   parseStylesheet,
   parseStylesheetBytes,
-  querySelectorList,
   resolveCssProperty,
   serializeCssComponentValues,
   specificitiesOfSelectorList,
+  SyntaxResourceError,
   validateCssPropertyValue,
   type ComplexSelector,
   type ComponentValue,
@@ -18,6 +19,7 @@ import {
   type CssStylesheet,
   type SelectorEnvironment,
   type SelectorList,
+  type SelectorMatchSession,
   type SelectorSpecificity
 } from "@ismail-elkorchi/css-parser";
 
@@ -321,6 +323,25 @@ function selectorEnvironment(input: ResolveStylesInput): SelectorEnvironment<Web
     attributeCache.set(node.ref, frozen);
     return frozen;
   };
+  const candidateCache = new Map<string, readonly WebDocumentNode[]>();
+  const candidateNodes = (refs: Iterable<DocumentNodeRef>): readonly WebDocumentNode[] => {
+    const nodes: WebDocumentNode[] = [];
+    for (const ref of refs) {
+      const node = document.node(ref);
+      if (node.kind === "element") nodes.push(node);
+    }
+    return Object.freeze(nodes);
+  };
+  const cachedCandidates = (
+    name: string,
+    create: () => readonly WebDocumentNode[]
+  ): readonly WebDocumentNode[] => {
+    const cached = candidateCache.get(name);
+    if (cached !== undefined) return cached;
+    const created = create();
+    candidateCache.set(name, created);
+    return created;
+  };
   return {
     tree: {
       data(node) {
@@ -365,6 +386,69 @@ function selectorEnvironment(input: ResolveStylesInput): SelectorEnvironment<Web
       return attribute.namespace === null && ASCII_INSENSITIVE_ATTRIBUTES.has(attribute.localName.toLowerCase())
         ? "ascii-insensitive"
         : "sensitive";
+    },
+    pseudoClassCandidates(pseudo) {
+      if (pseudo.argument.kind !== "none") return null;
+      const name = pseudo.name;
+      if (name === "link" || name === "any-link") {
+        return cachedCandidates("links", () =>
+          candidateNodes(document.links.map((link) => link.node))
+        );
+      }
+      if (name === "visited") return Object.freeze([]);
+      if (name === "target") {
+        return state.urlTarget === null
+          ? Object.freeze([])
+          : candidateNodes([state.urlTarget]);
+      }
+      if (name === "hover") {
+        return state.hover === null ? Object.freeze([]) : candidateNodes([state.hover]);
+      }
+      if (name === "active") {
+        return state.active === null ? Object.freeze([]) : candidateNodes([state.active]);
+      }
+      if (name === "focus" || name === "focus-visible") {
+        return state.focus === null ? Object.freeze([]) : candidateNodes([state.focus]);
+      }
+      if (name === "focus-within") {
+        return cachedCandidates("focus-within", () => {
+          const refs: DocumentNodeRef[] = [];
+          let current = state.focus;
+          while (current !== null) {
+            refs.push(current);
+            current = document.parent(current)?.ref ?? null;
+          }
+          return candidateNodes(refs);
+        });
+      }
+      if (name === "checked") {
+        return cachedCandidates("checked", () => {
+          const refs: DocumentNodeRef[] = [];
+          for (const control of document.controls) {
+            if (control.kind === "checkbox" || control.kind === "radio") {
+              if (state.controls.get(control.node)?.checked ?? control.defaultChecked) {
+                refs.push(control.node);
+              }
+            } else if (control.kind === "select") {
+              const selected = state.controls.get(control.node)?.selected ??
+                control.options.filter((option) => option.defaultSelected).map((option) => option.node);
+              refs.push(...selected);
+            }
+          }
+          return candidateNodes(refs);
+        });
+      }
+      if (name === "open") {
+        return cachedCandidates("open", () => candidateNodes(state.open));
+      }
+      if (name === "disabled" || name === "enabled") {
+        return cachedCandidates(name, () => candidateNodes(
+          document.controls
+            .filter((control) => (name === "disabled") === control.disabled)
+            .map((control) => control.node)
+        ));
+      }
+      return null;
     },
     matchPseudoClass(node, pseudo) {
       if (node.kind !== "element") return "no-match";
@@ -610,6 +694,18 @@ function recordCandidate(
   }
   byProperty.set(property, entries);
   candidates.set(key, byProperty);
+}
+
+function mergeCandidateMaps(target: CandidateMap, source: CandidateMap): void {
+  for (const [key, sourceProperties] of source) {
+    const targetProperties = target.get(key) ?? new Map<string, CascadeCandidate[]>();
+    for (const [property, sourceEntries] of sourceProperties) {
+      const targetEntries = targetProperties.get(property) ?? [];
+      targetEntries.push(...sourceEntries);
+      targetProperties.set(property, targetEntries);
+    }
+    target.set(key, targetProperties);
+  }
 }
 
 function declarationsOf(rule: CssQualifiedRule): readonly CssDeclaration[] {
@@ -925,14 +1021,49 @@ function collectCandidates(
   truncate: (budget: keyof StyleBudgets) => void
 ): CandidateMap {
   const candidates: CandidateMap = new Map();
+  const authorCandidates: CandidateMap = new Map();
   const eligible = new Set(styleNodes);
   const environment = selectorEnvironment(input);
   const root = input.document.node(input.document.root);
   let sourceOrder = 0;
   let stylesheetOrdinal = 0;
   let queryCount = 0;
-  let selectorSteps = 0;
   let exhausted = false;
+  const authorMatchCache = new Map<
+    string,
+    ReturnType<SelectorMatchSession<WebDocumentNode>["query"]>
+  >();
+  const selectorExhaustion = new Set<"maxSelectorQueries" | "maxSelectorSteps">();
+  const userAgentMatcher = createSelectorMatchSession(root, environment, {
+    limits: {
+      maxNodes: Math.max(1, totalNodes),
+      maxDepth: Math.max(1, totalNodes),
+      maxSteps: Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, totalNodes * 128))
+    },
+    ...(input.signal === undefined ? {} : { signal: input.signal })
+  });
+  let authorMatcher: SelectorMatchSession<WebDocumentNode> | null | undefined;
+  const authorSelectorMatcher = (): SelectorMatchSession<WebDocumentNode> | null => {
+    if (authorMatcher !== undefined) return authorMatcher;
+    try {
+      authorMatcher = createSelectorMatchSession(root, environment, {
+        limits: {
+          maxNodes: Math.max(1, totalNodes),
+          maxDepth: 2_048,
+          maxSteps: limits.maxSelectorSteps
+        },
+        ...(input.signal === undefined ? {} : { signal: input.signal })
+      });
+    } catch (error) {
+      input.signal?.throwIfAborted();
+      if (!(error instanceof SyntaxResourceError)) throw error;
+      truncate("maxSelectorSteps");
+      selectorExhaustion.add("maxSelectorSteps");
+      exhausted = true;
+      authorMatcher = null;
+    }
+    return authorMatcher;
+  };
   interface LayerNode {
     readonly name: string;
     readonly path: CascadeLayerPath;
@@ -980,7 +1111,6 @@ function collectCandidates(
     return segments.length > 0 && segments.every((segment) => segment.length > 0)
       ? Object.freeze(segments) : null;
   };
-  const selectorExhaustion = new Set<"maxSelectorQueries" | "maxSelectorSteps">();
   for (const source of sources) {
     if (selectorExhaustion.size > 0) break;
     if (!source.mediaConditions.every((condition) => mediaApplies(condition, input, diagnostics, source.sourceUrl))) continue;
@@ -1049,24 +1179,20 @@ function collectCandidates(
               exhausted = true;
               break;
             }
-            if (authorRule && selectorSteps >= limits.maxSelectorSteps) {
-              truncate("maxSelectorSteps");
-              selectorExhaustion.add("maxSelectorSteps");
-              exhausted = true;
-              break;
-            }
             if (authorRule) queryCount += 1;
             try {
-              const baselineSteps = Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, totalNodes * 128));
-              const result = querySelectorList(selectorListFor(selector, parsed.value), root, environment, {
-                limits: {
-                  maxNodes: authorRule ? limits.maxSelectorSteps : Math.max(1, totalNodes),
-                  maxDepth: authorRule ? 2_048 : Math.max(1, totalNodes),
-                  maxSteps: authorRule ? limits.maxSelectorSteps - selectorSteps : baselineSteps
-                },
-                ...(input.signal === undefined ? {} : { signal: input.signal })
-              });
-              if (authorRule) selectorSteps += result.usage.steps;
+              const matcher = authorRule ? authorSelectorMatcher() : userAgentMatcher;
+              if (matcher === null) {
+                truncate("maxSelectorSteps");
+                selectorExhaustion.add("maxSelectorSteps");
+                exhausted = true;
+                break;
+              }
+              let result = authorRule ? authorMatchCache.get(pseudo.text) : undefined;
+              if (result === undefined) {
+                result = matcher.query(selectorListFor(selector, parsed.value));
+                if (authorRule) authorMatchCache.set(pseudo.text, result);
+              }
               const parsedSpecificity = specificities[index] ?? { a: 0, b: 0, c: 0 };
               const specificity = pseudo.pseudo === null
                 ? parsedSpecificity
@@ -1083,8 +1209,7 @@ function collectCandidates(
               }
             } catch (error) {
               input.signal?.throwIfAborted();
-              if (authorRule && error !== null && typeof error === "object" && "code" in error
-                && error.code === "CSS_RESOURCE_LIMIT_EXCEEDED") {
+              if (authorRule && error instanceof SyntaxResourceError) {
                 truncate("maxSelectorSteps");
                 selectorExhaustion.add("maxSelectorSteps");
                 exhausted = true;
@@ -1098,6 +1223,7 @@ function collectCandidates(
           }
           if (exhausted) break;
         }
+        if (exhausted) return;
         for (const declaration of declarationsOf(rule)) {
           const property = canonicalProperty(declaration.name);
           if (property === null) {
@@ -1112,7 +1238,8 @@ function collectCandidates(
           for (const [pseudo, matching] of matchingByPseudo) {
             for (const [ref, specificity] of matching) {
               recordCandidate(
-                candidates, styleKey(ref, pseudo), declaration, source, specificity, sourceOrder, false,
+                source.origin === "author" ? authorCandidates : candidates,
+                styleKey(ref, pseudo), declaration, source, specificity, sourceOrder, false,
                 inheritedLayer?.position ?? null
               );
             }
@@ -1132,7 +1259,7 @@ function collectCandidates(
     layer: null,
     predeclaredLayers: Object.freeze([])
   };
-  for (const ref of styleNodes) {
+  for (const ref of selectorExhaustion.size === 0 ? styleNodes : []) {
     const value = input.document.attribute(ref, "style");
     if (value === null) continue;
     const parsed = parseBlockContents(value, {
@@ -1156,11 +1283,12 @@ function collectCandidates(
       }
       sourceOrder += 1;
       recordCandidate(
-        candidates, styleKey(ref), item, inlineSource, { a: 1, b: 0, c: 0 }, sourceOrder, true,
+        authorCandidates, styleKey(ref), item, inlineSource, { a: 1, b: 0, c: 0 }, sourceOrder, true,
         null
       );
     }
   }
+  if (selectorExhaustion.size === 0) mergeCandidateMaps(candidates, authorCandidates);
   return candidates;
 }
 

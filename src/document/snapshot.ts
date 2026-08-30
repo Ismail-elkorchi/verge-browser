@@ -862,17 +862,13 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
       } else if (element.name === "button") {
         const rawType = (attribute(element.ref, "type") ?? "submit").trim().toLowerCase();
         const type = rawType === "reset" || rawType === "button" ? rawType : "submit";
-        if (type === "submit" || type === "reset") {
-          control = Object.freeze({
-            ...common,
-            kind: type,
-            label: cleanText(text(element.ref)) || common.label,
-            value: attribute(element.ref, "value") ?? "",
-            ...submitterMetadata()
-          });
-        } else {
-          control = Object.freeze({ ...common, kind: "unsupported", inputType: type, reason: "unsupported-button" });
-        }
+        control = Object.freeze({
+          ...common,
+          kind: type,
+          label: cleanText(text(element.ref)) || common.label,
+          value: attribute(element.ref, "value") ?? "",
+          ...submitterMetadata()
+        });
       } else {
         const rawInputType = (attribute(element.ref, "type") ?? "text").trim().toLowerCase();
         const inputType = KNOWN_INPUT_TYPES.has(rawInputType) ? rawInputType : "text";

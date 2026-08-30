@@ -246,7 +246,7 @@ export interface DocumentHiddenControl {
 }
 
 export interface DocumentButtonControl extends DocumentFormControlBase {
-  readonly kind: "submit" | "reset";
+  readonly kind: "submit" | "reset" | "button";
   readonly value: string;
   readonly formAction: string | null;
   readonly formMethod: "get" | "post" | "dialog" | null;
@@ -258,7 +258,7 @@ export interface DocumentButtonControl extends DocumentFormControlBase {
 export interface DocumentUnsupportedControl extends DocumentFormControlBase {
   readonly kind: "unsupported";
   readonly inputType: string;
-  readonly reason: "file-upload" | "unsupported-input" | "unsupported-button";
+  readonly reason: "file-upload" | "unsupported-input";
 }
 
 export type DocumentFormControl =

@@ -141,8 +141,15 @@ test("interactive browser renders the cell buffer and preserves link focus acros
       await runtime.handleInput(key("tab"));
     }
     assert.ok(runtime.frame().focusPath?.includes(linkId));
+    assert.equal(runtime.state().documents[0].documentState.focus, document.snapshot.document.links[0].node);
+    const focusedLinkCells = runtime.frame().cells.filter((cell) =>
+      cell.link?.href === "https://example.test/next"
+    );
+    assert.ok(focusedLinkCells.length > 0);
+    assert.ok(focusedLinkCells.every((cell) => cell.style?.inverse !== true));
     await runtime.resize({ columns: 48, rows: 20 });
     assert.ok(runtime.frame().focusPath?.includes(linkId));
+    assert.equal(runtime.state().documents[0].documentState.focus, document.snapshot.document.links[0].node);
     await runtime.handleInput(key("enter"));
     await waitUntil(runtime, () => runtime.state().documents[0].snapshot.finalUrl === "https://example.test/next");
     assert.equal(runtime.state().documents[0].snapshot.document.title, "Next");
@@ -166,6 +173,14 @@ test("terminal control focus reveals offscreen fragment geometry through the pag
     }
     assert.ok(runtime.frame().focusPath?.includes(linkId));
     await runtime.handleInput(key("arrowDown"));
+    assert.ok(runtime.frame().focusPath?.includes(query.node));
+    assert.equal(runtime.state().documents[0].documentState.focus, query.node);
+    await runtime.handleInput(key("tab"));
+    assert.ok(runtime.frame().focusPath?.includes(language.node));
+    assert.equal(runtime.state().documents[0].documentState.focus, language.node);
+    await runtime.handleInput(key("tab", { shift: true }));
+    assert.ok(runtime.frame().focusPath?.includes(query.node));
+    assert.equal(runtime.state().documents[0].documentState.focus, query.node);
     assert.ok(runtime.frame().focusPath?.includes(query.node));
     const current = runtime.state().documents[0];
     const layout = renderDocumentForViewport(current, 71, 21).terminal;
@@ -273,7 +288,7 @@ test("find and scrolling preserve layout-fragment and document-node identities",
     await runtime.dispatch({ kind: "openFind" });
     await runtime.dispatch({
       kind: "findAction",
-      action: { kind: "edit", operation: { kind: "insert", text: "alpha" } }
+      transition: { kind: "edit", operation: { kind: "insert", text: "alpha" } }
     });
     const search = runtime.state().documents[0].search;
     assert.ok(search?.matches.length > 1);
@@ -293,7 +308,7 @@ test("interactive find keeps one logical match while resize reprojects its highl
     await runtime.dispatch({ kind: "openFind" });
     await runtime.dispatch({
       kind: "findAction",
-      action: { kind: "edit", operation: { kind: "insert", text: query } }
+      transition: { kind: "edit", operation: { kind: "insert", text: query } }
     });
     const narrowDocument = runtime.state().documents[0];
     const narrowSearch = narrowDocument.search;
@@ -367,7 +382,7 @@ test("terminal-ui form controls update document state and submit through semanti
     await runtime.dispatch({
       kind: "formText",
       controlId: query.node,
-      action: { kind: "edit", operation: { kind: "insert", text: "Z" } }
+      transition: { kind: "edit", operation: { kind: "insert", text: "Z" } }
     });
     await runtime.dispatch({ kind: "formValues", controlId: language.node, values: ["fr"] });
     assert.equal(runtime.state().documents[0].documentState.controls.get(query.node).values[0], "alphaZ");
@@ -421,9 +436,56 @@ test("standalone controls use the same terminal-ui editing path without inventin
     await runtime.dispatch({
       kind: "formText",
       controlId: control.node,
-      action: { kind: "edit", operation: { kind: "insert", text: "Z" } }
+      transition: { kind: "edit", operation: { kind: "insert", text: "Z" } }
     });
     assert.equal(runtime.state().documents[0].documentState.controls.get(control.node).values[0], "alphaZ");
+  } finally {
+    await runtime.dispose();
+    await prepared.controller.close();
+  }
+});
+
+test("ordinary buttons use the native terminal control path without debug prose", async () => {
+  const ordinaryButtonLoader = async (requestUrl) => response(
+    requestUrl,
+    `<title>Button</title><main><button type="button" name="command" value="close">Close menu</button></main>`
+  );
+  const { runtime, prepared } = await preparedFixture({ loader: ordinaryButtonLoader });
+  try {
+    const document = runtime.state().documents[0];
+    const control = document.snapshot.document.controls[0];
+    assert.equal(control.kind, "button");
+    assert.match(renderFramePlain(runtime.frame()), /Close menu/u);
+    assert.doesNotMatch(renderFramePlain(runtime.frame()), /unsupported-button/u);
+    for (let count = 0; count < 20 && !runtime.frame().focusPath?.includes(control.node); count += 1) {
+      await runtime.handleInput(key("tab"));
+    }
+    assert.ok(runtime.frame().focusPath?.includes(control.node));
+    assert.equal(
+      runtime.state().documents[0].documentState.focus,
+      control.node,
+      `focus path: ${JSON.stringify(runtime.frame().focusPath)}`
+    );
+    await runtime.handleInput(key("enter"));
+    assert.equal(runtime.state().documents[0].documentState.focus, control.node);
+    assert.equal(runtime.state().status?.text, "This button has no native HTML action.");
+  } finally {
+    await runtime.dispose();
+    await prepared.controller.close();
+  }
+});
+
+test("rendering truncation takes precedence over a stale navigation success status", async () => {
+  const rules = Array.from({ length: 4_097 }, () => "p { color:red }").join("\n");
+  const incompleteLoader = async (requestUrl) => response(
+    requestUrl,
+    `<title>Incomplete</title><style>${rules}</style><main><p>Visible text</p></main>`
+  );
+  const { runtime, prepared } = await preparedFixture({ loader: incompleteLoader });
+  try {
+    const frame = renderFramePlain(runtime.frame());
+    assert.match(frame, /rendering incomplete \(style\.maxSelectorQueries=4096\)/u);
+    assert.doesNotMatch(frame, /Opened Incomplete/u);
   } finally {
     await runtime.dispose();
     await prepared.controller.close();

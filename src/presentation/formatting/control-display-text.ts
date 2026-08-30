@@ -73,7 +73,7 @@ export function controlDisplayText(node: FormattingFormControlNode, tree: Format
       { kind: "control-value", text: value }
     ]);
   }
-  if (control.kind === "submit" || control.kind === "reset") {
+  if (control.kind === "submit" || control.kind === "reset" || control.kind === "button") {
     const label = control.label || control.value;
     return result(control.label, control.value, [
       { kind: "control-decoration", text: "[" },

@@ -1,20 +1,20 @@
 import type {
-  CheckboxGroupAction,
+  CheckboxGroupTransition,
   ComboboxCommitEvent,
   ComboboxControlTransition,
-  UnscrolledComboboxPresentation,
+  UnscrolledComboboxState,
   CommandInputTransition,
   ContextMenuTransition,
   MenuItem,
   MenuActivateEvent,
   MenuTriggerTransition,
-  NumberInputControlAction,
+  NumberInputControlTransition,
   SearchPickerAcceptEvent,
   SearchPickerControlTransition,
   TabCloseEvent,
   TabsTransition,
-  TextAreaAction,
-  TextInputAction
+  TextAreaTransition,
+  TextInputTransition
 } from "@ismail-elkorchi/terminal-ui/components";
 import type {
   CommandInputState,
@@ -28,7 +28,7 @@ import type {
 import type {
   CollectionInteractionIndex,
   CollectionInteractionState,
-  ScrollEvent
+  ScrollRequest
 } from "@ismail-elkorchi/terminal-ui/interaction";
 import type { SearchPickerIndex } from "@ismail-elkorchi/terminal-ui/behavior";
 import type { TextEditBuffer } from "@ismail-elkorchi/terminal-ui/text";
@@ -97,7 +97,7 @@ export interface BrowserDocumentState {
     | { readonly kind: "textarea"; readonly state: TextAreaState }
     | {
         readonly kind: "combobox";
-        readonly state: UnscrolledComboboxPresentation;
+        readonly state: UnscrolledComboboxState;
         readonly index: CollectionInteractionIndex;
       }
     | { readonly kind: "checkboxGroup"; readonly state: CollectionInteractionState }
@@ -198,6 +198,7 @@ export type BrowserTuiMessage =
   | { readonly kind: "scrollTop" }
   | { readonly kind: "scrollBottom" }
   | { readonly kind: "moveSearch"; readonly direction: "next" | "prev" }
+  | { readonly kind: "focusDocumentNode"; readonly target: DocumentNodeRef | null }
   | {
       readonly kind: "movePageFocus";
       readonly direction: "next" | "prev";
@@ -227,7 +228,7 @@ export type BrowserTuiMessage =
   | { readonly kind: "openPicker"; readonly picker: PickerKind; readonly query?: string }
   | { readonly kind: "openDetail"; readonly detail: DetailKind }
   | { readonly kind: "toggleSidePanel"; readonly panel: SidePanelKind }
-  | { readonly kind: "sidePanelScroll"; readonly event: ScrollEvent }
+  | { readonly kind: "sidePanelScroll"; readonly request: ScrollRequest }
   | { readonly kind: "toggleBookmark" }
   | { readonly kind: "openExternal"; readonly target?: string }
   | { readonly kind: "newDocument"; readonly target?: string; readonly background?: boolean }
@@ -242,17 +243,18 @@ export type BrowserTuiMessage =
   | { readonly kind: "pickerAccept"; readonly event: SearchPickerAcceptEvent }
   | { readonly kind: "pickerSelect"; readonly value?: PickerValue }
   | { readonly kind: "openFind" }
-  | { readonly kind: "findAction"; readonly action: TextInputAction }
+  | { readonly kind: "findAction"; readonly transition: TextInputTransition }
   | { readonly kind: "findSubmit" }
   | { readonly kind: "closeFind" }
-  | { readonly kind: "formText"; readonly controlId: string; readonly action: TextInputAction }
-  | { readonly kind: "formNumber"; readonly controlId: string; readonly action: NumberInputControlAction }
-  | { readonly kind: "formArea"; readonly controlId: string; readonly action: TextAreaAction }
+  | { readonly kind: "formText"; readonly controlId: string; readonly transition: TextInputTransition }
+  | { readonly kind: "formNumber"; readonly controlId: string; readonly transition: NumberInputControlTransition }
+  | { readonly kind: "formArea"; readonly controlId: string; readonly transition: TextAreaTransition }
   | { readonly kind: "formComboboxTransition"; readonly controlId: string; readonly transition: ComboboxControlTransition }
   | { readonly kind: "formComboboxCommit"; readonly controlId: string; readonly event: ComboboxCommitEvent }
-  | { readonly kind: "formCheckboxGroup"; readonly controlId: string; readonly action: CheckboxGroupAction }
+  | { readonly kind: "formCheckboxGroup"; readonly controlId: string; readonly transition: CheckboxGroupTransition }
   | { readonly kind: "formValues"; readonly controlId: string; readonly values: readonly string[] }
-  | { readonly kind: "resetForm"; readonly formId: string }
+  | { readonly kind: "activateButton"; readonly controlId: string }
+  | { readonly kind: "resetForm"; readonly formId: string; readonly resetterId?: string }
   | { readonly kind: "submitForm"; readonly formId: string; readonly submitterId?: string }
   | {
       readonly kind: "pageLoaded";

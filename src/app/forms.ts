@@ -17,7 +17,8 @@ function successfulValues(
 ): URLSearchParams {
   const params = new URLSearchParams();
   for (const control of form.controls) {
-    if (control.disabled || control.name.length === 0 || control.kind === "reset" || control.kind === "unsupported") continue;
+    if (control.disabled || control.name.length === 0 || control.kind === "reset"
+      || control.kind === "button" || control.kind === "unsupported") continue;
     const dynamic = state.controls.get(control.node);
     if (control.kind === "submit") {
       if (control.node === submitter) params.append(control.name, control.value);
