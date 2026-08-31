@@ -9,6 +9,7 @@ import {
   type CssNonNegativeLength,
   type CssPixelLength
 } from "./fixed.js";
+import type { CssContentAlignment } from "../style/index.js";
 
 const ZERO = cssNonNegativeLength(cssPx(0));
 
@@ -63,7 +64,7 @@ export interface ResolveFlexLinesInput<Identity> {
   readonly gap: CssNonNegativeLength;
   readonly wrap: "nowrap" | "wrap" | "wrap-reverse";
   readonly reverse: boolean;
-  readonly justifyContent: "start" | "center" | "end" | "space-between" | "space-around" | "space-evenly";
+  readonly justifyContent: CssContentAlignment;
   readonly maxSizingWork?: number;
   readonly signal?: AbortSignal;
 }
@@ -246,11 +247,15 @@ function resolveFlexibleLengths<Identity>(
 function justifyOffsets(
   free: CssPixelLength,
   itemCount: number,
-  justify: ResolveFlexLinesInput<unknown>["justifyContent"]
+  alignment: ResolveFlexLinesInput<unknown>["justifyContent"]
 ): { readonly leading: CssPixelLength; readonly extraBetween: CssPixelLength } {
-  if (free <= 0) return { leading: ZERO, extraBetween: ZERO };
+  const justify = alignment.value === "normal" || alignment.value === "stretch"
+    ? "start"
+    : alignment.value;
+  if (free < 0 && alignment.overflow === "safe") return { leading: ZERO, extraBetween: ZERO };
   if (justify === "end") return { leading: free, extraBetween: ZERO };
   if (justify === "center") return { leading: cssDivide(free, 2), extraBetween: ZERO };
+  if (free <= 0) return { leading: ZERO, extraBetween: ZERO };
   if (justify === "space-between" && itemCount > 1) {
     return { leading: ZERO, extraBetween: cssDivide(free, itemCount - 1) };
   }

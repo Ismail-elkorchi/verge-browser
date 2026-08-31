@@ -1,4 +1,5 @@
-import type { CssGridLine } from "../../style/index.js";
+import type { CssGridLine, CssGridPlacement } from "../../style/index.js";
+import { GRID_AUTO_LINE } from "../../style/grid/index.js";
 import { SparseGridOccupancy } from "./auto-placement.js";
 import {
   GridWorkBudgetExceeded,
@@ -28,6 +29,80 @@ const DEFAULT_AUTOMATIC_SPAN: CssGridLine = Object.freeze({
   index: 1,
   name: null
 });
+
+function isSpan(line: CssGridLine): line is Extract<CssGridLine, { readonly kind: "line" }> {
+  return line.kind === "line" && line.span;
+}
+
+function isNamedOnlySpan(line: CssGridLine): boolean {
+  return isSpan(line) && line.name !== null && line.index === null;
+}
+
+function unnamedSingleSpan(): CssGridLine {
+  return DEFAULT_AUTOMATIC_SPAN;
+}
+
+function normalizeAxisPlacement(
+  originalStart: CssGridLine,
+  originalEnd: CssGridLine
+): readonly [CssGridLine, CssGridLine] {
+  let start = originalStart;
+  let end = originalEnd;
+  // CSS Grid placement conflict handling is performed once before named-line
+  // or integer-line resolution. A pair of spans cannot define an area; the
+  // end-side span contributes nothing.
+  if (isSpan(start) && isSpan(end)) end = GRID_AUTO_LINE;
+  // A named span with no integer has no named line to search from when the
+  // opposite side is automatic. It becomes the initial unnamed span of one.
+  if (isNamedOnlySpan(start) && end.kind === "auto") start = unnamedSingleSpan();
+  if (isNamedOnlySpan(end) && start.kind === "auto") end = unnamedSingleSpan();
+  if (start.kind === "line" && end.kind === "line" && !start.span && !end.span
+    && start.index !== null && end.index !== null
+    && start.name === end.name) {
+    if (start.index === end.index) end = GRID_AUTO_LINE;
+    else if (Math.sign(start.index) === Math.sign(end.index) && start.index > end.index) {
+      [start, end] = [end, start];
+    }
+  }
+  return Object.freeze([start, end]);
+}
+
+/** Normalize placement conflicts before resolving indexes and named lines. */
+export function normalizeGridPlacement(placement: CssGridPlacement): CssGridPlacement {
+  const [columnStart, columnEnd] = normalizeAxisPlacement(placement.columnStart, placement.columnEnd);
+  const [rowStart, rowEnd] = normalizeAxisPlacement(placement.rowStart, placement.rowEnd);
+  return Object.freeze({ columnStart, columnEnd, rowStart, rowEnd });
+}
+
+export function occupiedExplicitGridTracks(
+  placement: GridPlacementResult,
+  axis: "row" | "column",
+  explicitTrackCount: number
+): ReadonlySet<number> {
+  const occupied = new Set<number>();
+  for (const item of placement.items) {
+    const start = axis === "column" ? item.columnStart : item.rowStart;
+    const end = axis === "column" ? item.columnEnd : item.rowEnd;
+    for (let track = Math.max(0, start); track < Math.min(explicitTrackCount, end); track += 1) {
+      occupied.add(track);
+    }
+  }
+  return occupied;
+}
+
+export function offsetGridPlacements(
+  placement: GridPlacementResult,
+  columnOffset: number,
+  rowOffset: number
+): readonly GridAreaPlacement[] {
+  return Object.freeze(placement.items.map((item) => Object.freeze({
+    ...item,
+    columnStart: item.columnStart + columnOffset,
+    columnEnd: item.columnEnd + columnOffset,
+    rowStart: item.rowStart + rowOffset,
+    rowEnd: item.rowEnd + rowOffset
+  })));
+}
 
 function step(work: PlacementWork): void {
   work.input.signal?.throwIfAborted();
@@ -159,9 +234,10 @@ function partialPlacement(
   input: GridPlacementInput,
   work: PlacementWork
 ): { readonly column: ResolvedAxis; readonly row: ResolvedAxis } {
+  const normalized = normalizeGridPlacement(item);
   return Object.freeze({
-    column: resolvedAxis(item.columnStart, item.columnEnd, input.columns, work),
-    row: resolvedAxis(item.rowStart, item.rowEnd, input.rows, work)
+    column: resolvedAxis(normalized.columnStart, normalized.columnEnd, input.columns, work),
+    row: resolvedAxis(normalized.rowStart, normalized.rowEnd, input.rows, work)
   });
 }
 
@@ -191,6 +267,8 @@ export function placeGridItems(input: GridPlacementInput): GridPlacementResult {
     partial.set(item.formattingNode, partialPlacement(item, input, work));
   }
   const result: GridAreaPlacement[] = [];
+  const sparseColumnFrontierByRow = new Map<number, number>();
+  const sparseRowFrontierByColumn = new Map<number, number>();
   let minimumColumn = 0;
   let maximumColumn = input.columns.tracks.length;
   let minimumRow = 0;
@@ -229,7 +307,14 @@ export function placeGridItems(input: GridPlacementInput): GridPlacementResult {
   }
   ensureImplicitLimit(minimumColumn, maximumColumn, input.columns.tracks.length, input);
   ensureImplicitLimit(minimumRow, maximumRow, input.rows.tracks.length, input);
-  const commit = (item: GridItemPlacementInput, columnStart: number, rowStart: number, columnSpan: number, rowSpan: number): void => {
+  const commit = (
+    item: GridItemPlacementInput,
+    columnStart: number,
+    rowStart: number,
+    columnSpan: number,
+    rowSpan: number,
+    updateSparseFrontiers = false
+  ): void => {
     const placement = Object.freeze({
       formattingNode: item.formattingNode,
       sourceIndex: item.sourceIndex,
@@ -243,6 +328,22 @@ export function placeGridItems(input: GridPlacementInput): GridPlacementResult {
     ensureImplicitLimit(placement.rowStart, placement.rowEnd, input.rows.tracks.length, input);
     occupancy.occupy(placement, () => { step(work); });
     result.push(placement);
+    if (updateSparseFrontiers) {
+      for (let row = placement.rowStart; row < placement.rowEnd; row += 1) {
+        step(work);
+        sparseColumnFrontierByRow.set(
+          row,
+          Math.max(sparseColumnFrontierByRow.get(row) ?? minimumColumn, placement.columnEnd)
+        );
+      }
+      for (let column = placement.columnStart; column < placement.columnEnd; column += 1) {
+        step(work);
+        sparseRowFrontierByColumn.set(
+          column,
+          Math.max(sparseRowFrontierByColumn.get(column) ?? minimumRow, placement.rowEnd)
+        );
+      }
+    }
     minimumColumn = Math.min(minimumColumn, placement.columnStart);
     maximumColumn = Math.max(maximumColumn, placement.columnEnd);
     minimumRow = Math.min(minimumRow, placement.rowStart);
@@ -261,6 +362,12 @@ export function placeGridItems(input: GridPlacementInput): GridPlacementResult {
     if (axes === undefined) continue;
     if (input.autoFlow.axis === "row" && axes.row.start !== null && axes.column.start === null) {
       let column = minimumColumn;
+      if (input.autoFlow.packing === "sparse") {
+        for (let row = axes.row.start; row < axes.row.start + axes.row.span; row += 1) {
+          step(work);
+          column = Math.max(column, sparseColumnFrontierByRow.get(row) ?? minimumColumn);
+        }
+      }
       for (;;) {
         step(work);
         const end = automaticAxisEnd(axes.column, column, input.columns, work);
@@ -269,7 +376,7 @@ export function placeGridItems(input: GridPlacementInput): GridPlacementResult {
         ensureImplicitLimit(axes.row.start, axes.row.start + axes.row.span, input.rows.tracks.length, input);
         if (occupancy.vacant(axes.row.start, axes.row.start + axes.row.span, column, end, () => { step(work); })) {
           maximumColumn = Math.max(maximumColumn, end);
-          commit(item, column, axes.row.start, columnSpan, axes.row.span);
+          commit(item, column, axes.row.start, columnSpan, axes.row.span, true);
           break;
         }
         column += 1;
@@ -282,6 +389,12 @@ export function placeGridItems(input: GridPlacementInput): GridPlacementResult {
       }
     } else if (input.autoFlow.axis === "column" && axes.column.start !== null && axes.row.start === null) {
       let row = minimumRow;
+      if (input.autoFlow.packing === "sparse") {
+        for (let column = axes.column.start; column < axes.column.start + axes.column.span; column += 1) {
+          step(work);
+          row = Math.max(row, sparseRowFrontierByColumn.get(column) ?? minimumRow);
+        }
+      }
       for (;;) {
         step(work);
         const end = automaticAxisEnd(axes.row, row, input.rows, work);
@@ -290,7 +403,7 @@ export function placeGridItems(input: GridPlacementInput): GridPlacementResult {
         ensureImplicitLimit(axes.column.start, axes.column.start + axes.column.span, input.columns.tracks.length, input);
         if (occupancy.vacant(row, end, axes.column.start, axes.column.start + axes.column.span, () => { step(work); })) {
           maximumRow = Math.max(maximumRow, end);
-          commit(item, axes.column.start, row, axes.column.span, rowSpan);
+          commit(item, axes.column.start, row, axes.column.span, rowSpan, true);
           break;
         }
         row += 1;

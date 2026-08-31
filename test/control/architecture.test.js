@@ -194,6 +194,9 @@ test("CSS Grid grammar, item generation, intrinsic sizing, and layout retain one
     .map(([, text]) => text).join("\n");
   const intrinsic = (await files(paths.filter((path) => path.startsWith("src/presentation/layout/intrinsic/"))))
     .map(([, text]) => text).join("\n");
+  const genericLayout = await source("src/presentation/layout/layout.ts");
+  const gridContainerLayout = await source("src/presentation/layout/grid/container-layout.ts");
+  const gridIntrinsicLayout = await source("src/presentation/layout/grid/intrinsic-layout.ts");
   const terminal = (await files(paths.filter((path) => path.startsWith("src/presentation/terminal/"))))
     .map(([, text]) => text).join("\n");
   const uiAndApplication = (await files(paths.filter((path) => path.startsWith("src/ui/") || path.startsWith("src/app/"))))
@@ -208,11 +211,22 @@ test("CSS Grid grammar, item generation, intrinsic sizing, and layout retain one
   assert.match(intrinsic, /IntrinsicSizeContributions/u);
   assert.match(layoutGrid, /placeGridItems/u);
   assert.match(layoutGrid, /sizeGridTracks/u);
+  assert.match(gridContainerLayout, /export function layoutGridContainer/u);
+  assert.match(gridIntrinsicLayout, /export function intrinsicGrid(?:Inline|Block)Size/u);
+  assert.match(genericLayout, /layoutGridContainer/u);
+  assert.doesNotMatch(
+    genericLayout,
+    /\b(?:expandExplicitGridAxis|buildGridTrackSequence|placeGridItems|sizeGridTracks|resolvedGridArea)\b/u
+  );
   assert.doesNotMatch(layoutGrid, /@ismail-elkorchi\/css-parser|TerminalCell|terminal-ui/u);
   assert.doesNotMatch(terminal, /(?:parseGrid|grid-template|auto-placement|track sizing|flexFactor)/iu);
   assert.doesNotMatch(uiAndApplication, /presentation\/layout\/grid|(?:place|size)GridTracks?/u);
   for (const [path, text] of await files(paths)) {
-    assert.doesNotMatch(text, /\b(?:CssGridBreadth|CssGridTrack)\b|#layoutGrid\b/u, `${path} retains the former Grid path`);
+    assert.doesNotMatch(
+      text,
+      /\b(?:CssGridBreadth|CssGridTrack|CssGridItemAlignment|CssGridContainerAlignment|parseGridItemAlignment|parseGridContainerAlignment)\b|#layoutGrid\b/u,
+      `${path} retains a former Grid contract`
+    );
   }
   assert.doesNotMatch(
     rootDeclaration,

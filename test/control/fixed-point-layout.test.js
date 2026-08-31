@@ -29,6 +29,7 @@ import {
   placeGridItems,
   sizeGridTracks
 } from "../../dist/presentation/layout/grid/index.js";
+import { IntrinsicContributionCache } from "../../dist/presentation/layout/intrinsic/index.js";
 import {
   parseGridAreaShorthand,
   parseGridLine,
@@ -50,6 +51,22 @@ import {
 const CELL_WIDTH = cssPx(8);
 const ROW_HEIGHT = cssPx(16);
 const ZERO = cssPx(0);
+
+test("intrinsic contribution caching reports cycles and capacity without substituting geometry", () => {
+  const cache = new IntrinsicContributionCache(1);
+  const request = { formattingNode: "intrinsic-node", availableInlineSize: null };
+  let recursive;
+  const first = cache.resolve(request, () => {
+    recursive = cache.resolve(request, () => assert.fail("recursive intrinsic calculation ran"));
+    return { status: "truncated", limit: 7 };
+  });
+  assert.deepEqual(recursive, { status: "cycle" });
+  assert.deepEqual(first, { status: "truncated", limit: 7 });
+  assert.deepEqual(cache.resolve(
+    { formattingNode: "other-node", availableInlineSize: null },
+    () => assert.fail("capacity-exhausted intrinsic calculation ran")
+  ), { status: "truncated", limit: 1 });
+});
 
 function media(columns, rows) {
   return {
@@ -781,7 +798,7 @@ test("Grid track sizing honors fixed, intrinsic, spanning, and flexible tracks",
     resolveLength: (value, basis) => value.kind === "zero" ? ZERO
       : value.kind === "length" && value.unit === "px" ? cssPx(value.value)
         : value.kind === "length" && value.unit === "%" && basis !== null ? cssMultiply(basis, value.value / 100) : null,
-    alignment: "start",
+    alignment: { value: "start", overflow: "default" },
     maxWork: 10_000,
     signal: undefined
   });
@@ -798,7 +815,7 @@ test("Grid track sizing honors fixed, intrinsic, spanning, and flexible tracks",
     gap: ZERO,
     resolveLength: (value, basis) => value.kind === "length" && value.unit === "%" && basis !== null
       ? cssMultiply(basis, value.value / 100) : null,
-    alignment: "start",
+    alignment: { value: "start", overflow: "default" },
     maxWork: 100,
     signal: undefined
   });
@@ -809,7 +826,7 @@ test("Grid track sizing honors fixed, intrinsic, spanning, and flexible tracks",
     availableSize: null,
     gap: ZERO,
     resolveLength: () => null,
-    alignment: "start",
+    alignment: { value: "start", overflow: "default" },
     maxWork: 100,
     signal: undefined
   });
@@ -974,7 +991,7 @@ test("flexible lengths use order, freezing, wrapping, and automatic margins", ()
   const grown = resolveFlexLines({
     items: [item("later", 0, { order: 2, grow: 1 }), item("first", 1, { order: 1, grow: 3, maximum: 50 })],
     containerMainSize: cssPx(100), gap: cssPx(0), wrap: "nowrap", reverse: false,
-    justifyContent: "start"
+    justifyContent: { value: "start", overflow: "default" }
   });
   assert.deepEqual(grown[0].items.map((entry) => entry.identity), ["first", "later"]);
   assert.deepEqual(grown[0].items.map((entry) => cssPixels(entry.targetMainSize)), [50, 50]);
@@ -982,37 +999,45 @@ test("flexible lengths use order, freezing, wrapping, and automatic margins", ()
   const shrunk = resolveFlexLines({
     items: [item("a", 0, { base: 80, minimum: 60 }), item("b", 1, { base: 80, minimum: 10 })],
     containerMainSize: cssPx(100), gap: cssPx(0), wrap: "nowrap", reverse: false,
-    justifyContent: "start"
+    justifyContent: { value: "start", overflow: "default" }
   });
   assert.deepEqual(shrunk[0].items.map((entry) => cssPixels(entry.targetMainSize)), [60, 40]);
 
   const wrapped = resolveFlexLines({
     items: [item("a", 0, { base: 45 }), item("b", 1, { base: 45 }), item("c", 2, { base: 45 })],
     containerMainSize: cssPx(100), gap: cssPx(10), wrap: "wrap", reverse: false,
-    justifyContent: "start"
+    justifyContent: { value: "start", overflow: "default" }
   });
   assert.deepEqual(wrapped.map((line) => line.items.map((entry) => entry.identity)), [["a", "b"], ["c"]]);
 
   const automatic = resolveFlexLines({
     items: [item("a", 0, { autoStart: true }), item("b", 1)],
     containerMainSize: cssPx(100), gap: cssPx(0), wrap: "nowrap", reverse: false,
-    justifyContent: "space-between"
+    justifyContent: { value: "space-between", overflow: "default" }
   });
   assert.equal(cssPixels(automatic[0].items[0].mainOffset), 60);
 
   const fractionalGrow = resolveFlexLines({
     items: [item("a", 0, { grow: 0.25 }), item("b", 1, { grow: 0.25 })],
     containerMainSize: cssPx(100), gap: cssPx(0), wrap: "nowrap", reverse: false,
-    justifyContent: "start"
+    justifyContent: { value: "start", overflow: "default" }
   });
   assert.deepEqual(fractionalGrow[0].items.map((entry) => cssPixels(entry.targetMainSize)), [35, 35]);
 
   const fractionalShrink = resolveFlexLines({
     items: [item("a", 0, { base: 80, shrink: 0.25 }), item("b", 1, { base: 80, shrink: 0.25 })],
     containerMainSize: cssPx(100), gap: cssPx(0), wrap: "nowrap", reverse: false,
-    justifyContent: "start"
+    justifyContent: { value: "start", overflow: "default" }
   });
   assert.deepEqual(fractionalShrink[0].items.map((entry) => cssPixels(entry.targetMainSize)), [65, 65]);
+
+  const overflowing = (overflow) => resolveFlexLines({
+    items: [item("oversized", 0, { base: 120, hypothetical: 120, shrink: 0 })],
+    containerMainSize: cssPx(100), gap: cssPx(0), wrap: "nowrap", reverse: false,
+    justifyContent: { value: "end", overflow }
+  });
+  assert.equal(cssPixels(overflowing("safe")[0].items[0].mainOffset), 0);
+  assert.equal(cssPixels(overflowing("unsafe")[0].items[0].mainOffset), -20);
 });
 
 test("flex formatting applies resolved main sizes, order, directions, and column sizing", () => {
@@ -1471,7 +1496,7 @@ test("flexible-length resolution has deterministic work and cancellation boundar
     gap: ZERO,
     wrap: "nowrap",
     reverse: false,
-    justifyContent: "start",
+    justifyContent: { value: "start", overflow: "default" },
     maxSizingWork: 100
   }), /Flex sizing work budget/u);
   const controller = new globalThis.AbortController();
@@ -1482,7 +1507,7 @@ test("flexible-length resolution has deterministic work and cancellation boundar
     gap: ZERO,
     wrap: "nowrap",
     reverse: false,
-    justifyContent: "start",
+    justifyContent: { value: "start", overflow: "default" },
     signal: controller.signal
   }), /cancel flex sizing/u);
 

@@ -8,11 +8,13 @@ fixture and stylesheet source by SHA-256. The original twelve seed fixtures are
 regressions, not evidence of broad web compatibility by themselves. Resource
 fixtures add linked and embedded stylesheets, nested imports, redirects, cycles,
 encoding evidence, base URLs, media/supports conditions, layers, and resource
-budget rejection. Ten independently authored Grid fixtures cover responsive
+budget rejection. Sixteen independently authored Grid fixtures cover responsive
 product cards, named-area documentation, dashboard spans, sidebar placement,
 RTL flow, overlap and z-index, auto-repeat reflow, positioned descendants,
-nested grids, and dense packing. Normal qualification performs no network
-access.
+nested grids, dense packing, staged intrinsic spanning contributions, sparse
+locked-axis frontiers, placement conflict normalization, invalid grammar,
+collapsed auto-fit gutters, and overflow alignment. Normal qualification
+performs no network access.
 
 Run `npm run compat:check` to build Verge, load every fixture through the same
 `BrowserSession` resource path as the CLI, and render it through the
@@ -31,8 +33,8 @@ There is no global unsupported-feature allowlist.
 `baseline-before.json` records the original seed-corpus measurement against
 protected main and explicitly identifies the metrics that old harness did not
 measure. `baseline-grid-before.json` pins the protected-main result immediately
-before the Grid milestone; `baseline-after.json` records the 24-fixture,
-70-variant native matrix after it. They are evidence, not expected-output
+before the Grid milestone; `baseline-after.json` records the 30-fixture,
+88-variant native matrix after it. They are evidence, not expected-output
 snapshots.
 
 ## Optional Chromium comparison

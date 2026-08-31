@@ -378,7 +378,7 @@
     {
       "source": "css/css-grid/layout-algorithm/grid-find-fr-size-gutters-001.html",
       "behavior": "flex fractions account for gutters, intrinsic bases, and frozen flexible tracks",
-      "terminalAdjustment": "fixed-point remainders are distributed deterministically across flexible tracks",
+      "terminalAdjustment": "26.6 fixed-point truncation is deterministic and no non-normative remainder-filling pass is applied",
       "license": "WPT 3-clause BSD"
     },
     {
@@ -451,6 +451,48 @@
       "source": "css/css-grid/abspos/absolute-positioning-grid-container-containing-block-001.html",
       "behavior": "resolved Grid lines establish an absolute descendant's positioned containing block without entering Grid sizing",
       "terminalAdjustment": "the positioned border rectangle and focus identity are asserted in CSS pixels and cells",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/layout-algorithm/grid-intrinsic-track-sizes-001.html",
+      "behavior": "spanning intrinsic contributions use phase-local planned increases and are independent of item traversal order",
+      "terminalAdjustment": "base sizes and finite or infinite growth-limit state are asserted before free-space maximization",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/placement/grid-auto-placement-implicit-tracks-001.html",
+      "behavior": "sparse locked-row and locked-column placement retains an independent frontier while dense placement restarts at the earliest line",
+      "terminalAdjustment": "physical item rectangles expose implicit fifth-track placement and dense hole filling",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/parsing/grid-area-shorthand.html",
+      "behavior": "Grid placement shorthands preserve integer and named spans before the placement algorithm uniformly handles span conflicts, named-only spans, equal lines, and reversed lines",
+      "terminalAdjustment": "the typed placement contract and resulting fixed-point grid areas are both asserted",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/parsing/grid-auto-flow-valid.html",
+      "behavior": "grid-auto-flow accepts one optional axis and one optional dense component in either order and rejects duplicate components",
+      "terminalAdjustment": "declaration acceptance and @supports use the same style-owned component-value parser",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/parsing/grid-template-shorthand-invalid.html",
+      "behavior": "the ASCII-art grid-template form rejects fixed and automatic repeat functions in its row and column track listings",
+      "terminalAdjustment": "declaration acceptance and @supports consume the same component-tree validation",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/alignment/grid-content-distribution-with-collapsed-tracks-001.html",
+      "behavior": "a gutter collapses whenever either adjacent auto-fit track is collapsed, including distributed alignment space",
+      "terminalAdjustment": "an active/collapsed/active track sequence is asserted in CSS-pixel geometry",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/alignment/grid-align-justify-overflow.html",
+      "behavior": "safe overflow alignment falls back to start while unsafe end and center retain negative offsets",
+      "terminalAdjustment": "oversized Grid items and track collections are checked before clipping and cell snapping",
       "license": "WPT 3-clause BSD"
     },
     {

@@ -11,6 +11,10 @@ import {
   cssPx,
   cssRect
 } from "../../dist/presentation/layout/index.js";
+import {
+  normalizeGridPlacement,
+  sizeGridTracks
+} from "../../dist/presentation/layout/grid/index.js";
 import { buildTextSearchIndex } from "../../dist/presentation/search/index.js";
 import { embeddedStylesheetSources, resolveStyles } from "../../dist/presentation/style/index.js";
 import { buildInlineItemStreamSet } from "../../dist/presentation/text/index.js";
@@ -91,6 +95,134 @@ function rectangle(result, id) {
   };
 }
 
+function cssLength(value) {
+  return cssLengthFromFixed(cssPx(value));
+}
+
+function autoTrack() {
+  return Object.freeze({ kind: "breadth", breadth: Object.freeze({ kind: "auto" }) });
+}
+
+function contribution(formattingNode, start, end, minimum, minContent, maxContent) {
+  return Object.freeze({
+    formattingNode,
+    start,
+    end,
+    minimumContribution: cssLength(minimum),
+    minContent: cssLength(minContent),
+    maxContent: cssLength(maxContent)
+  });
+}
+
+test("staged intrinsic track sizing uses planned increases independent of item order", () => {
+  const first = contribution("first", 0, 1, 10, 10, 10);
+  const spanning = contribution("spanning", 0, 2, 30, 30, 100);
+  const size = (contributions) => sizeGridTracks({
+    tracks: [autoTrack(), autoTrack()],
+    contributions,
+    availableSize: null,
+    gap: cssLength(0),
+    resolveLength: () => null,
+    alignment: { value: "start", overflow: "default" },
+    maxWork: 10_000,
+    signal: undefined
+  });
+  for (const permutation of [[first, spanning], [spanning, first]]) {
+    const result = size(permutation);
+    assert.deepEqual(result.tracks.map((track) => cssPixels(track.baseSize)), [10, 20]);
+    assert.deepEqual(result.tracks.map((track) =>
+      track.growthLimit.kind === "finite" ? cssPixels(track.growthLimit.value) : "infinite"), [10, 90]);
+  }
+
+  const overlaps = [
+    contribution("a", 0, 2, 50, 50, 80),
+    contribution("b", 1, 3, 70, 70, 120),
+    contribution("c", 0, 3, 120, 120, 180)
+  ];
+  const states = [];
+  for (const permutation of [overlaps, [overlaps[2], overlaps[0], overlaps[1]], [...overlaps].reverse()]) {
+    const result = sizeGridTracks({
+      tracks: [autoTrack(), autoTrack(), autoTrack()],
+      contributions: permutation,
+      availableSize: null,
+      gap: cssLength(0),
+      resolveLength: () => null,
+      alignment: { value: "start", overflow: "default" },
+      maxWork: 20_000,
+      signal: undefined
+    });
+    states.push(result.tracks.map((track) => ({
+      base: track.baseSize,
+      growth: track.growthLimit.kind === "finite" ? track.growthLimit.value : null
+    })));
+  }
+  assert.deepEqual(states[1], states[0]);
+  assert.deepEqual(states[2], states[0]);
+
+  const disjointSpanGroups = sizeGridTracks({
+    tracks: [autoTrack(), autoTrack(), autoTrack(), autoTrack(), autoTrack()],
+    contributions: [
+      contribution("early-span-group", 0, 2, 20, 20, 40),
+      contribution("later-span-group", 2, 5, 30, 30, 90)
+    ],
+    availableSize: null,
+    gap: cssLength(0),
+    resolveLength: () => null,
+    alignment: { value: "start", overflow: "default" },
+    maxWork: 30_000,
+    signal: undefined
+  });
+  assert.deepEqual(
+    disjointSpanGroups.tracks.map((track) =>
+      track.growthLimit.kind === "finite" ? cssPixels(track.growthLimit.value) : "infinite"),
+    [20, 20, 30, 30, 30]
+  );
+
+  const constrained = sizeGridTracks({
+    tracks: [
+      { kind: "minmax", minimum: { kind: "auto" }, maximum: { kind: "length", value: { kind: "length", value: 10, unit: "px" } } },
+      { kind: "minmax", minimum: { kind: "auto" }, maximum: { kind: "max-content" } }
+    ],
+    contributions: [contribution("spanning-limit", 0, 2, 30, 30, 60)],
+    availableSize: null,
+    gap: cssLength(0),
+    resolveLength: (value) => value.kind === "length" && value.unit === "px" ? cssLength(value.value) : null,
+    alignment: { value: "start", overflow: "default" },
+    maxWork: 10_000,
+    signal: undefined
+  });
+  assert.deepEqual(constrained.tracks.map((track) => cssPixels(track.baseSize)), [10, 20]);
+
+  const intrinsicModes = (sizingConstraint) => sizeGridTracks({
+    tracks: [autoTrack(), autoTrack()],
+    contributions: [first, spanning],
+    availableSize: null,
+    gap: cssLength(0),
+    resolveLength: () => null,
+    alignment: { value: "start", overflow: "default" },
+    sizingConstraint,
+    maxWork: 10_000,
+    signal: undefined
+  });
+  assert.equal(cssPixels(intrinsicModes("min-content").usedSize), 30);
+  assert.equal(cssPixels(intrinsicModes("max-content").usedSize), 100);
+
+  const subOneFlexible = sizeGridTracks({
+    tracks: [
+      { kind: "breadth", breadth: { kind: "flex", factor: 0.25 } },
+      { kind: "breadth", breadth: { kind: "flex", factor: 0.25 } }
+    ],
+    contributions: [contribution("sub-one-flex", 0, 2, 100, 100, 100)],
+    availableSize: null,
+    gap: cssLength(0),
+    resolveLength: () => null,
+    alignment: { value: "start", overflow: "default" },
+    maxWork: 10_000,
+    signal: undefined
+  });
+  assert.deepEqual(subOneFlexible.tracks.map((track) => cssPixels(track.baseSize)), [50, 50]);
+});
+
 test("explicit and implicit Grid tracks resolve named, negative, and outlying line placements", () => {
   const result = render(`<style>
     #grid{display:grid;width:120px;grid-template-columns:[left] 30px [middle] 1fr [right];
@@ -160,6 +292,79 @@ test("row and column auto-placement grow the implicit Grid and dense packing fil
   assert.equal(rectangle(orderModified, "absolute").x, 0);
 });
 
+test("sparse locked-axis placement retains an independent frontier while dense packing fills holes", () => {
+  const markup = (flow) => `<style>
+    #grid{display:grid;width:160px;grid-template-columns:repeat(4,40px);grid-auto-columns:40px;
+      grid-auto-rows:16px;grid-auto-flow:${flow}}
+    #definite{grid-row:1;grid-column:2}#wide{grid-row:1;grid-column:span 2}#tail{grid-row:1}
+  </style><div id="grid"><div id="definite">d</div><div id="wide">w</div><div id="tail">t</div></div>`;
+  const sparse = render(markup("row"));
+  assert.equal(rectangle(sparse, "wide").x, 80);
+  assert.equal(rectangle(sparse, "tail").x, 160);
+  const dense = render(markup("row dense"));
+  assert.equal(rectangle(dense, "wide").x, 80);
+  assert.equal(rectangle(dense, "tail").x, 0);
+
+  const definiteDoesNotAdvanceFrontier = render(`<style>
+    #grid{display:grid;width:160px;grid-template-columns:repeat(4,40px);grid-auto-rows:16px}
+    #definite{grid-row:1;grid-column:4}#first{grid-row:1}#second{grid-row:1}
+  </style><div id="grid"><div id="definite">d</div><div id="first">f</div><div id="second">s</div></div>`);
+  assert.equal(rectangle(definiteDoesNotAdvanceFrontier, "first").x, 0);
+  assert.equal(rectangle(definiteDoesNotAdvanceFrontier, "second").x, 40);
+
+  const transposed = (flow) => `<style>
+    #grid{display:grid;width:40px;grid-template-columns:40px;grid-template-rows:repeat(4,16px);
+      grid-auto-rows:16px;grid-auto-flow:${flow}}
+    #definite{grid-column:1;grid-row:2}#wide{grid-column:1;grid-row:span 2}#tail{grid-column:1}
+  </style><div id="grid"><div id="definite">d</div><div id="wide">w</div><div id="tail">t</div></div>`;
+  assert.equal(rectangle(render(transposed("column")), "tail").y, 64);
+  assert.equal(rectangle(render(transposed("column dense")), "tail").y, 0);
+});
+
+test("Grid placement conflicts normalize once before line resolution", () => {
+  const auto = Object.freeze({ kind: "auto" });
+  const line = (index, name = null) => Object.freeze({ kind: "line", span: false, index, name });
+  const span = (index, name = null) => Object.freeze({ kind: "line", span: true, index, name });
+  const normalized = (columnStart, columnEnd) => normalizeGridPlacement({
+    columnStart,
+    columnEnd,
+    rowStart: auto,
+    rowEnd: auto
+  });
+  assert.deepEqual(normalized(span(null, "foo"), auto), {
+    columnStart: { kind: "line", span: true, index: 1, name: null },
+    columnEnd: auto,
+    rowStart: auto,
+    rowEnd: auto
+  });
+  assert.deepEqual(normalized(span(null, "foo"), span(null, "foo")).columnEnd, auto);
+  assert.deepEqual(normalized(span(2, "foo"), span(3, "bar")), {
+    columnStart: span(2, "foo"),
+    columnEnd: auto,
+    rowStart: auto,
+    rowEnd: auto
+  });
+
+  const result = render(`<style>#grid{display:grid;width:120px;grid-template-columns:repeat(3,40px)}
+    #equal{grid-column:2/2}#reversed{grid-column:3/1}#negative{grid-column:-2/-1}</style>
+    <div id="grid"><div id="equal">e</div><div id="reversed">r</div><div id="negative">n</div></div>`);
+  assert.deepEqual(((rect) => ({ x: rect.x, width: rect.width }))(rectangle(result, "equal")), { x: 40, width: 40 });
+  assert.deepEqual(((rect) => ({ x: rect.x, width: rect.width }))(rectangle(result, "reversed")), { x: 0, width: 80 });
+  assert.deepEqual(((rect) => ({ x: rect.x, width: rect.width }))(rectangle(result, "negative")), { x: 80, width: 40 });
+  assert.deepEqual(line(-1), { kind: "line", span: false, index: -1, name: null });
+
+  const equivalent = render(`<style>#grid{display:grid;position:relative;width:120px;height:40px;
+      grid-template-columns:repeat(3,40px);grid-template-rows:40px}
+    #shorthand{grid-column:3/1;grid-row:1}#longhand{grid-column-start:3;grid-column-end:1;grid-row:1}
+    #absolute{position:absolute;grid-column:3/1;grid-row:1/2;left:0;right:0;height:10px}</style>
+    <div id="grid"><div id="shorthand"></div><div id="longhand"></div><div id="absolute"></div></div>`);
+  assert.deepEqual(rectangle(equivalent, "shorthand"), rectangle(equivalent, "longhand"));
+  assert.deepEqual(
+    (({ x, width }) => ({ x, width }))(rectangle(equivalent, "absolute")),
+    { x: 0, width: 80 }
+  );
+});
+
 test("intrinsic, fit-content, spanning, and flexible Grid tracks share CSS-pixel contributions", () => {
   const result = render(`<style>
     #grid{display:grid;width:240px;grid-template-columns:min-content max-content fit-content(40px) minmax(20px,1fr) 2fr}
@@ -197,6 +402,70 @@ test("auto-fill and auto-fit use definite inline size, gaps, and collapsed empty
     <div id="grid"><div id="item">item</div></div>`);
   assert.equal(rectangle(fill, "item").width, 80);
   assert.equal(rectangle(fit, "item").width, 240);
+
+  const collapsedMiddle = render(`<style>#grid{display:grid;width:140px;
+    grid-template-columns:repeat(auto-fit,40px);column-gap:10px;justify-content:space-between}
+    #first{grid-column:1}#third{grid-column:3}</style>
+    <div id="grid"><div id="first">first</div><div id="third">third</div></div>`);
+  assert.equal(rectangle(collapsedMiddle, "first").x, 0);
+  assert.equal(rectangle(collapsedMiddle, "third").x, 40);
+
+  const fixedTracks = Array.from({ length: 3 }, () => ({
+    kind: "breadth",
+    breadth: { kind: "length", value: { kind: "length", value: 40, unit: "px" } }
+  }));
+  const gutters = (collapsedTracks, alignment = "start") => sizeGridTracks({
+    tracks: fixedTracks,
+    collapsedTracks,
+    contributions: [],
+    availableSize: cssLength(140),
+    gap: cssLength(10),
+    resolveLength: (value) => value.kind === "length" && value.unit === "px" ? cssLength(value.value) : null,
+    alignment: { value: alignment, overflow: "default" },
+    maxWork: 10_000,
+    signal: undefined
+  });
+  assert.deepEqual(gutters(new Set([1])).activeGutterBoundaries, [false, false]);
+  assert.deepEqual(gutters(new Set([0])).activeGutterBoundaries, [false, true]);
+  assert.deepEqual(gutters(new Set([2])).activeGutterBoundaries, [true, false]);
+  assert.deepEqual(gutters(new Set([0, 1])).activeGutterBoundaries, [false, false]);
+  assert.deepEqual(gutters(new Set([0, 1, 2])).activeGutterBoundaries, [false, false]);
+  assert.equal(cssPixels(gutters(new Set([1]), "space-between").tracks[2].offset), 40);
+  assert.equal(cssPixels(gutters(new Set([1]), "space-around").tracks[2].offset), 55);
+  assert.equal(cssPixels(gutters(new Set([1]), "space-evenly").tracks[2].offset), 60);
+
+  const collapsedRow = render(`<style>#grid{display:grid;width:40px;height:140px;
+    grid-template-rows:repeat(auto-fit,40px);row-gap:10px;align-content:space-between}
+    #first{grid-row:1}#third{grid-row:3}</style>
+    <div id="grid"><div id="first">first</div><div id="third">third</div></div>`);
+  assert.equal(rectangle(collapsedRow, "third").y, 40);
+
+  const rtlCollapsed = render(`<style>#grid{display:grid;direction:rtl;width:140px;
+    grid-template-columns:repeat(auto-fit,40px);column-gap:10px;justify-content:space-between}
+    #first{grid-column:1}#third{grid-column:3}</style>
+    <div id="grid"><div id="first">first</div><div id="third">third</div></div>`);
+  assert.equal(rectangle(rtlCollapsed, "first").x - rectangle(rtlCollapsed, "third").x, 40);
+});
+
+test("Grid overflow alignment distinguishes safe, unsafe, and default actual geometry", () => {
+  const item = (alignment, direction = "ltr", overflow = "visible") => render(`<style>
+    #grid{display:grid;direction:${direction};width:100px;grid-template-columns:100px;overflow:${overflow}}
+    #item{width:120px;justify-self:${alignment}}</style>
+    <div id="grid"><div id="item">oversized</div></div>`);
+  assert.equal(rectangle(item("safe end"), "item").x, 0);
+  assert.equal(rectangle(item("unsafe end"), "item").x, -20);
+  assert.equal(rectangle(item("safe center"), "item").x, 0);
+  assert.equal(rectangle(item("unsafe center"), "item").x, -10);
+  assert.equal(rectangle(item("unsafe end", "rtl"), "item").x, 0);
+  assert.equal(rectangle(item("safe end", "ltr", "hidden"), "item").x, 0);
+
+  const content = (alignment) => render(`<style>#grid{display:grid;width:100px;
+    grid-template-columns:60px 60px;justify-content:${alignment}}</style>
+    <div id="grid"><div id="first">first</div><div>second</div></div>`);
+  assert.equal(rectangle(content("safe end"), "first").x, 0);
+  assert.equal(rectangle(content("unsafe end"), "first").x, -20);
+  assert.equal(rectangle(content("safe center"), "first").x, 0);
+  assert.equal(rectangle(content("unsafe center"), "first").x, -10);
 });
 
 test("Grid percentage gaps use the corresponding content-box axis", () => {
@@ -344,4 +613,46 @@ test("Grid layout budgets reject an uncommittable Grid without clearing finalize
   assert.equal(result.layout.outcome.budget, "maxExplicitGridTracks");
   assert.equal(result.layout.forDocumentNode(result.document.elementById("before")).length > 0, true);
   assert.match(result.terminal.cellBuffer.rows.map((row) => row.text).join("\n"), /before/u);
+});
+
+test("Grid track distribution checks deterministic work and cancellation boundaries", () => {
+  const tracks = Array.from({ length: 64 }, autoTrack);
+  const contributions = Array.from(
+    { length: 256 },
+    (_, index) => contribution(`bounded-${String(index)}`, index % 48, index % 48 + 16, 64, 96, 160)
+  );
+  const input = {
+    tracks,
+    contributions,
+    availableSize: cssLength(1_024),
+    gap: cssLength(1),
+    resolveLength: () => null,
+    alignment: { value: "stretch", overflow: "default" },
+    signal: undefined
+  };
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    assert.throws(
+      () => sizeGridTracks({ ...input, maxWork: 1_000 }),
+      (error) => error?.name === "GridWorkBudgetExceeded"
+        && error.budget === "maxGridTrackSizingWork"
+        && error.limit === 1_000
+    );
+  }
+
+  let cancellationChecks = 0;
+  const cancellation = new Error("cancel Grid track sizing");
+  assert.throws(
+    () => sizeGridTracks({
+      ...input,
+      maxWork: 1_000_000,
+      signal: {
+        throwIfAborted() {
+          cancellationChecks += 1;
+          if (cancellationChecks === 250) throw cancellation;
+        }
+      }
+    }),
+    (error) => error === cancellation
+  );
+  assert.equal(cancellationChecks, 250);
 });

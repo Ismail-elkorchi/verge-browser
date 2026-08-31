@@ -299,10 +299,10 @@ test("Grid computed values retain templates, areas, placements, implicit tracks,
   assert.equal(grid.gridAutoColumns.length, 2);
   assert.equal(grid.gridAutoRows[0].kind, "fit-content");
   assert.deepEqual(grid.gridAutoFlow, { axis: "column", packing: "dense" });
-  assert.equal(grid.alignItems, "normal");
-  assert.equal(grid.justifyItems, "baseline");
-  assert.equal(grid.alignContent, "space-around");
-  assert.equal(grid.justifyContent, "space-evenly");
+  assert.deepEqual(grid.alignItems, { position: "normal", overflow: "default" });
+  assert.deepEqual(grid.justifyItems, { position: "baseline", overflow: "default" });
+  assert.deepEqual(grid.alignContent, { value: "space-around", overflow: "default" });
+  assert.deepEqual(grid.justifyContent, { value: "space-evenly", overflow: "default" });
   assert.deepEqual(grid.rowGap, { kind: "length", value: 3, unit: "px" });
   assert.deepEqual(grid.columnGap, { kind: "length", value: 5, unit: "px" });
 
@@ -319,8 +319,8 @@ test("Grid computed values retain templates, areas, placements, implicit tracks,
   assert.deepEqual(item.gridPlacement.columnEnd, {
     kind: "line", span: true, index: 3, name: "slot"
   });
-  assert.equal(item.alignSelf, "center");
-  assert.equal(item.justifySelf, "stretch");
+  assert.deepEqual(item.alignSelf, { position: "center", overflow: "default" });
+  assert.deepEqual(item.justifySelf, { position: "stretch", overflow: "default" });
   assert.equal(styles.diagnostics.length, 0);
 
   const templates = setup(`<style>
@@ -350,8 +350,16 @@ test("invalid Grid grammar remains invalid and implementation support uses the o
     "grid-template:none / [content] 1fr",
     "grid-template:\"main main\"",
     "grid-column:content -1 / span 2 item",
+    "grid-auto-flow:row",
+    "grid-auto-flow:column",
+    "grid-auto-flow:dense",
+    "grid-auto-flow:row dense",
+    "grid-auto-flow:dense row",
     "grid-auto-flow:column dense",
-    "place-content:space-around space-evenly"
+    "grid-auto-flow:dense column",
+    "place-content:space-around space-evenly",
+    "justify-self:safe end",
+    "align-self:unsafe center"
   ]) assert.equal(implementationSupportsCondition(condition), true, condition);
   for (const condition of [
     "grid-template-columns:repeat(auto-fit,1fr)",
@@ -364,7 +372,13 @@ test("invalid Grid grammar remains invalid and implementation support uses the o
     "grid-column:-1 span",
     "grid-template-areas:\"a a\" \"a b\"",
     "grid-template:[auto] \"main\"",
+    "grid-template:\"main\" / repeat(2,10px)",
     "grid-template:\"main\" / repeat(auto-fit,10px)",
+    "grid-auto-flow:row row",
+    "grid-auto-flow:column column",
+    "grid-auto-flow:dense dense",
+    "grid-auto-flow:row column",
+    "grid-auto-flow:row dense column",
     "grid:auto-flow / 1fr"
   ]) assert.equal(implementationSupportsCondition(condition), false, condition);
 });
@@ -378,12 +392,12 @@ test("flex wrapping and alignment retain typed computed values and CSS-wide sema
   const parent = styles.style(document.elementById("parent"));
   assert.equal(parent.box.flexDirection, "column");
   assert.equal(parent.box.flexWrap, "wrap-reverse");
-  assert.equal(parent.box.justifyContent, "space-between");
-  assert.equal(parent.box.alignItems, "center");
+  assert.deepEqual(parent.box.justifyContent, { value: "space-between", overflow: "default" });
+  assert.deepEqual(parent.box.alignItems, { position: "center", overflow: "default" });
   const child = styles.style(document.elementById("child"));
   assert.equal(child.box.flexWrap, "wrap-reverse");
-  assert.equal(child.box.justifyContent, "space-between");
-  assert.equal(child.box.alignItems, "normal");
+  assert.deepEqual(child.box.justifyContent, { value: "space-between", overflow: "default" });
+  assert.deepEqual(child.box.alignItems, { position: "normal", overflow: "default" });
 });
 
 test("cascade layers, revert-layer, and implementation-backed supports conditions are ordered", () => {
@@ -604,7 +618,7 @@ test("flex item and positioned-flow properties retain typed computed values", ()
   assert.equal(item.flexShrink, 3);
   assert.equal(item.flexBasis.kind, "calculation");
   assert.equal(item.order, -2);
-  assert.equal(item.alignSelf, "baseline");
+  assert.deepEqual(item.alignSelf, { position: "baseline", overflow: "default" });
   assert.deepEqual(item.inset.left, { kind: "length", value: 4, unit: "px" });
   assert.equal(item.zIndex, 7);
   assert.equal(item.float, "right");

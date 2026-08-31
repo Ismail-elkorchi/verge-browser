@@ -39,9 +39,13 @@ const GRID_TRACK_LISTS = Object.freeze([
 ]);
 const GRID_PLACEMENTS = Object.freeze([
   "auto", "1", "-1", "2 / -1", "span 2", "slot / span 3",
-  "-2 name / span name", "span 4096", "span 5000", "0", "-1 span"
+  "-2 name / span name", "span foo / span foo", "span 2 foo / span 3 bar",
+  "4 / 2", "2 / 2", "span 4096", "span 5000", "0", "-1 span"
 ]);
-const GRID_AUTO_FLOWS = Object.freeze(["row", "column", "row dense", "column dense"]);
+const GRID_AUTO_FLOWS = Object.freeze([
+  "row", "column", "dense", "row dense", "dense row", "column dense", "dense column",
+  "row row", "column column", "dense dense", "row column", "row dense column"
+]);
 const ATTRIBUTES = Object.freeze(["aria-label", "class", "data-k", "hidden", "href", "id", "name", "title", "value"]);
 const WORDS = Object.freeze([
   "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa",

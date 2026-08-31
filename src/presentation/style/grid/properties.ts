@@ -6,12 +6,12 @@ import {
 
 import type {
   CssGridAutoFlow,
-  CssGridContainerAlignment,
-  CssGridItemAlignment,
   CssGridLineNames,
   CssGridTemplate,
   CssGridTrackListEntry
 } from "./types.js";
+import { parseContentAlignment, parseSelfAlignment } from "../alignment.js";
+import { parseGridPair } from "./shorthands.js";
 import { parseGridAreaShorthand, parseGridAxisShorthand, parseGridLine, parseGridTemplateAreas } from "./placement-values.js";
 import {
   parseGridAutoTracks,
@@ -31,26 +31,25 @@ export const GRID_LONGHAND_PROPERTIES = Object.freeze(new Set([
 ]));
 
 export function parseGridAutoFlow(source: string): CssGridAutoFlow | null {
-  const parts = source.trim().toLowerCase().split(/\s+/u);
-  if (parts.length < 1 || parts.length > 2) return null;
-  const axis = parts.includes("column") ? "column" : "row";
-  if (parts.some((part) => part !== "row" && part !== "column" && part !== "dense")
-    || (parts.includes("row") && parts.includes("column"))) return null;
-  return Object.freeze({ axis, packing: parts.includes("dense") ? "dense" : "sparse" });
-}
-
-export function parseGridItemAlignment(source: string, allowAuto: boolean): CssGridItemAlignment | null {
-  const value = source.trim().toLowerCase().replace(/^self-/u, "").replace(/^flex-/u, "");
-  return ((allowAuto && value === "auto") || value === "normal" || value === "start" || value === "end" || value === "center"
-    || value === "stretch" || value === "baseline") ? value : null;
-}
-
-export function parseGridContainerAlignment(source: string): CssGridContainerAlignment | null {
-  const value = source.trim().toLowerCase().replace(/^flex-/u, "");
-  return value === "normal" || value === "start" || value === "end" || value === "center" || value === "stretch"
-    || value === "space-between" || value === "space-around" || value === "space-evenly"
-    ? value
-    : null;
+  const parsed = parseComponentValues(source);
+  if (!parsed.ok) return null;
+  const components = parsed.value.filter((value) => value.kind !== "whitespace");
+  if (components.length < 1 || components.length > 2
+    || components.some((value) => value.kind !== "ident")) return null;
+  let axis: CssGridAutoFlow["axis"] | null = null;
+  let packing: CssGridAutoFlow["packing"] = "sparse";
+  for (const component of components) {
+    if (component.kind !== "ident") return null;
+    const keyword = component.value.toLowerCase();
+    if (keyword === "row" || keyword === "column") {
+      if (axis !== null) return null;
+      axis = keyword;
+    } else if (keyword === "dense") {
+      if (packing === "dense") return null;
+      packing = "dense";
+    } else return null;
+  }
+  return Object.freeze({ axis: axis ?? "row", packing });
 }
 
 function splitSlash(values: readonly ComponentValue[]): readonly [readonly ComponentValue[], readonly ComponentValue[] | null] | null {
@@ -105,8 +104,10 @@ export function parseGridTemplateShorthand(source: string): CssGridTemplate | nu
   }
   const columns = columnValues === null ? Object.freeze({ kind: "none" as const }) : templateTrackList(columnValues);
   if (columns === null) return null;
-  if (columns.kind === "track-list" && columns.entries.some((entry) =>
-    entry.kind === "repeat" && entry.repetition.kind !== "fixed")) return null;
+  // The ASCII-art form's row and column track listings use
+  // <track-size>, not <track-repeat>. All repeat() forms are therefore
+  // invalid here, including fixed repetitions.
+  if (columns.kind === "track-list" && columns.entries.some((entry) => entry.kind === "repeat")) return null;
   const rowEntries: CssGridTrackListEntry[] = [];
   const areaRows: ComponentValue[] = [];
   let index = 0;
@@ -159,20 +160,18 @@ export function gridPropertyValueSupported(property: string, value: string): boo
     case "grid-column":
     case "grid-row": return parseGridAxisShorthand(value) !== null;
     case "grid-area": return parseGridAreaShorthand(value) !== null;
-    case "justify-items": return parseGridItemAlignment(value, false) !== null;
-    case "align-items": return parseGridItemAlignment(value, false) !== null;
+    case "justify-items": return parseSelfAlignment(value, false) !== null;
+    case "align-items": return parseSelfAlignment(value, false) !== null;
     case "justify-self":
-    case "align-self": return parseGridItemAlignment(value, true) !== null;
+    case "align-self": return parseSelfAlignment(value, true) !== null;
     case "justify-content":
-    case "align-content": return parseGridContainerAlignment(value) !== null;
+    case "align-content": return parseContentAlignment(value) !== null;
     case "place-items":
     case "place-self":
     case "place-content": {
-      const parts = value.trim().split(/\s+/u);
-      if (parts.length < 1 || parts.length > 2) return false;
       return property === "place-content"
-        ? parts.every((part) => parseGridContainerAlignment(part) !== null)
-        : parts.every((part) => parseGridItemAlignment(part, property === "place-self") !== null);
+        ? parseGridPair(value, parseContentAlignment) !== null
+        : parseGridPair(value, (part) => parseSelfAlignment(part, property === "place-self")) !== null;
     }
     default: return false;
   }

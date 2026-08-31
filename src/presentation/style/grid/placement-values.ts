@@ -45,7 +45,7 @@ export function parseGridLineComponents(values: readonly ComponentValue[]): CssG
     name = candidate;
   }
   if (significant.length === 0 || (index === null && name === null) || (span && (index ?? 1) < 1)) return null;
-  return Object.freeze({ kind: "line", span, index: span && index === null ? 1 : index, name });
+  return Object.freeze({ kind: "line", span, index, name });
 }
 
 export function parseGridLine(source: string): CssGridLine | null {

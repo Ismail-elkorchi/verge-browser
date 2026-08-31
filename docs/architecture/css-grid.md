@@ -48,7 +48,16 @@ one bounded repetition.
 Placement consumes Grid items in order-modified document order with source
 order as the stable tie breaker. It commits both-axis definite items first,
 then major-axis definite items, then cursor-positioned items. Row and column
-flow each support sparse and dense packing. Definite overlaps remain overlaps.
+flow each support sparse and dense packing. Sparse locked-row/locked-column
+placement retains one frontier per definite row/column, including spans; dense
+placement restarts at the earliest implicit-grid line. Definite overlaps remain
+overlaps.
+
+One placement normalization contract handles longhands, shorthands, ordinary
+Grid items, and absolutely positioned Grid descendants before line lookup. It
+swaps reversed resolved lines, removes an equal end line, discards an end-side
+span when both sides are spans, and converts a remaining named-only span to an
+unnamed span of one only when it has no definite line from which to search.
 
 Occupancy is stored as sorted, merged column intervals keyed by row. Vacancy
 queries and interval insertion consume placement work and check cancellation;
@@ -66,14 +75,24 @@ CSS-pixel text-metrics contracts. Controls, replaced boxes, block, flex, Grid,
 and the currently supported table slice contribute without invoking terminal
 painting. Nested Grid can therefore size a parent Grid directly.
 
-For each axis, track sizing initializes base sizes and growth limits, applies
-non-spanning and spanning intrinsic contributions, maximizes eligible tracks,
-freezes flexible tracks whose intrinsic base exceeds the current flex fraction,
-expands the remaining flexible tracks, and stretches eligible auto tracks for
-content alignment. Gaps remain outside track base sizes. Fractional factors
-below one may intentionally leave free space. Column tracks are resolved before
-row intrinsic contributions so text wrapping at the used column width affects
-row sizing.
+For each axis, track sizing retains finite or infinite growth limits and
+initializes fixed and intrinsic sizing functions separately. It resolves all
+span-one contributions before increasing-span groups. Every spanning phase
+computes item-incurred increases from the pre-phase track state, distributes to
+affected and then eligible non-affected tracks, applies beyond-limit priorities,
+and commits only the maximum planned increase after every item in the group has
+been examined. The temporary infinitely-growable state is scoped to the
+intrinsic-maximum and following max-content-maximum phases. Items crossing
+flexible tracks are processed together.
+
+Maximization freezes tracks at finite growth limits. Flexible sizing uses the
+normative repeated-freezing `fr` calculation for definite and indefinite space,
+including factors below one; there is no remainder-filling allocator. Stretch
+then expands only eligible non-collapsed auto tracks. Each boundary stores
+whether its gutter is active, so either adjacent collapsed auto-fit track
+collapses that gutter for sizing, alignment, area geometry, and positioned
+containing blocks. Column tracks are resolved before row intrinsic
+contributions so text wrapping at the used column width affects row sizing.
 
 All geometry is deterministic 26.6 fixed-point CSS pixels. Definite and
 indefinite percentage bases remain distinct; no terminal row or column enters
@@ -87,7 +106,16 @@ automatic margins, `justify-self`, `align-self`, container defaults, stretch,
 and the supported baseline cases resolve there. Stretch performs descendant
 relayout, including text wrapping and percentage-dependent descendants.
 Container content alignment distributes surplus space independently on the row
-and column axes.
+and column axes. Alignment values retain their overflow mode: explicit `safe`
+falls back to start on overflow, while explicit `unsafe` preserves negative end
+or center offsets. Automatic margins resolve before self-alignment, and stretch
+is limited to stretch-eligible subjects.
+
+`src/presentation/layout/grid/container-layout.ts` owns complete Grid
+formatting-context orchestration. Grid intrinsic orchestration is adjacent in
+`intrinsic-layout.ts`; the generic layout builder supplies only a narrow host
+for child layout, intrinsic queries, used-value resolution, fragment
+translation, positioned layout, cancellation, and budgets.
 
 An absolute Grid descendant does not enter placement occupancy or track sizing.
 When both applicable lines resolve, its Grid area establishes its positioned

@@ -91,10 +91,17 @@ const LIMITS_MS = Object.freeze({
   explicitGridConstructionP95: 100,
   gridNamedLineResolutionP95: 250,
   gridAutoPlacementP95: 500,
+  gridSparseLockedAxisPlacementP95: 500,
   gridDensePlacementP95: 1_000,
+  gridNonSpanningIntrinsicSizingP95: 500,
+  gridSpanningIntrinsicSizingP95: 500,
+  gridPlannedIncreaseDistributionP95: 500,
+  gridFlexibleTrackSizingP95: 500,
+  gridCollapsedGutterConstructionP95: 500,
   gridColumnTrackSizingP95: 500,
   gridRowTrackSizingP95: 500,
   gridItemLayoutP95: 2_000,
+  gridContainerOrchestrationP95: 2_000,
   completeGridLayoutP95: 2_000,
   gridDisplayListConstructionP95: 500,
   gridCellRasterizationP95: 1_000,
@@ -106,7 +113,13 @@ const LIMITS_MS = Object.freeze({
   nestedGrids: 5_000,
   gridAutoFitProductListing: 5_000,
   gridOverlappingItems: 5_000,
-  gridManyNamedLines: 5_000
+  gridManyNamedLines: 5_000,
+  gridEqualSpanItems: 5_000,
+  gridOverlappingSpans: 5_000,
+  gridSpanGroups: 5_000,
+  gridGrowthLimits: 5_000,
+  gridSparseFrontiers: 5_000,
+  gridCollapsedAutoFitTracks: 5_000
 });
 const LIMITS_MEMORY_MIB = Object.freeze({
   hundredThousandNodePeakHeapGrowth: 384,
@@ -571,7 +584,25 @@ const workloadFormatting = {
   ).join("")}</div>`, "grid-overlapping-items"),
   gridManyNamedLines: formattingFixture(`<div style="display:grid;width:1000px;grid-template-columns:${Array.from(
     { length: 1_000 }, (_, index) => `[line-${String(index)}] 1px`
-  ).join(" ")} [line-end]"><span style="grid-column:line-500/line-end">named lines</span></div>`, "grid-many-named-lines")
+  ).join(" ")} [line-end]"><span style="grid-column:line-500/line-end">named lines</span></div>`, "grid-many-named-lines"),
+  gridEqualSpanItems: formattingFixture(`<div style="display:grid;grid-template-columns:repeat(50,minmax(auto,1fr))">${Array.from(
+    { length: 500 }, (_, index) => `<span style="grid-column:span 5">equal span ${String(index)}</span>`
+  ).join("")}</div>`, "grid-equal-span-items"),
+  gridOverlappingSpans: formattingFixture(`<div style="display:grid;grid-template-columns:repeat(50,minmax(auto,1fr))">${Array.from(
+    { length: 500 }, (_, index) => `<span style="grid-column:${String(1 + index % 10)}/span 25">overlap span ${String(index)}</span>`
+  ).join("")}</div>`, "grid-overlapping-spans"),
+  gridSpanGroups: formattingFixture(`<div style="display:grid;grid-template-columns:repeat(50,minmax(auto,1fr))">${Array.from(
+    { length: 500 }, (_, index) => `<span style="grid-column:span ${String(1 + index % 50)}">span group ${String(index)}</span>`
+  ).join("")}</div>`, "grid-span-groups"),
+  gridGrowthLimits: formattingFixture(`<div style="display:grid;grid-template-columns:repeat(50,minmax(auto,40px))">${Array.from(
+    { length: 500 }, (_, index) => `<span style="grid-column:span ${String(2 + index % 8)}">growth limit ${String(index)} ${"x".repeat(index % 32)}</span>`
+  ).join("")}</div>`, "grid-growth-limits"),
+  gridSparseFrontiers: formattingFixture(`<div style="display:grid;grid-template-columns:repeat(4,20px);grid-auto-flow:row">${Array.from(
+    { length: 500 }, (_, index) => `<span style="grid-row:${String(1 + Math.floor(index / 3))};grid-column:span ${index % 3 === 0 ? "2" : "1"}">frontier ${String(index)}</span>`
+  ).join("")}</div>`, "grid-sparse-frontiers"),
+  gridCollapsedAutoFitTracks: formattingFixture(`<div style="display:grid;width:1000px;grid-template-columns:repeat(auto-fit,minmax(8px,1fr));gap:2px">${Array.from(
+    { length: 60 }, (_, index) => `<span style="grid-column:${String(1 + index * 2)}">auto-fit ${String(index)}</span>`
+  ).join("")}</div>`, "grid-collapsed-auto-fit-tracks")
 };
 const workloadMetrics = {};
 const workloadStageMetrics = {};
@@ -791,11 +822,47 @@ const gridSizingContributions = Object.freeze(Array.from({ length: 500 }, (_, in
   minContent: cssPx(24 + index % 32),
   maxContent: cssPx(64 + index % 64)
 })));
+const gridIntrinsicTracks = benchmarkGridAxis(requireGridTrackList("repeat(1000,auto)"), cssPx(12_000));
+const gridNonSpanningContributions = Object.freeze(Array.from({ length: 1_000 }, (_, index) => Object.freeze({
+  formattingNode: `non-spanning-${String(index)}`,
+  start: index,
+  end: index + 1,
+  minimumContribution: cssPx(8 + index % 24),
+  minContent: cssPx(8 + index % 24),
+  maxContent: cssPx(32 + index % 64)
+})));
+const gridPlannedIncreaseTracks = benchmarkGridAxis(requireGridTrackList("repeat(200,minmax(auto,max-content))"), cssPx(4_000));
+const gridPlannedIncreaseContributions = Object.freeze(Array.from({ length: 500 }, (_, index) => {
+  const start = index % 180;
+  const span = 2 + index % 20;
+  return Object.freeze({
+    formattingNode: `planned-increase-${String(index)}`,
+    start,
+    end: Math.min(200, start + span),
+    minimumContribution: cssPx(40 + index % 80),
+    minContent: cssPx(40 + index % 80),
+    maxContent: cssPx(120 + index % 160)
+  });
+}));
+const gridSparseLockedItems = Object.freeze(Array.from({ length: 1_000 }, (_, sourceIndex) => Object.freeze({
+  formattingNode: `locked-${String(sourceIndex)}`,
+  sourceIndex,
+  order: 0,
+  columnStart: GRID_AUTO_LINE,
+  columnEnd: sourceIndex % 5 === 0
+    ? Object.freeze({ kind: "line", span: true, index: 2, name: null })
+    : GRID_AUTO_LINE,
+  rowStart: Object.freeze({ kind: "line", span: false, index: 1 + Math.floor(sourceIndex / 20), name: null }),
+  rowEnd: GRID_SPAN_ONE
+})));
+const gridCollapsedTracks = new Set(Array.from({ length: 1_000 }, (_, index) => index).filter((index) => index % 2 === 1));
 const gridItemLayoutFormatting = workloadFormatting.gridAutoPlacement1000;
 const completeGridFormatting = workloadFormatting.nestedGrids;
+const gridContainerFormatting = workloadFormatting.gridSpanningItems500;
 const gridResizeFormatting = workloadFormatting.gridAutoFitProductListing;
 const gridItemLayoutStreams = inlineItemStreams(gridItemLayoutFormatting);
 const completeGridStreams = inlineItemStreams(completeGridFormatting);
+const gridContainerStreams = inlineItemStreams(gridContainerFormatting);
 const gridResizeStreams = inlineItemStreams(gridResizeFormatting);
 const measuredGridLayout = layoutFragments(gridItemLayoutFormatting, 120, gridItemLayoutStreams);
 const measuredGridDisplayList = displayList(measuredGridLayout, 120);
@@ -829,6 +896,17 @@ const gridStageMetrics = {
     });
     if (placement.items.length !== 1_000) throw new Error("auto-placement benchmark lost Grid items");
   }),
+  gridSparseLockedAxisPlacement: repeatedStage(() => {
+    const placement = placeGridItems({
+      items: gridSparseLockedItems,
+      columns: gridPlacementColumns,
+      rows: gridRows,
+      autoFlow: { axis: "row", packing: "sparse" },
+      limits: GRID_WORK_LIMITS,
+      signal: undefined
+    });
+    if (placement.items.length !== 1_000) throw new Error("sparse locked-axis benchmark lost Grid items");
+  }),
   gridDensePlacement: repeatedStage(() => {
     const placement = placeGridItems({
       items: gridDenseItems,
@@ -840,6 +918,74 @@ const gridStageMetrics = {
     });
     if (placement.items.length !== 1_000) throw new Error("dense-placement benchmark lost Grid items");
   }),
+  gridNonSpanningIntrinsicSizing: repeatedStage(() => {
+    const sizing = sizeGridTracks({
+      tracks: gridIntrinsicTracks.tracks,
+      contributions: gridNonSpanningContributions,
+      availableSize: null,
+      gap: cssPx(1),
+      resolveLength: gridBenchmarkLength,
+      alignment: { value: "start", overflow: "default" },
+      maxWork: GRID_WORK_LIMITS.maxGridTrackSizingWork,
+      signal: undefined
+    });
+    if (sizing.tracks.length !== 1_000) throw new Error("non-spanning intrinsic benchmark lost tracks");
+  }),
+  gridSpanningIntrinsicSizing: repeatedStage(() => {
+    const sizing = sizeGridTracks({
+      tracks: gridSizingTracks.tracks,
+      contributions: gridSizingContributions,
+      availableSize: null,
+      gap: cssPx(1),
+      resolveLength: gridBenchmarkLength,
+      alignment: { value: "start", overflow: "default" },
+      maxWork: GRID_WORK_LIMITS.maxGridTrackSizingWork,
+      signal: undefined
+    });
+    if (sizing.tracks.length !== 1_000) throw new Error("spanning intrinsic benchmark lost tracks");
+  }),
+  gridPlannedIncreaseDistribution: repeatedStage(() => {
+    const sizing = sizeGridTracks({
+      tracks: gridPlannedIncreaseTracks.tracks,
+      contributions: gridPlannedIncreaseContributions,
+      availableSize: null,
+      gap: cssPx(1),
+      resolveLength: gridBenchmarkLength,
+      alignment: { value: "start", overflow: "default" },
+      maxWork: GRID_WORK_LIMITS.maxGridTrackSizingWork,
+      signal: undefined
+    });
+    if (sizing.tracks.length !== 200) throw new Error("planned-increase benchmark lost tracks");
+  }),
+  gridFlexibleTrackSizing: repeatedStage(() => {
+    const sizing = sizeGridTracks({
+      tracks: gridSizingTracks.tracks,
+      contributions: gridSizingContributions,
+      availableSize: cssPx(12_000),
+      gap: cssPx(1),
+      resolveLength: gridBenchmarkLength,
+      alignment: { value: "start", overflow: "default" },
+      maxWork: GRID_WORK_LIMITS.maxGridTrackSizingWork,
+      signal: undefined
+    });
+    if (sizing.tracks.length !== 1_000) throw new Error("flexible track-sizing benchmark lost tracks");
+  }),
+  gridCollapsedGutterConstruction: repeatedStage(() => {
+    const sizing = sizeGridTracks({
+      tracks: gridIntrinsicTracks.tracks,
+      contributions: [],
+      availableSize: cssPx(12_000),
+      gap: cssPx(2),
+      resolveLength: gridBenchmarkLength,
+      alignment: { value: "space-evenly", overflow: "default" },
+      collapsedTracks: gridCollapsedTracks,
+      maxWork: GRID_WORK_LIMITS.maxGridTrackSizingWork,
+      signal: undefined
+    });
+    if (sizing.activeGutterBoundaries.some((active) => active)) {
+      throw new Error("collapsed-gutter benchmark retained a boundary adjacent to a collapsed track");
+    }
+  }),
   gridColumnTrackSizing: repeatedStage(() => {
     const sizing = sizeGridTracks({
       tracks: gridSizingTracks.tracks,
@@ -847,7 +993,7 @@ const gridStageMetrics = {
       availableSize: cssPx(12_000),
       gap: cssPx(1),
       resolveLength: gridBenchmarkLength,
-      alignment: "stretch",
+      alignment: { value: "stretch", overflow: "default" },
       maxWork: GRID_WORK_LIMITS.maxGridTrackSizingWork,
       signal: undefined
     });
@@ -864,7 +1010,7 @@ const gridStageMetrics = {
       availableSize: null,
       gap: cssPx(1),
       resolveLength: gridBenchmarkLength,
-      alignment: "start",
+      alignment: { value: "start", overflow: "default" },
       maxWork: GRID_WORK_LIMITS.maxGridTrackSizingWork,
       signal: undefined
     });
@@ -873,6 +1019,10 @@ const gridStageMetrics = {
   gridItemLayout: repeatedStage(() => {
     const layout = layoutFragments(gridItemLayoutFormatting, 120, gridItemLayoutStreams);
     if (layout.outcome.status !== "complete") throw new Error("Grid item-layout workload was incomplete");
+  }),
+  gridContainerOrchestration: repeatedStage(() => {
+    const layout = layoutFragments(gridContainerFormatting, 120, gridContainerStreams);
+    if (layout.outcome.status !== "complete") throw new Error("Grid container orchestration workload was incomplete");
   }),
   completeGridLayout: repeatedStage(() => {
     const layout = layoutFragments(completeGridFormatting, 120, completeGridStreams);
@@ -1072,10 +1222,17 @@ const metrics = {
   explicitGridConstructionP95: gridStageMetrics.explicitGridConstruction.p95,
   gridNamedLineResolutionP95: gridStageMetrics.gridNamedLineResolution.p95,
   gridAutoPlacementP95: gridStageMetrics.gridAutoPlacement.p95,
+  gridSparseLockedAxisPlacementP95: gridStageMetrics.gridSparseLockedAxisPlacement.p95,
   gridDensePlacementP95: gridStageMetrics.gridDensePlacement.p95,
+  gridNonSpanningIntrinsicSizingP95: gridStageMetrics.gridNonSpanningIntrinsicSizing.p95,
+  gridSpanningIntrinsicSizingP95: gridStageMetrics.gridSpanningIntrinsicSizing.p95,
+  gridPlannedIncreaseDistributionP95: gridStageMetrics.gridPlannedIncreaseDistribution.p95,
+  gridFlexibleTrackSizingP95: gridStageMetrics.gridFlexibleTrackSizing.p95,
+  gridCollapsedGutterConstructionP95: gridStageMetrics.gridCollapsedGutterConstruction.p95,
   gridColumnTrackSizingP95: gridStageMetrics.gridColumnTrackSizing.p95,
   gridRowTrackSizingP95: gridStageMetrics.gridRowTrackSizing.p95,
   gridItemLayoutP95: gridStageMetrics.gridItemLayout.p95,
+  gridContainerOrchestrationP95: gridStageMetrics.gridContainerOrchestration.p95,
   completeGridLayoutP95: gridStageMetrics.completeGridLayout.p95,
   gridDisplayListConstructionP95: gridStageMetrics.gridDisplayListConstruction.p95,
   gridCellRasterizationP95: gridStageMetrics.gridCellRasterization.p95,
@@ -1144,7 +1301,7 @@ const report = {
     stressControls: "Every rendering stress workload is warmed and reports p50 and p95 separately for layout fragment construction, display-list construction, cell rasterization, index construction, and complete rendering.",
     unicodeTextControls: "Unicode stage limits are new workload-specific controls measured after two warmups; PR #130 thresholds remain unchanged. One-shot controls cover one million LTR code points, mixed scripts, isolates, maximum valid embedding depth, CJK, emoji, and repeated resize with cached invariant text analysis.",
     compatibilityCorpus: "Every offline compatibility fixture is warmed twice and measured over seven complete native renderings; the 500ms p95 control is unchanged.",
-    gridControls: "Grid parsing, explicit-grid construction, named-line resolution, sparse and dense placement, column and row track sizing, item layout, complete nested-Grid layout, display-list construction, cell rasterization, and auto-repeat resize are each warmed and report p50/p95. New Grid workload and memory limits do not alter prior controls."
+    gridControls: "Grid parsing, explicit-grid construction, named-line resolution, ordinary and locked-axis sparse placement, dense placement, non-spanning and spanning intrinsic sizing, planned-increase distribution, flexible-track sizing, collapsed-gutter construction, column and row sizing, container orchestration, item layout, complete nested-Grid layout, display-list construction, cell rasterization, and auto-repeat resize are each warmed and report p50/p95. Stress controls include equal and overlapping spans, every span group through the configured fixture track count, growth-limit saturation, sparse row frontiers, and collapsed auto-fit tracks. New Grid workload and memory limits do not alter prior controls."
   },
   ok: failures.length === 0,
   failures

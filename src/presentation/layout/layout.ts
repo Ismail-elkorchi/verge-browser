@@ -33,11 +33,9 @@ import type { InlineItemStream, ProcessedCssText } from "../text/index.js";
 import type {
   ComputedStyle,
   CssGap,
-  CssGridLine,
   CssLength,
   CssLengthPercentageExpression,
 } from "../style/index.js";
-import { GRID_AUTO_LINE } from "../style/grid/index.js";
 import {
   cssAdd,
   cssCoordinate,
@@ -87,18 +85,14 @@ import {
 import { selectLogicalLines } from "./line-selection.js";
 import {
   GridWorkBudgetExceeded,
-  alignGridItem,
-  buildGridTrackSequence,
-  expandExplicitGridAxis,
-  placeGridItems,
-  resolvedGridArea,
-  sizeGridTracks,
-  type GridAreaPlacement,
-  type GridItemContribution,
-  type GridPlacementResult,
+  intrinsicGridBlockSize,
+  intrinsicGridInlineSize,
+  layoutGridContainer,
+  type GridIntrinsicSizingHost,
 } from "./grid/index.js";
 import {
   IntrinsicContributionCache,
+  IntrinsicSizingCycleError,
   intrinsicContributions,
   type IntrinsicSizeContributions,
 } from "./intrinsic/index.js";
@@ -286,28 +280,31 @@ function singleFlexItemAlignmentOffset(
   freeSpace: CssPixelLength,
   alignment: ComputedStyle["box"]["justifyContent"],
 ): CssPixelLength {
+  const value = alignment.value;
   if (
-    freeSpace <= 0 ||
-    alignment === "normal" ||
-    alignment === "stretch" ||
-    alignment === "start" ||
-    alignment === "space-between"
+    value === "normal" ||
+    value === "stretch" ||
+    value === "start" ||
+    value === "space-between"
   )
     return ZERO;
-  if (alignment === "end") return freeSpace;
+  if (freeSpace < 0 && alignment.overflow === "safe") return ZERO;
+  if (value === "end") return freeSpace;
   return cssDivide(freeSpace, 2);
 }
 
 function usedGridContentAlignment(
   alignment: ComputedStyle["box"]["justifyContent"],
-): Exclude<ComputedStyle["box"]["justifyContent"], "normal"> {
-  return alignment === "normal" ? "stretch" : alignment;
+): ComputedStyle["box"]["justifyContent"] {
+  return alignment.value === "normal"
+    ? Object.freeze({ value: "stretch", overflow: alignment.overflow })
+    : alignment;
 }
 
 function usedItemAlignment(
   alignment: ComputedStyle["box"]["alignSelf"],
 ): "start" | "end" | "center" | "stretch" | "baseline" {
-  return alignment === "normal" || alignment === "auto" ? "stretch" : alignment;
+  return alignment.position === "normal" || alignment.position === "auto" ? "stretch" : alignment.position;
 }
 
 function percentageDependent(value: CssLength): boolean {
@@ -4168,7 +4165,7 @@ class LayoutBuilder {
     )
       return ZERO;
     if (node.kind === "grid-container")
-      return this.#intrinsicGridInlineSize(node, mode, maximum);
+      return intrinsicGridInlineSize(this.#gridIntrinsicSizingHost(), node, mode, maximum);
     if (node.kind === "table" || node.kind === "table-wrapper") {
       return mode === "min-content"
         ? this.#intrinsicMinimumWidth(id, maximum)
@@ -4206,143 +4203,6 @@ class LayoutBuilder {
       result = cssAdd(result, cssMultiply(gap, inFlowChildren - 1));
     }
     return cssMin(maximum, result);
-  }
-
-  #intrinsicGridInlineSize(
-    node: FormattingNode,
-    mode: "min-content" | "max-content",
-    maximum: CssPixelLength,
-  ): CssPixelLength {
-    const style = this.#boxComputed(node) ?? this.#computed(node);
-    if (style === null) return ZERO;
-    const items = node.children.filter(
-      (child) => !this.#outOfFlow(this.#formatting.node(child)),
-    );
-    if (items.length === 0) return ZERO;
-    return this.#gridBudget(() => {
-      const columnGap = nonNegative(
-        this.#usedGap(style.box.columnGap, null, style) ?? ZERO,
-      );
-      const resolveLength = (
-        value: CssLength,
-        basis: CssPixelLength | null,
-      ): CssPixelLength | null => this.#usedLength(value, basis, style);
-      const columns = expandExplicitGridAxis({
-        list: style.box.gridTemplateColumns,
-        areas: style.box.gridTemplateAreas,
-        areaAxis: "column",
-        automaticTrackSizing: style.box.gridAutoColumns,
-        availableSize: null,
-        gap: columnGap,
-        limits: this.#budgets,
-        resolveLength,
-        signal: this.#input.signal,
-      });
-      const rows = expandExplicitGridAxis({
-        list: style.box.gridTemplateRows,
-        areas: style.box.gridTemplateAreas,
-        areaAxis: "row",
-        automaticTrackSizing: style.box.gridAutoRows,
-        availableSize: null,
-        gap: ZERO,
-        limits: this.#budgets,
-        resolveLength,
-        signal: this.#input.signal,
-      });
-      const placement = placeGridItems({
-        items: items.map((formattingNode, sourceIndex) => {
-          const itemStyle = this.#computed(
-            this.#formatting.node(formattingNode),
-          );
-          return Object.freeze({
-            formattingNode,
-            sourceIndex,
-            order: itemStyle?.box.order ?? 0,
-            ...(itemStyle?.box.gridPlacement ?? {
-              columnStart: GRID_AUTO_LINE,
-              columnEnd: GRID_AUTO_LINE,
-              rowStart: GRID_AUTO_LINE,
-              rowEnd: GRID_AUTO_LINE,
-            }),
-          });
-        }),
-        columns,
-        rows,
-        autoFlow: style.box.gridAutoFlow,
-        limits: this.#budgets,
-        signal: this.#input.signal,
-      });
-      const sequence = buildGridTrackSequence(
-        columns,
-        placement.minimumColumnLine,
-        placement.maximumColumnLine,
-        style.box.gridAutoColumns,
-        this.#occupiedExplicitTracks(
-          placement,
-          "column",
-          columns.tracks.length,
-        ),
-      );
-      const normalized = this.#normalizedGridPlacements(
-        placement,
-        sequence.explicitTrackOffset,
-        0,
-      );
-      const contributions: GridItemContribution[] = normalized.map((item) => {
-        const intrinsic = this.#intrinsicContributions(
-          item.formattingNode,
-          null,
-        );
-        const itemNode = this.#formatting.node(item.formattingNode);
-        const edges = this.#edges(
-          this.#boxComputed(itemNode) ?? this.#computed(itemNode),
-          ZERO,
-        );
-        return Object.freeze({
-          formattingNode: item.formattingNode,
-          start: item.columnStart,
-          end: item.columnEnd,
-          minimumContribution: nonNegative(
-            sum(
-              this.#gridItemMinimumInlineContribution(
-                item.formattingNode,
-                intrinsic,
-              ),
-              edges.margin.left,
-              edges.margin.right,
-            ),
-          ),
-          minContent: nonNegative(
-            sum(
-              intrinsic.borderBox.minContentInlineSize,
-              edges.margin.left,
-              edges.margin.right,
-            ),
-          ),
-          maxContent: nonNegative(
-            sum(
-              mode === "min-content"
-                ? intrinsic.borderBox.minContentInlineSize
-                : intrinsic.borderBox.maxContentInlineSize,
-              edges.margin.left,
-              edges.margin.right,
-            ),
-          ),
-        });
-      });
-      const sized = sizeGridTracks({
-        tracks: sequence.tracks,
-        collapsedTracks: sequence.collapsedTracks,
-        contributions,
-        availableSize: null,
-        gap: columnGap,
-        resolveLength,
-        alignment: "start",
-        maxWork: this.#budgets.maxGridTrackSizingWork,
-        signal: this.#input.signal,
-      });
-      return cssMin(maximum, sized.usedSize);
-    });
   }
 
   #intrinsicContributions(
@@ -4452,16 +4312,10 @@ class LayoutBuilder {
       this.#truncated ??= "maxIntrinsicContributionCacheEntries";
       throw new LayoutBudgetExhausted();
     }
-    return intrinsicContributions(
-      {
-        minContentInlineSize: ZERO,
-        maxContentInlineSize: ZERO,
-        minimumBlockContribution: ZERO,
-        maximumBlockContribution: ZERO,
-      },
-      { inline: ZERO, block: ZERO },
-      { inline: true, block: true },
-    );
+    throw new IntrinsicSizingCycleError({
+      formattingNode: id,
+      availableInlineSize,
+    });
   }
 
   #gridItemMinimumInlineContribution(
@@ -4545,7 +4399,8 @@ class LayoutBuilder {
         depth + 1,
       );
     } else if (node.kind === "grid-container") {
-      automatic = this.#intrinsicGridBlockSize(
+      automatic = intrinsicGridBlockSize(
+        this.#gridIntrinsicSizingHost(),
         node,
         availableInlineSize,
         depth + 1,
@@ -4708,239 +4563,26 @@ class LayoutBuilder {
     }
   }
 
-  #occupiedExplicitTracks(
-    placement: GridPlacementResult,
-    axis: "row" | "column",
-    explicitTrackCount: number,
-  ): ReadonlySet<number> {
-    const occupied = new Set<number>();
-    for (const item of placement.items) {
-      const start = axis === "column" ? item.columnStart : item.rowStart;
-      const end = axis === "column" ? item.columnEnd : item.rowEnd;
-      for (
-        let track = Math.max(0, start);
-        track < Math.min(explicitTrackCount, end);
-        track += 1
-      )
-        occupied.add(track);
-    }
-    return occupied;
-  }
-
-  #normalizedGridPlacements(
-    placement: GridPlacementResult,
-    columnOffset: number,
-    rowOffset: number,
-  ): readonly GridAreaPlacement[] {
-    return Object.freeze(
-      placement.items.map((item) =>
-        Object.freeze({
-          ...item,
-          columnStart: item.columnStart + columnOffset,
-          columnEnd: item.columnEnd + columnOffset,
-          rowStart: item.rowStart + rowOffset,
-          rowEnd: item.rowEnd + rowOffset,
-        }),
-      ),
-    );
-  }
-
-  #positionedGridAxisDefinite(start: CssGridLine, end: CssGridLine): boolean {
-    const definiteStart = start.kind === "line" && !start.span;
-    const definiteEnd = end.kind === "line" && !end.span;
-    const spanStart = start.kind === "line" && start.span;
-    const spanEnd = end.kind === "line" && end.span;
-    return (
-      (definiteStart && (definiteEnd || spanEnd)) || (definiteEnd && spanStart)
-    );
-  }
-
-  #intrinsicGridBlockSize(
-    node: FormattingNode,
-    availableInlineSize: CssPixelLength,
-    depth: number,
-  ): CssNonNegativeLength {
-    const style = this.#boxComputed(node) ?? this.#computed(node);
-    if (style === null) return ZERO;
-    const items = node.children.filter(
-      (child) => !this.#outOfFlow(this.#formatting.node(child)),
-    );
-    if (items.length === 0) return ZERO;
-    return this.#gridBudget(() => {
-      const columnGap = nonNegative(
-        this.#usedGap(style.box.columnGap, availableInlineSize, style) ??
-          ZERO,
-      );
-      const rowGap = nonNegative(
-        this.#usedGap(style.box.rowGap, availableInlineSize, style) ?? ZERO,
-      );
-      const resolveLength = (
-        value: CssLength,
-        basis: CssPixelLength | null,
-      ): CssPixelLength | null => this.#usedLength(value, basis, style);
-      const columns = expandExplicitGridAxis({
-        list: style.box.gridTemplateColumns,
-        areas: style.box.gridTemplateAreas,
-        areaAxis: "column",
-        automaticTrackSizing: style.box.gridAutoColumns,
-        availableSize: availableInlineSize,
-        gap: columnGap,
-        limits: this.#budgets,
-        resolveLength,
-        signal: this.#input.signal,
-      });
-      const rows = expandExplicitGridAxis({
-        list: style.box.gridTemplateRows,
-        areas: style.box.gridTemplateAreas,
-        areaAxis: "row",
-        automaticTrackSizing: style.box.gridAutoRows,
-        availableSize: null,
-        gap: rowGap,
-        limits: this.#budgets,
-        resolveLength,
-        signal: this.#input.signal,
-      });
-      const placement = placeGridItems({
-        items: items.map((id, sourceIndex) => {
-          const itemStyle = this.#computed(this.#formatting.node(id));
-          const itemPlacement = itemStyle?.box.gridPlacement ?? {
-            columnStart: GRID_AUTO_LINE,
-            columnEnd: GRID_AUTO_LINE,
-            rowStart: GRID_AUTO_LINE,
-            rowEnd: GRID_AUTO_LINE,
-          };
-          return {
-            formattingNode: id,
-            sourceIndex,
-            order: itemStyle?.box.order ?? 0,
-            ...itemPlacement,
-          };
-        }),
-        columns,
-        rows,
-        autoFlow: style.box.gridAutoFlow,
-        limits: this.#budgets,
-        signal: this.#input.signal,
-      });
-      const occupiedColumns = this.#occupiedExplicitTracks(
-        placement,
-        "column",
-        columns.tracks.length,
-      );
-      const occupiedRows = this.#occupiedExplicitTracks(
-        placement,
-        "row",
-        rows.tracks.length,
-      );
-      const columnSequence = buildGridTrackSequence(
-        columns,
-        placement.minimumColumnLine,
-        placement.maximumColumnLine,
-        style.box.gridAutoColumns,
-        occupiedColumns,
-      );
-      const rowSequence = buildGridTrackSequence(
-        rows,
-        placement.minimumRowLine,
-        placement.maximumRowLine,
-        style.box.gridAutoRows,
-        occupiedRows,
-      );
-      const normalized = this.#normalizedGridPlacements(
-        placement,
-        columnSequence.explicitTrackOffset,
-        rowSequence.explicitTrackOffset,
-      );
-      const columnContributions = normalized.map((item) => {
-        const contributions = this.#intrinsicContributions(
-          item.formattingNode,
-          null,
-        );
-        const edges = this.#edges(
-          this.#computed(this.#formatting.node(item.formattingNode)),
-          availableInlineSize,
-        );
-        return Object.freeze({
-          formattingNode: item.formattingNode,
-          start: item.columnStart,
-          end: item.columnEnd,
-          minimumContribution: nonNegative(
-            sum(
-              this.#gridItemMinimumInlineContribution(
-                item.formattingNode,
-                contributions,
-              ),
-              edges.margin.left,
-              edges.margin.right,
-            ),
-          ),
-          minContent: nonNegative(
-            sum(
-              contributions.borderBox.minContentInlineSize,
-              edges.margin.left,
-              edges.margin.right,
-            ),
-          ),
-          maxContent: nonNegative(
-            sum(
-              contributions.borderBox.maxContentInlineSize,
-              edges.margin.left,
-              edges.margin.right,
-            ),
-          ),
-        });
-      });
-      const sizedColumns = sizeGridTracks({
-        tracks: columnSequence.tracks,
-        collapsedTracks: columnSequence.collapsedTracks,
-        contributions: columnContributions,
-        availableSize: availableInlineSize,
-        gap: columnGap,
-        resolveLength,
-        alignment: usedGridContentAlignment(style.box.justifyContent),
-        maxWork: this.#budgets.maxGridTrackSizingWork,
-        signal: this.#input.signal,
-      });
-      const rowContributions = normalized.map((item) => {
-        const area = resolvedGridArea(
-          item,
-          sizedColumns.tracks,
-          rowSequence.tracks.map((_, index) => ({
-            index,
-            baseSize: ZERO,
-            growthLimit: null,
-            flexFactor: 0,
-            collapsed: false,
-            offset: ZERO,
-          })),
-        );
-        const block = this.#intrinsicOuterBlockSize(
-          item.formattingNode,
-          area.width,
-          depth,
-          true,
-        );
-        return Object.freeze({
-          formattingNode: item.formattingNode,
-          start: item.rowStart,
-          end: item.rowEnd,
-          minimumContribution: block,
-          minContent: block,
-          maxContent: block,
-        });
-      });
-      return sizeGridTracks({
-        tracks: rowSequence.tracks,
-        collapsedTracks: rowSequence.collapsedTracks,
-        contributions: rowContributions,
-        availableSize: null,
-        gap: rowGap,
-        resolveLength,
-        alignment: usedGridContentAlignment(style.box.alignContent),
-        maxWork: this.#budgets.maxGridTrackSizingWork,
-        signal: this.#input.signal,
-      }).usedSize;
-    });
+  #gridIntrinsicSizingHost(): GridIntrinsicSizingHost {
+    const host: GridIntrinsicSizingHost = {
+      budgets: this.#budgets,
+      signal: this.#input.signal,
+      formattingNode: (id) => this.#formatting.node(id),
+      computed: (node) => this.#computed(node),
+      boxComputed: (node) => this.#boxComputed(node),
+      isOutOfFlow: (node) => this.#outOfFlow(node),
+      usedGap: (value, basis, style) => this.#usedGap(value, basis, style),
+      usedLength: (value, basis, style) => this.#usedLength(value, basis, style),
+      edges: (style, containingWidth) => this.#edges(style, containingWidth),
+      intrinsicContributions: (id, availableInlineSize) =>
+        this.#intrinsicContributions(id, availableInlineSize),
+      gridItemMinimumInlineContribution: (id, contributions) =>
+        this.#gridItemMinimumInlineContribution(id, contributions),
+      intrinsicOuterBlockSize: (id, availableInlineSize, depth, itemStyle) =>
+        this.#intrinsicOuterBlockSize(id, availableInlineSize, depth, itemStyle),
+      withGridBudget: <T>(operation: () => T): T => this.#gridBudget(operation),
+    };
+    return Object.freeze(host);
   }
 
   #translate(
@@ -5991,654 +5633,116 @@ class LayoutBuilder {
     forcedContentWidth: CssPixelLength | null = null,
     forcedContentHeight: CssPixelLength | null = null,
   ): LayoutResult {
-    const style = this.#boxComputed(node) ?? this.#computed(node);
-    if (style === null)
-      throw new RangeError("A grid container must have a computed style.");
-    const dimensions = this.#dimensions(node, width, null, forcedContentWidth);
-    const borderX = point(x, dimensions.marginLeft);
-    const contentX = point(
-      borderX,
-      sum(dimensions.border.left, dimensions.padding.left),
-    );
-    const contentY = point(
-      y,
-      sum(dimensions.border.top, dimensions.padding.top),
-    );
-    const contentWidth = dimensions.contentWidth;
-    const specifiedHeight = forcedContentHeight ?? dimensions.specifiedHeight;
-    return this.#gridBudget(() => {
-      const columnGap = nonNegative(
-        this.#usedGap(style.box.columnGap, contentWidth, style) ?? ZERO,
-      );
-      let rowGap = nonNegative(
-        this.#usedGap(style.box.rowGap, specifiedHeight, style) ?? ZERO,
-      );
-      const resolveLength = (
-        value: CssLength,
-        basis: CssPixelLength | null,
-      ): CssPixelLength | null => this.#usedLength(value, basis, style);
-      const explicitColumns = expandExplicitGridAxis({
-        list: style.box.gridTemplateColumns,
-        areas: style.box.gridTemplateAreas,
-        areaAxis: "column",
-        automaticTrackSizing: style.box.gridAutoColumns,
-        availableSize: contentWidth,
-        gap: columnGap,
-        limits: this.#budgets,
-        resolveLength,
+    return layoutGridContainer(
+      {
+        budgets: this.#budgets,
         signal: this.#input.signal,
-      });
-      const explicitRows = expandExplicitGridAxis({
-        list: style.box.gridTemplateRows,
-        areas: style.box.gridTemplateAreas,
-        areaAxis: "row",
-        automaticTrackSizing: style.box.gridAutoRows,
-        availableSize: specifiedHeight,
-        gap: rowGap,
-        limits: this.#budgets,
-        resolveLength,
-        signal: this.#input.signal,
-      });
-      const gridItems: FormattingNodeId[] = [];
-      const outOfFlow: FormattingNodeId[] = [];
-      for (const child of node.children) {
-        const destination = this.#outOfFlow(this.#formatting.node(child))
-          ? outOfFlow
-          : gridItems;
-        destination.push(child);
-      }
-      const inputItems = gridItems.map((id, sourceIndex) => {
-        const itemStyle = this.#computed(this.#formatting.node(id));
-        return Object.freeze({
-          formattingNode: id,
-          sourceIndex,
-          order: itemStyle?.box.order ?? 0,
-          ...(itemStyle?.box.gridPlacement ?? {
-            columnStart: GRID_AUTO_LINE,
-            columnEnd: GRID_AUTO_LINE,
-            rowStart: GRID_AUTO_LINE,
-            rowEnd: GRID_AUTO_LINE,
-          }),
-        });
-      });
-      const placement = placeGridItems({
-        items: inputItems,
-        columns: explicitColumns,
-        rows: explicitRows,
-        autoFlow: style.box.gridAutoFlow,
-        limits: this.#budgets,
-        signal: this.#input.signal,
-      });
-      const columnSequence = buildGridTrackSequence(
-        explicitColumns,
-        placement.minimumColumnLine,
-        placement.maximumColumnLine,
-        style.box.gridAutoColumns,
-        this.#occupiedExplicitTracks(
-          placement,
-          "column",
-          explicitColumns.tracks.length,
-        ),
-      );
-      const rowSequence = buildGridTrackSequence(
-        explicitRows,
-        placement.minimumRowLine,
-        placement.maximumRowLine,
-        style.box.gridAutoRows,
-        this.#occupiedExplicitTracks(
-          placement,
-          "row",
-          explicitRows.tracks.length,
-        ),
-      );
-      const normalizedPlacements = this.#normalizedGridPlacements(
-        placement,
-        columnSequence.explicitTrackOffset,
-        rowSequence.explicitTrackOffset,
-      );
-      const columnContributions: GridItemContribution[] =
-        normalizedPlacements.map((item) => {
-          const contributions = this.#intrinsicContributions(
-            item.formattingNode,
-            null,
-          );
-          const edges = this.#edges(
-            this.#computed(this.#formatting.node(item.formattingNode)),
-            contentWidth,
-          );
-          return Object.freeze({
-            formattingNode: item.formattingNode,
-            start: item.columnStart,
-            end: item.columnEnd,
-            minimumContribution: nonNegative(
-              sum(
-                this.#gridItemMinimumInlineContribution(
-                  item.formattingNode,
-                  contributions,
-                ),
-                edges.margin.left,
-                edges.margin.right,
-              ),
-            ),
-            minContent: nonNegative(
-              sum(
-                contributions.borderBox.minContentInlineSize,
-                edges.margin.left,
-                edges.margin.right,
-              ),
-            ),
-            maxContent: nonNegative(
-              sum(
-                contributions.borderBox.maxContentInlineSize,
-                edges.margin.left,
-                edges.margin.right,
-              ),
-            ),
-          });
-        });
-      const sizedColumns = sizeGridTracks({
-        tracks: columnSequence.tracks,
-        collapsedTracks: columnSequence.collapsedTracks,
-        contributions: columnContributions,
-        availableSize: contentWidth,
-        gap: columnGap,
-        resolveLength,
-        alignment: usedGridContentAlignment(style.box.justifyContent),
-        maxWork: this.#budgets.maxGridTrackSizingWork,
-        signal: this.#input.signal,
-      });
-      const rowContributions: GridItemContribution[] = normalizedPlacements.map(
-        (item) => {
-          const first = sizedColumns.tracks[item.columnStart];
-          const last = sizedColumns.tracks[item.columnEnd - 1];
-          const areaWidth =
-            first === undefined || last === undefined
-              ? ZERO
-              : nonNegative(
-                  sum(last.offset, last.baseSize, negate(first.offset)),
-                );
-          const itemNode = this.#formatting.node(item.formattingNode);
-          const itemStyle = this.#boxComputed(itemNode) ?? this.#computed(itemNode);
-          const intrinsic = this.#intrinsicContributions(
-            item.formattingNode,
-            areaWidth,
-          );
-          const edges = this.#edges(itemStyle, areaWidth);
-          const block = nonNegative(
-            sum(
-              intrinsic.borderBox.minimumBlockContribution,
-              edges.margin.top,
-              edges.margin.bottom,
-            ),
-          );
-          return Object.freeze({
-            formattingNode: item.formattingNode,
-            start: item.rowStart,
-            end: item.rowEnd,
-            minimumContribution: block,
-            minContent: block,
-            maxContent: block,
-          });
-        },
-      );
-      let sizedRows = sizeGridTracks({
-        tracks: rowSequence.tracks,
-        collapsedTracks: rowSequence.collapsedTracks,
-        contributions: rowContributions,
-        availableSize: specifiedHeight,
-        gap: rowGap,
-        resolveLength,
-        alignment: usedGridContentAlignment(style.box.alignContent),
-        maxWork: this.#budgets.maxGridTrackSizingWork,
-        signal: this.#input.signal,
-      });
-      const contentHeight = constrainedSize(
-        sizedRows.usedSize,
-        specifiedHeight,
-        dimensions.minHeight,
-        dimensions.maxHeight,
-      );
-      const finalRowGap = nonNegative(
-        this.#usedGap(style.box.rowGap, contentHeight, style) ?? ZERO,
-      );
-      if (
-        contentHeight !== sizedRows.usedSize ||
-        specifiedHeight !== null ||
-        finalRowGap !== rowGap
-      ) {
-        rowGap = finalRowGap;
-        sizedRows = sizeGridTracks({
-          tracks: rowSequence.tracks,
-          collapsedTracks: rowSequence.collapsedTracks,
-          contributions: rowContributions,
-          availableSize: contentHeight,
-          gap: rowGap,
-          resolveLength,
-          alignment: usedGridContentAlignment(style.box.alignContent),
-          maxWork: this.#budgets.maxGridTrackSizingWork,
-          signal: this.#input.signal,
-        });
-      }
-      const contentRect = cssRect(
-        contentX,
-        contentY,
-        contentWidth,
-        contentHeight,
-      );
-      const paddingRect = cssRect(
-        point(contentX, negate(dimensions.padding.left)),
-        point(contentY, negate(dimensions.padding.top)),
-        sum(contentWidth, dimensions.padding.left, dimensions.padding.right),
-        sum(contentHeight, dimensions.padding.top, dimensions.padding.bottom),
-      );
-      const borderRect = cssRect(
-        point(paddingRect.x, negate(dimensions.border.left)),
-        point(paddingRect.y, negate(dimensions.border.top)),
-        sum(paddingRect.width, dimensions.border.left, dimensions.border.right),
-        sum(
-          paddingRect.height,
-          dimensions.border.top,
-          dimensions.border.bottom,
-        ),
-      );
-      const marginRect = cssRect(
-        point(borderRect.x, negate(dimensions.marginLeft)),
-        point(borderRect.y, negate(dimensions.margin.top)),
-        sum(borderRect.width, dimensions.marginLeft, dimensions.marginRight),
-        sum(borderRect.height, dimensions.margin.top, dimensions.margin.bottom),
-      );
-      const finalClip = this.#clip(node, paddingRect, borderRect, clip);
-      if (style.box.position !== "static")
-        this.#positionedContainingBlocks.set(node.id, paddingRect);
-      const children: LayoutFragmentId[] = [];
-      const baselineItems: {
-        readonly row: number;
-        readonly result: LayoutResult;
-        readonly baseline: CssPixelLength;
-      }[] = [];
-      const paintOrderedPlacements = [...normalizedPlacements].sort(
-        (left, right) =>
-          left.order - right.order || left.sourceIndex - right.sourceIndex,
-      );
-      for (const item of paintOrderedPlacements) {
-        const child = this.#formatting.node(item.formattingNode);
-        const childStyle = this.#computed(child);
-        const area = resolvedGridArea(
-          item,
-          sizedColumns.tracks,
-          sizedRows.tracks,
-        );
-        const edges = this.#edges(childStyle, area.width);
-        const horizontalChrome = sum(
-          edges.margin.left,
-          edges.border.left,
-          edges.padding.left,
-          edges.padding.right,
-          edges.border.right,
-          edges.margin.right,
-        );
-        const verticalChrome = sum(
-          edges.margin.top,
-          edges.border.top,
-          edges.padding.top,
-          edges.padding.bottom,
-          edges.border.bottom,
-          edges.margin.bottom,
-        );
-        const specifiedJustify =
-          childStyle?.box.justifySelf === "auto"
-            ? style.box.justifyItems
-            : (childStyle?.box.justifySelf ?? style.box.justifyItems);
-        const specifiedAlign =
-          childStyle?.box.alignSelf === "auto"
-            ? style.box.alignItems
-            : (childStyle?.box.alignSelf ?? style.box.alignItems);
-        const replacedItem =
-          childStyle?.display.box === "principal" && childStyle.display.replaced;
-        const justify =
-          specifiedJustify === "normal" && replacedItem
-            ? "start"
-            : usedItemAlignment(specifiedJustify);
-        const align =
-          specifiedAlign === "normal" && replacedItem
-            ? "start"
-            : usedItemAlignment(specifiedAlign);
-        const physicalJustify =
-          style.text.direction === "rtl"
-            ? justify === "start"
-              ? "end"
-              : justify === "end"
-                ? "start"
-                : justify
-            : justify;
-        const automaticWidth =
-          childStyle?.box.width.kind === "auto" ||
-          childStyle?.box.width.kind === "none" ||
-          childStyle === null;
-        const automaticHeight =
-          childStyle?.box.height.kind === "auto" ||
-          childStyle?.box.height.kind === "none" ||
-          childStyle === null;
-        const autoMarginLeft = childStyle?.box.margin.left.kind === "auto";
-        const autoMarginRight = childStyle?.box.margin.right.kind === "auto";
-        const autoMarginTop = childStyle?.box.margin.top.kind === "auto";
-        const autoMarginBottom = childStyle?.box.margin.bottom.kind === "auto";
-        const intrinsic = this.#intrinsicContributions(
-          item.formattingNode,
-          area.width,
-        );
-        const availableContentWidth = nonNegative(
-          sum(area.width, negate(horizontalChrome)),
-        );
-        let spansFlexibleColumn = false;
-        let spansAutomaticMinimumColumn = false;
-        for (let index = item.columnStart; index < item.columnEnd; index += 1) {
-          const track = columnSequence.tracks[index];
-          if (track === undefined) continue;
-          if (
-            item.columnEnd - item.columnStart > 1 &&
-            ((track.kind === "breadth" && track.breadth.kind === "flex") ||
-              (track.kind === "minmax" && track.maximum.kind === "flex"))
-          ) {
-            spansFlexibleColumn = true;
-          }
-          if (
-            track.kind === "fit-content" ||
-            (track.kind === "breadth" &&
-              (track.breadth.kind === "auto" ||
-                track.breadth.kind === "flex")) ||
-            (track.kind === "minmax" && track.minimum.kind === "auto")
-          ) {
-            spansAutomaticMinimumColumn = true;
-          }
-        }
-        const automaticMinimumInline =
-          childStyle?.box.overflowX !== "hidden" &&
-          !spansFlexibleColumn &&
-          spansAutomaticMinimumColumn
-            ? intrinsic.automaticMinimumSize.inline
-            : ZERO;
-        const specifiedWidth =
-          childStyle === null
-            ? null
-            : this.#usedLength(childStyle.box.width, area.width, childStyle);
-        const widthToContent = (candidate: CssPixelLength): CssPixelLength =>
-          childStyle?.box.boxSizing === "border-box"
-            ? nonNegative(
-                sum(
-                  candidate,
-                  negate(edges.border.left),
-                  negate(edges.padding.left),
-                  negate(edges.padding.right),
-                  negate(edges.border.right),
-                ),
-              )
-            : nonNegative(candidate);
-        let forcedWidth = automaticWidth
-          ? justify === "stretch" && !autoMarginLeft && !autoMarginRight
-            ? availableContentWidth
-            : cssMin(
-                availableContentWidth,
-                intrinsic.contentBox.maxContentInlineSize,
-              )
-          : widthToContent(specifiedWidth ?? availableContentWidth);
-        const minimumWidth =
-          childStyle === null
-            ? ZERO
-            : childStyle.box.minWidth.kind === "auto"
-              ? automaticMinimumInline
-              : widthToContent(
-                  this.#usedLength(
-                    childStyle.box.minWidth,
-                    area.width,
-                    childStyle,
-                  ) ?? ZERO,
-                );
-        const maximumWidthValue =
-          childStyle === null
-            ? null
-            : this.#usedLength(childStyle.box.maxWidth, area.width, childStyle);
-        if (maximumWidthValue !== null)
-          forcedWidth = cssMin(forcedWidth, widthToContent(maximumWidthValue));
-        forcedWidth = cssMax(forcedWidth, minimumWidth);
-        const specifiedItemHeight =
-          childStyle === null
-            ? null
-            : this.#usedLength(childStyle.box.height, area.height, childStyle);
-        const heightToContent = (candidate: CssPixelLength): CssPixelLength =>
-          childStyle?.box.boxSizing === "border-box"
-            ? nonNegative(
-                sum(
-                  candidate,
-                  negate(edges.border.top),
-                  negate(edges.padding.top),
-                  negate(edges.padding.bottom),
-                  negate(edges.border.bottom),
-                ),
-              )
-            : nonNegative(candidate);
-        let forcedHeight = automaticHeight
-          ? align === "stretch" && !autoMarginTop && !autoMarginBottom
-            ? nonNegative(sum(area.height, negate(verticalChrome)))
-            : null
-          : heightToContent(specifiedItemHeight ?? area.height);
-        if (forcedHeight !== null && childStyle !== null) {
-          let spansFlexibleRow = false;
-          let spansAutomaticMinimumRow = false;
-          for (let index = item.rowStart; index < item.rowEnd; index += 1) {
-            const track = rowSequence.tracks[index];
-            if (track === undefined) continue;
-            if (
-              item.rowEnd - item.rowStart > 1 &&
-              ((track.kind === "breadth" && track.breadth.kind === "flex") ||
-                (track.kind === "minmax" && track.maximum.kind === "flex"))
-            ) {
-              spansFlexibleRow = true;
-            }
-            if (
-              track.kind === "fit-content" ||
-              (track.kind === "breadth" &&
-                (track.breadth.kind === "auto" ||
-                  track.breadth.kind === "flex")) ||
-              (track.kind === "minmax" && track.minimum.kind === "auto")
-            ) {
-              spansAutomaticMinimumRow = true;
-            }
-          }
-          const minimumHeightValue =
-            childStyle.box.minHeight.kind === "auto"
-              ? childStyle.box.overflowY !== "hidden" &&
-                !spansFlexibleRow &&
-                spansAutomaticMinimumRow
-                ? intrinsic.automaticMinimumSize.block
-                : ZERO
-              : heightToContent(
-                  this.#usedLength(
-                    childStyle.box.minHeight,
-                    area.height,
-                    childStyle,
-                  ) ?? ZERO,
-                );
-          const maximumHeightValue = this.#usedLength(
-            childStyle.box.maxHeight,
-            area.height,
-            childStyle,
-          );
-          forcedHeight = cssMax(forcedHeight, minimumHeightValue);
-          if (maximumHeightValue !== null)
-            forcedHeight = cssMin(
-              forcedHeight,
-              heightToContent(maximumHeightValue),
-            );
-        }
-        let result = this.#tryLayoutNode(
-          item.formattingNode,
-          point(
-            contentX,
-            style.text.direction === "rtl"
-              ? sum(contentWidth, negate(area.x), negate(area.width))
-              : area.x,
+        formattingNode: (id) => this.#formatting.node(id),
+        computed: (candidate) => this.#computed(candidate),
+        boxComputed: (candidate) => this.#boxComputed(candidate),
+        dimensions: (
+          candidate,
+          containingWidth,
+          containingHeight,
+          forcedWidth,
+        ) =>
+          this.#dimensions(
+            candidate,
+            containingWidth,
+            containingHeight,
+            forcedWidth,
           ),
-          point(contentY, sum(area.y, edges.margin.top)),
-          area.width,
-          finalClip,
-          depth + 1,
-          undefined,
-          area.height,
+        usedGap: (value, basis, computed) =>
+          this.#usedGap(value, basis, computed),
+        usedLength: (value, basis, computed) =>
+          this.#usedLength(value, basis, computed),
+        isOutOfFlow: (candidate) => this.#outOfFlow(candidate),
+        intrinsicContributions: (id, availableInlineSize) =>
+          this.#intrinsicContributions(id, availableInlineSize),
+        gridItemMinimumInlineContribution: (id, contributions) =>
+          this.#gridItemMinimumInlineContribution(id, contributions),
+        edges: (computed, containingWidth) =>
+          this.#edges(computed, containingWidth),
+        clip: (candidate, paddingRect, borderRect, inheritedClip) =>
+          this.#clip(candidate, paddingRect, borderRect, inheritedClip),
+        registerPositionedContainingBlock: (id, paddingRect) => {
+          this.#positionedContainingBlocks.set(id, paddingRect);
+        },
+        layoutChild: (
+          id,
+          childX,
+          childY,
+          childWidth,
+          childClip,
+          childDepth,
+          containingHeight,
           forcedWidth,
           forcedHeight,
-        );
-        if (result === null) break;
-        const inlineAlignment = alignGridItem({
-          areaSize: area.width,
-          itemSize: result.marginRect.width,
-          marginStart: ZERO,
-          marginEnd: ZERO,
-          autoMarginStart: autoMarginLeft,
-          autoMarginEnd: autoMarginRight,
-          alignment: physicalJustify === "baseline" ? "start" : physicalJustify,
-        });
-        const blockAlignment = alignGridItem({
-          areaSize: area.height,
-          itemSize: result.marginRect.height,
-          marginStart: ZERO,
-          marginEnd: ZERO,
-          autoMarginStart: autoMarginTop,
-          autoMarginEnd: autoMarginBottom,
-          alignment: align === "baseline" ? "start" : align,
-        });
-        result = this.#translate(
-          result,
-          inlineAlignment.offset,
-          blockAlignment.offset,
-          finalClip,
-        );
-        children.push(result.fragment);
-        if (align === "baseline") {
-          const fragment = this.#fragments.get(result.fragment);
-          baselineItems.push({
-            row: item.rowStart,
-            result,
-            baseline:
-              fragment?.baseline === null || fragment?.baseline === undefined
-                ? result.marginRect.height
-                : sum(
-                    cssCoordinateDifference(
-                      fragment.borderRect.y,
-                      result.marginRect.y,
-                    ),
-                    fragment.baseline,
-                  ),
-          });
-        }
-      }
-      for (const row of new Set(baselineItems.map((item) => item.row))) {
-        const entries = baselineItems.filter((item) => item.row === row);
-        let baseline: CssPixelLength = ZERO;
-        for (const entry of entries)
-          baseline = cssMax(baseline, entry.baseline);
-        for (const entry of entries)
-          this.#translate(
-            entry.result,
-            ZERO,
-            sum(baseline, negate(entry.baseline)),
-            finalClip,
-          );
-      }
-      for (const outOfFlowId of outOfFlow) {
-        const outOfFlowNode = this.#formatting.node(outOfFlowId);
-        const outOfFlowStyle = this.#computed(outOfFlowNode);
-        let positionedContainingBlock: CssRect | undefined;
-        if (outOfFlowStyle?.box.position === "absolute") {
-          const positionedPlacement = placeGridItems({
-            items: [
-              {
-                formattingNode: outOfFlowId,
-                sourceIndex: node.children.indexOf(outOfFlowId),
-                order: outOfFlowStyle.box.order,
-                ...outOfFlowStyle.box.gridPlacement,
-              },
-            ],
-            columns: explicitColumns,
-            rows: explicitRows,
-            autoFlow: style.box.gridAutoFlow,
-            limits: this.#budgets,
-            signal: this.#input.signal,
-          }).items[0];
-          if (positionedPlacement !== undefined) {
-            const normalized = {
-              ...positionedPlacement,
-              columnStart:
-                positionedPlacement.columnStart +
-                columnSequence.explicitTrackOffset,
-              columnEnd:
-                positionedPlacement.columnEnd +
-                columnSequence.explicitTrackOffset,
-              rowStart:
-                positionedPlacement.rowStart + rowSequence.explicitTrackOffset,
-              rowEnd:
-                positionedPlacement.rowEnd + rowSequence.explicitTrackOffset,
-            };
-            const gridArea = resolvedGridArea(
-              normalized,
-              sizedColumns.tracks,
-              sizedRows.tracks,
-            );
-            const columnsDefinite =
-              this.#positionedGridAxisDefinite(
-                outOfFlowStyle.box.gridPlacement.columnStart,
-                outOfFlowStyle.box.gridPlacement.columnEnd,
-              ) &&
-              normalized.columnStart >= 0 &&
-              normalized.columnEnd <= sizedColumns.tracks.length;
-            const rowsDefinite =
-              this.#positionedGridAxisDefinite(
-                outOfFlowStyle.box.gridPlacement.rowStart,
-                outOfFlowStyle.box.gridPlacement.rowEnd,
-              ) &&
-              normalized.rowStart >= 0 &&
-              normalized.rowEnd <= sizedRows.tracks.length;
-            positionedContainingBlock = cssRect(
-              columnsDefinite
-                ? point(
-                    contentX,
-                    style.text.direction === "rtl"
-                      ? sum(
-                          contentWidth,
-                          negate(gridArea.x),
-                          negate(gridArea.width),
-                        )
-                      : gridArea.x,
-                  )
-                : paddingRect.x,
-              rowsDefinite ? point(contentY, gridArea.y) : paddingRect.y,
-              columnsDefinite ? gridArea.width : paddingRect.width,
-              rowsDefinite ? gridArea.height : paddingRect.height,
-            );
-          }
-        }
-        const positioned = this.#layoutOutOfFlow(
-          outOfFlowNode,
-          positionedContainingBlock?.x ?? contentX,
-          positionedContainingBlock?.y ?? contentY,
-          finalClip,
-          depth + 1,
-          positionedContainingBlock,
-        );
-        if (positioned === null) break;
-        children.push(positioned.fragment);
-      }
-      return this.#container(
+        ) =>
+          this.#tryLayoutNode(
+            id,
+            childX,
+            childY,
+            childWidth,
+            childClip,
+            childDepth,
+            undefined,
+            containingHeight,
+            forcedWidth,
+            forcedHeight,
+          ),
+        translate: (result, inlineOffset, blockOffset, containingClip) =>
+          this.#translate(result, inlineOffset, blockOffset, containingClip),
+        fragment: (id) => this.#fragments.get(id),
+        layoutOutOfFlow: (
+          candidate,
+          staticX,
+          staticY,
+          inheritedClip,
+          childDepth,
+          containingBlock,
+        ) =>
+          this.#layoutOutOfFlow(
+            candidate,
+            staticX,
+            staticY,
+            inheritedClip,
+            childDepth,
+            containingBlock,
+          ),
+        container: (
+          candidate,
+          contentRect,
+          paddingRect,
+          borderRect,
+          marginRect,
+          clipRect,
+          children,
+          lineBoxes,
+        ) =>
+          this.#container(
+            candidate,
+            contentRect,
+            paddingRect,
+            borderRect,
+            marginRect,
+            clipRect,
+            children,
+            lineBoxes,
+          ),
+        withGridBudget: (operation) => this.#gridBudget(operation),
+      },
+      {
         node,
-        contentRect,
-        paddingRect,
-        borderRect,
-        marginRect,
-        finalClip,
-        children,
-        [],
-      );
-    });
+        x,
+        y,
+        width,
+        clip,
+        depth,
+        forcedContentWidth,
+        forcedContentHeight,
+      },
+    );
   }
 
   #flexItemInput(
@@ -6771,22 +5875,26 @@ class LayoutBuilder {
     const style = this.#boxComputed(child) ?? this.#computed(child);
     const startProperty = style?.box.margin[axes.crossStart];
     const endProperty = style?.box.margin[axes.crossEnd];
-    const free = nonNegative(sum(lineCrossSize, negate(outerCrossSize)));
+    const free = sum(lineCrossSize, negate(outerCrossSize));
     const autoStart = startProperty?.kind === "auto";
     const autoEnd = endProperty?.kind === "auto";
-    if (autoStart && autoEnd) return cssDivide(free, 2);
-    if (autoStart) return free;
+    if (free > 0 && autoStart && autoEnd) return cssDivide(free, 2);
+    if (free > 0 && autoStart) return free;
     if (autoEnd) return ZERO;
-    const align =
-      style?.box.alignSelf === "auto" || style?.box.alignSelf === undefined
-        ? (containerStyle?.box.alignItems ?? "stretch")
+    const alignment =
+      style?.box.alignSelf.position === "auto" || style?.box.alignSelf === undefined
+        ? (containerStyle?.box.alignItems ?? Object.freeze({ position: "stretch" as const, overflow: "default" as const }))
         : style.box.alignSelf;
-    if (align === "center") return cssDivide(free, 2);
-    if (align === "end") return axes.crossReverse ? ZERO : free;
-    if (align === "start" && axes.crossReverse) return free;
+    const align = alignment.position === "normal" || alignment.position === "auto"
+      ? "stretch"
+      : alignment.position;
     if (align === "baseline" && axes.row)
       return cssMax(ZERO, sum(lineBaseline, negate(baselineOffset)));
-    return ZERO;
+    const safe = free < 0 && alignment.overflow === "safe";
+    const logical = safe ? ZERO
+      : align === "center" ? cssDivide(free, 2)
+        : align === "end" ? free : ZERO;
+    return axes.crossReverse ? sum(free, negate(logical)) : logical;
   }
 
   #discardLayoutSubtree(root: LayoutFragmentId): void {
@@ -6928,11 +6036,7 @@ class LayoutBuilder {
         gap: nonNegative(mainGap),
         wrap: style.box.flexWrap,
         reverse: axes.mainReverse,
-        justifyContent:
-          style.box.justifyContent === "stretch" ||
-          style.box.justifyContent === "normal"
-            ? "start"
-            : style.box.justifyContent,
+        justifyContent: style.box.justifyContent,
         maxSizingWork: this.#budgets.maxFlexSizingWork,
         ...(this.#input.signal === undefined
           ? {}
@@ -6978,7 +6082,7 @@ class LayoutBuilder {
         const childStyle = this.#boxComputed(child) ?? this.#computed(child);
         const childEdges = this.#edges(childStyle, dimensions.contentWidth);
         const alignment = usedItemAlignment(
-          childStyle?.box.alignSelf === "auto" ||
+          childStyle?.box.alignSelf.position === "auto" ||
             childStyle?.box.alignSelf === undefined
             ? style.box.alignItems
             : childStyle.box.alignSelf,
@@ -7087,8 +6191,8 @@ class LayoutBuilder {
       laidOutLines.length > 0 &&
       availableCrossSize > usedCrossSize &&
       (laidOutLines.length === 1 ||
-        style.box.alignContent === "stretch" ||
-        style.box.alignContent === "normal")
+        style.box.alignContent.value === "stretch" ||
+        style.box.alignContent.value === "normal")
     ) {
       let free = sum(availableCrossSize, negate(usedCrossSize));
       let remainingLines = laidOutLines.length;
@@ -7101,25 +6205,28 @@ class LayoutBuilder {
       usedCrossSize = availableCrossSize;
     }
     if (laidOutLines.length > 0) {
-      const free = cssMax(ZERO, sum(availableCrossSize, negate(usedCrossSize)));
+      const free = sum(availableCrossSize, negate(usedCrossSize));
       const count = laidOutLines.length;
-      const align = usedGridContentAlignment(style.box.alignContent);
+      const contentAlignment = usedGridContentAlignment(style.box.alignContent);
+      const align = free < 0 && contentAlignment.overflow === "safe"
+        ? "start"
+        : contentAlignment.value;
       const leading =
         align === "end"
           ? free
           : align === "center"
             ? cssDivide(free, 2)
-            : align === "space-around"
+            : free > 0 && align === "space-around"
               ? cssDivide(free, count * 2)
-              : align === "space-evenly"
+              : free > 0 && align === "space-evenly"
                 ? cssDivide(free, count + 1)
                 : ZERO;
       const between =
-        align === "space-between" && count > 1
+        free > 0 && align === "space-between" && count > 1
           ? cssDivide(free, count - 1)
-          : align === "space-around"
+          : free > 0 && align === "space-around"
             ? cssDivide(free, count)
-            : align === "space-evenly"
+            : free > 0 && align === "space-evenly"
               ? cssDivide(free, count + 1)
               : ZERO;
       let expandedCrossStart: CssPixelLength = ZERO;
@@ -7305,7 +6412,7 @@ class LayoutBuilder {
         childEdges.margin.bottom,
       );
       const outerMain = rowAxis ? outerWidth : outerHeight;
-      const mainFree = nonNegative(sum(mainSize, negate(outerMain)));
+      const mainFree = sum(mainSize, negate(outerMain));
       const leadingMain = singleFlexItemAlignmentOffset(
         mainFree,
         style.box.justifyContent,
@@ -7314,17 +6421,22 @@ class LayoutBuilder {
         ? sum(mainSize, negate(leadingMain), negate(outerMain))
         : leadingMain;
       const alignment = usedItemAlignment(
-        childStyle?.box.alignSelf === "auto" ||
+        childStyle?.box.alignSelf.position === "auto" ||
           childStyle?.box.alignSelf === undefined
           ? style.box.alignItems
           : childStyle.box.alignSelf,
       );
       const outerCross = rowAxis ? outerHeight : outerWidth;
-      const crossFree = nonNegative(
-        sum(availableCrossSize, negate(outerCross)),
-      );
+      const crossFree = sum(availableCrossSize, negate(outerCross));
+      const crossAlignment =
+        childStyle?.box.alignSelf.position === "auto" || childStyle?.box.alignSelf === undefined
+          ? style.box.alignItems
+          : childStyle.box.alignSelf;
+      const safeCross = crossFree < 0 && crossAlignment.overflow === "safe";
       const logicalCrossOffset =
-        alignment === "center"
+        safeCross
+          ? ZERO
+          : alignment === "center"
           ? cssDivide(crossFree, 2)
           : alignment === "end"
             ? crossFree
@@ -8083,6 +7195,12 @@ export function buildLayoutFragmentTree(
   try {
     return new LayoutBuilder(input, budgets).build();
   } catch (error) {
+    if (error instanceof IntrinsicSizingCycleError) {
+      return ImmutableLayoutFragmentTree.rejected(
+        input,
+        "intrinsic-sizing-cycle",
+      );
+    }
     if (error instanceof RangeError) {
       return ImmutableLayoutFragmentTree.rejected(
         input,

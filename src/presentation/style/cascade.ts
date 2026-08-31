@@ -69,8 +69,6 @@ import {
   parseGridAutoFlow,
   parseGridAutoTracks,
   parseGridAxisShorthand,
-  parseGridContainerAlignment,
-  parseGridItemAlignment,
   parseGridLine,
   parseGridPair,
   parseGridTemplateAreas,
@@ -79,6 +77,13 @@ import {
   type CssGridLine,
   type CssGridPlacement
 } from "./grid/index.js";
+import {
+  AUTO_SELF_ALIGNMENT,
+  NORMAL_CONTENT_ALIGNMENT,
+  NORMAL_SELF_ALIGNMENT,
+  parseContentAlignment,
+  parseSelfAlignment
+} from "./alignment.js";
 
 const DEFAULT_STYLE_BUDGETS: StyleBudgets = Object.freeze({
   maxStylesheetSources: 64,
@@ -1492,12 +1497,12 @@ function initialStyle(parent: ComputedStyle | null, replaced: boolean, htmlDirec
       flexShrink: 1,
       flexBasis: AUTO,
       order: 0,
-      justifyContent: "normal",
-      alignItems: "normal",
-      alignSelf: "auto",
-      alignContent: "normal",
-      justifyItems: "normal",
-      justifySelf: "auto",
+      justifyContent: NORMAL_CONTENT_ALIGNMENT,
+      alignItems: NORMAL_SELF_ALIGNMENT,
+      alignSelf: AUTO_SELF_ALIGNMENT,
+      alignContent: NORMAL_CONTENT_ALIGNMENT,
+      justifyItems: NORMAL_SELF_ALIGNMENT,
+      justifySelf: AUTO_SELF_ALIGNMENT,
       position: "static",
       inset: edges(AUTO),
       zIndex: null,
@@ -2334,11 +2339,11 @@ function computeStyle(
   const justifyContent = value(["justify-content", "place-content"]);
   if (justifyContent !== null) {
     const wide = cssWide(justifyContent.value);
-    const computed = wide === "inherit" ? parent?.box.justifyContent ?? "normal"
-      : wide === "initial" || wide === "unset" ? "normal"
+    const computed = wide === "inherit" ? parent?.box.justifyContent ?? NORMAL_CONTENT_ALIGNMENT
+      : wide === "initial" || wide === "unset" ? NORMAL_CONTENT_ALIGNMENT
         : justifyContent.property === "place-content"
-          ? parseGridPair(justifyContent.value, parseGridContainerAlignment)?.second ?? null
-          : parseGridContainerAlignment(justifyContent.value);
+          ? parseGridPair(justifyContent.value, parseContentAlignment)?.second ?? null
+          : parseContentAlignment(justifyContent.value);
     if (computed !== null) {
       style = { ...style, box: { ...style.box, justifyContent: computed } };
     } else unsupported(justifyContent);
@@ -2346,56 +2351,56 @@ function computeStyle(
   const alignItems = value(["align-items", "place-items"]);
   if (alignItems !== null) {
     const wide = cssWide(alignItems.value);
-    const computed = wide === "inherit" ? parent?.box.alignItems ?? "normal"
-      : wide === "initial" || wide === "unset" ? "normal"
+    const computed = wide === "inherit" ? parent?.box.alignItems ?? NORMAL_SELF_ALIGNMENT
+      : wide === "initial" || wide === "unset" ? NORMAL_SELF_ALIGNMENT
         : alignItems.property === "place-items"
-          ? parseGridPair(alignItems.value, (source) => parseGridItemAlignment(source, false))?.first ?? null
-          : parseGridItemAlignment(alignItems.value, false);
-    if (computed !== null && computed !== "auto") {
+          ? parseGridPair(alignItems.value, (source) => parseSelfAlignment(source, false))?.first ?? null
+          : parseSelfAlignment(alignItems.value, false);
+    if (computed !== null && computed.position !== "auto") {
       style = { ...style, box: { ...style.box, alignItems: computed } };
     } else unsupported(alignItems);
   }
   const alignSelf = value(["align-self", "place-self"]);
   if (alignSelf !== null) {
     const wide = cssWide(alignSelf.value);
-    const computed = wide === "inherit" ? parent?.box.alignSelf ?? "auto"
-      : wide === "initial" || wide === "unset" ? "auto"
+    const computed = wide === "inherit" ? parent?.box.alignSelf ?? AUTO_SELF_ALIGNMENT
+      : wide === "initial" || wide === "unset" ? AUTO_SELF_ALIGNMENT
         : alignSelf.property === "place-self"
-          ? parseGridPair(alignSelf.value, (source) => parseGridItemAlignment(source, true))?.first ?? null
-          : parseGridItemAlignment(alignSelf.value, true);
+          ? parseGridPair(alignSelf.value, (source) => parseSelfAlignment(source, true))?.first ?? null
+          : parseSelfAlignment(alignSelf.value, true);
     if (computed === null) unsupported(alignSelf);
     else style = { ...style, box: { ...style.box, alignSelf: computed } };
   }
   const alignContent = value(["align-content", "place-content"]);
   if (alignContent !== null) {
     const wide = cssWide(alignContent.value);
-    const computed = wide === "inherit" ? parent?.box.alignContent ?? "normal"
-      : wide === "initial" || wide === "unset" ? "normal"
+    const computed = wide === "inherit" ? parent?.box.alignContent ?? NORMAL_CONTENT_ALIGNMENT
+      : wide === "initial" || wide === "unset" ? NORMAL_CONTENT_ALIGNMENT
         : alignContent.property === "place-content"
-          ? parseGridPair(alignContent.value, parseGridContainerAlignment)?.first ?? null
-          : parseGridContainerAlignment(alignContent.value);
+          ? parseGridPair(alignContent.value, parseContentAlignment)?.first ?? null
+          : parseContentAlignment(alignContent.value);
     if (computed === null) unsupported(alignContent);
     else style = { ...style, box: { ...style.box, alignContent: computed } };
   }
   const justifyItems = value(["justify-items", "place-items"]);
   if (justifyItems !== null) {
     const wide = cssWide(justifyItems.value);
-    const computed = wide === "inherit" ? parent?.box.justifyItems ?? "normal"
-      : wide === "initial" || wide === "unset" ? "normal"
+    const computed = wide === "inherit" ? parent?.box.justifyItems ?? NORMAL_SELF_ALIGNMENT
+      : wide === "initial" || wide === "unset" ? NORMAL_SELF_ALIGNMENT
         : justifyItems.property === "place-items"
-          ? parseGridPair(justifyItems.value, (source) => parseGridItemAlignment(source, false))?.second ?? null
-          : parseGridItemAlignment(justifyItems.value, false);
-    if (computed === null || computed === "auto") unsupported(justifyItems);
+          ? parseGridPair(justifyItems.value, (source) => parseSelfAlignment(source, false))?.second ?? null
+          : parseSelfAlignment(justifyItems.value, false);
+    if (computed === null || computed.position === "auto") unsupported(justifyItems);
     else style = { ...style, box: { ...style.box, justifyItems: computed } };
   }
   const justifySelf = value(["justify-self", "place-self"]);
   if (justifySelf !== null) {
     const wide = cssWide(justifySelf.value);
-    const computed = wide === "inherit" ? parent?.box.justifySelf ?? "auto"
-      : wide === "initial" || wide === "unset" ? "auto"
+    const computed = wide === "inherit" ? parent?.box.justifySelf ?? AUTO_SELF_ALIGNMENT
+      : wide === "initial" || wide === "unset" ? AUTO_SELF_ALIGNMENT
         : justifySelf.property === "place-self"
-          ? parseGridPair(justifySelf.value, (source) => parseGridItemAlignment(source, true))?.second ?? null
-          : parseGridItemAlignment(justifySelf.value, true);
+          ? parseGridPair(justifySelf.value, (source) => parseSelfAlignment(source, true))?.second ?? null
+          : parseSelfAlignment(justifySelf.value, true);
     if (computed === null) unsupported(justifySelf);
     else style = { ...style, box: { ...style.box, justifySelf: computed } };
   }

@@ -83,17 +83,6 @@ export interface CssGridAutoFlow {
   readonly packing: "sparse" | "dense";
 }
 
-export type CssGridItemAlignment = "auto" | "normal" | "start" | "end" | "center" | "stretch" | "baseline";
-export type CssGridContainerAlignment =
-  | "normal"
-  | "start"
-  | "end"
-  | "center"
-  | "stretch"
-  | "space-between"
-  | "space-around"
-  | "space-evenly";
-
 export const GRID_AUTO_LINE: CssGridLine = Object.freeze({ kind: "auto" });
 export const GRID_NONE_TRACK_LIST: CssGridTrackList = Object.freeze({ kind: "none" });
 export const GRID_NONE_AREAS: CssGridTemplateAreas = Object.freeze({ kind: "none" });

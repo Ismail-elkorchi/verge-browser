@@ -2,8 +2,8 @@
   "schemaVersion": 2,
   "sourceBranch": "feat/css-grid-layout",
   "corpusManifest": "corpus.json",
-  "fixtureCount": 24,
-  "caseCount": 70,
+  "fixtureCount": 30,
+  "caseCount": 88,
   "metrics": {
     "logicalMeaningfulTextRecall": 1,
     "paintedCellMeaningfulTextRecall": 1,

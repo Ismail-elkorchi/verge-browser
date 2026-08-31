@@ -222,7 +222,11 @@ export type LayoutOutcome =
     }
   | {
       readonly status: "rejected";
-      readonly reason: "invalid-context" | "invalid-fixed-point-input" | "invalid-budget";
+      readonly reason:
+        | "invalid-context"
+        | "invalid-fixed-point-input"
+        | "invalid-budget"
+        | "intrinsic-sizing-cycle";
     }
   | { readonly status: "unsupported"; readonly feature: string };
 

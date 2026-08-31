@@ -30,3 +30,13 @@ export type IntrinsicContributionOutcome =
   | { readonly status: "complete"; readonly contributions: IntrinsicSizeContributions }
   | { readonly status: "cycle" }
   | { readonly status: "truncated"; readonly limit: number };
+
+export class IntrinsicSizingCycleError extends Error {
+  public readonly request: IntrinsicContributionRequest;
+
+  public constructor(request: IntrinsicContributionRequest) {
+    super(`Intrinsic sizing dependency cycle for ${request.formattingNode}.`);
+    this.name = "IntrinsicSizingCycleError";
+    this.request = request;
+  }
+}

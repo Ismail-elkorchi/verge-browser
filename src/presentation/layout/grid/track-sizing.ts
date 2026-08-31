@@ -13,38 +13,54 @@ import {
 import {
   GridWorkBudgetExceeded,
   type GridItemContribution,
+  type GridTrackGrowthLimit,
+  type GridTrackSizingFunctionCategory,
   type GridTrackSizingInput,
   type GridTrackSizingResult,
   type ResolvedGridTrack
 } from "./types.js";
 
 const ZERO = cssNonNegativeLength(cssPx(0));
+const INFINITE_GROWTH_LIMIT: GridTrackGrowthLimit = Object.freeze({ kind: "infinite" });
 
-function requiresPercentageBasis(value: CssLength): boolean {
-  return value.kind === "length" ? value.unit === "%"
-    : value.kind === "calculation" && value.calculation.percentageDependence !== "none";
-}
+type ContributionPhase =
+  | "intrinsic-minimum"
+  | "content-based-minimum"
+  | "max-content-minimum"
+  | "intrinsic-maximum"
+  | "max-content-maximum"
+  | "flexible-crossing-minimum";
 
 interface MutableTrack {
   readonly index: number;
   readonly sizing: CssGridTrackSizingFunction;
+  readonly minimum: CssGridTrackBreadth;
+  readonly maximum: CssGridTrackBreadth;
+  readonly minimumCategory: GridTrackSizingFunctionCategory;
+  readonly maximumCategory: GridTrackSizingFunctionCategory;
   readonly collapsed: boolean;
   readonly flexFactor: number;
-  readonly intrinsicMinimum: boolean;
-  readonly minContentMinimum: boolean;
-  readonly maxContentMinimum: boolean;
-  readonly intrinsicMaximum: boolean;
-  readonly minContentMaximum: boolean;
-  readonly automaticMaximum: boolean;
   readonly fitContentLimit: CssNonNegativeLength | null;
-  base: CssNonNegativeLength;
-  growth: CssNonNegativeLength | null;
+  baseSize: CssNonNegativeLength;
+  growthLimit: GridTrackGrowthLimit;
+  infinitelyGrowable: boolean;
+  plannedIncrease: CssNonNegativeLength;
   offset: CssPixelLength;
 }
 
 interface TrackSizingWork {
   used: number;
   readonly input: GridTrackSizingInput;
+}
+
+interface AlignmentResult {
+  readonly leading: CssPixelLength;
+  readonly boundaryExtra: CssNonNegativeLength;
+}
+
+interface IncurredIncreases {
+  readonly affected: readonly MutableTrack[];
+  readonly increases: ReadonlyMap<MutableTrack, CssNonNegativeLength>;
 }
 
 function consume(work: TrackSizingWork, amount = 1): void {
@@ -55,19 +71,57 @@ function consume(work: TrackSizingWork, amount = 1): void {
   work.used += amount;
 }
 
+function sum(left: CssPixelLength, right: CssPixelLength): CssPixelLength {
+  return cssAdd(left, right);
+}
+
+function difference(left: CssPixelLength, right: CssPixelLength): CssPixelLength {
+  return cssAdd(left, cssMultiply(right, -1));
+}
+
+function nonNegative(value: CssPixelLength): CssNonNegativeLength {
+  return cssNonNegativeLength(cssMax(ZERO, value));
+}
+
+function requiresPercentageBasis(value: CssLength): boolean {
+  return value.kind === "length" ? value.unit === "%"
+    : value.kind === "calculation" && value.calculation.percentageDependence !== "none";
+}
+
 function breadthLength(
   breadth: CssGridTrackBreadth,
   input: GridTrackSizingInput
 ): CssNonNegativeLength | null {
   if (breadth.kind !== "length") return null;
   const value = input.resolveLength(breadth.value, input.availableSize);
-  return value === null ? null : cssNonNegativeLength(cssMax(ZERO, value));
+  return value === null ? null : nonNegative(value);
+}
+
+function minimumBreadth(sizing: CssGridTrackSizingFunction): CssGridTrackBreadth {
+  if (sizing.kind === "minmax") return sizing.minimum;
+  if (sizing.kind === "fit-content") return Object.freeze({ kind: "auto" });
+  return sizing.breadth.kind === "flex" ? Object.freeze({ kind: "auto" }) : sizing.breadth;
+}
+
+function maximumBreadth(sizing: CssGridTrackSizingFunction): CssGridTrackBreadth {
+  if (sizing.kind === "minmax") return sizing.maximum;
+  if (sizing.kind === "fit-content") return Object.freeze({ kind: "max-content" });
+  return sizing.breadth;
+}
+
+function breadthCategory(
+  breadth: CssGridTrackBreadth,
+  resolved: CssNonNegativeLength | null
+): GridTrackSizingFunctionCategory {
+  if (breadth.kind === "flex") return "flexible";
+  if (breadth.kind === "auto") return "automatic";
+  if (breadth.kind !== "length") return "content-based";
+  return resolved === null && requiresPercentageBasis(breadth.value) ? "automatic" : "fixed";
 }
 
 function flexFactor(sizing: CssGridTrackSizingFunction): number {
-  if (sizing.kind === "breadth" && sizing.breadth.kind === "flex") return sizing.breadth.factor;
-  if (sizing.kind === "minmax" && sizing.maximum.kind === "flex") return sizing.maximum.factor;
-  return 0;
+  const maximum = maximumBreadth(sizing);
+  return maximum.kind === "flex" ? maximum.factor : 0;
 }
 
 function initializeTrack(
@@ -76,313 +130,672 @@ function initializeTrack(
   collapsed: boolean,
   input: GridTrackSizingInput
 ): MutableTrack {
+  const minimum = minimumBreadth(sizing);
+  const maximum = maximumBreadth(sizing);
   if (collapsed) return {
     index,
     sizing,
+    minimum,
+    maximum,
+    minimumCategory: "fixed",
+    maximumCategory: "fixed",
     collapsed,
     flexFactor: 0,
-    intrinsicMinimum: false,
-    minContentMinimum: false,
-    maxContentMinimum: false,
-    intrinsicMaximum: false,
-    minContentMaximum: false,
-    automaticMaximum: false,
-    fitContentLimit: null,
-    base: ZERO,
-    growth: ZERO,
+    fitContentLimit: ZERO,
+    baseSize: ZERO,
+    growthLimit: Object.freeze({ kind: "finite", value: ZERO }),
+    infinitelyGrowable: false,
+    plannedIncrease: ZERO,
     offset: ZERO
   };
-  const minimum = sizing.kind === "breadth" ? sizing.breadth
-    : sizing.kind === "minmax" ? sizing.minimum : { kind: "auto" as const };
-  const maximum = sizing.kind === "breadth" ? sizing.breadth
-    : sizing.kind === "minmax" ? sizing.maximum : { kind: "auto" as const };
-  const minimumLength = breadthLength(minimum, input);
-  const maximumLength = breadthLength(maximum, input);
-  const unresolvedMinimumPercentage = minimum.kind === "length" && minimumLength === null
-    && requiresPercentageBasis(minimum.value);
-  const unresolvedMaximumPercentage = maximum.kind === "length" && maximumLength === null
-    && requiresPercentageBasis(maximum.value);
-  const minimumIsIntrinsic = minimum.kind === "auto" || minimum.kind === "min-content" || minimum.kind === "max-content"
-    || minimum.kind === "flex" || unresolvedMinimumPercentage;
-  const maximumIsIntrinsic = maximum.kind === "auto" || maximum.kind === "min-content" || maximum.kind === "max-content"
-    || unresolvedMaximumPercentage;
-  const base = minimumLength ?? ZERO;
-  let growth = maximumLength;
+  const resolvedMinimum = breadthLength(minimum, input);
+  const resolvedMaximum = breadthLength(maximum, input);
+  const minimumCategory = breadthCategory(minimum, resolvedMinimum);
+  const maximumCategory = sizing.kind === "fit-content"
+    ? "intrinsic"
+    : breadthCategory(maximum, resolvedMaximum);
+  const baseSize = minimumCategory === "fixed" ? resolvedMinimum ?? ZERO : ZERO;
+  const growthLimit: GridTrackGrowthLimit = maximumCategory === "fixed"
+    ? Object.freeze({ kind: "finite", value: nonNegative(cssMax(baseSize, resolvedMaximum ?? ZERO)) })
+    : INFINITE_GROWTH_LIMIT;
   const resolvedFitContentLimit = sizing.kind === "fit-content"
     ? input.resolveLength(sizing.limit, input.availableSize)
     : null;
-  const fitContentLimit = resolvedFitContentLimit === null
-    ? null
-    : cssNonNegativeLength(cssMax(base, resolvedFitContentLimit));
-  if (sizing.kind === "fit-content") growth = null;
-  if (growth !== null) growth = cssNonNegativeLength(cssMax(base, growth));
   return {
     index,
     sizing,
+    minimum,
+    maximum,
+    minimumCategory,
+    maximumCategory,
     collapsed,
     flexFactor: flexFactor(sizing),
-    intrinsicMinimum: minimumIsIntrinsic,
-    minContentMinimum: minimum.kind === "min-content",
-    maxContentMinimum: minimum.kind === "max-content",
-    intrinsicMaximum: maximumIsIntrinsic || sizing.kind === "fit-content",
-    minContentMaximum: maximum.kind === "min-content",
-    automaticMaximum: sizing.kind !== "fit-content" && (maximum.kind === "auto" || unresolvedMaximumPercentage),
-    fitContentLimit,
-    base,
-    growth,
+    fitContentLimit: resolvedFitContentLimit === null ? null : nonNegative(resolvedFitContentLimit),
+    baseSize,
+    growthLimit,
+    infinitelyGrowable: false,
+    plannedIncrease: ZERO,
     offset: ZERO
   };
 }
 
-function activeTrackCount(tracks: readonly MutableTrack[]): number {
-  return tracks.reduce((count, track) => count + (track.collapsed ? 0 : 1), 0);
-}
-
-function trackGapTotal(tracks: readonly MutableTrack[], gap: CssPixelLength): CssPixelLength {
-  return cssMultiply(gap, Math.max(0, activeTrackCount(tracks) - 1));
-}
-
-function spanBase(tracks: readonly MutableTrack[], item: GridItemContribution, gap: CssPixelLength): CssPixelLength {
-  let total: CssPixelLength = ZERO;
-  let active = 0;
-  for (let index = item.start; index < item.end; index += 1) {
-    const track = tracks[index];
-    if (track === undefined || track.collapsed) continue;
-    total = cssAdd(total, track.base);
-    active += 1;
-  }
-  return cssAdd(total, cssMultiply(gap, Math.max(0, active - 1)));
-}
-
-function distributeBase(
+function activeGutterBoundaries(
   tracks: readonly MutableTrack[],
-  item: GridItemContribution,
-  target: CssPixelLength,
+  work: TrackSizingWork
+): readonly boolean[] {
+  const boundaries: boolean[] = [];
+  for (let index = 0; index + 1 < tracks.length; index += 1) {
+    consume(work);
+    boundaries.push(!(tracks[index]?.collapsed ?? true) && !(tracks[index + 1]?.collapsed ?? true));
+  }
+  return Object.freeze(boundaries);
+}
+
+function gutterTotal(
+  boundaries: readonly boolean[],
   gap: CssPixelLength,
-  work: TrackSizingWork,
-  excludeFlexible: boolean
-): void {
-  let deficit = cssMax(ZERO, cssAdd(target, cssMultiply(spanBase(tracks, item, gap), -1)));
-  let candidates = tracks.slice(item.start, item.end)
-    .filter((track) => !track.collapsed && track.intrinsicMinimum && (!excludeFlexible || track.flexFactor === 0));
-  if (candidates.length === 0) {
-    candidates = tracks.slice(item.start, item.end)
-      .filter((track) => !track.collapsed && track.intrinsicMinimum);
+  start = 0,
+  end = boundaries.length + 1,
+  work?: TrackSizingWork
+): CssPixelLength {
+  let total: CssPixelLength = ZERO;
+  for (let boundary = Math.max(0, start); boundary < Math.min(boundaries.length, end - 1); boundary += 1) {
+    if (work !== undefined) consume(work);
+    if (boundaries[boundary]) total = sum(total, gap);
   }
-  while (deficit > 0 && candidates.length > 0) {
-    consume(work, candidates.length);
-    const share = cssDivide(deficit, candidates.length);
-    let distributed: CssPixelLength = ZERO;
-    const next: MutableTrack[] = [];
-    for (const track of candidates) {
-      const growth = share;
-      track.base = cssNonNegativeLength(cssAdd(track.base, growth));
-      distributed = cssAdd(distributed, growth);
-      next.push(track);
-    }
-    if (distributed <= 0) break;
-    deficit = cssMax(ZERO, cssAdd(deficit, cssMultiply(distributed, -1)));
-    candidates = next;
-  }
+  return total;
 }
 
-function distributeGrowthLimit(
+function validContribution(item: GridItemContribution, trackCount: number): boolean {
+  return item.start >= 0 && item.end > item.start && item.end <= trackCount;
+}
+
+function tracksForItem(
   tracks: readonly MutableTrack[],
   item: GridItemContribution,
-  target: CssPixelLength,
-  gap: CssNonNegativeLength,
-  work: TrackSizingWork,
-  usesMinContent: boolean
-): void {
-  const spanned = tracks.slice(item.start, item.end).filter((track) => !track.collapsed);
-  let current: CssPixelLength = cssMultiply(gap, Math.max(0, spanned.length - 1));
-  for (const track of spanned) current = cssAdd(current, track.growth ?? track.base);
-  let deficit = cssMax(ZERO, cssAdd(target, cssMultiply(current, -1)));
-  let candidates = spanned.filter((track) => track.intrinsicMaximum && track.flexFactor === 0
-    && track.minContentMaximum === usesMinContent);
-  while (deficit > 0 && candidates.length > 0) {
-    consume(work, candidates.length);
-    const share = cssDivide(deficit, candidates.length);
-    let distributed: CssPixelLength = ZERO;
-    const next: MutableTrack[] = [];
-    for (const track of candidates) {
-      const currentLimit = track.growth ?? track.base;
-      let permitted = share;
-      if (track.fitContentLimit !== null) {
-        permitted = cssMin(permitted, cssMax(ZERO, cssAdd(track.fitContentLimit, cssMultiply(currentLimit, -1))));
-      }
-      track.growth = cssNonNegativeLength(cssAdd(currentLimit, permitted));
-      distributed = cssAdd(distributed, permitted);
-      if (permitted === share) next.push(track);
-    }
-    if (distributed <= 0) break;
-    deficit = cssMax(ZERO, cssAdd(deficit, cssMultiply(distributed, -1)));
-    candidates = next;
+  work: TrackSizingWork
+): readonly MutableTrack[] {
+  const result: MutableTrack[] = [];
+  for (let index = item.start; index < item.end; index += 1) {
+    consume(work);
+    const track = tracks[index];
+    if (track !== undefined && !track.collapsed) result.push(track);
   }
+  return result;
 }
 
-function resolveIntrinsicContributions(
+function selectTracks(
+  tracks: readonly MutableTrack[],
+  predicate: (track: MutableTrack) => boolean,
+  work: TrackSizingWork
+): MutableTrack[] {
+  const selected: MutableTrack[] = [];
+  for (const track of tracks) {
+    consume(work);
+    if (predicate(track)) selected.push(track);
+  }
+  return selected;
+}
+
+function baseSpanSize(
+  tracks: readonly MutableTrack[],
+  item: GridItemContribution,
+  boundaries: readonly boolean[],
+  gap: CssPixelLength,
+  work: TrackSizingWork
+): CssPixelLength {
+  let result = gutterTotal(boundaries, gap, item.start, item.end, work);
+  for (const track of tracksForItem(tracks, item, work)) result = sum(result, track.baseSize);
+  return result;
+}
+
+function growthSpanSize(
+  tracks: readonly MutableTrack[],
+  item: GridItemContribution,
+  boundaries: readonly boolean[],
+  gap: CssPixelLength,
+  work: TrackSizingWork
+): CssPixelLength {
+  let result = gutterTotal(boundaries, gap, item.start, item.end, work);
+  for (const track of tracksForItem(tracks, item, work)) {
+    result = sum(result, track.growthLimit.kind === "finite" ? track.growthLimit.value : track.baseSize);
+  }
+  return result;
+}
+
+function baseTarget(track: MutableTrack, item: GridItemContribution): CssNonNegativeLength | null {
+  if (track.minimumCategory === "fixed" || track.flexFactor > 0) return null;
+  if (track.minimum.kind === "max-content") return item.maxContent;
+  if (track.minimum.kind === "min-content") return item.minContent;
+  return item.minimumContribution;
+}
+
+function growthTarget(track: MutableTrack, item: GridItemContribution): CssNonNegativeLength | null {
+  if (track.maximumCategory === "fixed" || track.maximumCategory === "flexible") return null;
+  const target = track.maximum.kind === "min-content" ? item.minContent : item.maxContent;
+  return track.fitContentLimit === null ? target : nonNegative(cssMin(target, track.fitContentLimit));
+}
+
+function resolveNonSpanningItems(
   tracks: readonly MutableTrack[],
   contributions: readonly GridItemContribution[],
-  gap: CssNonNegativeLength,
   work: TrackSizingWork
 ): void {
-  const ordered = [...contributions].sort((left, right) =>
-    (left.end - left.start) - (right.end - right.start) || left.start - right.start);
-  for (const item of ordered) {
+  const baseCandidates = tracks.map(() => ZERO);
+  const growthCandidates: (CssNonNegativeLength | null)[] = tracks.map(() => null);
+  for (const item of contributions) {
     consume(work);
-    if (item.end <= item.start || item.start < 0 || item.end > tracks.length) continue;
-    const spanned = tracks.slice(item.start, item.end).filter((track) => !track.collapsed);
-    const baseTarget = spanned.some((track) => track.maxContentMinimum)
-      ? item.maxContent
-      : spanned.some((track) => track.minContentMinimum)
-        ? item.minContent
-        : item.minimumContribution;
-    distributeBase(tracks, item, baseTarget, gap, work, true);
-    distributeGrowthLimit(tracks, item, item.minContent, gap, work, true);
-    distributeGrowthLimit(tracks, item, item.maxContent, gap, work, false);
+    if (!validContribution(item, tracks.length) || item.end - item.start !== 1) continue;
+    const track = tracks[item.start];
+    if (track === undefined || track.collapsed) continue;
+    const base = baseTarget(track, item);
+    if (base !== null) baseCandidates[track.index] = nonNegative(cssMax(baseCandidates[track.index] ?? ZERO, base));
+    const growth = growthTarget(track, item);
+    if (growth !== null) {
+      growthCandidates[track.index] = nonNegative(cssMax(growthCandidates[track.index] ?? ZERO, growth));
+    }
   }
   for (const track of tracks) {
-    if (track.intrinsicMaximum && track.growth === null) track.growth = track.base;
-    if (track.growth !== null) track.growth = cssNonNegativeLength(cssMax(track.base, track.growth));
+    consume(work);
+    if (track.collapsed) continue;
+    const base = baseCandidates[track.index] ?? ZERO;
+    track.baseSize = nonNegative(cssMax(track.baseSize, base));
+    const growth = growthCandidates[track.index];
+    if (growth !== null && growth !== undefined) {
+      track.growthLimit = Object.freeze({
+        kind: "finite",
+        value: nonNegative(cssMax(track.baseSize, growth))
+      });
+    } else if (track.growthLimit.kind === "finite" && track.growthLimit.value < track.baseSize) {
+      track.growthLimit = Object.freeze({ kind: "finite", value: track.baseSize });
+    }
   }
 }
 
-function maximizeTracks(tracks: readonly MutableTrack[], input: GridTrackSizingInput, work: TrackSizingWork): void {
-  if (input.availableSize === null) return;
-  let used = trackGapTotal(tracks, input.gap);
-  for (const track of tracks) used = cssAdd(used, track.base);
-  let free = cssMax(ZERO, cssAdd(input.availableSize, cssMultiply(used, -1)));
-  let growable = tracks.filter((track) => !track.collapsed && track.flexFactor === 0
-    && (track.growth === null || track.base < track.growth));
-  while (free > 0 && growable.length > 0) {
+function phaseTarget(phase: ContributionPhase, item: GridItemContribution): CssNonNegativeLength {
+  if (phase === "max-content-minimum" || phase === "max-content-maximum") return item.maxContent;
+  if (phase === "content-based-minimum" || phase === "intrinsic-maximum") return item.minContent;
+  return item.minimumContribution;
+}
+
+function intrinsicMinimum(track: MutableTrack): boolean {
+  return track.minimumCategory !== "fixed" && track.minimumCategory !== "flexible";
+}
+
+function intrinsicMaximum(track: MutableTrack): boolean {
+  return track.maximumCategory !== "fixed" && track.maximumCategory !== "flexible";
+}
+
+function maxContentMaximum(track: MutableTrack): boolean {
+  return track.maximum.kind === "max-content" || track.maximum.kind === "auto";
+}
+
+function participates(
+  track: MutableTrack,
+  phase: ContributionPhase,
+  sizingConstraint: GridTrackSizingInput["sizingConstraint"]
+): boolean {
+  if (track.collapsed) return false;
+  if (phase === "flexible-crossing-minimum") return track.flexFactor > 0;
+  if (phase === "intrinsic-minimum") return intrinsicMinimum(track);
+  if (phase === "content-based-minimum") {
+    return track.minimum.kind === "min-content" || track.minimum.kind === "max-content";
+  }
+  if (phase === "max-content-minimum") {
+    return track.minimum.kind === "max-content"
+      || (sizingConstraint === "max-content" && track.minimum.kind === "auto");
+  }
+  if (phase === "intrinsic-maximum") return intrinsicMaximum(track);
+  return track.infinitelyGrowable || maxContentMaximum(track);
+}
+
+function roomForBase(track: MutableTrack): CssPixelLength | null {
+  return track.growthLimit.kind === "infinite"
+    ? null
+    : nonNegative(difference(track.growthLimit.value, track.baseSize));
+}
+
+function distributeEqually(
+  amount: CssNonNegativeLength,
+  candidates: readonly MutableTrack[],
+  room: (track: MutableTrack) => CssPixelLength | null,
+  work: TrackSizingWork
+): ReadonlyMap<MutableTrack, CssNonNegativeLength> {
+  const increases = new Map<MutableTrack, CssNonNegativeLength>();
+  let remaining: CssPixelLength = amount;
+  let growable = [...candidates];
+  for (const track of candidates) increases.set(track, ZERO);
+  while (remaining > 0 && growable.length > 0) {
     consume(work, growable.length);
-    const share = cssDivide(free, growable.length);
+    const share = cssDivide(remaining, growable.length);
     let distributed: CssPixelLength = ZERO;
     const next: MutableTrack[] = [];
     for (const track of growable) {
-      const room = track.growth === null ? share : cssAdd(track.growth, cssMultiply(track.base, -1));
-      const growth = cssMin(share, cssMax(ZERO, room));
-      track.base = cssNonNegativeLength(cssAdd(track.base, growth));
-      distributed = cssAdd(distributed, growth);
-      if (track.growth === null || track.base < track.growth) next.push(track);
+      const already = increases.get(track) ?? ZERO;
+      const available = room(track);
+      const remainingRoom = available === null ? null : nonNegative(difference(available, already));
+      const increase = remainingRoom === null ? share : cssMin(share, remainingRoom);
+      increases.set(track, nonNegative(sum(already, increase)));
+      distributed = sum(distributed, increase);
+      if (remainingRoom === null || increase < remainingRoom) next.push(track);
     }
     if (distributed <= 0) break;
-    free = cssMax(ZERO, cssAdd(free, cssMultiply(distributed, -1)));
+    remaining = nonNegative(difference(remaining, distributed));
     growable = next;
+  }
+  return increases;
+}
+
+function distributeToFlexibleTracks(
+  amount: CssNonNegativeLength,
+  candidates: readonly MutableTrack[],
+  work: TrackSizingWork
+): ReadonlyMap<MutableTrack, CssNonNegativeLength> {
+  const increases = new Map<MutableTrack, CssNonNegativeLength>();
+  const flexible = selectTracks(candidates, (track) => track.flexFactor > 0, work);
+  if (flexible.length === 0) return distributeEqually(amount, candidates, roomForBase, work);
+  let factorSum = 0;
+  for (const track of flexible) {
+    consume(work);
+    factorSum += track.flexFactor;
+  }
+  const divisor = Math.max(1, factorSum);
+  for (const track of candidates) increases.set(track, ZERO);
+  let distributed: CssPixelLength = ZERO;
+  for (const track of flexible) {
+    const increase = nonNegative(cssMultiply(cssDivide(amount, divisor), track.flexFactor));
+    increases.set(track, increase);
+    distributed = sum(distributed, increase);
+  }
+  const remaining = nonNegative(difference(amount, distributed));
+  if (remaining > 0 && factorSum < 1) {
+    for (const [track, increase] of distributeEqually(remaining, flexible, () => null, work)) {
+      increases.set(track, nonNegative(sum(increases.get(track) ?? ZERO, increase)));
+    }
+  }
+  return increases;
+}
+
+type AffectedSize = "base" | "growth";
+
+function affectedSize(phase: ContributionPhase): AffectedSize {
+  return phase === "intrinsic-maximum" || phase === "max-content-maximum" ? "growth" : "base";
+}
+
+function increaseLimit(track: MutableTrack, size: AffectedSize): CssPixelLength | null {
+  if (size === "base") {
+    const growthRoom = track.growthLimit.kind === "infinite"
+      ? null
+      : nonNegative(difference(track.growthLimit.value, track.baseSize));
+    const fitRoom = track.fitContentLimit === null
+      ? null
+      : nonNegative(difference(track.fitContentLimit, track.baseSize));
+    if (growthRoom === null) return fitRoom;
+    if (fitRoom === null) return growthRoom;
+    return nonNegative(cssMin(growthRoom, fitRoom));
+  }
+  if (track.growthLimit.kind === "finite" && !track.infinitelyGrowable) return ZERO;
+  if (track.fitContentLimit === null) return null;
+  return nonNegative(difference(
+    track.fitContentLimit,
+    track.growthLimit.kind === "finite" ? track.growthLimit.value : track.baseSize
+  ));
+}
+
+function addIncreases(
+  target: Map<MutableTrack, CssNonNegativeLength>,
+  additions: ReadonlyMap<MutableTrack, CssNonNegativeLength>
+): CssNonNegativeLength {
+  let total: CssPixelLength = ZERO;
+  for (const [track, increase] of additions) {
+    target.set(track, nonNegative(sum(target.get(track) ?? ZERO, increase)));
+    total = sum(total, increase);
+  }
+  return nonNegative(total);
+}
+
+function beyondLimitCandidates(
+  affected: readonly MutableTrack[],
+  phase: ContributionPhase,
+  work: TrackSizingWork
+): readonly MutableTrack[] {
+  if (phase === "intrinsic-maximum" || phase === "max-content-maximum") {
+    return selectTracks(affected, (track) => intrinsicMaximum(track), work);
+  }
+  if (phase === "max-content-minimum") {
+    const preferred = selectTracks(affected, (track) => maxContentMaximum(track), work);
+    return preferred.length > 0 ? preferred : affected;
+  }
+  const preferred = selectTracks(affected, (track) => intrinsicMaximum(track), work);
+  return preferred.length > 0 ? preferred : affected;
+}
+
+function incurredIncreases(
+  tracks: readonly MutableTrack[],
+  item: GridItemContribution,
+  phase: ContributionPhase,
+  boundaries: readonly boolean[],
+  gap: CssPixelLength,
+  sizingConstraint: GridTrackSizingInput["sizingConstraint"],
+  work: TrackSizingWork
+): IncurredIncreases {
+  const size = affectedSize(phase);
+  const spanned = tracksForItem(tracks, item, work);
+  const affected = selectTracks(
+    spanned,
+    (track) => participates(track, phase, sizingConstraint),
+    work
+  );
+  const affectedSet = new Set(affected);
+  const increases = new Map<MutableTrack, CssNonNegativeLength>();
+  if (affected.length === 0) return { affected, increases };
+  const current = size === "growth"
+    ? growthSpanSize(tracks, item, boundaries, gap, work)
+    : baseSpanSize(tracks, item, boundaries, gap, work);
+  let remaining = nonNegative(difference(phaseTarget(phase, item), current));
+  if (remaining <= 0) return { affected, increases };
+
+  const initial = phase === "flexible-crossing-minimum"
+    ? distributeToFlexibleTracks(remaining, affected, work)
+    : distributeEqually(remaining, affected, (track) => increaseLimit(track, size), work);
+  remaining = nonNegative(difference(remaining, addIncreases(increases, initial)));
+
+  const unaffected = selectTracks(spanned, (track) => !affectedSet.has(track), work);
+  if (remaining > 0 && unaffected.length > 0) {
+    const distributed = distributeEqually(
+      remaining,
+      unaffected,
+      (track) => increaseLimit(track, size),
+      work
+    );
+    remaining = nonNegative(difference(remaining, addIncreases(increases, distributed)));
+  }
+
+  if (remaining > 0) {
+    const beyond = beyondLimitCandidates(affected, phase, work);
+    if (beyond.length > 0) {
+      const distributed = phase === "flexible-crossing-minimum"
+        ? distributeToFlexibleTracks(remaining, beyond, work)
+        : distributeEqually(remaining, beyond, () => null, work);
+      addIncreases(increases, distributed);
+    }
+  }
+  return { affected, increases };
+}
+
+function examineSpanningPhase(
+  tracks: readonly MutableTrack[],
+  items: readonly GridItemContribution[],
+  phase: ContributionPhase,
+  boundaries: readonly boolean[],
+  gap: CssPixelLength,
+  work: TrackSizingWork
+): void {
+  const affectedTracks = new Set<MutableTrack>();
+  for (const track of tracks) {
+    consume(work);
+    track.plannedIncrease = ZERO;
+  }
+  for (const item of items) {
+    consume(work);
+    const incurred = incurredIncreases(
+      tracks,
+      item,
+      phase,
+      boundaries,
+      gap,
+      work.input.sizingConstraint,
+      work
+    );
+    for (const track of incurred.affected) affectedTracks.add(track);
+    for (const [track, increase] of incurred.increases) {
+      track.plannedIncrease = nonNegative(cssMax(track.plannedIncrease, increase));
+    }
+  }
+  for (const track of tracks) {
+    consume(work);
+    if (!affectedTracks.has(track)) {
+      track.plannedIncrease = ZERO;
+      if (phase === "max-content-maximum") track.infinitelyGrowable = false;
+      continue;
+    }
+    if (phase === "intrinsic-maximum" || phase === "max-content-maximum") {
+      const previousGrowthLimit = track.growthLimit;
+      const wasInfinite = previousGrowthLimit.kind === "infinite";
+      const current = previousGrowthLimit.kind === "infinite" ? track.baseSize : previousGrowthLimit.value;
+      track.growthLimit = Object.freeze({
+        kind: "finite",
+        value: nonNegative(cssMax(track.baseSize, sum(current, track.plannedIncrease)))
+      });
+      if (phase === "intrinsic-maximum" && wasInfinite) track.infinitelyGrowable = true;
+      if (phase === "max-content-maximum") track.infinitelyGrowable = false;
+    } else {
+      track.baseSize = nonNegative(sum(track.baseSize, track.plannedIncrease));
+      if (track.growthLimit.kind === "finite" && track.growthLimit.value < track.baseSize) {
+        track.growthLimit = Object.freeze({ kind: "finite", value: track.baseSize });
+      }
+    }
+    track.plannedIncrease = ZERO;
+  }
+}
+
+function resolveSpanningItems(
+  tracks: readonly MutableTrack[],
+  contributions: readonly GridItemContribution[],
+  boundaries: readonly boolean[],
+  gap: CssPixelLength,
+  work: TrackSizingWork
+): void {
+  const ordinaryBySpan = new Map<number, GridItemContribution[]>();
+  const flexible: GridItemContribution[] = [];
+  for (const item of contributions) {
+    consume(work);
+    if (!validContribution(item, tracks.length)) continue;
+    const crossesFlexible = tracksForItem(tracks, item, work).some((track) => track.flexFactor > 0);
+    if (crossesFlexible) flexible.push(item);
+    else if (item.end - item.start > 1) {
+      const span = item.end - item.start;
+      const group = ordinaryBySpan.get(span) ?? [];
+      group.push(item);
+      ordinaryBySpan.set(span, group);
+    }
+  }
+  const spans = [...ordinaryBySpan.keys()].sort((left, right) => left - right);
+  for (const span of spans) {
+    const group = ordinaryBySpan.get(span) ?? [];
+    for (const phase of [
+      "intrinsic-minimum",
+      "content-based-minimum",
+      "max-content-minimum",
+      "intrinsic-maximum",
+      "max-content-maximum"
+    ] as const) {
+      examineSpanningPhase(tracks, group, phase, boundaries, gap, work);
+    }
+  }
+  if (flexible.length > 0)
+    examineSpanningPhase(tracks, flexible, "flexible-crossing-minimum", boundaries, gap, work);
+  for (const track of tracks) {
+    if (track.growthLimit.kind === "infinite" && track.maximumCategory !== "flexible") {
+      track.growthLimit = Object.freeze({ kind: "finite", value: track.baseSize });
+    }
+    if (track.growthLimit.kind === "finite" && track.growthLimit.value < track.baseSize) {
+      track.growthLimit = Object.freeze({ kind: "finite", value: track.baseSize });
+    }
+    track.infinitelyGrowable = false;
+  }
+}
+
+function totalBaseSize(
+  tracks: readonly MutableTrack[],
+  boundaries: readonly boolean[],
+  gap: CssPixelLength,
+  work: TrackSizingWork
+): CssPixelLength {
+  let total = gutterTotal(boundaries, gap, 0, boundaries.length + 1, work);
+  for (const track of tracks) {
+    consume(work);
+    total = sum(total, track.baseSize);
+  }
+  return total;
+}
+
+function maximizeTracks(
+  tracks: readonly MutableTrack[],
+  boundaries: readonly boolean[],
+  input: GridTrackSizingInput,
+  work: TrackSizingWork
+): void {
+  if (input.sizingConstraint === "min-content") return;
+  if (input.availableSize === null) {
+    if (input.sizingConstraint !== "max-content") return;
+    for (const track of tracks) {
+      consume(work);
+      if (!track.collapsed && track.flexFactor === 0 && track.growthLimit.kind === "finite") {
+        track.baseSize = track.growthLimit.value;
+      }
+    }
+    return;
+  }
+  let free = nonNegative(difference(input.availableSize, totalBaseSize(tracks, boundaries, input.gap, work)));
+  let growable = selectTracks(
+    tracks,
+    (track) => !track.collapsed && track.flexFactor === 0
+      && (track.growthLimit.kind === "infinite" || track.baseSize < track.growthLimit.value),
+    work
+  );
+  while (free > 0 && growable.length > 0) {
+    const increases = distributeEqually(free, growable, roomForBase, work);
+    let distributed: CssPixelLength = ZERO;
+    for (const [track, increase] of increases) {
+      track.baseSize = nonNegative(sum(track.baseSize, increase));
+      distributed = sum(distributed, increase);
+    }
+    if (distributed <= 0) break;
+    free = nonNegative(difference(free, distributed));
+    growable = selectTracks(
+      growable,
+      (track) => track.growthLimit.kind === "infinite" || track.baseSize < track.growthLimit.value,
+      work
+    );
+  }
+}
+
+function findFlexFraction(
+  tracks: readonly MutableTrack[],
+  spaceToFill: CssPixelLength,
+  work: TrackSizingWork
+): CssPixelLength {
+  const flexible = selectTracks(tracks, (track) => !track.collapsed && track.flexFactor > 0, work);
+  const frozen = new Set<MutableTrack>();
+  let fraction: CssPixelLength = ZERO;
+  for (;;) {
+    consume(work, Math.max(1, flexible.length + tracks.length));
+    let leftover = spaceToFill;
+    let factorSum = 0;
+    for (const track of tracks) {
+      if (track.collapsed) continue;
+      if (track.flexFactor === 0 || frozen.has(track)) leftover = difference(leftover, track.baseSize);
+      else factorSum += track.flexFactor;
+    }
+    fraction = cssDivide(leftover, Math.max(1, factorSum));
+    const newlyFrozen = selectTracks(
+      flexible,
+      (track) => !frozen.has(track) && cssMultiply(fraction, track.flexFactor) < track.baseSize,
+      work
+    );
+    if (newlyFrozen.length === 0) return cssMax(ZERO, fraction);
+    for (const track of newlyFrozen) frozen.add(track);
+    if (frozen.size === flexible.length) return ZERO;
   }
 }
 
 function expandFlexibleTracks(
   tracks: readonly MutableTrack[],
+  boundaries: readonly boolean[],
   input: GridTrackSizingInput,
   contributions: readonly GridItemContribution[],
   work: TrackSizingWork
 ): void {
-  const flexible = tracks.filter((track) => !track.collapsed && track.flexFactor > 0);
+  const flexible = selectTracks(tracks, (track) => !track.collapsed && track.flexFactor > 0, work);
   if (flexible.length === 0) return;
-  consume(work, flexible.length);
   let fraction: CssPixelLength = ZERO;
   if (input.availableSize !== null) {
-    const frozen = new Set<MutableTrack>();
-    for (;;) {
-      consume(work, flexible.length);
-      let occupied: CssPixelLength = trackGapTotal(tracks, input.gap);
-      for (const track of tracks) {
-        if (track.flexFactor === 0 || frozen.has(track)) occupied = cssAdd(occupied, track.base);
-      }
-      const remaining = cssMax(ZERO, cssAdd(input.availableSize, cssMultiply(occupied, -1)));
-      const factors = flexible.reduce((sum, track) => frozen.has(track) ? sum : sum + track.flexFactor, 0);
-      fraction = factors <= 0 ? ZERO : cssDivide(remaining, Math.max(1, factors));
-      const newlyFrozen = flexible.filter((track) => !frozen.has(track)
-        && track.base > cssMultiply(fraction, track.flexFactor));
-      if (newlyFrozen.length === 0) break;
-      for (const track of newlyFrozen) frozen.add(track);
-      if (frozen.size === flexible.length) break;
-    }
+    fraction = findFlexFraction(
+      tracks,
+      difference(input.availableSize, gutterTotal(boundaries, input.gap, 0, boundaries.length + 1, work)),
+      work
+    );
   } else {
-    for (const track of flexible) fraction = cssMax(fraction, cssDivide(track.base, Math.max(1, track.flexFactor)));
+    for (const track of flexible) {
+      consume(work);
+      fraction = cssMax(fraction, cssDivide(track.baseSize, track.flexFactor));
+    }
     for (const item of contributions) {
-      const spanned = tracks.slice(item.start, item.end).filter((track) => !track.collapsed);
-      const itemFlexible = spanned.filter((track) => track.flexFactor > 0);
-      if (itemFlexible.length === 0) continue;
-      const frozen = new Set<MutableTrack>();
-      let itemFraction: CssPixelLength = ZERO;
-      for (;;) {
-        consume(work, spanned.length);
-        let occupied = cssMultiply(input.gap, Math.max(0, spanned.length - 1));
-        for (const track of spanned) {
-          if (track.flexFactor === 0 || frozen.has(track)) occupied = cssAdd(occupied, track.base);
-        }
-        const remaining = cssMax(ZERO, cssAdd(item.maxContent, cssMultiply(occupied, -1)));
-        const factors = itemFlexible.reduce(
-          (sum, track) => frozen.has(track) ? sum : sum + track.flexFactor,
-          0
-        );
-        itemFraction = factors <= 0 ? ZERO : cssDivide(remaining, Math.max(1, factors));
-        const newlyFrozen = itemFlexible.filter((track) => !frozen.has(track)
-          && track.base > cssMultiply(itemFraction, track.flexFactor));
-        if (newlyFrozen.length === 0 || frozen.size + newlyFrozen.length === itemFlexible.length) break;
-        for (const track of newlyFrozen) frozen.add(track);
-      }
-      fraction = cssMax(fraction, itemFraction);
+      consume(work);
+      if (!validContribution(item, tracks.length)) continue;
+      const spanned = tracksForItem(tracks, item, work);
+      if (!spanned.some((track) => track.flexFactor > 0)) continue;
+      const space = difference(
+        item.maxContent,
+        gutterTotal(boundaries, input.gap, item.start, item.end, work)
+      );
+      fraction = cssMax(fraction, findFlexFraction(spanned, space, work));
     }
   }
   for (const track of flexible) {
-    track.base = cssNonNegativeLength(cssMax(track.base, cssMultiply(fraction, track.flexFactor)));
-  }
-  if (input.availableSize !== null
-    && flexible.reduce((sum, track) => sum + track.flexFactor, 0) >= 1) {
-    let used: CssPixelLength = trackGapTotal(tracks, input.gap);
-    for (const track of tracks) used = cssAdd(used, track.base);
-    let remainder = cssMax(ZERO, cssAdd(input.availableSize, cssMultiply(used, -1)));
-    for (let index = 0; index < flexible.length && remainder > 0; index += 1) {
-      const track = flexible[index];
-      if (track === undefined) continue;
-      const addition = cssDivide(remainder, flexible.length - index);
-      track.base = cssNonNegativeLength(cssAdd(track.base, addition));
-      remainder = cssMax(ZERO, cssAdd(remainder, cssMultiply(addition, -1)));
-    }
+    consume(work);
+    track.baseSize = nonNegative(cssMax(track.baseSize, cssMultiply(fraction, track.flexFactor)));
   }
 }
 
-function alignTracks(tracks: readonly MutableTrack[], input: GridTrackSizingInput): {
-  readonly leading: CssPixelLength;
-  readonly gap: CssNonNegativeLength;
-} {
-  let used: CssPixelLength = trackGapTotal(tracks, input.gap);
-  for (const track of tracks) used = cssAdd(used, track.base);
-  const free = input.availableSize === null ? ZERO : cssMax(ZERO, cssAdd(input.availableSize, cssMultiply(used, -1)));
-  const active = activeTrackCount(tracks);
-  if (input.alignment === "stretch" && free > 0) {
-    const automatic = tracks.filter((track) => !track.collapsed && track.automaticMaximum && track.flexFactor === 0);
+function alignTracks(
+  tracks: readonly MutableTrack[],
+  boundaries: readonly boolean[],
+  input: GridTrackSizingInput,
+  work: TrackSizingWork
+): AlignmentResult {
+  const available = input.availableSize;
+  if (available === null) return { leading: ZERO, boundaryExtra: ZERO };
+  let free = difference(available, totalBaseSize(tracks, boundaries, input.gap, work));
+  const alignment = input.alignment.value === "normal" ? "stretch" : input.alignment.value;
+  const safeOverflow = input.alignment.overflow === "safe"
+    || (input.alignment.overflow === "default" && input.defaultOverflowAlignment === "safe");
+  if (alignment === "stretch" && free > 0) {
+    const automatic = selectTracks(
+      tracks,
+      (track) => !track.collapsed && track.maximumCategory === "automatic" && track.flexFactor === 0,
+      work
+    );
     if (automatic.length > 0) {
-      let remaining = free;
-      for (let index = 0; index < automatic.length; index += 1) {
-        const growth = cssDivide(remaining, automatic.length - index);
-        const track = automatic[index];
-        if (track === undefined) continue;
-        track.base = cssNonNegativeLength(cssAdd(track.base, growth));
-        remaining = cssAdd(remaining, cssMultiply(growth, -1));
+      const increases = distributeEqually(nonNegative(free), automatic, () => null, work);
+      let distributed: CssPixelLength = ZERO;
+      for (const [track, increase] of increases) {
+        track.baseSize = nonNegative(sum(track.baseSize, increase));
+        distributed = sum(distributed, increase);
       }
-      return { leading: ZERO, gap: input.gap };
+      free = difference(free, distributed);
     }
   }
-  if (input.alignment === "end") return { leading: free, gap: input.gap };
-  if (input.alignment === "center") return { leading: cssDivide(free, 2), gap: input.gap };
-  if (active <= 0) return { leading: ZERO, gap: input.gap };
-  if (input.alignment === "space-between" && active > 1) {
-    return { leading: ZERO, gap: cssNonNegativeLength(cssAdd(input.gap, cssDivide(free, active - 1))) };
+  if (free < 0 && safeOverflow) return { leading: ZERO, boundaryExtra: ZERO };
+  if (alignment === "end") return { leading: free, boundaryExtra: ZERO };
+  if (alignment === "center") return { leading: cssDivide(free, 2), boundaryExtra: ZERO };
+  if (free <= 0) return { leading: ZERO, boundaryExtra: ZERO };
+  consume(work, boundaries.length + tracks.length);
+  const boundaryCount = boundaries.reduce((count, active) => count + Number(active), 0);
+  const activeTracks = tracks.reduce((count, track) => count + Number(!track.collapsed), 0);
+  if (alignment === "space-between" && boundaryCount > 0) {
+    return { leading: ZERO, boundaryExtra: nonNegative(cssDivide(free, boundaryCount)) };
   }
-  if (input.alignment === "space-around") {
-    const space = cssDivide(free, active);
-    return { leading: cssDivide(space, 2), gap: cssNonNegativeLength(cssAdd(input.gap, space)) };
+  if (alignment === "space-around" && activeTracks > 0) {
+    const space = cssDivide(free, activeTracks);
+    return { leading: cssDivide(space, 2), boundaryExtra: nonNegative(space) };
   }
-  if (input.alignment === "space-evenly") {
-    const space = cssDivide(free, active + 1);
-    return { leading: space, gap: cssNonNegativeLength(cssAdd(input.gap, space)) };
+  if (alignment === "space-evenly" && activeTracks > 0) {
+    const space = cssDivide(free, activeTracks + 1);
+    return { leading: space, boundaryExtra: nonNegative(space) };
   }
-  return { leading: ZERO, gap: input.gap };
+  return { leading: ZERO, boundaryExtra: ZERO };
 }
 
 export function sizeGridTracks(input: GridTrackSizingInput): GridTrackSizingResult {
@@ -398,33 +811,47 @@ export function sizeGridTracks(input: GridTrackSizingInput): GridTrackSizingResu
       input
     ));
   }
-  resolveIntrinsicContributions(tracks, input.contributions, input.gap, work);
-  maximizeTracks(tracks, input, work);
-  expandFlexibleTracks(tracks, input, input.contributions, work);
-  const alignment = alignTracks(tracks, input);
+  const boundaries = activeGutterBoundaries(tracks, work);
+  resolveNonSpanningItems(tracks, input.contributions, work);
+  resolveSpanningItems(tracks, input.contributions, boundaries, input.gap, work);
+  maximizeTracks(tracks, boundaries, input, work);
+  expandFlexibleTracks(tracks, boundaries, input, input.contributions, work);
+  const alignment = alignTracks(tracks, boundaries, input, work);
   let offset: CssPixelLength = alignment.leading;
-  let previousActive = false;
   for (const track of tracks) {
-    if (!track.collapsed && previousActive) offset = cssAdd(offset, alignment.gap);
+    consume(work);
+    if (track.index > 0 && boundaries[track.index - 1]) {
+      offset = sum(offset, sum(input.gap, alignment.boundaryExtra));
+    }
     track.offset = offset;
-    offset = cssAdd(offset, track.base);
-    if (!track.collapsed) previousActive = true;
+    offset = sum(offset, track.baseSize);
   }
-  let used: CssPixelLength = trackGapTotal(tracks, alignment.gap);
-  for (const track of tracks) used = cssAdd(used, track.base);
-  const resolved: ResolvedGridTrack[] = tracks.map((track) => Object.freeze({
-    index: track.index,
-    baseSize: track.base,
-    growthLimit: track.growth,
-    flexFactor: track.flexFactor,
-    collapsed: track.collapsed,
-    offset: track.offset
-  }));
+  let used = totalBaseSize(tracks, boundaries, input.gap, work);
+  consume(work, boundaries.length);
+  used = sum(used, cssMultiply(alignment.boundaryExtra, boundaries.reduce(
+    (count, active) => count + Number(active),
+    0
+  )));
+  const resolved: ResolvedGridTrack[] = [];
+  for (const track of tracks) {
+    consume(work);
+    resolved.push(Object.freeze({
+      index: track.index,
+      baseSize: track.baseSize,
+      growthLimit: track.growthLimit,
+      flexFactor: track.flexFactor,
+      collapsed: track.collapsed,
+      gutterBefore: track.index > 0 && (boundaries[track.index - 1] ?? false),
+      minimumCategory: track.minimumCategory,
+      maximumCategory: track.maximumCategory,
+      offset: track.offset
+    }));
+  }
   return Object.freeze({
     tracks: Object.freeze(resolved),
-    usedSize: cssNonNegativeLength(cssMax(ZERO, used)),
+    usedSize: nonNegative(used),
     leadingSpace: alignment.leading,
-    distributedGap: alignment.gap,
+    activeGutterBoundaries: boundaries,
     work: work.used
   });
 }

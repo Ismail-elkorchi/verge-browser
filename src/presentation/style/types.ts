@@ -10,6 +10,7 @@ import type {
   CssGridTemplateAreas,
   CssGridTrackList
 } from "./grid/index.js";
+import type { CssContentAlignment, CssSelfAlignment } from "./alignment.js";
 
 export interface CssColor {
   readonly r: number;
@@ -145,12 +146,12 @@ export interface ComputedBoxStyle {
   readonly flexShrink: number;
   readonly flexBasis: CssFlexBasis;
   readonly order: number;
-  readonly justifyContent: "normal" | "start" | "center" | "end" | "stretch" | "space-between" | "space-around" | "space-evenly";
-  readonly alignItems: "normal" | "start" | "center" | "end" | "stretch" | "baseline";
-  readonly alignSelf: "auto" | "normal" | "start" | "center" | "end" | "stretch" | "baseline";
-  readonly alignContent: "normal" | "start" | "center" | "end" | "stretch" | "space-between" | "space-around" | "space-evenly";
-  readonly justifyItems: "normal" | "start" | "center" | "end" | "stretch" | "baseline";
-  readonly justifySelf: "auto" | "normal" | "start" | "center" | "end" | "stretch" | "baseline";
+  readonly justifyContent: CssContentAlignment;
+  readonly alignItems: CssSelfAlignment;
+  readonly alignSelf: CssSelfAlignment;
+  readonly alignContent: CssContentAlignment;
+  readonly justifyItems: CssSelfAlignment;
+  readonly justifySelf: CssSelfAlignment;
   readonly position: "static" | "relative" | "absolute" | "fixed" | "sticky";
   readonly inset: CssEdges;
   readonly zIndex: number | null;

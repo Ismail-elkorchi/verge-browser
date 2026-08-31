@@ -1,5 +1,6 @@
 import type { FormattingNodeId } from "../../formatting/index.js";
 import type {
+  CssContentAlignment,
   CssGridAutoFlow,
   CssGridLine,
   CssGridTrackSizingFunction,
@@ -100,17 +101,34 @@ export interface GridTrackSizingInput {
   readonly availableSize: CssPixelLength | null;
   readonly gap: CssNonNegativeLength;
   readonly resolveLength: (value: CssLength, percentageBasis: CssPixelLength | null) => CssPixelLength | null;
-  readonly alignment: "start" | "end" | "center" | "stretch" | "space-between" | "space-around" | "space-evenly";
+  readonly alignment: CssContentAlignment;
+  readonly defaultOverflowAlignment?: "safe" | "unsafe";
+  readonly sizingConstraint?: "none" | "min-content" | "max-content";
   readonly maxWork: number;
   readonly signal: AbortSignal | undefined;
 }
 
+export type GridTrackSizingFunctionCategory =
+  | "fixed"
+  | "intrinsic"
+  | "content-based"
+  | "automatic"
+  | "flexible";
+
+export type GridTrackGrowthLimit =
+  | { readonly kind: "finite"; readonly value: CssNonNegativeLength }
+  | { readonly kind: "infinite" };
+
 export interface ResolvedGridTrack {
   readonly index: number;
   readonly baseSize: CssNonNegativeLength;
-  readonly growthLimit: CssNonNegativeLength | null;
+  readonly growthLimit: GridTrackGrowthLimit;
   readonly flexFactor: number;
   readonly collapsed: boolean;
+  /** Whether the used gutter immediately before this track is active. */
+  readonly gutterBefore: boolean;
+  readonly minimumCategory: GridTrackSizingFunctionCategory;
+  readonly maximumCategory: GridTrackSizingFunctionCategory;
   readonly offset: CssPixelLength;
 }
 
@@ -118,6 +136,6 @@ export interface GridTrackSizingResult {
   readonly tracks: readonly ResolvedGridTrack[];
   readonly usedSize: CssNonNegativeLength;
   readonly leadingSpace: CssPixelLength;
-  readonly distributedGap: CssNonNegativeLength;
+  readonly activeGutterBoundaries: readonly boolean[];
   readonly work: number;
 }
