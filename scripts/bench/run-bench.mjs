@@ -7,6 +7,7 @@ import { parse } from "@ismail-elkorchi/html-parser";
 import { BrowserSession } from "../../dist/app/session.js";
 import { createDocumentState } from "../../dist/document/index.js";
 import { createIndexedWebDocumentSnapshot } from "../../dist/document/snapshot.js";
+import { associateTableHeaders } from "../../dist/document/table/index.js";
 import { buildFormattingTree } from "../../dist/presentation/formatting/index.js";
 import {
   buildLayoutFragmentTree,
@@ -23,10 +24,12 @@ import {
   sizeGridTracks
 } from "../../dist/presentation/layout/grid/index.js";
 import {
+  buildCollapsedTableBorderGraph,
+  buildCollapsedTableBorderSegments,
   buildTableSlotGrid,
   distributeTableWidth,
   measureTableColumns,
-  resolveCollapsedTableBorders,
+  resolveCollapsedBorderConflictSets,
   sizeTableRows
 } from "../../dist/presentation/layout/table/index.js";
 import { buildTextSearchIndex } from "../../dist/presentation/search/index.js";
@@ -129,15 +132,21 @@ const LIMITS_MS = Object.freeze({
   gridSparseFrontiers: 5_000,
   gridCollapsedAutoFitTracks: 5_000,
   tableMetadataIndexingP95: 500,
+  tableHeaderAssociationP95: 500,
+  tableAutomaticHeaderAssociationP95: 500,
   tableSlotGridConstructionP95: 500,
   tableCellIntrinsicMeasurementP95: 500,
   tableColumnMeasureAggregationP95: 1_000,
+  tableColspanPlanningP95: 1_000,
   tableAutomaticWidthDistributionP95: 500,
   tableFixedWidthDistributionP95: 500,
   tableFirstCellLayoutPassP95: 3_000,
   tableRowHeightAndRowspanDistributionP95: 1_000,
+  tableRowspanPlanningP95: 1_000,
   tableSecondCellLayoutPassP95: 3_000,
-  tableCollapsedBorderResolutionP95: 2_000,
+  tableCollapsedBorderGraphConstructionP95: 2_000,
+  tableCollapsedBorderConflictSetsP95: 2_000,
+  tablePaintSegmentGenerationP95: 1_000,
   tableDisplayListConstructionP95: 1_000,
   tableCellRasterizationP95: 2_000,
   completeTableLayoutP95: 3_000,
@@ -147,6 +156,7 @@ const LIMITS_MS = Object.freeze({
   tableRowspanStressP95: 5_000,
   tableWideStressP95: 5_000,
   tableNestedStressP95: 5_000,
+  tableColumnGroupStressP95: 5_000,
   tableCollapsedBorderStressP95: 5_000
 });
 const LIMITS_MEMORY_MIB = Object.freeze({
@@ -399,6 +409,18 @@ function formattingFixture(html, name) {
   });
   const state = createDocumentState(document);
   return buildFormattingTree({ document, state, styles: styles(document, state) });
+}
+
+function formattingNodeOfKind(formatting, kind) {
+  const pending = [formatting.root];
+  while (pending.length > 0) {
+    const id = pending.pop();
+    if (id === undefined) continue;
+    const node = formatting.node(id);
+    if (node.kind === kind) return node;
+    pending.push(...node.children);
+  }
+  throw new Error(`benchmark formatting tree has no ${kind} box`);
 }
 
 function layoutContext(columns, rows = 24) {
@@ -1090,17 +1112,7 @@ const tableParsedDocument = parse(tableBenchmarkHtml, {
   trace: "none"
 });
 const tableFormatting = formattingFixture(tableBenchmarkHtml, "table-stage");
-const tableFormattingNode = (() => {
-  const pending = [tableFormatting.root];
-  while (pending.length > 0) {
-    const id = pending.pop();
-    if (id === undefined) continue;
-    const node = tableFormatting.node(id);
-    if (node.kind === "table") return node;
-    pending.push(...node.children);
-  }
-  throw new Error("table benchmark formatting tree has no table root");
-})();
+const tableFormattingNode = formattingNodeOfKind(tableFormatting, "table");
 const tableBudgets = Object.freeze({
   maxTableRoots: 10_000,
   maxTableRowGroups: 100_000,
@@ -1167,8 +1179,20 @@ function tableHost(formatting) {
     },
     consume: (budget, amount = 1) => work.set(budget, (work.get(budget) ?? 0) + amount),
     usedLength: (value, basis) => tableUsedLength(value, basis),
+    inlineBoxOffsets: () => cssPx(0),
     intrinsicContributions: (id) => syntheticTableContributions(id),
-    registerCollapsedBorderOverride: () => {}
+    registerCollapsedBorderOverride: () => {},
+    paintStyle: () => Object.freeze({
+      visible: true,
+      foreground: null,
+      background: null,
+      bold: false,
+      italic: false,
+      underline: false,
+      strikethrough: false,
+      borderColors: Object.freeze({ top: null, right: null, bottom: null, left: null }),
+      borderStyles: Object.freeze({ top: "none", right: "none", bottom: "none", left: "none" })
+    })
   };
 }
 const measuredTableHost = tableHost(tableFormatting);
@@ -1177,6 +1201,75 @@ const measuredTableStyle = tableComputed(tableFormatting, tableFormattingNode);
 if (measuredTableStyle === null) throw new Error("table benchmark has no computed style");
 const measuredTableColumns = measureTableColumns(measuredTableHost, measuredTableGrid, cssPx(960));
 const measuredTableWidth = distributeTableWidth(measuredTableHost, measuredTableStyle, measuredTableColumns, cssPx(960), cssPx(0));
+const measuredTableRows = sizeTableRows(
+  measuredTableHost,
+  measuredTableGrid,
+  measuredTableWidth.columns,
+  cssPx(0),
+  cssPx(0),
+  null
+);
+const measuredCollapsedGraph = buildCollapsedTableBorderGraph(
+  measuredTableHost,
+  measuredTableGrid,
+  tableFormattingNode,
+  cssPx(960)
+);
+const measuredCollapsedWinners = resolveCollapsedBorderConflictSets(
+  measuredTableHost,
+  measuredTableGrid,
+  tableFormattingNode,
+  measuredCollapsedGraph
+);
+const tableColspanFormatting = formattingFixture(`<table style="width:960px">${Array.from(
+  { length: 100 }, (_, row) => `<tr>${Array.from(
+    { length: 10 },
+    (_, column) => `<td colspan="${String(1 + (row + column) % 5)}" style="width:${String(40 + column * 4)}px">${String(row)}:${String(column)}</td>`
+  ).join("")}</tr>`
+).join("")}</table>`, "table-colspan-planning");
+const tableColspanNode = formattingNodeOfKind(tableColspanFormatting, "table");
+const tableColspanGrid = buildTableSlotGrid(tableHost(tableColspanFormatting), tableColspanNode);
+const tableHeaderDocument = createIndexedWebDocumentSnapshot(parse(`<table id="header-benchmark"><tr>${Array.from(
+  { length: 100 }, (_, column) => `<th id="h${String(column)}" scope="col">H${String(column)}</th>`
+).join("")}</tr>${Array.from(
+  { length: 100 }, (_, row) => `<tr><th id="r${String(row)}" scope="row">R${String(row)}</th>${Array.from(
+    { length: 99 }, (_, column) => `<td headers="r${String(row)} h${String(column + 1)}">${String(row)}:${String(column)}</td>`
+  ).join("")}</tr>`
+).join("")}</table>`), {
+  requestUrl: "https://bench.example/table-headers",
+  finalUrl: "https://bench.example/table-headers",
+  limits: { maxHtmlTableHeaderAssociationWork: 5_000_000 }
+});
+const tableHeader = tableHeaderDocument.elementById("header-benchmark");
+const tableHeaderModel = tableHeader === null ? null : tableHeaderDocument.htmlTable(tableHeader);
+if (tableHeaderModel === null) throw new Error("table header-association benchmark has no HTML table model");
+const tableAutomaticHeaderDocument = createIndexedWebDocumentSnapshot(parse(`<table id="automatic-header-benchmark"><tr>${Array.from(
+  { length: 50 }, (_, column) => `<th>H${String(column)}</th>`
+).join("")}</tr>${Array.from(
+  { length: 49 }, (_, row) => `<tr><th>R${String(row)}</th>${Array.from(
+    { length: 49 }, (_, column) => `<td>${String(row)}:${String(column)}</td>`
+  ).join("")}</tr>`
+).join("")}</table>`), {
+  requestUrl: "https://bench.example/table-automatic-headers",
+  finalUrl: "https://bench.example/table-automatic-headers"
+});
+const tableAutomaticHeader = tableAutomaticHeaderDocument.elementById("automatic-header-benchmark");
+const tableAutomaticHeaderModel = tableAutomaticHeader === null
+  ? null
+  : tableAutomaticHeaderDocument.htmlTable(tableAutomaticHeader);
+if (tableAutomaticHeaderModel === null) throw new Error("automatic header benchmark has no HTML table model");
+const tableRowspanFormatting = formattingFixture(`<table style="width:960px">${Array.from(
+  { length: 500 },
+  (_, row) => `<tr><td rowspan="${String(1 + row % 8)}">${String(row)}</td><td>value</td></tr>`
+).join("")}</table>`, "table-rowspan-planning");
+const tableRowspanNode = formattingNodeOfKind(tableRowspanFormatting, "table");
+const tableRowspanGrid = buildTableSlotGrid(tableHost(tableRowspanFormatting), tableRowspanNode);
+const tableRowspanColumns = Object.freeze(tableRowspanGrid.columns.map((column) => Object.freeze({
+  index: column.index,
+  offset: cssPx(column.index * 120),
+  size: cssPx(120),
+  collapsed: column.collapsed
+})));
 const tableSimpleFormatting = formattingFixture(`<table style="width:960px">${Array.from(
   { length: 100 }, (_, row) => `<tr>${Array.from({ length: 10 }, (_, column) => `<td>${String(row)}:${String(column)}</td>`).join("")}</tr>`
 ).join("")}</table>`, "table-first-cell-pass");
@@ -1196,6 +1289,26 @@ const tableStageMetrics = {
       throw new Error("table metadata benchmark lost cells");
     }
   }),
+  tableHeaderAssociation: repeatedStage(() => {
+    let work = 0;
+    const associations = associateTableHeaders({
+      cells: tableHeaderModel.cellPlacements,
+      slotIntervals: tableHeaderModel.slotIntervals
+    }, () => { work += 1; });
+    if (associations.size < 10_000 || work === 0) {
+      throw new Error("table header-association benchmark lost cells");
+    }
+  }),
+  tableAutomaticHeaderAssociation: repeatedStage(() => {
+    let work = 0;
+    const associations = associateTableHeaders({
+      cells: tableAutomaticHeaderModel.cellPlacements,
+      slotIntervals: tableAutomaticHeaderModel.slotIntervals
+    }, () => { work += 1; });
+    if (associations.size !== 2_500 || work === 0) {
+      throw new Error("automatic table header-association benchmark lost cells");
+    }
+  }),
   tableSlotGridConstruction: repeatedStage(() => {
     const grid = buildTableSlotGrid(tableHost(tableFormatting), tableFormattingNode);
     if (grid.cells.length !== 1_000) throw new Error("slot-grid benchmark lost cells");
@@ -1207,7 +1320,11 @@ const tableStageMetrics = {
   }),
   tableColumnMeasureAggregation: repeatedStage(() => {
     const measures = measureTableColumns(tableHost(tableFormatting), measuredTableGrid, cssPx(960));
-    if (measures.length === 0) throw new Error("table column-measure benchmark produced no columns");
+    if (measures.columns.length === 0) throw new Error("table column-measure benchmark produced no columns");
+  }),
+  tableColspanPlanning: repeatedStage(() => {
+    const measures = measureTableColumns(tableHost(tableColspanFormatting), tableColspanGrid, cssPx(960));
+    if (measures.spanningCellConstraints.length === 0) throw new Error("table colspan-planning benchmark produced no spanning constraints");
   }),
   tableAutomaticWidthDistribution: repeatedStage(() => {
     const width = distributeTableWidth(tableHost(tableFormatting), measuredTableStyle, measuredTableColumns, cssPx(960), cssPx(2));
@@ -1225,12 +1342,52 @@ const tableStageMetrics = {
     const result = sizeTableRows(tableHost(tableFormatting), measuredTableGrid, measuredTableWidth.columns, cssPx(0), cssPx(0), cssPx(1_600));
     if (result.rows.length !== 100) throw new Error("table row-sizing benchmark lost rows");
   }),
+  tableRowspanPlanning: repeatedStage(() => {
+    const result = sizeTableRows(
+      tableHost(tableRowspanFormatting),
+      tableRowspanGrid,
+      tableRowspanColumns,
+      cssPx(0),
+      cssPx(0),
+      null
+    );
+    if (result.rows.length !== 500) throw new Error("table rowspan-planning benchmark lost rows");
+  }),
   tableSecondCellLayoutPass: repeatedStage(() => {
     if (layoutFragments(tableSecondPassFormatting, 120).outcome.status !== "complete") throw new Error("second table cell-layout workload was incomplete");
   }),
-  tableCollapsedBorderResolution: repeatedStage(() => {
-    const winners = resolveCollapsedTableBorders(tableHost(tableFormatting), measuredTableGrid, tableFormattingNode, cssPx(960));
-    if (winners.length === 0) throw new Error("collapsed-border benchmark produced no segments");
+  tableCollapsedBorderGraphConstruction: repeatedStage(() => {
+    const graph = buildCollapsedTableBorderGraph(tableHost(tableFormatting), measuredTableGrid, tableFormattingNode, cssPx(960));
+    if (graph.edges.length === 0) throw new Error("collapsed-border graph benchmark produced no edges");
+  }),
+  tableCollapsedBorderConflictSets: repeatedStage(() => {
+    const winners = resolveCollapsedBorderConflictSets(
+      tableHost(tableFormatting),
+      measuredTableGrid,
+      tableFormattingNode,
+      measuredCollapsedGraph
+    );
+    if (winners.length === 0) throw new Error("collapsed-border conflict-set benchmark produced no winners");
+  }),
+  tablePaintSegmentGeneration: repeatedStage(() => {
+    const segments = buildCollapsedTableBorderSegments(
+      tableHost(tableFormatting),
+      measuredCollapsedWinners,
+      measuredTableWidth.columns,
+      measuredTableRows.rows,
+      "ltr",
+      cssCoordinate(cssPx(0)),
+      cssCoordinate(cssPx(0)),
+      measuredTableWidth.usedGridWidth,
+      measuredTableRows.usedGridHeight,
+      cssRect(
+        cssCoordinate(cssPx(0)),
+        cssCoordinate(cssPx(0)),
+        measuredTableWidth.usedGridWidth,
+        measuredTableRows.usedGridHeight
+      )
+    );
+    if (segments.size === 0) throw new Error("collapsed-border paint-segment benchmark produced no segments");
   }),
   tableDisplayListConstruction: repeatedStage(() => {
     if (displayList(tableMeasuredLayout, 120).outcome.status === "rejected") throw new Error("table display-list benchmark was rejected");
@@ -1258,6 +1415,9 @@ const tableStressFormatting = {
   tableRowspanStress: formattingFixture(`<table>${Array.from({ length: 500 }, (_, row) => `<tr><td rowspan="${String(1 + row % 8)}">span ${String(row)}</td><td>value</td></tr>`).join("")}</table>`, "table-rowspan-stress"),
   tableWideStress: formattingFixture(`<table><tr>${Array.from({ length: 1_000 }, (_, column) => `<td>${String(column)}</td>`).join("")}</tr></table>`, "table-wide-stress"),
   tableNestedStress: formattingFixture(`${"<table><tr><td>".repeat(30)}nested${"</td></tr></table>".repeat(30)}`, "table-nested-stress"),
+  tableColumnGroupStress: formattingFixture(`<table style="width:4000px"><colgroup>${Array.from(
+    { length: 1_000 }, (_, column) => `<col style="width:${String(1 + column % 4)}px">`
+  ).join("")}</colgroup><tr><td colspan="1000">many column constraints</td></tr></table>`, "table-column-group-stress"),
   tableCollapsedBorderStress: formattingFixture(`<table style="border-collapse:collapse">${Array.from({ length: 100 }, (_, row) => `<tr>${Array.from(
     { length: 10 }, (_, column) => `<td style="border:${String(1 + (row + column) % 4)}px solid">${String(row)}:${String(column)}</td>`
   ).join("")}</tr>`).join("")}</table>`, "table-collapsed-border-stress")
@@ -1462,15 +1622,21 @@ const metrics = {
   gridCellRasterizationP95: gridStageMetrics.gridCellRasterization.p95,
   gridAutoRepeatResizeP95: gridStageMetrics.gridAutoRepeatResize.p95,
   tableMetadataIndexingP95: tableStageMetrics.tableMetadataIndexing.p95,
+  tableHeaderAssociationP95: tableStageMetrics.tableHeaderAssociation.p95,
+  tableAutomaticHeaderAssociationP95: tableStageMetrics.tableAutomaticHeaderAssociation.p95,
   tableSlotGridConstructionP95: tableStageMetrics.tableSlotGridConstruction.p95,
   tableCellIntrinsicMeasurementP95: tableStageMetrics.tableCellIntrinsicMeasurement.p95,
   tableColumnMeasureAggregationP95: tableStageMetrics.tableColumnMeasureAggregation.p95,
+  tableColspanPlanningP95: tableStageMetrics.tableColspanPlanning.p95,
   tableAutomaticWidthDistributionP95: tableStageMetrics.tableAutomaticWidthDistribution.p95,
   tableFixedWidthDistributionP95: tableStageMetrics.tableFixedWidthDistribution.p95,
   tableFirstCellLayoutPassP95: tableStageMetrics.tableFirstCellLayoutPass.p95,
   tableRowHeightAndRowspanDistributionP95: tableStageMetrics.tableRowHeightAndRowspanDistribution.p95,
+  tableRowspanPlanningP95: tableStageMetrics.tableRowspanPlanning.p95,
   tableSecondCellLayoutPassP95: tableStageMetrics.tableSecondCellLayoutPass.p95,
-  tableCollapsedBorderResolutionP95: tableStageMetrics.tableCollapsedBorderResolution.p95,
+  tableCollapsedBorderGraphConstructionP95: tableStageMetrics.tableCollapsedBorderGraphConstruction.p95,
+  tableCollapsedBorderConflictSetsP95: tableStageMetrics.tableCollapsedBorderConflictSets.p95,
+  tablePaintSegmentGenerationP95: tableStageMetrics.tablePaintSegmentGeneration.p95,
   tableDisplayListConstructionP95: tableStageMetrics.tableDisplayListConstruction.p95,
   tableCellRasterizationP95: tableStageMetrics.tableCellRasterization.p95,
   completeTableLayoutP95: tableStageMetrics.completeTableLayout.p95,
@@ -1548,7 +1714,7 @@ const report = {
     unicodeTextControls: "Unicode stage limits are new workload-specific controls measured after two warmups; PR #130 thresholds remain unchanged. One-shot controls cover one million LTR code points, mixed scripts, isolates, maximum valid embedding depth, CJK, emoji, and repeated resize with cached invariant text analysis.",
     compatibilityCorpus: "Every offline compatibility fixture is warmed twice and measured over seven complete native renderings; the 500ms p95 control is unchanged.",
     gridControls: "Grid parsing, explicit-grid construction, named-line resolution, ordinary and locked-axis sparse placement, dense placement, non-spanning and spanning intrinsic sizing, planned-increase distribution, flexible-track sizing, collapsed-gutter construction, column and row sizing, container orchestration, item layout, complete nested-Grid layout, display-list construction, cell rasterization, and auto-repeat resize are each warmed and report p50/p95. Stress controls include equal and overlapping spans, every span group through the configured fixture track count, growth-limit saturation, sparse row frontiers, and collapsed auto-fit tracks. New Grid workload and memory limits do not alter prior controls.",
-    tableControls: "Table metadata indexing, sparse slot-grid construction, synthetic intrinsic-cell measurement, column-measure aggregation, automatic and fixed width distribution, first and second cell-layout workloads, row-height and rowspan distribution, collapsed-border resolution, complete layout, display-list construction, cell rasterization, and resize are warmed and report p50/p95. Stress workloads cover 10,000 ordinary cells, colspan, rowspan, 1,000 columns, nested tables, and collapsed-border edges. Existing limits are unchanged; table limits are new workload-specific controls."
+    tableControls: "HTML table-model indexing, explicit/transitive and automatic header assignment, sparse CSS slot-grid construction, synthetic cell intrinsic measurement, column-constraint collection, colspan planning, automatic and fixed width distribution, first row measurement, rowspan planning, final cell relayout, collapsed-border graph construction, connected conflict-set resolution, paint-segment generation, complete layout, display-list construction, cell rasterization, and resize are warmed and report p50/p95. Stress workloads cover 10,000 ordinary cells, many header references and automatic headers, colspan and rowspan constraints, 1,000 column-group constraints, nested tables, and collapsed-border edges. Existing limits are unchanged."
   },
   ok: failures.length === 0,
   failures

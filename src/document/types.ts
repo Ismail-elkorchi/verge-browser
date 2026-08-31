@@ -125,6 +125,8 @@ export interface DocumentSemanticEntry {
   readonly accessibleDescription: string;
   /** HTML table headers associated through `headers`, `scope`, or implicit slot rules. */
   readonly tableHeaders: readonly DocumentNodeRef[];
+  /** `abbr` label used when this entry is referenced as an HTML table header. */
+  readonly tableHeaderLabel: string | null;
   /** Excluded from semantic/accessibility projections; this does not itself suppress CSS boxes. */
   readonly accessibilityHidden: boolean;
   readonly behavior: "normal" | "forced-break" | "break-opportunity" | "replaced" | "form-control";

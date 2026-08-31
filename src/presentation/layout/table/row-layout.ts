@@ -1,9 +1,7 @@
-import type { FormattingNodeId } from "../../formatting/index.js";
 import {
   cssAdd,
   cssDivide,
   cssMax,
-  cssMin,
   cssMultiply,
   cssNegate,
   cssNonNegativeLength,
@@ -39,7 +37,119 @@ function spanInlineSize(
   return cssNonNegativeLength(result);
 }
 
-/** Resolve row minimums after columns are known, so wrapped text contributes its used block size. */
+function weightedPlan(
+  host: Pick<TableLayoutHost, "signal" | "consume">,
+  current: readonly CssNonNegativeLength[],
+  indexes: readonly number[],
+  deficit: CssPixelLength,
+): readonly CssNonNegativeLength[] {
+  const plan = current.map(() => ZERO);
+  if (deficit <= 0 || indexes.length === 0) return plan;
+  const weights = indexes.map((index) => cssMax(cssPx(1), current[index] ?? ZERO));
+  let total: CssPixelLength = ZERO;
+  for (const weight of weights) total = cssAdd(total, weight);
+  let assigned: CssPixelLength = ZERO;
+  for (const [position, index] of indexes.entries()) {
+    host.signal?.throwIfAborted();
+    host.consume("maxTableRowDistributionWork");
+    const increment = position === indexes.length - 1
+      ? cssAdd(deficit, cssNegate(assigned))
+      : cssDivide(cssMultiply(deficit, weights[position] ?? cssPx(1)), total);
+    plan[index] = cssNonNegativeLength(increment);
+    assigned = cssAdd(assigned, increment);
+  }
+  return plan;
+}
+
+/** Apply order-independent rowspan increases from one snapshot per span group. */
+export function applyRowspanPlans(
+  host: Pick<TableLayoutHost, "signal" | "consume">,
+  grid: TableSlotGrid,
+  sizes: CssNonNegativeLength[],
+  entries: readonly {
+    readonly row: number;
+    readonly span: number;
+    readonly required: CssNonNegativeLength;
+  }[],
+  autoHeight: readonly boolean[],
+  verticalSpacing: CssNonNegativeLength,
+): void {
+  const bySpan = new Map<number, typeof entries[number][]>();
+  for (const entry of entries) {
+    const group = bySpan.get(entry.span) ?? [];
+    group.push(entry);
+    bySpan.set(entry.span, group);
+  }
+  for (const span of [...bySpan.keys()].sort((left, right) => left - right)) {
+    const snapshot = [...sizes];
+    const planned = sizes.map(() => ZERO);
+    const group = [...(bySpan.get(span) ?? [])].sort((left, right) => left.row - right.row);
+    for (const entry of group) {
+      host.signal?.throwIfAborted();
+      const active: number[] = [];
+      let current: CssPixelLength = ZERO;
+      for (let row = entry.row; row < entry.row + entry.span; row += 1) {
+        host.consume("maxTableRowDistributionWork");
+        if (grid.rows[row]?.collapsed === true) continue;
+        active.push(row);
+        current = cssAdd(current, snapshot[row] ?? ZERO);
+      }
+      current = cssAdd(current, cssMultiply(verticalSpacing, Math.max(0, active.length - 1)));
+      const deficit = cssMax(ZERO, cssAdd(entry.required, cssNegate(current)));
+      const automatic = active.filter((row) => autoHeight[row] === true);
+      const targets = automatic.length > 0 ? automatic : active;
+      const increase = weightedPlan(host, snapshot, targets, deficit);
+      for (const row of targets) planned[row] = cssMax(planned[row] ?? ZERO, increase[row] ?? ZERO) as CssNonNegativeLength;
+    }
+    for (let row = 0; row < sizes.length; row += 1) {
+      sizes[row] = cssNonNegativeLength(cssAdd(sizes[row] ?? ZERO, planned[row] ?? ZERO));
+    }
+  }
+}
+
+function distributeTableHeight(
+  host: TableLayoutHost,
+  grid: TableSlotGrid,
+  base: readonly CssNonNegativeLength[],
+  reference: readonly CssNonNegativeLength[],
+  autoHeight: readonly boolean[],
+  availableRows: CssNonNegativeLength,
+): readonly CssNonNegativeLength[] {
+  const active = grid.rows.filter((row) => !row.collapsed).map((row) => row.index);
+  let baseSum: CssPixelLength = ZERO;
+  let referenceSum: CssPixelLength = ZERO;
+  for (const row of active) {
+    baseSum = cssAdd(baseSum, base[row] ?? ZERO);
+    referenceSum = cssAdd(referenceSum, reference[row] ?? ZERO);
+  }
+  if (availableRows <= baseSum) return [...base];
+  if (availableRows <= referenceSum && referenceSum > baseSum) {
+    const ratio = Number(cssAdd(availableRows, cssNegate(baseSum)))
+      / Number(cssAdd(referenceSum, cssNegate(baseSum)));
+    return base.map((value, row) => grid.rows[row]?.collapsed === true
+      ? ZERO
+      : cssNonNegativeLength(cssAdd(value, cssMultiply(cssAdd(reference[row] ?? value, cssNegate(value)), ratio))));
+  }
+  const result = [...reference];
+  const deficit = cssNonNegativeLength(
+    cssMax(ZERO, cssAdd(availableRows, cssNegate(referenceSum))),
+  );
+  const automatic = active.filter((row) => autoHeight[row] === true);
+  const targets = automatic.length > 0 ? automatic : active;
+  if (targets.length === 0 || deficit <= 0) return result;
+  const share = cssDivide(deficit, targets.length);
+  let assigned: CssPixelLength = ZERO;
+  for (const [position, row] of targets.entries()) {
+    host.signal?.throwIfAborted();
+    host.consume("maxTableRowDistributionWork");
+    const increment = position === targets.length - 1 ? cssAdd(deficit, cssNegate(assigned)) : share;
+    result[row] = cssNonNegativeLength(cssAdd(result[row] ?? ZERO, increment));
+    assigned = cssAdd(assigned, increment);
+  }
+  return result;
+}
+
+/** Resolve row base/reference sizes and rowspan constraints after column sizing. */
 export function sizeTableRows(
   host: TableLayoutHost,
   grid: TableSlotGrid,
@@ -48,160 +158,118 @@ export function sizeTableRows(
   verticalSpacing: CssNonNegativeLength,
   tableBlockSize: CssPixelLength | null,
 ): TableRowSizingResult {
-  const sizes = grid.rows.map(() => ZERO);
-  const maximums = grid.rows.map(() => null as CssNonNegativeLength | null);
+  const base = grid.rows.map(() => ZERO);
+  const reference = grid.rows.map(() => ZERO);
   const baselines = grid.rows.map(() => null as CssPixelLength | null);
-  const cellBlocks = grid.cells.map((cell) => {
+  const ascents = grid.rows.map(() => ZERO);
+  const descents = grid.rows.map(() => ZERO);
+  const autoHeight = grid.rows.map(() => true);
+  const cells = grid.cells.map((cell) => {
     host.signal?.throwIfAborted();
     host.consume("maxTableIntrinsicMeasureWork");
     const inlineSize = spanInlineSize(columns, cell.column, cell.columnSpan, horizontalSpacing);
-    const contribution = host.intrinsicContributions(cell.formattingNode, inlineSize);
+    const intrinsic = host.intrinsicContributions(cell.formattingNode, inlineSize);
+    const style = host.computed(host.formattingNode(cell.formattingNode));
+    const absoluteHeight = style === null ? null : host.usedLength(style.box.height, null, style);
+    const absoluteMinimum = style === null ? null : host.usedLength(style.box.minHeight, null, style);
+    const resolvedHeight = style === null ? null : host.usedLength(style.box.height, tableBlockSize, style);
+    const resolvedMinimum = style === null ? null : host.usedLength(style.box.minHeight, tableBlockSize, style);
     return Object.freeze({
       cell,
-      block: contribution.borderBox.minimumBlockContribution,
-      baseline: contribution.firstBaseline,
+      base: cssNonNegativeLength(cssMax(intrinsic.borderBox.minimumBlockContribution, absoluteHeight ?? ZERO, absoluteMinimum ?? ZERO)),
+      reference: cssNonNegativeLength(cssMax(intrinsic.borderBox.minimumBlockContribution, resolvedHeight ?? ZERO, resolvedMinimum ?? ZERO)),
+      baseline: intrinsic.firstBaseline,
+      specified: absoluteHeight !== null || resolvedHeight !== null,
     });
   });
-  for (const { cell, block } of cellBlocks) {
-    if (cell.rowSpan !== 1) continue;
-    sizes[cell.row] = cssMax(sizes[cell.row] ?? ZERO, block) as CssNonNegativeLength;
-  }
-  for (const row of grid.rows) {
-    let ascent: CssPixelLength = ZERO;
-    let descent: CssPixelLength = ZERO;
-    for (const entry of cellBlocks) {
-      if (entry.cell.row !== row.index || entry.cell.rowSpan !== 1) continue;
-      const style = host.computed(host.formattingNode(entry.cell.formattingNode));
-      if (style?.text.verticalAlign.kind !== "keyword" || style.text.verticalAlign.value !== "baseline") continue;
-      const baseline = entry.baseline ?? entry.block;
-      ascent = cssMax(ascent, baseline);
-      descent = cssMax(descent, cssMax(ZERO, cssAdd(entry.block, cssNegate(baseline))));
-    }
-    sizes[row.index] = cssMax(sizes[row.index] ?? ZERO, cssAdd(ascent, descent)) as CssNonNegativeLength;
-    if (ascent > 0) baselines[row.index] = ascent;
+
+  for (const entry of cells) {
+    if (entry.cell.rowSpan !== 1) continue;
+    base[entry.cell.row] = cssMax(base[entry.cell.row] ?? ZERO, entry.base) as CssNonNegativeLength;
+    reference[entry.cell.row] = cssMax(reference[entry.cell.row] ?? ZERO, entry.reference) as CssNonNegativeLength;
+    if (entry.specified) autoHeight[entry.cell.row] = false;
   }
   for (const row of grid.rows) {
     const style = host.computed(host.formattingNode(row.formattingNode));
-    const specified = style === null ? null : host.usedLength(style.box.height, tableBlockSize, style);
-    const minimum = style === null ? null : host.usedLength(style.box.minHeight, tableBlockSize, style);
-    const maximum = style === null ? null : host.usedLength(style.box.maxHeight, tableBlockSize, style);
-    let used = cssMax(sizes[row.index] ?? ZERO, specified ?? ZERO, minimum ?? ZERO);
-    if (maximum !== null) used = cssMin(used, maximum);
-    sizes[row.index] = row.collapsed ? ZERO : cssNonNegativeLength(used);
-    maximums[row.index] = row.collapsed || maximum === null
-      ? (row.collapsed ? ZERO : null)
-      : cssNonNegativeLength(cssMax(ZERO, maximum));
-  }
-  const spanningBySpan = new Map<number, typeof cellBlocks>();
-  for (const entry of cellBlocks) {
-    if (entry.cell.rowSpan <= 1) continue;
-    host.signal?.throwIfAborted();
-    host.consume("maxTableRowDistributionWork");
-    const group = spanningBySpan.get(entry.cell.rowSpan) ?? [];
-    group.push(entry);
-    spanningBySpan.set(entry.cell.rowSpan, group);
-  }
-  for (const span of [...spanningBySpan.keys()].sort((left, right) => left - right)) {
-    const plan = sizes.map(() => ZERO);
-    for (const { cell, block } of spanningBySpan.get(span) ?? []) {
-      const activeRows = grid.rows
-        .slice(cell.row, cell.row + span)
-        .filter((row) => !row.collapsed).length;
-      let current: CssPixelLength = cssMultiply(verticalSpacing, Math.max(0, activeRows - 1));
-      for (let row = cell.row; row < cell.row + span; row += 1) current = cssAdd(current, sizes[row] ?? ZERO);
-      const deficit = cssMax(ZERO, cssAdd(block, cssNegate(current)));
-      if (deficit <= 0) continue;
-      const eligible: number[] = [];
-      for (let row = cell.row; row < cell.row + span; row += 1) {
-        host.signal?.throwIfAborted();
-        host.consume("maxTableRowDistributionWork");
-        if (grid.rows[row]?.collapsed !== true) eligible.push(row);
-      }
-      if (eligible.length === 0) continue;
-      const share = cssDivide(deficit, eligible.length);
-      let assigned: CssPixelLength = ZERO;
-      for (const [position, row] of eligible.entries()) {
-        host.signal?.throwIfAborted();
-        host.consume("maxTableRowDistributionWork");
-        const increment = position === eligible.length - 1 ? cssAdd(deficit, cssNegate(assigned)) : share;
-        plan[row] = cssMax(plan[row] ?? ZERO, increment) as CssNonNegativeLength;
-        assigned = cssAdd(assigned, increment);
+    const absolute = style === null ? null : host.usedLength(style.box.height, null, style);
+    const absoluteMinimum = style === null ? null : host.usedLength(style.box.minHeight, null, style);
+    const resolved = style === null ? null : host.usedLength(style.box.height, tableBlockSize, style);
+    const resolvedMinimum = style === null ? null : host.usedLength(style.box.minHeight, tableBlockSize, style);
+    base[row.index] = row.collapsed ? ZERO : cssNonNegativeLength(cssMax(base[row.index] ?? ZERO, absolute ?? ZERO, absoluteMinimum ?? ZERO));
+    reference[row.index] = row.collapsed ? ZERO : cssNonNegativeLength(cssMax(base[row.index] ?? ZERO, reference[row.index] ?? ZERO, resolved ?? ZERO, resolvedMinimum ?? ZERO));
+    autoHeight[row.index] &&= absolute === null && resolved === null;
+
+    let ascent: CssPixelLength = ZERO;
+    let descent: CssPixelLength = ZERO;
+    for (const entry of cells) {
+      if (entry.cell.row !== row.index) continue;
+      const cellStyle = host.computed(host.formattingNode(entry.cell.formattingNode));
+      const align = cellStyle?.text.verticalAlign;
+      const baselineAligned = align === undefined || align.kind !== "keyword"
+        || (align.value !== "top" && align.value !== "middle" && align.value !== "bottom");
+      if (!baselineAligned) continue;
+      const baseline = entry.baseline ?? entry.base;
+      ascent = cssMax(ascent, baseline);
+      if (entry.cell.rowSpan === 1) {
+        descent = cssMax(
+          descent,
+          cssMax(ZERO, cssAdd(entry.base, cssNegate(baseline))),
+        );
       }
     }
-    for (let row = 0; row < sizes.length; row += 1) {
-      sizes[row] = cssNonNegativeLength(cssAdd(sizes[row] ?? ZERO, plan[row] ?? ZERO));
-    }
+    base[row.index] = cssMax(base[row.index] ?? ZERO, cssAdd(ascent, descent)) as CssNonNegativeLength;
+    reference[row.index] = cssMax(reference[row.index] ?? ZERO, base[row.index] ?? ZERO) as CssNonNegativeLength;
+    ascents[row.index] = cssNonNegativeLength(ascent);
+    descents[row.index] = cssNonNegativeLength(descent);
+    baselines[row.index] = ascent > 0 ? ascent : null;
   }
-  const distributeDeficit = (indexes: readonly number[], deficit: CssPixelLength): void => {
-    let remaining = deficit;
-    let eligible = indexes.filter((index) => grid.rows[index]?.collapsed !== true
-      && (maximums[index] === null || (sizes[index] ?? ZERO) < (maximums[index] ?? ZERO)));
-    while (remaining > 0 && eligible.length > 0) {
-      host.signal?.throwIfAborted();
-      const share = cssDivide(remaining, eligible.length);
-      let consumed: CssPixelLength = ZERO;
-      const next: number[] = [];
-      for (const index of eligible) {
-        host.consume("maxTableRowDistributionWork");
-        const current = sizes[index] ?? ZERO;
-        const maximum = maximums[index] ?? null;
-        const capacity = maximum === null ? share : cssMin(share, cssMax(ZERO, cssAdd(maximum, cssNegate(current))));
-        sizes[index] = cssNonNegativeLength(cssAdd(current, capacity));
-        consumed = cssAdd(consumed, capacity);
-        if (maximum === null || (sizes[index] ?? ZERO) < maximum) next.push(index);
-      }
-      if (consumed <= 0) break;
-      remaining = cssAdd(remaining, cssNegate(consumed));
-      eligible = next;
-    }
-    const fallback = indexes.filter((index) => grid.rows[index]?.collapsed !== true);
-    if (remaining <= 0 || fallback.length === 0) return;
-    const share = cssDivide(remaining, fallback.length);
-    let assigned: CssPixelLength = ZERO;
-    for (const [position, index] of fallback.entries()) {
-      host.consume("maxTableRowDistributionWork");
-      const increment = position === fallback.length - 1 ? cssAdd(remaining, cssNegate(assigned)) : share;
-      sizes[index] = cssNonNegativeLength(cssAdd(sizes[index] ?? ZERO, increment));
-      assigned = cssAdd(assigned, increment);
-    }
-  };
-  const rowsByGroup = new Map<FormattingNodeId, number[]>();
-  for (const row of grid.rows) {
-    if (row.rowGroup === null) continue;
-    const indexes = rowsByGroup.get(row.rowGroup) ?? [];
-    indexes.push(row.index);
-    rowsByGroup.set(row.rowGroup, indexes);
-  }
-  for (const [groupId, indexes] of rowsByGroup) {
-    const style = host.computed(host.formattingNode(groupId));
-    if (style === null) continue;
-    const specified = host.usedLength(style.box.height, tableBlockSize, style);
-    const minimum = host.usedLength(style.box.minHeight, tableBlockSize, style) ?? ZERO;
-    const active = indexes.filter((index) => grid.rows[index]?.collapsed !== true).length;
-    let current: CssPixelLength = cssMultiply(verticalSpacing, Math.max(0, active - 1));
-    for (const index of indexes) current = cssAdd(current, sizes[index] ?? ZERO);
-    const required = cssMax(specified ?? ZERO, minimum);
-    distributeDeficit(indexes, cssMax(ZERO, cssAdd(required, cssNegate(current))));
-  }
-  if (tableBlockSize !== null) {
-    const active = grid.rows.filter((row) => !row.collapsed).length;
-    let current: CssPixelLength = cssMultiply(verticalSpacing, active === 0 ? 0 : active + 1);
-    for (const size of sizes) current = cssAdd(current, size);
-    distributeDeficit(grid.rows.map((row) => row.index), cssMax(ZERO, cssAdd(tableBlockSize, cssNegate(current))));
-  }
+
+  const spanningBase = cells.filter((entry) => entry.cell.rowSpan > 1).map((entry) => ({
+    row: entry.cell.row,
+    span: entry.cell.rowSpan,
+    required: entry.base,
+  }));
+  const spanningReference = cells.filter((entry) => entry.cell.rowSpan > 1).map((entry) => ({
+    row: entry.cell.row,
+    span: entry.cell.rowSpan,
+    required: entry.reference,
+  }));
+  applyRowspanPlans(host, grid, base, spanningBase, autoHeight, verticalSpacing);
+  applyRowspanPlans(host, grid, reference, spanningReference, autoHeight, verticalSpacing);
+  for (let row = 0; row < reference.length; row += 1) reference[row] = cssMax(reference[row] ?? ZERO, base[row] ?? ZERO) as CssNonNegativeLength;
+
+  const activeRows = grid.rows.filter((row) => !row.collapsed).length;
+  const outerSpacing = cssMultiply(verticalSpacing, activeRows === 0 ? 0 : activeRows + 1);
+  const availableRows = tableBlockSize === null
+    ? cssNonNegativeLength(reference.reduce<CssPixelLength>((total, size) => cssAdd(total, size), ZERO))
+    : cssNonNegativeLength(cssMax(ZERO, cssAdd(tableBlockSize, cssNegate(outerSpacing))));
+  const finalSizes = tableBlockSize === null
+    ? [...reference]
+    : distributeTableHeight(host, grid, base, reference, autoHeight, availableRows);
   const rows: UsedTableRow[] = [];
   let offset: CssPixelLength = ZERO;
-  let hasActiveRow = false;
-  for (let index = 0; index < sizes.length; index += 1) {
-    const size = sizes[index] ?? ZERO;
+  let hasActive = false;
+  for (let index = 0; index < finalSizes.length; index += 1) {
     const collapsed = grid.rows[index]?.collapsed === true;
+    const size = collapsed ? ZERO : finalSizes[index] ?? ZERO;
     if (!collapsed) {
       offset = cssAdd(offset, verticalSpacing);
-      hasActiveRow = true;
+      hasActive = true;
     }
-    rows.push(Object.freeze({ index, offset, size, baseline: baselines[index] ?? null, collapsed }));
+    rows.push(Object.freeze({
+      index,
+      offset,
+      size,
+      baseline: baselines[index] ?? null,
+      baselineAscent: ascents[index] ?? ZERO,
+      baselineDescent: descents[index] ?? ZERO,
+      baseSize: base[index] ?? ZERO,
+      referenceSize: reference[index] ?? ZERO,
+      autoHeight: autoHeight[index] ?? true,
+      collapsed,
+    }));
     offset = cssAdd(offset, size);
   }
-  if (hasActiveRow) offset = cssAdd(offset, verticalSpacing);
+  if (hasActive) offset = cssAdd(offset, verticalSpacing);
   return Object.freeze({ rows: Object.freeze(rows), usedGridHeight: cssNonNegativeLength(offset) });
 }

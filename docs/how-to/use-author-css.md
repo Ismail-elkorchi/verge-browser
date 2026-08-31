@@ -59,8 +59,9 @@ rasterization. The currently supported CSS slice includes:
 - horizontal-writing-mode tables with CSS table box fixup, HTML `colspan` and
   `rowspan`, automatic and fixed column layout, column and row groups, row-height
   distribution, top and bottom captions, separated borders, collapsed-border
-  conflict resolution, empty-cell painting, RTL geometry, and positioned
-  descendants that remain outside table sizing;
+  edge-graph conflict resolution, empty-cell painting, RTL geometry,
+  source-owned header associations, and positioned descendants that remain
+  outside table sizing;
 - relative, absolute, fixed, and sticky positioning, insets, shrink-to-fit
   sizing, z-index stacking, left/right/logical floats, clearing, and line boxes
   shortened around floats;

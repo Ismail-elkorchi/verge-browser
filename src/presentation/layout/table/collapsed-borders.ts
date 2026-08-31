@@ -19,6 +19,32 @@ import type {
 type Side = TableCollapsedBorderCandidate["side"];
 const ZERO = cssNonNegativeLength(cssPx(0));
 const ORIGIN_RANK = Object.freeze({ table: 0, "column-group": 1, column: 2, "row-group": 3, row: 4, cell: 5 });
+const STYLE_RANK = Object.freeze({ none: 0, solid: 1, hidden: 2 });
+
+export interface TableCollapsedBorderEdge {
+  readonly axis: "horizontal" | "vertical";
+  readonly line: number;
+  readonly start: number;
+  readonly end: number;
+  readonly tablePerimeterSide: Side | null;
+  readonly candidates: readonly TableCollapsedBorderCandidate[];
+  readonly owner: { readonly target: FormattingNodeId; readonly side: Side };
+}
+
+export interface TableCollapsedBorderGraph {
+  readonly direction: "ltr" | "rtl";
+  readonly edges: readonly TableCollapsedBorderEdge[];
+}
+
+interface MutableCollapsedEdge {
+  readonly axis: "horizontal" | "vertical";
+  readonly line: number;
+  readonly start: number;
+  readonly end: number;
+  readonly tablePerimeterSide: Side | null;
+  readonly candidates: TableCollapsedBorderCandidate[];
+  owner: { readonly target: FormattingNodeId; readonly side: Side } | null;
+}
 
 function candidate(
   host: TableCollapsedBorderHost,
@@ -26,6 +52,8 @@ function candidate(
   side: Side,
   origin: TableCollapsedBorderCandidate["origin"],
   sourceOrder: number,
+  logicalRow: number,
+  logicalColumn: number,
   basis: CssPixelLength,
 ): TableCollapsedBorderCandidate | null {
   const style = host.computed(node);
@@ -40,226 +68,353 @@ function candidate(
     color: style.box.borderColors[side],
     origin,
     sourceOrder,
+    logicalRow,
+    logicalColumn,
   });
 }
 
-function wins(left: TableCollapsedBorderCandidate, right: TableCollapsedBorderCandidate): TableCollapsedBorderCandidate {
-  if (left.style === "hidden" || right.style === "hidden") return left.style === "hidden" ? left : right;
-  if (left.style === "none" || right.style === "none") return left.style === "none" ? right : left;
+function wins(
+  left: TableCollapsedBorderCandidate,
+  right: TableCollapsedBorderCandidate,
+  direction: "ltr" | "rtl",
+): TableCollapsedBorderCandidate {
+  const style = STYLE_RANK[left.style] - STYLE_RANK[right.style];
+  if (style !== 0) return style > 0 ? left : right;
   if (left.width !== right.width) return left.width > right.width ? left : right;
   const origin = ORIGIN_RANK[left.origin] - ORIGIN_RANK[right.origin];
   if (origin !== 0) return origin > 0 ? left : right;
-  return left.sourceOrder >= right.sourceOrder ? left : right;
+  if (left.logicalRow !== right.logicalRow) return left.logicalRow < right.logicalRow ? left : right;
+  if (left.logicalColumn !== right.logicalColumn) {
+    return direction === "ltr"
+      ? (left.logicalColumn < right.logicalColumn ? left : right)
+      : (left.logicalColumn > right.logicalColumn ? left : right);
+  }
+  return left.sourceOrder <= right.sourceOrder ? left : right;
 }
 
-function emptyOverride(): {
+function emptyOverride(suppressPadding = false): {
   styles: Record<Side, CssBorderStyle>;
   widths: Record<Side, CssNonNegativeLength>;
   colors: Record<Side, CssColor | null>;
+  suppressPadding: boolean;
 } {
   return {
     styles: { top: "none", right: "none", bottom: "none", left: "none" },
     widths: { top: ZERO, right: ZERO, bottom: ZERO, left: ZERO },
     colors: { top: null, right: null, bottom: null, left: null },
+    suppressPadding,
   };
 }
 
-/** Resolve one winning segment for each collapsed table edge and register cell geometry overrides. */
+class DisjointSet {
+  readonly #parent: number[];
+  public constructor(size: number) { this.#parent = Array.from({ length: size }, (_, index) => index); }
+  public find(value: number): number {
+    let root = value;
+    while (this.#parent[root] !== root) root = this.#parent[root] as number;
+    let cursor = value;
+    while (this.#parent[cursor] !== cursor) {
+      const next = this.#parent[cursor] as number;
+      this.#parent[cursor] = root;
+      cursor = next;
+    }
+    return root;
+  }
+  public union(left: number, right: number): void {
+    const leftRoot = this.find(left);
+    const rightRoot = this.find(right);
+    if (leftRoot !== rightRoot) this.#parent[rightRoot] = leftRoot;
+  }
+}
+
+/** Build the complete collapsed-border edge graph and its candidate sets. */
+export function buildCollapsedTableBorderGraph(
+  host: TableCollapsedBorderHost,
+  grid: TableSlotGrid,
+  table: FormattingNode,
+  inlineBasis: CssPixelLength,
+): TableCollapsedBorderGraph {
+  const direction = host.computed(table)?.text.direction ?? "ltr";
+  const rowLineCount = Math.max(1, grid.rows.length);
+  const columnLineCount = Math.max(1, grid.columns.length);
+  const rowSectionCount = Math.max(1, grid.rows.length);
+  const columnSectionCount = Math.max(1, grid.columns.length);
+  const edges: MutableCollapsedEdge[] = [];
+  for (let line = 0; line <= rowLineCount; line += 1) {
+    for (let column = 0; column < columnSectionCount; column += 1) {
+      host.signal?.throwIfAborted();
+      host.consume("maxTableCollapsedBorderSegments");
+      edges.push({
+        axis: "horizontal",
+        line,
+        start: column,
+        end: column + 1,
+        tablePerimeterSide: line === 0 ? "top" : line === rowLineCount ? "bottom" : null,
+        candidates: [],
+        owner: null,
+      });
+    }
+  }
+  for (let line = 0; line <= columnLineCount; line += 1) {
+    for (let row = 0; row < rowSectionCount; row += 1) {
+      host.signal?.throwIfAborted();
+      host.consume("maxTableCollapsedBorderSegments");
+      edges.push({
+        axis: "vertical",
+        line,
+        start: row,
+        end: row + 1,
+        tablePerimeterSide: line === 0 ? "left" : line === columnLineCount ? "right" : null,
+        candidates: [],
+        owner: null,
+      });
+    }
+  }
+  const edgeIndexes = new Map<string, number>();
+  for (const [index, edge] of edges.entries()) {
+    edgeIndexes.set(`${edge.axis}:${String(edge.line)}:${String(edge.start)}`, index);
+  }
+  const edgeAt = (
+    axis: "horizontal" | "vertical",
+    line: number,
+    start: number,
+  ): MutableCollapsedEdge | null => {
+    const index = edgeIndexes.get(`${axis}:${String(line)}:${String(start)}`);
+    return index === undefined ? null : edges[index] ?? null;
+  };
+  const add = (
+    edge: MutableCollapsedEdge | null,
+    node: FormattingNode,
+    side: Side,
+    origin: TableCollapsedBorderCandidate["origin"],
+    sourceOrder: number,
+    row: number,
+    column: number,
+  ): void => {
+    if (edge === null) return;
+    host.signal?.throwIfAborted();
+    host.consume("maxTableCollapsedBorderCandidates");
+    const value = candidate(host, node, side, origin, sourceOrder, row, column, inlineBasis);
+    if (value === null) return;
+    edge.candidates.push(value);
+    if (edge.owner === null || origin === "cell") edge.owner = { target: node.id, side };
+  };
+  const rowGroupRanges = new Map<FormattingNodeId, { start: number; end: number }>();
+  for (const row of grid.rows) {
+    if (row.rowGroup === null) continue;
+    const range = rowGroupRanges.get(row.rowGroup);
+    rowGroupRanges.set(row.rowGroup, { start: range?.start ?? row.index, end: row.index + 1 });
+  }
+  const columnGroupRanges = new Map<FormattingNodeId, { start: number; end: number }>();
+  for (const column of grid.columns) {
+    if (column.columnGroup === null) continue;
+    const range = columnGroupRanges.get(column.columnGroup);
+    columnGroupRanges.set(column.columnGroup, { start: range?.start ?? column.index, end: column.index + 1 });
+  }
+  const sourceOrder = new Map<FormattingNodeId, number>();
+  sourceOrder.set(table.id, 0);
+  for (const [index, group] of grid.columnGroups.entries()) sourceOrder.set(group, index + 1);
+  for (const column of grid.columns) if (column.formattingNode !== null) sourceOrder.set(column.formattingNode, column.index + 1);
+  for (const group of grid.rowGroups) sourceOrder.set(group.formattingNode, group.sourceOrder + 1);
+  for (const row of grid.rows) sourceOrder.set(row.formattingNode, row.index + 1);
+  for (const [index, cell] of grid.cells.entries()) sourceOrder.set(cell.formattingNode, index + 1);
+  const order = (node: FormattingNode): number => sourceOrder.get(node.id) ?? Number.MAX_SAFE_INTEGER;
+
+  for (const cell of grid.cells) {
+    host.signal?.throwIfAborted();
+    const node = host.formattingNode(cell.formattingNode);
+    for (let column = cell.column; column < cell.column + cell.columnSpan; column += 1) {
+      add(edgeAt("horizontal", cell.row, column), node, "top", "cell", order(node), cell.row, cell.column);
+      add(edgeAt("horizontal", cell.row + cell.rowSpan, column), node, "bottom", "cell", order(node), cell.row, cell.column);
+    }
+    for (let row = cell.row; row < cell.row + cell.rowSpan; row += 1) {
+      add(edgeAt("vertical", cell.column, row), node, "left", "cell", order(node), cell.row, cell.column);
+      add(edgeAt("vertical", cell.column + cell.columnSpan, row), node, "right", "cell", order(node), cell.row, cell.column);
+    }
+  }
+  for (const row of grid.rows) {
+    const node = host.formattingNode(row.formattingNode);
+    for (let column = 0; column < columnSectionCount; column += 1) {
+      add(edgeAt("horizontal", row.index, column), node, "top", "row", order(node), row.index, column);
+      add(edgeAt("horizontal", row.index + 1, column), node, "bottom", "row", order(node), row.index, column);
+    }
+  }
+  for (const [groupId, range] of rowGroupRanges) {
+    const group = host.formattingNode(groupId);
+    for (let column = 0; column < columnSectionCount; column += 1) {
+      add(edgeAt("horizontal", range.start, column), group, "top", "row-group", order(group), range.start, column);
+      add(edgeAt("horizontal", range.end, column), group, "bottom", "row-group", order(group), range.end - 1, column);
+    }
+  }
+  for (const column of grid.columns) {
+    if (column.formattingNode === null) continue;
+    const node = host.formattingNode(column.formattingNode);
+    for (let row = 0; row < rowSectionCount; row += 1) {
+      add(edgeAt("vertical", column.index, row), node, "left", "column", order(node), row, column.index);
+      add(edgeAt("vertical", column.index + 1, row), node, "right", "column", order(node), row, column.index);
+    }
+  }
+  for (const [groupId, range] of columnGroupRanges) {
+    const group = host.formattingNode(groupId);
+    for (let row = 0; row < rowSectionCount; row += 1) {
+      add(edgeAt("vertical", range.start, row), group, "left", "column-group", order(group), row, range.start);
+      add(edgeAt("vertical", range.end, row), group, "right", "column-group", order(group), row, range.end - 1);
+    }
+  }
+  for (let columnIndex = 0; columnIndex < columnSectionCount; columnIndex += 1) {
+    const column = grid.columns[columnIndex];
+    if (column?.formattingNode !== null && column?.formattingNode !== undefined) {
+      const node = host.formattingNode(column.formattingNode);
+      add(edgeAt("horizontal", 0, columnIndex), node, "top", "column", order(node), 0, column.index);
+      add(edgeAt("horizontal", rowLineCount, columnIndex), node, "bottom", "column", order(node), rowLineCount, column.index);
+    }
+    if (column?.columnGroup !== null && column?.columnGroup !== undefined) {
+      const group = host.formattingNode(column.columnGroup);
+      add(edgeAt("horizontal", 0, columnIndex), group, "top", "column-group", order(group), 0, column.index);
+      add(edgeAt("horizontal", rowLineCount, columnIndex), group, "bottom", "column-group", order(group), rowLineCount, column.index);
+    }
+    add(edgeAt("horizontal", 0, columnIndex), table, "top", "table", order(table), 0, columnIndex);
+    add(edgeAt("horizontal", rowLineCount, columnIndex), table, "bottom", "table", order(table), rowLineCount, columnIndex);
+  }
+  for (let rowIndex = 0; rowIndex < rowSectionCount; rowIndex += 1) {
+    const row = grid.rows[rowIndex];
+    if (row !== undefined) {
+      const node = host.formattingNode(row.formattingNode);
+      add(edgeAt("vertical", 0, rowIndex), node, "left", "row", order(node), row.index, 0);
+      add(edgeAt("vertical", columnLineCount, rowIndex), node, "right", "row", order(node), row.index, columnLineCount);
+      if (row.rowGroup !== null) {
+        const group = host.formattingNode(row.rowGroup);
+        add(edgeAt("vertical", 0, rowIndex), group, "left", "row-group", order(group), row.index, 0);
+        add(edgeAt("vertical", columnLineCount, rowIndex), group, "right", "row-group", order(group), row.index, columnLineCount);
+      }
+    }
+    add(edgeAt("vertical", 0, rowIndex), table, "left", "table", order(table), rowIndex, 0);
+    add(edgeAt("vertical", columnLineCount, rowIndex), table, "right", "table", order(table), rowIndex, columnLineCount);
+  }
+  for (const edge of edges) {
+    edge.owner ??= {
+      target: table.id,
+      side: edge.tablePerimeterSide ?? (edge.axis === "horizontal" ? "top" : "left"),
+    };
+  }
+
+  return Object.freeze({
+    direction,
+    edges: Object.freeze(edges.map((edge) => Object.freeze({
+      ...edge,
+      candidates: Object.freeze(edge.candidates),
+      owner: edge.owner as { readonly target: FormattingNodeId; readonly side: Side },
+    }))),
+  });
+}
+
+/** Resolve connected border conflict sets and register their used geometry. */
+export function resolveCollapsedBorderConflictSets(
+  host: TableCollapsedBorderHost,
+  grid: TableSlotGrid,
+  table: FormattingNode,
+  graph: TableCollapsedBorderGraph,
+): readonly TableCollapsedBorderWinner[] {
+  const { direction, edges } = graph;
+
+  const sets = new DisjointSet(edges.length);
+  const cellSideEdge = new Map<string, number>();
+  for (const [edgeIndex, edge] of edges.entries()) {
+    host.signal?.throwIfAborted();
+    for (const value of edge.candidates) {
+      if (value.origin !== "cell") continue;
+      const key = `${value.formattingNode}:${value.side}`;
+      const previous = cellSideEdge.get(key);
+      if (previous === undefined) cellSideEdge.set(key, edgeIndex);
+      else sets.union(previous, edgeIndex);
+    }
+  }
+  const candidatesBySet = new Map<number, TableCollapsedBorderCandidate[]>();
+  for (const [edgeIndex, edge] of edges.entries()) {
+    host.signal?.throwIfAborted();
+    const root = sets.find(edgeIndex);
+    const values = candidatesBySet.get(root) ?? [];
+    values.push(...edge.candidates);
+    candidatesBySet.set(root, values);
+  }
+  const winnersBySet = new Map<number, TableCollapsedBorderCandidate>();
+  for (const [root, values] of candidatesBySet) {
+    host.signal?.throwIfAborted();
+    let winner = values[0];
+    if (winner === undefined) continue;
+    for (let index = 1; index < values.length; index += 1) {
+      const value = values[index];
+      if (value !== undefined) winner = wins(winner, value, direction);
+    }
+    winnersBySet.set(root, winner);
+  }
+
+  const overrides = new Map<FormattingNodeId, ReturnType<typeof emptyOverride>>();
+  overrides.set(table.id, emptyOverride(true));
+  for (const row of grid.rows) {
+    host.signal?.throwIfAborted();
+    overrides.set(row.formattingNode, emptyOverride());
+    if (row.rowGroup !== null && !overrides.has(row.rowGroup)) overrides.set(row.rowGroup, emptyOverride());
+  }
+  for (const column of grid.columns) {
+    host.signal?.throwIfAborted();
+    if (column.formattingNode !== null && !overrides.has(column.formattingNode)) overrides.set(column.formattingNode, emptyOverride());
+    if (column.columnGroup !== null && !overrides.has(column.columnGroup)) overrides.set(column.columnGroup, emptyOverride());
+  }
+  for (const cell of grid.cells) {
+    host.signal?.throwIfAborted();
+    overrides.set(cell.formattingNode, emptyOverride());
+  }
+  const winners: TableCollapsedBorderWinner[] = [];
+  for (const [edgeIndex, edge] of edges.entries()) {
+    host.signal?.throwIfAborted();
+    const winner = winnersBySet.get(sets.find(edgeIndex));
+    if (winner === undefined) continue;
+    winners.push(Object.freeze({
+      ...winner,
+      axis: edge.axis,
+      line: edge.line,
+      start: edge.start,
+      end: edge.end,
+      ownerFormattingNode: edge.owner.target,
+      ownerSide: edge.owner.side,
+      tablePerimeterSide: edge.tablePerimeterSide,
+    }));
+    const half = winner.style === "hidden" ? ZERO : cssNonNegativeLength(cssDivide(winner.width, 2));
+    for (const value of edge.candidates) {
+      const geometry = overrides.get(value.formattingNode);
+      if (geometry === undefined) continue;
+      geometry.widths[value.side] = cssMax(geometry.widths[value.side], half) as CssNonNegativeLength;
+      geometry.colors[value.side] = winner.color;
+    }
+    if (edge.tablePerimeterSide !== null) {
+      const tableGeometry = overrides.get(table.id);
+      if (tableGeometry !== undefined) {
+        tableGeometry.widths[edge.tablePerimeterSide] = cssMax(tableGeometry.widths[edge.tablePerimeterSide], half) as CssNonNegativeLength;
+        tableGeometry.colors[edge.tablePerimeterSide] = winner.color;
+      }
+    }
+  }
+  for (const [id, value] of overrides) {
+    host.signal?.throwIfAborted();
+    const frozen: TableBorderOverride = Object.freeze({
+      styles: Object.freeze(value.styles),
+      widths: Object.freeze(value.widths),
+      colors: Object.freeze(value.colors),
+      suppressPadding: value.suppressPadding,
+    });
+    host.registerCollapsedBorderOverride(id, frozen);
+  }
+  return Object.freeze(winners);
+}
+
+/** Build and harmonize the complete collapsed-border edge graph. */
 export function resolveCollapsedTableBorders(
   host: TableCollapsedBorderHost,
   grid: TableSlotGrid,
   table: FormattingNode,
   inlineBasis: CssPixelLength,
 ): readonly TableCollapsedBorderWinner[] {
-  const candidates = new Map<string, TableCollapsedBorderCandidate[]>();
-  const owners = new Map<string, { target: FormattingNodeId; side: Side }>();
-  const add = (key: string, value: TableCollapsedBorderCandidate | null): void => {
-    if (value === null) return;
-    host.consume("maxTableCollapsedBorderCandidates");
-    const list = candidates.get(key) ?? [];
-    list.push(value);
-    candidates.set(key, list);
-  };
-  const sourceOrder = new Map<FormattingNodeId, number>();
-  let ordinal = 0;
-  const order = (id: FormattingNodeId): number => {
-    const existing = sourceOrder.get(id);
-    if (existing !== undefined) return existing;
-    sourceOrder.set(id, ++ordinal);
-    return ordinal;
-  };
-  const rowGroupRanges = new Map<FormattingNodeId, { start: number; end: number }>();
-  for (const row of grid.rows) {
-    if (row.rowGroup === null) continue;
-    const range = rowGroupRanges.get(row.rowGroup);
-    rowGroupRanges.set(row.rowGroup, {
-      start: range?.start ?? row.index,
-      end: row.index + 1,
-    });
-  }
-  const columnGroupRanges = new Map<FormattingNodeId, { start: number; end: number }>();
-  for (const column of grid.columns) {
-    if (column.columnGroup === null) continue;
-    const range = columnGroupRanges.get(column.columnGroup);
-    columnGroupRanges.set(column.columnGroup, {
-      start: range?.start ?? column.index,
-      end: column.index + 1,
-    });
-  }
-  for (const cell of grid.cells) {
-    const cellNode = host.formattingNode(cell.formattingNode);
-    const rowNode = host.formattingNode(grid.rows[cell.row]?.formattingNode ?? cell.formattingNode);
-    const rowGroup = cell.rowGroup === null ? null : host.formattingNode(cell.rowGroup);
-    const column = grid.columns[cell.column];
-    const columnNode = column?.formattingNode === null || column?.formattingNode === undefined ? null : host.formattingNode(column.formattingNode);
-    const columnGroup = column?.columnGroup === null || column?.columnGroup === undefined ? null : host.formattingNode(column.columnGroup);
-    const addEdge = (side: Side, key: string, perpendicularTrack: number, perimeter: boolean): void => {
-      add(key, candidate(host, cellNode, side, "cell", order(cellNode.id), inlineBasis));
-      if (side === "top" || side === "bottom") {
-        add(key, candidate(host, rowNode, side, "row", order(rowNode.id), inlineBasis));
-        const rowRange = rowGroup === null ? undefined : rowGroupRanges.get(rowGroup.id);
-        const line = side === "top" ? cell.row : cell.row + cell.rowSpan;
-        if (rowGroup !== null && rowRange !== undefined && (line === rowRange.start || line === rowRange.end)) {
-          add(key, candidate(host, rowGroup, side, "row-group", order(rowGroup.id), inlineBasis));
-        }
-        if (perimeter) {
-          const edgeColumn = grid.columns[perpendicularTrack];
-          const edgeColumnNode = edgeColumn?.formattingNode === null || edgeColumn?.formattingNode === undefined
-            ? null
-            : host.formattingNode(edgeColumn.formattingNode);
-          const edgeColumnGroup = edgeColumn?.columnGroup === null || edgeColumn?.columnGroup === undefined
-            ? null
-            : host.formattingNode(edgeColumn.columnGroup);
-          if (edgeColumnNode !== null) add(key, candidate(host, edgeColumnNode, side, "column", order(edgeColumnNode.id), inlineBasis));
-          if (edgeColumnGroup !== null) add(key, candidate(host, edgeColumnGroup, side, "column-group", order(edgeColumnGroup.id), inlineBasis));
-        }
-      } else {
-        if (columnNode !== null) add(key, candidate(host, columnNode, side, "column", order(columnNode.id), inlineBasis));
-        const columnRange = columnGroup === null ? undefined : columnGroupRanges.get(columnGroup.id);
-        const line = side === "left" ? cell.column : cell.column + cell.columnSpan;
-        if (columnGroup !== null && columnRange !== undefined && (line === columnRange.start || line === columnRange.end)) {
-          add(key, candidate(host, columnGroup, side, "column-group", order(columnGroup.id), inlineBasis));
-        }
-        if (perimeter) {
-          const edgeRow = grid.rows[perpendicularTrack];
-          const edgeRowNode = edgeRow === undefined ? null : host.formattingNode(edgeRow.formattingNode);
-          const edgeRowGroup = edgeRow?.rowGroup === null || edgeRow?.rowGroup === undefined
-            ? null
-            : host.formattingNode(edgeRow.rowGroup);
-          if (edgeRowNode !== null) add(key, candidate(host, edgeRowNode, side, "row", order(edgeRowNode.id), inlineBasis));
-          if (edgeRowGroup !== null) add(key, candidate(host, edgeRowGroup, side, "row-group", order(edgeRowGroup.id), inlineBasis));
-        }
-      }
-      if (perimeter) add(key, candidate(host, table, side, "table", order(table.id), inlineBasis));
-      const current = owners.get(key);
-      const prefer = side === "top" || side === "left";
-      if (current === undefined || prefer) owners.set(key, { target: cell.formattingNode, side });
-    };
-    for (let columnIndex = cell.column; columnIndex < cell.column + cell.columnSpan; columnIndex += 1) {
-      addEdge("top", `h:${String(cell.row)}:${String(columnIndex)}:${String(columnIndex + 1)}`, columnIndex, cell.row === 0);
-      addEdge("bottom", `h:${String(cell.row + cell.rowSpan)}:${String(columnIndex)}:${String(columnIndex + 1)}`, columnIndex, cell.row + cell.rowSpan === grid.rows.length);
-    }
-    for (let rowIndex = cell.row; rowIndex < cell.row + cell.rowSpan; rowIndex += 1) {
-      addEdge("left", `v:${String(cell.column)}:${String(rowIndex)}:${String(rowIndex + 1)}`, rowIndex, cell.column === 0);
-      addEdge("right", `v:${String(cell.column + cell.columnSpan)}:${String(rowIndex)}:${String(rowIndex + 1)}`, rowIndex, cell.column + cell.columnSpan === grid.columns.length);
-    }
-  }
-  const overrides = new Map<FormattingNodeId, ReturnType<typeof emptyOverride>>();
-  overrides.set(table.id, emptyOverride());
-  for (const row of grid.rows) {
-    overrides.set(row.formattingNode, emptyOverride());
-    if (row.rowGroup !== null && !overrides.has(row.rowGroup)) overrides.set(row.rowGroup, emptyOverride());
-  }
-  for (const column of grid.columns) {
-    if (column.formattingNode !== null && !overrides.has(column.formattingNode)) overrides.set(column.formattingNode, emptyOverride());
-    if (column.columnGroup !== null && !overrides.has(column.columnGroup)) overrides.set(column.columnGroup, emptyOverride());
-  }
-  for (const cell of grid.cells) overrides.set(cell.formattingNode, emptyOverride());
-  const cellsById = new Map(
-    grid.cells.map((cell) => [cell.formattingNode, cell] as const),
-  );
-  const intervalsByRow = new Map<number, typeof grid.slotIntervals[number][]>();
-  for (const interval of grid.slotIntervals) {
-    const intervals = intervalsByRow.get(interval.row) ?? [];
-    intervals.push(interval);
-    intervalsByRow.set(interval.row, intervals);
-  }
-  const winners: TableCollapsedBorderWinner[] = [];
-  for (const [key, values] of candidates) {
-    host.signal?.throwIfAborted();
-    host.consume("maxTableCollapsedBorderSegments");
-    let winner = values[0];
-    if (winner === undefined) continue;
-    for (let index = 1; index < values.length; index += 1) {
-      const value = values[index];
-      if (value !== undefined) winner = wins(winner, value);
-    }
-    const [axisToken, lineToken, startToken, endToken] = key.split(":");
-    const segment: TableCollapsedBorderWinner = Object.freeze({
-      ...winner,
-      axis: axisToken === "h" ? "horizontal" : "vertical",
-      line: Number(lineToken),
-      start: Number(startToken),
-      end: Number(endToken),
-      ownerFormattingNode: owners.get(key)?.target ?? winner.formattingNode,
-      ownerSide: owners.get(key)?.side ?? winner.side,
-    });
-    winners.push(segment);
-    const owner = owners.get(key);
-    if (owner === undefined) continue;
-    const target = overrides.get(owner.target);
-    if (target === undefined) continue;
-    const perimeter = segment.axis === "horizontal"
-      ? segment.line === 0 || segment.line === grid.rows.length
-      : segment.line === 0 || segment.line === grid.columns.length;
-    const half = cssNonNegativeLength(cssDivide(winner.width, 2));
-    const contribution = perimeter ? winner.width : half;
-    target.styles[owner.side] = "none";
-    target.widths[owner.side] = winner.style === "hidden" ? ZERO : contribution;
-    target.colors[owner.side] = winner.color;
-    const touching = new Set<FormattingNodeId>();
-    const rows: number[] = [];
-    if (segment.axis === "horizontal") rows.push(segment.line - 1, segment.line);
-    else {
-      for (let row = segment.start; row < segment.end; row += 1) rows.push(row);
-    }
-    for (const row of rows) {
-      host.signal?.throwIfAborted();
-      for (const interval of intervalsByRow.get(row) ?? []) {
-        host.consume("maxTableCollapsedBorderCandidates");
-        if (
-          segment.axis === "horizontal"
-            ? interval.columnStart < segment.end &&
-              interval.columnEnd > segment.start
-            : interval.columnStart <= segment.line &&
-              interval.columnEnd >= segment.line
-        ) {
-          touching.add(interval.cell);
-        }
-      }
-    }
-    for (const id of touching) {
-      const cell = cellsById.get(id);
-      if (cell === undefined) continue;
-      const touches = segment.axis === "horizontal"
-        ? cell.row === segment.line || cell.row + cell.rowSpan === segment.line
-        : cell.column === segment.line || cell.column + cell.columnSpan === segment.line;
-      if (!touches) continue;
-      const geometry = overrides.get(cell.formattingNode);
-      if (geometry === undefined) continue;
-      const side: Side = segment.axis === "horizontal"
-        ? (cell.row === segment.line ? "top" : "bottom")
-        : (cell.column === segment.line ? "left" : "right");
-      geometry.widths[side] = cssMax(geometry.widths[side], contribution) as CssNonNegativeLength;
-    }
-  }
-  for (const [id, value] of overrides) {
-    const frozen: TableBorderOverride = Object.freeze({
-      styles: Object.freeze(value.styles),
-      widths: Object.freeze(value.widths),
-      colors: Object.freeze(value.colors),
-    });
-    host.registerCollapsedBorderOverride(id, frozen);
-  }
-  return Object.freeze(winners);
+  const graph = buildCollapsedTableBorderGraph(host, grid, table, inlineBasis);
+  return resolveCollapsedBorderConflictSets(host, grid, table, graph);
 }

@@ -252,7 +252,10 @@ test("HTML metadata, CSS table fixup, table layout, and terminal painting retain
   const rootDeclaration = await source("dist/mod.d.ts");
 
   assert.match(documentTable, /HtmlTableMetadata/u);
+  assert.match(documentTable, /HtmlTableCellPlacement/u);
+  assert.match(documentTable, /HtmlTableSlotInterval/u);
   assert.match(documentTable, /associateTableHeaders/u);
+  assert.match(documentTable, /header block/iu);
   assert.doesNotMatch(documentTable, /ComputedStyle|LayoutFragment|TerminalCell/u);
   assert.match(styleTable, /parseTableLayout/u);
   assert.match(styleTable, /parseBorderCollapse/u);
@@ -262,21 +265,32 @@ test("HTML metadata, CSS table fixup, table layout, and terminal painting retain
   assert.match(formattingTable, /anonymousContainer/u);
   assert.doesNotMatch(formattingTable, /column measure|rowSpanWork|TerminalCell/iu);
   assert.match(layoutTable, /buildTableSlotGrid/u);
+  assert.match(layoutTable, /TableSlotGrid/u);
   assert.match(layoutTable, /measureTableColumns/u);
   assert.match(layoutTable, /distributeTableWidth/u);
+  assert.match(layoutTable, /buildCollapsedTableBorderGraph/u);
+  assert.match(layoutTable, /resolveCollapsedBorderConflictSets/u);
+  assert.match(layoutTable, /buildCollapsedTableBorderSegments/u);
   assert.match(layoutTable, /resolveCollapsedTableBorders/u);
+  assert.match(layoutTable, /paintPhase: "collapsed-border"/u);
   assert.match(layoutTable, /LayoutTableCollapsedBorderSegment/u);
   assert.match(layoutTable, /layoutTableContainer/u);
   assert.match(genericLayout, /layoutTableContainer/u);
+  assert.match(genericLayout, /#tableSlotGridCache/u);
   assert.doesNotMatch(genericLayout, /#table\s*\(|#columnCount\s*\(/u);
   assert.doesNotMatch(layoutTable, /@ismail-elkorchi\/css-parser|TerminalCell|terminal-ui/u);
+  assert.doesNotMatch(layoutTable, /buildHtmlTableMetadata|associateTableHeaders/u);
   assert.doesNotMatch(terminal, /(?:colspan|rowspan|slot grid|table-layout|border-collapse|column measure|row distribution)/iu);
   assert.match(terminal, /tableCollapsedBorderSegments/u);
   assert.doesNotMatch(terminal, /resolveCollapsedTableBorders|TableCollapsedBorderCandidate/u);
   assert.doesNotMatch(uiAndApplication, /presentation\/layout\/table|buildTableSlotGrid|distributeTableWidth/u);
   assert.doesNotMatch(rootDeclaration, /\b(?:TableSlotGrid|TableColumnMeasure|TableCollapsedBorderWinner|HtmlTableMetadataIndex)\b/u);
   for (const [path, text] of await files(paths)) {
-    assert.doesNotMatch(text, /\b(?:calculateTableColumns|equalWidthTableColumns|legacyTableLayout)\b/u, `${path} retains a former table allocator`);
+    assert.doesNotMatch(
+      text,
+      /\b(?:calculateTableColumns|equalWidthTableColumns|legacyTableLayout|simpleTableLayout|fallbackTableLayout|legacyHeaderPlacement)\b/u,
+      `${path} retains a former table algorithm`,
+    );
   }
 });
 

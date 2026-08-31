@@ -6,6 +6,7 @@ import type {
   TableSlotGridHost,
   TableMissingCellInterval,
   TableOutOfFlowBox,
+  TableRowGroupTrack,
   TableRowTrack,
   TableSlotGrid,
   TableSlotInterval,
@@ -46,25 +47,63 @@ function collectRows(
   host: TableSlotGridHost,
   table: FormattingNode,
   addOutOfFlow: (node: FormattingNode, owner: FormattingNode) => void,
-): CollectedRow[] {
-  const result: CollectedRow[] = [];
-  for (const childId of table.children) {
+): {
+  readonly rows: readonly CollectedRow[];
+  readonly groups: readonly TableRowGroupTrack[];
+  readonly displayBoxes: readonly FormattingNode[];
+} {
+  const source: { readonly node: FormattingNode; readonly sourceOrder: number }[] = [];
+  for (const [sourceOrder, childId] of table.children.entries()) {
     const child = host.formattingNode(childId);
     if (host.isOutOfFlow(child)) {
       addOutOfFlow(child, table);
       continue;
     }
-    if (child.kind === "table-row") result.push({ node: child, group: null });
-    else if (child.kind === "table-header-group" || child.kind === "table-body-group" || child.kind === "table-footer-group") {
-      host.consume("maxTableRowGroups");
-      for (const rowId of child.children) {
-        const row = host.formattingNode(rowId);
-        if (host.isOutOfFlow(row)) addOutOfFlow(row, child);
-        else if (row.kind === "table-row") result.push({ node: row, group: child });
-      }
+    if (child.kind === "table-row" || child.kind === "table-header-group"
+      || child.kind === "table-body-group" || child.kind === "table-footer-group") source.push({ node: child, sourceOrder });
+  }
+  const firstHeader = source.find((entry) => entry.node.kind === "table-header-group") ?? null;
+  const firstFooter = source.find((entry) => entry.node.kind === "table-footer-group") ?? null;
+  const display = [
+    ...(firstHeader === null ? [] : [firstHeader]),
+    ...source.filter((entry) => entry !== firstHeader && entry !== firstFooter),
+    ...(firstFooter === null ? [] : [firstFooter]),
+  ];
+  const rows: CollectedRow[] = [];
+  const groups: TableRowGroupTrack[] = [];
+  const displayBoxes: FormattingNode[] = [];
+  for (const entry of display) {
+    const child = entry.node;
+    if (child.kind === "table-row") {
+      rows.push({ node: child, group: null });
+      displayBoxes.push(child);
+      continue;
+    }
+    host.consume("maxTableRowGroups");
+    const sourceRole = child.kind === "table-header-group" ? "header"
+      : child.kind === "table-footer-group" ? "footer" : "body";
+    const displayRole = entry === firstHeader ? "header" : entry === firstFooter ? "footer" : "body";
+    groups.push(Object.freeze({ formattingNode: child.id, sourceRole, displayRole, sourceOrder: entry.sourceOrder }));
+    displayBoxes.push(child);
+    for (const rowId of child.children) {
+      const row = host.formattingNode(rowId);
+      if (host.isOutOfFlow(row)) addOutOfFlow(row, child);
+      else if (row.kind === "table-row") rows.push({ node: row, group: child });
     }
   }
-  return result;
+  return Object.freeze({
+    rows: Object.freeze(rows),
+    groups: Object.freeze(groups),
+    displayBoxes: Object.freeze(displayBoxes),
+  });
+}
+
+function rowGroupRange(rows: readonly TableRowTrack[], row: TableRowTrack): { readonly start: number; readonly end: number } {
+  let start = row.index;
+  let end = row.index + 1;
+  while (start > 0 && rows[start - 1]?.rowGroup === row.rowGroup) start -= 1;
+  while (end < rows.length && rows[end]?.rowGroup === row.rowGroup) end += 1;
+  return Object.freeze({ start, end });
 }
 
 function collectedColumns(
@@ -136,16 +175,14 @@ export function buildTableSlotGrid(host: TableSlotGridHost, table: FormattingNod
     }
     return true;
   });
-  const rowGroups = table.children.filter((id) => {
-    const kind = host.formattingNode(id).kind;
-    return kind === "table-header-group" || kind === "table-body-group" || kind === "table-footer-group";
-  });
-  const columnGroups = table.children.filter((id) => host.formattingNode(id).kind === "table-column-group");
   const collected = collectRows(host, table, addOutOfFlow);
   const explicitColumns = collectedColumns(host, table, addOutOfFlow);
+  const columnGroups = table.children.filter((id) => {
+    const node = host.formattingNode(id);
+    return node.kind === "table-column-group" && !host.isOutOfFlow(node);
+  });
   const rows: TableRowTrack[] = [];
-  const groupRanges = new Map<FormattingNodeId | null, { start: number; end: number }>();
-  for (const [index, entry] of collected.entries()) {
+  for (const [index, entry] of collected.rows.entries()) {
     host.consume("maxTableRows");
     rows.push(Object.freeze({
       index,
@@ -154,10 +191,11 @@ export function buildTableSlotGrid(host: TableSlotGridHost, table: FormattingNod
       source: entry.node.source,
       collapsed: host.computed(entry.node)?.visibility === "collapse" || (entry.group !== null && host.computed(entry.group)?.visibility === "collapse"),
     }));
-    const key = entry.group?.id ?? null;
-    const range = groupRanges.get(key);
-    groupRanges.set(key, { start: range?.start ?? index, end: index + 1 });
   }
+  const rowByFormattingNode = new Map(rows.map((row) => [row.formattingNode, row.index] as const));
+  const rowSequence = collected.displayBoxes.map((node) => node.kind === "table-row"
+    ? Object.freeze({ kind: "row" as const, row: rowByFormattingNode.get(node.id) as number })
+    : Object.freeze({ kind: "row-group" as const, formattingNode: node.id }));
   const occupied = new Map<number, TableSlotInterval[]>();
   const cells: TableCellSlot[] = [];
   const slotIntervals: TableSlotInterval[] = [];
@@ -179,7 +217,7 @@ export function buildTableSlotGrid(host: TableSlotGridHost, table: FormattingNod
       host.consume("maxTableCells");
       const metadata = cellNode.source === null ? null : host.htmlTableCell(cellNode.source);
       const columnSpan = metadata?.columnSpan ?? 1;
-      const range = groupRanges.get(row.rowGroup) ?? { start: row.index, end: rows.length };
+      const range = rowGroupRange(rows, row);
       const requestedRowSpan = metadata?.rowSpan ?? 1;
       const rowSpan = requestedRowSpan === "remaining-row-group"
         ? Math.max(1, range.end - row.index)
@@ -218,7 +256,10 @@ export function buildTableSlotGrid(host: TableSlotGridHost, table: FormattingNod
         rowSpan,
         columnSpan,
         rowGroup: row.rowGroup,
-        columnGroup: explicitColumns[cursor]?.columnGroup ?? null,
+        columnGroups: Object.freeze([...new Set(explicitColumns
+          .slice(cursor, cursor + columnSpan)
+          .map((column) => column.columnGroup)
+          .filter((group): group is FormattingNodeId => group !== null))]),
         intervals: Object.freeze(intervals),
         htmlMetadata: metadata,
       }));
@@ -251,7 +292,8 @@ export function buildTableSlotGrid(host: TableSlotGridHost, table: FormattingNod
   return Object.freeze({
     table: table.id,
     captions: Object.freeze(captions),
-    rowGroups: Object.freeze(rowGroups),
+    rowGroups: collected.groups,
+    rowSequence: Object.freeze(rowSequence),
     columnGroups: Object.freeze(columnGroups),
     rows: Object.freeze(rows),
     columns: Object.freeze(columns),

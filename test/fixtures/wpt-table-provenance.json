@@ -156,6 +156,73 @@
       "license": "WPT 3-clause BSD"
     },
     {
+      "source": "css/css-tables/row-group-order.html",
+      "behavior": "the first table-header-group is displayed before ordinary groups and the first table-footer-group after them while additional header and footer groups remain in ordinary group order",
+      "terminalAdjustment": "CSS slot-grid row sequence and fixed-layout first-row selection replace pixel comparison",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/tentative/section-no-tbody-fixed-distribution.html",
+      "behavior": "fixed table layout takes width constraints from the first displayed row after CSS row-group ordering",
+      "terminalAdjustment": "fixed-point column boundaries identify the selected first row",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/tentative/colgroup-col.html",
+      "behavior": "column and containing column-group constraints remain distinct and a group width constrains its combined tracks",
+      "terminalAdjustment": "typed column-measure sources and used track widths are asserted before rasterization",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/width-distribution/computing-column-measure-2.html",
+      "behavior": "calculated percentage and mixed column constraints preserve percentage dependence through column measurement",
+      "terminalAdjustment": "length-percentage constraints are resolved against the used table-grid width in fixed-point CSS pixels",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/width-distribution/distribution-algo-min-content-percent-guess.html",
+      "behavior": "automatic width distribution progresses through minimum and intrinsic-percentage sizing categories rather than equal sharing",
+      "terminalAdjustment": "used column boundaries expose the selected sizing interpolation",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/tentative/rowspan-height-redistribution.html",
+      "behavior": "overlapping rowspan requirements are planned by increasing span from an unchanged row-size snapshot",
+      "terminalAdjustment": "item-order permutations compare base, reference, and final row boundaries",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/border-collapse-empty-cell.html",
+      "behavior": "the collapsed-border edge graph retains perimeter and missing-slot edges even when no cell originates in a slot",
+      "terminalAdjustment": "layout-owned segment topology is asserted instead of graphical reference pixels",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/tentative/border-collapse-spanning-cells-004.html",
+      "behavior": "rowspan and colspan sides connect transitive border conflict sets before winners are selected",
+      "terminalAdjustment": "harmonized segment widths and unique edge identities are inspected directly",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/tentative/collapsed-borders-painting-order-001.html",
+      "behavior": "equal collapsed-border ties use logical row and direction-sensitive column position instead of candidate encounter order",
+      "terminalAdjustment": "LTR and RTL winning source identities are asserted on layout paint segments",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/collapsed-border-paint-phase-001.html",
+      "behavior": "collapsed borders retain a dedicated table paint phase after table backgrounds and cell content ordering inputs are established",
+      "terminalAdjustment": "the display list consumes the layout segment paint phase without recalculating border conflicts",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "source#forming-relationships-between-data-cells-and-header-cells",
+      "repository": "https://github.com/whatwg/html",
+      "behavior": "automatic header assignment scans row and column directions through header blocks and makes completed blocks opaque after intervening data cells",
+      "terminalAdjustment": "same-table document-node associations are asserted independently of visual order and painted text",
+      "license": "WHATWG CC BY 4.0 and BSD-3-Clause"
+    },
+    {
       "source": "source#the-table-element",
       "repository": "https://github.com/whatwg/html",
       "behavior": "table, rowgroup, row, cell, columnheader, rowheader, caption name, and headers/scope relationships derive from document semantics rather than painted text",

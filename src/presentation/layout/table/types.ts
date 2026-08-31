@@ -59,6 +59,17 @@ export interface TableRowTrack {
   readonly collapsed: boolean;
 }
 
+export interface TableRowGroupTrack {
+  readonly formattingNode: FormattingNodeId;
+  readonly sourceRole: "header" | "body" | "footer";
+  readonly displayRole: "header" | "body" | "footer";
+  readonly sourceOrder: number;
+}
+
+export type TableRowSequenceEntry =
+  | { readonly kind: "row-group"; readonly formattingNode: FormattingNodeId }
+  | { readonly kind: "row"; readonly row: number };
+
 export interface TableColumnTrack {
   readonly index: number;
   readonly formattingNode: FormattingNodeId | null;
@@ -75,7 +86,7 @@ export interface TableCellSlot {
   readonly rowSpan: number;
   readonly columnSpan: number;
   readonly rowGroup: FormattingNodeId | null;
-  readonly columnGroup: FormattingNodeId | null;
+  readonly columnGroups: readonly FormattingNodeId[];
   readonly intervals: readonly TableSlotInterval[];
   readonly htmlMetadata: HtmlTableCellMetadata | null;
 }
@@ -99,7 +110,8 @@ export interface TableOutOfFlowBox {
 export interface TableSlotGrid {
   readonly table: FormattingNodeId;
   readonly captions: readonly FormattingNodeId[];
-  readonly rowGroups: readonly FormattingNodeId[];
+  readonly rowGroups: readonly TableRowGroupTrack[];
+  readonly rowSequence: readonly TableRowSequenceEntry[];
   readonly columnGroups: readonly FormattingNodeId[];
   readonly rows: readonly TableRowTrack[];
   readonly columns: readonly TableColumnTrack[];
@@ -112,11 +124,44 @@ export interface TableSlotGrid {
 
 export interface TableColumnMeasure {
   readonly index: number;
-  readonly minimum: CssNonNegativeLength;
-  readonly preferred: CssNonNegativeLength;
-  readonly percentage: number | null;
+  readonly intrinsicMinimum: CssNonNegativeLength;
+  readonly intrinsicPreferred: CssNonNegativeLength;
+  readonly intrinsicPercentages: readonly TableLengthConstraint[];
+  readonly originatingColumnConstraints: readonly TableLengthConstraint[];
+  readonly containingColumnGroupConstraints: readonly TableColumnGroupConstraintMembership[];
+  readonly cellConstraints: readonly TableLengthConstraint[];
+  readonly firstRowCellConstraints: readonly TableLengthConstraint[];
   readonly constrained: boolean;
+  readonly hasOriginatingCell: boolean;
   readonly collapsed: boolean;
+}
+
+export type TableConstraintSource = "column" | "column-group" | "cell" | "first-row-cell";
+export type TablePercentageDependence = "none" | "percentage" | "mixed";
+
+export interface TableLengthConstraint {
+  readonly source: TableConstraintSource;
+  readonly formattingNode: FormattingNodeId;
+  readonly start: number;
+  readonly span: number;
+  readonly width: CssLength;
+  readonly minWidth: CssLength;
+  readonly maxWidth: CssLength;
+  readonly percentageDependence: TablePercentageDependence;
+  readonly inlineOffsets: CssNonNegativeLength;
+  readonly sourceOrder: number;
+}
+
+export interface TableColumnGroupConstraintMembership {
+  readonly constraint: TableLengthConstraint;
+  readonly spanOffset: number;
+}
+
+export interface TableColumnMeasures {
+  readonly columns: readonly TableColumnMeasure[];
+  readonly constraints: readonly TableLengthConstraint[];
+  readonly spanningCellConstraints: readonly TableLengthConstraint[];
+  readonly columnGroupConstraints: readonly TableLengthConstraint[];
 }
 
 export interface UsedTableColumn {
@@ -131,6 +176,11 @@ export interface UsedTableRow {
   readonly offset: CssPixelLength;
   readonly size: CssNonNegativeLength;
   readonly baseline: CssPixelLength | null;
+  readonly baselineAscent: CssNonNegativeLength;
+  readonly baselineDescent: CssNonNegativeLength;
+  readonly baseSize: CssNonNegativeLength;
+  readonly referenceSize: CssNonNegativeLength;
+  readonly autoHeight: boolean;
   readonly collapsed: boolean;
 }
 
@@ -155,6 +205,8 @@ export interface TableCollapsedBorderCandidate {
   readonly color: CssColor | null;
   readonly origin: "table" | "column-group" | "column" | "row-group" | "row" | "cell";
   readonly sourceOrder: number;
+  readonly logicalRow: number;
+  readonly logicalColumn: number;
 }
 
 export interface TableCollapsedBorderWinner extends TableCollapsedBorderCandidate {
@@ -164,12 +216,14 @@ export interface TableCollapsedBorderWinner extends TableCollapsedBorderCandidat
   readonly end: number;
   readonly ownerFormattingNode: FormattingNodeId;
   readonly ownerSide: "top" | "right" | "bottom" | "left";
+  readonly tablePerimeterSide: "top" | "right" | "bottom" | "left" | null;
 }
 
 export interface TableBorderOverride {
   readonly styles: Readonly<Record<"top" | "right" | "bottom" | "left", CssBorderStyle>>;
   readonly widths: Readonly<Record<"top" | "right" | "bottom" | "left", CssNonNegativeLength>>;
   readonly colors: Readonly<Record<"top" | "right" | "bottom" | "left", CssColor | null>>;
+  readonly suppressPadding: boolean;
 }
 
 export interface TableLayoutOperationResult {
@@ -209,6 +263,7 @@ export interface TableColumnMeasureHost {
   boxComputed(node: FormattingNode): ComputedStyle | null;
   consume(budget: TableBudgetName, amount?: number): void;
   usedLength(value: CssLength, basis: CssPixelLength | null, style: ComputedStyle | null): CssPixelLength | null;
+  inlineBoxOffsets(node: FormattingNode, basis: CssPixelLength): CssNonNegativeLength;
   intrinsicContributions(id: FormattingNodeId, availableInlineSize: CssPixelLength | null): IntrinsicSizeContributions;
 }
 
@@ -222,6 +277,7 @@ export interface TableCollapsedBorderHost {
 }
 
 export interface TableLayoutHost extends TableSlotGridHost, TableColumnMeasureHost, TableCollapsedBorderHost {
+  tableSlotGrid(table: FormattingNode): TableSlotGrid;
   dimensions(node: FormattingNode, width: CssPixelLength, height: CssPixelLength | null, forcedWidth?: CssPixelLength | null): TableUsedDimensions;
   layoutChild(
     id: FormattingNodeId,

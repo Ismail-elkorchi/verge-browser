@@ -276,7 +276,19 @@ const TABLE_ADVERSARIAL_CASES = Object.freeze([
   `<table>${Array.from({ length: 20 }, (_, row) => `<tr>${Array.from({ length: 10 }, (_, column) =>
     `<td colspan="${String(1 + (row + column) % 4)}" rowspan="${String(1 + (row * column) % 3)}">${String(row)}:${String(column)}</td>`).join("")}</tr>`).join("")}</table>`,
   `<table style="border-spacing:8px"><col><col style="visibility:collapse"><col><tbody>
-    <tr><td>left</td><td>collapsed</td><td>right</td></tr><tr style="visibility:collapse"><td>hidden row</td></tr></tbody></table>`
+    <tr><td>left</td><td>collapsed</td><td>right</td></tr><tr style="visibility:collapse"><td>hidden row</td></tr></tbody></table>`,
+  `<table><tr><th id="root" abbr="R">root</th><th id="branch" headers="root">branch</th>
+    <th id="cycle-a" headers="cycle-b">a</th><th id="cycle-b" headers="cycle-a">b</th></tr>
+    <tr><td headers="branch root branch">explicit graph</td><th headers="branch">header target</th></tr></table>`,
+  `<table><tr>${Array.from({ length: 100 }, (_, column) => `<th id="column-${String(column)}" scope="col">${String(column)}</th>`).join("")}</tr>
+    ${Array.from({ length: 100 }, (_, row) => `<tr><th scope="row">${String(row)}</th><td colspan="99">automatic ${String(row)}</td></tr>`).join("")}</table>`,
+  `<table style="width:calc(100% - 1px)"><colgroup span="128" style="width:min(75%,900px)"></colgroup>
+    <colgroup><col span="64" style="width:calc(1% + 1px)"></colgroup><tr><td colspan="192">groups</td></tr></table>`,
+  `<table><tfoot><tr><td>displayed last</td></tr></tfoot><tbody><tr><td>body</td></tr></tbody>
+    <thead><tr><th>displayed first</th></tr></thead><thead><tr><th>ordinary header group</th></tr></thead></table>`,
+  `<table style="border-collapse:collapse;border:7px solid red"></table>`,
+  `<table dir="rtl" style="border-collapse:collapse;border:3px solid black"><colgroup style="border:3px solid red"><col><col></colgroup>
+    <tbody style="border:3px solid blue"><tr style="border:3px solid green"><td style="border:3px solid purple">right</td><td style="border:3px solid orange">left</td></tr></tbody></table>`
 ]);
 
 const profileName = parseProfile(process.argv.slice(2));

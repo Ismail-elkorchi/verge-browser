@@ -1,4 +1,5 @@
 export {
+  buildCollapsedTableBorderSegments,
   layoutTableContainer,
   type TableContainerLayoutInput,
   type TableWrapperFormattingNode,
@@ -7,7 +8,11 @@ export { buildTableSlotGrid } from "./slot-grid.js";
 export { measureTableColumns } from "./column-measures.js";
 export { distributeTableWidth } from "./width-distribution.js";
 export { sizeTableRows } from "./row-layout.js";
-export { resolveCollapsedTableBorders } from "./collapsed-borders.js";
+export {
+  buildCollapsedTableBorderGraph,
+  resolveCollapsedBorderConflictSets,
+  resolveCollapsedTableBorders,
+} from "./collapsed-borders.js";
 export {
   intrinsicTableBlockSize,
   intrinsicTableInlineSizes,

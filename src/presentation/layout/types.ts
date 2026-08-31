@@ -146,6 +146,13 @@ export interface LayoutTextFragment {
 
 export interface LayoutTableCollapsedBorderSegment {
   readonly id: string;
+  readonly edge: Readonly<{
+    axis: "horizontal" | "vertical";
+    line: number;
+    start: number;
+    end: number;
+  }>;
+  readonly paintPhase: "collapsed-border";
   readonly formattingNode: FormattingNodeId;
   readonly documentNode: DocumentNodeRef | null;
   readonly sourceRange: DocumentSourceRange | null;

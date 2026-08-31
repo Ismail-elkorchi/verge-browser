@@ -114,7 +114,8 @@ auto-placement, intrinsic and flexible track sizing, auto-fill/auto-fit, and
 Grid item/content alignment. Tables use HTML span metadata, CSS table box
 fixup, automatic or fixed column layout, row and rowspan distribution, top and
 bottom captions, separated or collapsed borders, RTL geometry, and source-owned
-header associations. Verge does not cover subgrid, masonry, vertical writing
+explicit, transitive, scoped, and automatic header associations. Verge does not
+cover subgrid, masonry, vertical writing
 modes, table fragmentation, animation, web fonts, raster image decoding, or
 page JavaScript. Client-rendered
 sites, anti-bot challenges, media, and unsupported form encodings may therefore

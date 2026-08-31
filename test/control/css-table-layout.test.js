@@ -172,7 +172,7 @@ test("HTML table slot work admits a deterministic complete-table prefix", () => 
   const repeated = parse(3);
   assert.deepEqual(repeated.indexOutcome, limited.indexOutcome);
   assert.equal(repeated.htmlTable(repeated.elementById("hostile")), null);
-  const extended = parse(100);
+  const extended = parse(70_000);
   assert.ok(extended.htmlTable(extended.elementById("first")));
   assert.ok(extended.htmlTable(extended.elementById("hostile")));
   assert.equal(extended.indexOutcome.status, "complete");
@@ -185,13 +185,13 @@ test("HTML table header association work is bounded at complete-table admission 
   const limited = parseWebDocument(html, {
     requestUrl: "https://tables.example.test/",
     finalUrl: "https://tables.example.test/",
-    indexLimits: { maxHtmlTableHeaderAssociationWork: 1 }
+    indexLimits: { maxHtmlTableHeaderAssociationWork: 2 }
   });
   assert.deepEqual(limited.indexOutcome, {
     status: "truncated",
     indexedNodes: limited.indexOutcome.indexedNodes,
     exhausted: "maxHtmlTableHeaderAssociationWork",
-    limit: 1
+    limit: 2
   });
   assert.ok(limited.htmlTable(limited.elementById("first")));
   assert.equal(limited.htmlTable(limited.elementById("headers")), null);
@@ -199,12 +199,55 @@ test("HTML table header association work is bounded at complete-table admission 
   const extended = parseWebDocument(html, {
     requestUrl: "https://tables.example.test/",
     finalUrl: "https://tables.example.test/",
-    indexLimits: { maxHtmlTableHeaderAssociationWork: 20 }
+    indexLimits: { maxHtmlTableHeaderAssociationWork: 100 }
   });
+  assert.equal(extended.indexOutcome.status, "complete");
   assert.deepEqual(extended.semantic(extended.elementById("value")).tableHeaders, [
     extended.elementById("left"),
     extended.elementById("right")
   ]);
+});
+
+test("header assignment indexes applicable axes and scoped groups without all-cell rescans", () => {
+  const document = parseWebDocument(`<table id="large"><colgroup><col span="10"></colgroup><tbody>${Array.from(
+    { length: 100 },
+    (_, row) => `<tr>${Array.from(
+      { length: 10 },
+      (_, column) => `<td>${String(row)}:${String(column)}</td>`,
+    ).join("")}</tr>`,
+  ).join("")}</tbody></table>`, {
+    requestUrl: "https://tables.example.test/",
+    finalUrl: "https://tables.example.test/",
+  });
+  const table = document.elementById("large");
+  assert.notEqual(table, null);
+  assert.equal(document.indexOutcome.status, "complete");
+  assert.equal(document.htmlTable(table).cells.length, 1_000);
+});
+
+test("the HTML table model defers footers and retains implied rows and downward-growing cells", () => {
+  const document = parseWebDocument(`<table id="model">
+    <tfoot id="foot"><tr id="foot-row"><td>foot</td></tr></tfoot>
+    <tbody id="body"><tr id="body-row"><td id="numeric" rowspan="3">numeric</td></tr>
+      <tr id="body-row-two"><td id="downward" rowspan="0">downward</td></tr></tbody>
+  </table>`, {
+    requestUrl: "https://tables.example.test/",
+    finalUrl: "https://tables.example.test/"
+  });
+  const model = document.htmlTable(document.elementById("model"));
+  assert.ok(model);
+  assert.deepEqual(model.rows, [
+    document.elementById("body-row"),
+    document.elementById("body-row-two"),
+    document.elementById("foot-row")
+  ]);
+  assert.equal(model.logicalRows.length, 4);
+  assert.equal(model.logicalRows[2].node, null);
+  assert.equal(model.logicalRows[2].rowGroup, document.elementById("body"));
+  assert.equal(model.logicalRows[3].node, document.elementById("foot-row"));
+  assert.deepEqual(model.downwardGrowingCells, [document.elementById("downward")]);
+  assert.equal(document.htmlTableCell(document.elementById("numeric")).rowSpan, 3);
+  assert.equal(document.htmlTableCell(document.elementById("downward")).rowSpan, "remaining-row-group");
 });
 
 test("HTML header associations remain scoped to their owning table", () => {
@@ -224,6 +267,84 @@ test("HTML header associations remain scoped to their owning table", () => {
   });
   assert.equal(scoped.semantic(scoped.elementById("group")).role, "rowheader");
   assert.deepEqual(scoped.semantic(scoped.elementById("member")).tableHeaders, [scoped.elementById("group")]);
+});
+
+test("HTML header assignment handles th targets, transitive references, cycles, blocks, and opaque headers", () => {
+  const document = parseWebDocument(`<table id="relations"><tr>
+      <th id="root" abbr="R">Root heading</th>
+      <th id="middle" headers="root">Middle</th>
+      <th id="leaf" headers="middle">Leaf</th>
+      <th id="cycle-a" headers="cycle-b">Cycle A</th>
+      <th id="cycle-b" headers="cycle-a">Cycle B</th></tr>
+    <tr><td id="explicit" headers="leaf leaf missing">value</td>
+      <th id="th-target" headers="root">target header</th></tr></table>
+    <table><tr><th id="foreign">Foreign</th></tr></table>`, {
+    requestUrl: "https://tables.example.test/",
+    finalUrl: "https://tables.example.test/"
+  });
+  const refs = (...ids) => ids.map((id) => document.elementById(id));
+  assert.deepEqual(document.semantic(document.elementById("explicit")).tableHeaders, refs("leaf", "middle", "root"));
+  assert.deepEqual(document.semantic(document.elementById("th-target")).tableHeaders, refs("root"));
+  assert.deepEqual(document.semantic(document.elementById("cycle-a")).tableHeaders, refs("cycle-b"));
+  assert.deepEqual(document.semantic(document.elementById("cycle-b")).tableHeaders, refs("cycle-a"));
+  assert.equal(document.semantic(document.elementById("root")).tableHeaderLabel, "R");
+  assert.equal(document.semantic(document.elementById("root")).accessibleName, "Root heading");
+
+  const automatic = parseWebDocument(`<table><tr><th id="far">Far</th></tr>
+    <tr><td>opaque data</td></tr><tr><th id="near">Near</th></tr>
+    <tr><td id="opaque-target"><a id="inside" href="/inside">value</a></td></tr></table>`, {
+    requestUrl: "https://tables.example.test/",
+    finalUrl: "https://tables.example.test/"
+  });
+  assert.deepEqual(automatic.semantic(automatic.elementById("opaque-target")).tableHeaders, [
+    automatic.elementById("near")
+  ]);
+  assert.deepEqual(automatic.semantic(automatic.elementById("inside")).tableHeaders, [
+    automatic.elementById("near")
+  ]);
+});
+
+test("HTML header assignment uses first-ID resolution and excludes empty automatic headers", () => {
+  const document = parseWebDocument(`<table><tr>
+      <td id="duplicate">not a header</td><th id="duplicate">shadow header</th>
+      <th id="explicit-header">Explicit</th></tr>
+    <tr><td id="explicit" headers="duplicate duplicate explicit-header explicit-header">value</td></tr></table>
+    <table><tr><th id="empty">   </th><th id="real">Real</th></tr>
+      <tr><td id="under-empty">empty column</td><td id="automatic">automatic</td></tr></table>`, {
+    requestUrl: "https://tables.example.test/",
+    finalUrl: "https://tables.example.test/"
+  });
+  assert.deepEqual(document.semantic(document.elementById("explicit")).tableHeaders, [
+    document.elementById("explicit-header")
+  ]);
+  assert.deepEqual(document.semantic(document.elementById("under-empty")).tableHeaders, [
+  ]);
+  assert.deepEqual(document.semantic(document.elementById("automatic")).tableHeaders, [
+    document.elementById("real")
+  ]);
+});
+
+test("HTML header groups, spans, nested tables, and RTL preserve logical semantic order", () => {
+  const document = parseWebDocument(`<table id="group-table" dir="rtl"><colgroup span="2"></colgroup><colgroup span="2"></colgroup>
+    <tbody><tr><th id="row-group" scope="rowgroup">Group</th><th id="row" scope="row">Row</th>
+      <th id="col-a" scope="col">A</th><th id="col-b" scope="col">B</th></tr>
+    <tr><td id="wide" colspan="4">wide</td></tr></tbody></table>
+    <table><tr><th id="nested-header">Nested</th></tr><tr><td id="nested-cell">nested value</td></tr></table>`, {
+    requestUrl: "https://tables.example.test/",
+    finalUrl: "https://tables.example.test/"
+  });
+  const wideHeaders = document.semantic(document.elementById("wide")).tableHeaders;
+  assert.deepEqual(wideHeaders, [
+    document.elementById("col-a"),
+    document.elementById("col-b"),
+    document.elementById("row-group")
+  ]);
+  assert.equal(document.htmlTable(document.elementById("group-table")).errors.some(
+    (error) => error.kind === "cell-in-multiple-column-groups"
+  ), true);
+  assert.deepEqual(document.semantic(document.elementById("nested-cell")).tableHeaders, [
+    document.elementById("nested-header")
+  ]);
 });
 
 test("table computed values and @supports share one implemented parser contract", () => {
@@ -291,7 +412,85 @@ test("fixed layout uses columns and first-row widths while automatic layout uses
   assert.ok(fragmentFor(automatic, "auto-first", "table-cell").borderRect.width > cssPx(8));
 });
 
-test("definite table and row-group block sizes distribute into rows before cell relayout", () => {
+test("CSS header and footer groups define one display row sequence used by fixed layout and painting", () => {
+  const result = render(`<div id="table" style="display:table;table-layout:fixed;width:240px;border-spacing:0">
+    <div id="footer-one" style="display:table-footer-group;background:#111"><div style="display:table-row"><span id="footer-cell" style="display:table-cell">footer</span></div></div>
+    <div id="body" style="display:table-row-group;background:#222"><div style="display:table-row"><span id="body-cell" style="display:table-cell">body</span></div></div>
+    <div id="header-one" style="display:table-header-group;background:#333"><div style="display:table-row"><span id="header-cell" style="display:table-cell;width:40px">header</span><span style="display:table-cell">other</span></div></div>
+    <div id="header-two" style="display:table-header-group;background:#444"><div style="display:table-row"><span id="header-two-cell" style="display:table-cell">second header</span></div></div>
+    <div id="footer-two" style="display:table-footer-group;background:#555"><div style="display:table-row"><span id="footer-two-cell" style="display:table-cell">second footer</span></div></div>
+  </div>`, 50);
+  const header = fragmentFor(result, "header-cell", "table-cell");
+  const body = fragmentFor(result, "body-cell", "table-cell");
+  const secondHeader = fragmentFor(result, "header-two-cell", "table-cell");
+  const secondFooter = fragmentFor(result, "footer-two-cell", "table-cell");
+  const footer = fragmentFor(result, "footer-cell", "table-cell");
+  assert.ok(header.borderRect.y < body.borderRect.y);
+  assert.ok(body.borderRect.y < secondHeader.borderRect.y);
+  assert.ok(secondHeader.borderRect.y < secondFooter.borderRect.y);
+  assert.ok(secondFooter.borderRect.y < footer.borderRect.y);
+  assert.equal(cssPixels(header.borderRect.width), 40);
+  const paintOrder = ["header-one", "body", "header-two", "footer-two", "footer-one"].map((id) => {
+    const node = result.document.elementById(id);
+    const fragment = result.pipeline.layout.forDocumentNode(node).find((candidate) => candidate.kind === "box");
+    assert.ok(fragment);
+    const index = result.pipeline.displayList.commands.findIndex((command) =>
+      command.kind === "background" && command.layoutFragment === fragment.id);
+    assert.ok(index >= 0);
+    return index;
+  });
+  assert.deepEqual(paintOrder, [...paintOrder].sort((left, right) => left - right));
+});
+
+test("typed column, column-group, cell, and calculated percentage constraints drive table widths", () => {
+  const fixed = render(`<table style="table-layout:fixed;width:240px;border-spacing:0">
+    <colgroup style="width:120px"><col style="width:40px"><col></colgroup>
+    <tr><td id="fixed-a">a</td><td id="fixed-b">b</td></tr></table>`, 50);
+  const fixedA = fragmentFor(fixed, "fixed-a", "table-cell");
+  const fixedB = fragmentFor(fixed, "fixed-b", "table-cell");
+  assert.ok(fixedA.borderRect.width + fixedB.borderRect.width >= cssPx(240));
+  assert.ok(fixedA.borderRect.width >= cssPx(40));
+
+  const calculated = render(`<table id="calculated-table" style="width:200px;border-spacing:0"><tr>
+    <td id="calculated" style="padding:0;width:calc(50% - 1rem)">a</td><td id="remainder" style="padding:0">b</td>
+    </tr></table>`, 50);
+  const calculatedWidth = fragmentFor(calculated, "calculated", "table-cell").borderRect.width;
+  const remainderWidth = fragmentFor(calculated, "remainder", "table-cell").borderRect.width;
+  const tableWidth = fragmentFor(calculated, "calculated-table", "table").borderRect.width;
+  assert.ok(calculatedWidth >= cssPx(84), `expected at least 84 CSS px, received ${cssPixels(calculatedWidth)}`);
+  assert.equal(cssPixels(calculatedWidth + remainderWidth), cssPixels(tableWidth));
+
+  for (const direction of ["ltr", "rtl"]) {
+    const cumulative = render(`<table dir="${direction}" style="width:200px;border-spacing:0"><tr>
+      <td id="first-percent" style="padding:0;width:60%">a</td><td id="second-percent" style="padding:0;width:60%">b</td>
+      </tr></table>`, 50);
+    const first = fragmentFor(cumulative, "first-percent", "table-cell");
+    const second = fragmentFor(cumulative, "second-percent", "table-cell");
+    assert.equal(first.borderRect.width, cssPx(120));
+    assert.equal(second.borderRect.width, cssPx(80));
+    assert.equal(direction === "ltr" ? first.borderRect.x < second.borderRect.x : first.borderRect.x > second.borderRect.x, true);
+  }
+
+  const spanning = render(`<table style="width:240px;border-spacing:0"><colgroup style="width:50%"><col><col></colgroup>
+    <tr><td id="group-a">a</td><td id="group-b">b</td></tr>
+    <tr><td id="percent-span" colspan="2" style="width:min(60%, 300px)">span</td></tr></table>`, 50);
+  assert.ok(fragmentFor(spanning, "group-a", "table-cell").borderRect.width
+    + fragmentFor(spanning, "group-b", "table-cell").borderRect.width >= cssPx(144));
+  assert.equal(fragmentFor(spanning, "percent-span", "table-cell").borderRect.width,
+    fragmentFor(spanning, "group-a", "table-cell").borderRect.width
+      + fragmentFor(spanning, "group-b", "table-cell").borderRect.width);
+});
+
+test("automatic colspan planning is independent of row traversal order", () => {
+  const fixture = (rows) => render(`<table style="border-spacing:0;width:320px">
+    <tr><td id="c1">a</td><td id="c2">b</td><td id="c3">c</td></tr>${rows}</table>`, 50);
+  const short = `<tr><td colspan="2">medium spanning value</td><td>x</td></tr>`;
+  const long = `<tr><td>x</td><td colspan="2">a considerably longer spanning preferred contribution</td></tr>`;
+  const widths = (result) => ["c1", "c2", "c3"].map((id) => fragmentFor(result, id, "table-cell").borderRect.width);
+  assert.deepEqual(widths(fixture(short + long)), widths(fixture(long + short)));
+});
+
+test("definite table block sizes distribute before cell relayout and row-group heights are ignored", () => {
   const tableSized = render(`<table id="sized" style="height:120px;border-spacing:0"><tbody>
     <tr><td id="row-one"><span id="top-content">top</span></td></tr>
     <tr><td id="row-two" style="vertical-align:bottom"><span id="bottom-content">bottom</span></td></tr>
@@ -308,7 +507,13 @@ test("definite table and row-group block sizes distribute into rows before cell 
     <tr><td id="group-one">one</td></tr><tr><td id="group-two">two</td></tr></tbody></table>`, 50);
   const groupOne = fragmentFor(groupSized, "group-one", "table-cell");
   const groupTwo = fragmentFor(groupSized, "group-two", "table-cell");
-  assert.equal(groupOne.borderRect.height + groupTwo.borderRect.height, cssPx(96));
+  const groupAuto = render(`<table style="border-spacing:0"><tbody>
+    <tr><td id="auto-one">one</td></tr><tr><td id="auto-two">two</td></tr></tbody></table>`, 50);
+  assert.equal(
+    groupOne.borderRect.height + groupTwo.borderRect.height,
+    fragmentFor(groupAuto, "auto-one", "table-cell").borderRect.height
+      + fragmentFor(groupAuto, "auto-two", "table-cell").borderRect.height
+  );
 });
 
 test("table intrinsic widths feed parent Flex sizing and mixed baselines reserve row descent", () => {
@@ -333,6 +538,40 @@ test("table intrinsic widths feed parent Flex sizing and mixed baselines reserve
   assert.ok(row.borderRect.y + row.borderRect.height >= descent.marginRect.y + descent.marginRect.height);
 });
 
+test("rowspan planning is order-independent and mandatory cell minimums survive table constraints", () => {
+  const fixture = (cells) => render(`<table style="border-spacing:0;height:160px">
+    <tr>${cells}</tr><tr><td id="measure-one">one</td><td>tail</td></tr>
+    <tr><td id="measure-two">two</td><td>tail</td></tr>
+    <tr><td id="measure-three">three</td><td>tail</td></tr></table>`, 50);
+  const firstSpan = `<td rowspan="2" style="height:80px">first span</td>`;
+  const secondSpan = `<td rowspan="3" style="height:96px">second span</td>`;
+  const heights = (result) => ["measure-one", "measure-two", "measure-three"]
+    .map((id) => fragmentFor(result, id, "table-cell").borderRect.height);
+  assert.deepEqual(heights(fixture(firstSpan + secondSpan)), heights(fixture(secondSpan + firstSpan)));
+
+  const constrained = render(`<table id="short-table" style="height:20px;max-height:20px;border-spacing:0">
+    <tr style="max-height:4px"><td id="tall-cell" style="height:64px;max-height:4px">required</td></tr></table>`, 50);
+  const tall = fragmentFor(constrained, "tall-cell", "table-cell");
+  assert.ok(tall.borderRect.height >= cssPx(64));
+  assert.ok(fragmentFor(constrained, "short-table", "table").overflowRect.height >= tall.borderRect.height);
+});
+
+test("final cell relayout resolves wrapping, percentage descendants, and table-cell vertical alignment", () => {
+  const result = render(`<table style="width:160px;height:128px;border-spacing:0"><tr>
+    <td id="wrapped" style="width:50%;vertical-align:baseline">text that wraps after the final column width is selected</td>
+    <td id="middle" style="vertical-align:middle"><div id="half" style="height:50%">middle</div></td>
+    <td id="bottom" style="vertical-align:bottom"><span id="bottom-text">bottom</span></td>
+    </tr></table>`, 50);
+  const wrapped = fragmentFor(result, "wrapped", "table-cell");
+  const middle = fragmentFor(result, "middle", "table-cell");
+  const half = fragmentFor(result, "half", "block-container");
+  const bottom = fragmentFor(result, "bottom", "table-cell");
+  const bottomText = fragmentFor(result, "bottom-text", "inline-container");
+  assert.ok(result.pipeline.layout.lineBoxes.some((line) => line.rect.width <= wrapped.contentRect.width));
+  assert.equal(half.borderRect.height, middle.contentRect.height / 2);
+  assert.ok(bottomText.borderRect.y > bottom.contentRect.y);
+});
+
 test("captions remain in the wrapper, RTL reverses physical columns, and nested tables retain containment", () => {
   const result = render(`<table id="outer" dir="rtl" style="border-spacing:4px">
     <caption id="top">Top caption</caption><caption id="bottom" style="caption-side:bottom">Bottom caption</caption>
@@ -355,6 +594,26 @@ test("captions remain in the wrapper, RTL reverses physical columns, and nested 
     a caption with a wide intrinsic contribution</caption><tr><td>x</td></tr></table>`, 60);
   const wideCaptionTable = fragmentFor(wideCaption, "caption-table", "table");
   assert.ok(wideCaptionTable.borderRect.width > cssPx(100));
+
+  const narrowCaption = render(`<table id="center-table" style="width:240px;border-spacing:0">
+    <caption id="narrow-caption" style="width:80px">narrow</caption><tr><td>cell</td></tr></table>`, 50);
+  const centerTable = fragmentFor(narrowCaption, "center-table", "table");
+  const caption = fragmentFor(narrowCaption, "narrow-caption", "table-caption");
+  assert.equal(
+    caption.marginRect.x - centerTable.borderRect.x,
+    (centerTable.borderRect.width - caption.marginRect.width) / 2
+  );
+});
+
+test("nested intrinsic queries reuse one immutable CSS slot grid per table root", () => {
+  const depth = 30;
+  const result = render(
+    `${"<table><tr><td>".repeat(depth)}nested${"</td></tr></table>".repeat(depth)}`,
+    80,
+    40,
+    { maxTableRoots: depth },
+  );
+  assert.equal(result.pipeline.layout.outcome.status, "complete");
 });
 
 test("separated and collapsed borders retain one layout-owned geometry path", () => {
@@ -407,6 +666,60 @@ test("separated and collapsed borders retain one layout-owned geometry path", ()
       || segment.borderWidths.top > 0 || segment.borderWidths.bottom > 0));
 });
 
+test("collapsed tables suppress padding and retain perimeter edges across empty and missing slots", () => {
+  const result = render(`<table id="empty-table" style="width:80px;height:48px;padding:24px;border-collapse:collapse;border:4px solid red"></table>
+    <table id="missing-table" style="width:160px;border-collapse:collapse;border:3px solid blue">
+      <tr><td id="only-cell" style="border:1px solid green">only</td><td></td></tr><tr><td>short</td></tr>
+    </table>`, 50);
+  const emptyNode = result.document.elementById("empty-table");
+  const empty = result.pipeline.layout.forDocumentNode(emptyNode).find((candidate) =>
+    candidate.kind === "box" && result.pipeline.formatting.node(candidate.formattingNode).kind === "table");
+  assert.ok(empty);
+  assert.deepEqual(empty.paddingRect, empty.contentRect);
+  const emptySegments = result.pipeline.displayList.commands.filter((command) =>
+    command.kind === "border-side" && command.documentNode === emptyNode);
+  assert.equal(emptySegments.length, 4);
+  assert.ok(emptySegments.every((command) => command.borderRect.width > 0 && command.borderRect.height > 0));
+
+  const missing = fragmentFor(result, "missing-table", "table");
+  const perimeter = result.pipeline.displayList.commands.filter((command) =>
+    command.kind === "border-side" && command.documentNode === result.document.elementById("missing-table"));
+  assert.ok(perimeter.length >= 2);
+  assert.ok(missing.borderRect.width >= fragmentFor(result, "only-cell", "table-cell").borderRect.width);
+});
+
+test("collapsed-border conflict precedence is deterministic in LTR and RTL and harmonized across spans", () => {
+  for (const direction of ["ltr", "rtl"]) {
+    const result = render(`<table dir="${direction}" style="border-collapse:collapse"><tr>
+      <td id="logical-first" style="border-right:4px solid red">first</td>
+      <td id="logical-second" style="border-left:4px solid blue">second</td></tr></table>`, 50);
+    const first = fragmentFor(result, "logical-first", "table-cell");
+    const second = fragmentFor(result, "logical-second", "table-cell");
+    const shared = result.pipeline.displayList.commands.find((command) => command.kind === "border-side"
+      && (command.layoutFragment === first.id || command.layoutFragment === second.id)
+      && (command.side === "left" || command.side === "right"));
+    assert.ok(shared);
+    assert.equal(shared.style.borderColors[shared.side]?.[direction === "ltr" ? "r" : "b"], 255);
+  }
+
+  const hidden = render(`<table style="border-collapse:collapse"><tr>
+    <td id="hidden-left" style="border-right:8px hidden red">left</td>
+    <td id="hidden-right" style="border-left:12px solid blue">right</td></tr></table>`, 50);
+  const hiddenFragments = ["hidden-left", "hidden-right"].map((id) => fragmentFor(hidden, id, "table-cell").id);
+  assert.equal(hidden.pipeline.displayList.commands.some((command) => command.kind === "border-side"
+    && hiddenFragments.includes(command.layoutFragment) && (command.side === "left" || command.side === "right")), false);
+
+  const connected = render(`<table style="border-collapse:collapse"><tr>
+    <td id="top-span" colspan="2" style="border-bottom:5px solid red">top</td></tr><tr>
+    <td id="left-span" rowspan="2" style="border-top:2px solid blue;border-right:3px solid blue">left</td>
+    <td style="border-top:2px solid blue">right</td></tr><tr><td style="border-left:3px solid green">bottom</td></tr></table>`, 50);
+  const top = fragmentFor(connected, "top-span", "table-cell");
+  const harmonized = connected.pipeline.displayList.commands.filter((command) => command.kind === "border-side"
+    && command.borderRect.y >= top.borderRect.y + top.borderRect.height - cssPx(3));
+  assert.ok(harmonized.length >= 2);
+  assert.ok(harmonized.some((command) => command.style.borderColors[command.side]?.r === 255));
+});
+
 test("collapsed rows and columns remove their track breadth without retaining duplicate spacing", () => {
   const columns = render(`<table style="border-spacing:8px 4px"><col><col style="visibility:collapse"><col>
     <tr><td id="first">A</td><td>hidden</td><td id="third">C</td></tr></table>`, 50);
@@ -429,6 +742,28 @@ test("collapsed rows and columns remove their track breadth without retaining du
   const top = fragmentFor(rows, "top", "table-cell");
   const bottom = fragmentFor(rows, "bottom", "table-cell");
   assert.equal(bottom.borderRect.y - top.borderRect.y - top.borderRect.height, cssPx(8));
+});
+
+test("empty-cells hiding follows collapsed white space without removing actions or semantics", () => {
+  const result = render(`<style>.generated::before{content:"generated"}</style><table style="border-collapse:separate;border-spacing:4px"><tr>
+    <td id="collapsed-space" style="empty-cells:hide;background:red;border:2px solid red">   </td>
+    <td id="preserved-space" style="white-space:pre;empty-cells:hide;background:red;border:2px solid red">   </td>
+    <td id="generated" class="generated" style="empty-cells:hide;background:red;border:2px solid red"></td>
+    <td id="out-of-flow-only" style="empty-cells:hide;background:red;border:2px solid red"><a id="floating-action" href="/x" style="position:absolute">action</a></td>
+    </tr></table>`, 50);
+  const hasCellPaint = (id) => {
+    const fragment = fragmentFor(result, id, "table-cell");
+    return result.pipeline.displayList.commands.some((command) => command.layoutFragment === fragment.id
+      && (command.kind === "background" || command.kind === "border-side"));
+  };
+  assert.equal(hasCellPaint("collapsed-space"), false);
+  assert.equal(hasCellPaint("preserved-space"), true);
+  assert.equal(hasCellPaint("generated"), true);
+  assert.equal(hasCellPaint("out-of-flow-only"), false);
+  assert.ok(result.pipeline.terminal.focusMap.targets.some((target) =>
+    target.action.node === result.document.elementById("floating-action")));
+  assert.ok(result.pipeline.terminal.accessibilityBounds.some((entry) =>
+    entry.documentNode === result.document.elementById("out-of-flow-only")));
 });
 
 test("table paint metadata preserves structural background phases and positioned descendants stay out of sizing", () => {
@@ -580,6 +915,19 @@ test("table slot construction, intrinsic sizing, distribution, and collapsed edg
     signal
   }), { name: "AbortError" });
   assert.ok(checks > 100);
+});
+
+test("collapsed-border candidate work is admitted incrementally for large edge graphs", () => {
+  const rows = Array.from({ length: 12 }, (_, row) => `<tr>${Array.from({ length: 12 }, (_, column) =>
+    `<td style="border:1px solid red">${String(row)}:${String(column)}</td>`).join("")}</tr>`).join("");
+  const html = `<p>retained edge prefix</p><table style="border-collapse:collapse">${rows}</table>`;
+  const first = render(html, 80, 40, { maxTableCollapsedBorderCandidates: 200 });
+  const second = render(html, 80, 40, { maxTableCollapsedBorderCandidates: 200 });
+  assert.deepEqual(first.pipeline.layout.outcome, second.pipeline.layout.outcome);
+  assert.equal(first.pipeline.layout.outcome.status, "truncated");
+  assert.equal(first.pipeline.layout.outcome.budget, "maxTableCollapsedBorderCandidates");
+  assert.equal(reachableFragments(first.pipeline.layout).size, first.pipeline.layout.outcome.fragments);
+  assert.match(first.pipeline.terminal.cellBuffer.rows.map((row) => row.text).join("\n"), /retained edge prefix/u);
 });
 
 test("CSS table fixup keeps HTML spans source-owned and CSS-created cells at span one", () => {

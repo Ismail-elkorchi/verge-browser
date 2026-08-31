@@ -10,9 +10,53 @@ export interface HtmlTableCellMetadata {
   readonly columnSpan: number;
   readonly rowSpan: number | "remaining-row-group";
   readonly scope: HtmlTableCellScope;
+  readonly hasExplicitHeaders: boolean;
   readonly explicitHeaders: readonly DocumentNodeRef[];
   readonly abbreviation: string | null;
   readonly header: boolean;
+  readonly headerRole: "row" | "column" | null;
+}
+
+export interface HtmlTableSlotInterval {
+  readonly row: number;
+  readonly columnStart: number;
+  readonly columnEnd: number;
+  readonly cell: DocumentNodeRef;
+}
+
+export interface HtmlTableRowSlot {
+  readonly index: number;
+  readonly node: DocumentNodeRef | null;
+  readonly rowGroup: DocumentNodeRef | null;
+}
+
+export interface HtmlTableGroupRange {
+  readonly node: DocumentNodeRef;
+  readonly start: number;
+  readonly end: number;
+}
+
+export interface HtmlTableCellPlacement {
+  readonly node: DocumentNodeRef;
+  readonly table: DocumentNodeRef;
+  readonly row: number;
+  readonly column: number;
+  readonly rowSpan: number;
+  readonly columnSpan: number;
+  readonly rowGroup: DocumentNodeRef | null;
+  readonly columnGroups: readonly DocumentNodeRef[];
+  readonly scope: HtmlTableCellScope;
+  readonly header: boolean;
+  readonly headerRole: "row" | "column" | null;
+  readonly empty: boolean;
+  readonly hasExplicitHeaders: boolean;
+  readonly explicitHeaders: readonly DocumentNodeRef[];
+  readonly sourceOrder: number;
+}
+
+export interface HtmlTableModelError {
+  readonly kind: "overlapping-cells" | "cell-in-multiple-column-groups";
+  readonly cell: DocumentNodeRef;
 }
 
 export interface HtmlTableColumnMetadata {
@@ -36,6 +80,14 @@ export interface HtmlTableMetadata {
   readonly columnGroups: readonly DocumentNodeRef[];
   readonly columns: readonly DocumentNodeRef[];
   readonly cells: readonly DocumentNodeRef[];
+  readonly logicalRows: readonly HtmlTableRowSlot[];
+  readonly columnCount: number;
+  readonly rowGroupRanges: readonly HtmlTableGroupRange[];
+  readonly columnGroupRanges: readonly HtmlTableGroupRange[];
+  readonly cellPlacements: readonly HtmlTableCellPlacement[];
+  readonly slotIntervals: readonly HtmlTableSlotInterval[];
+  readonly downwardGrowingCells: readonly DocumentNodeRef[];
+  readonly errors: readonly HtmlTableModelError[];
 }
 
 export interface HtmlTableMetadataIndex {
@@ -47,18 +99,4 @@ export interface HtmlTableMetadataIndex {
   readonly slotWork: number;
   readonly headerAssociationWork: number;
   readonly truncation: "slot-work" | "header-association-work" | null;
-}
-
-export interface HtmlTableHeaderCellPlacement {
-  readonly node: DocumentNodeRef;
-  readonly table: DocumentNodeRef;
-  readonly row: number;
-  readonly column: number;
-  readonly rowSpan: number;
-  readonly columnSpan: number;
-  readonly rowGroup: DocumentNodeRef | null;
-  readonly columnGroup: DocumentNodeRef | null;
-  readonly scope: HtmlTableCellScope;
-  readonly header: boolean;
-  readonly explicitHeaders: readonly DocumentNodeRef[];
 }

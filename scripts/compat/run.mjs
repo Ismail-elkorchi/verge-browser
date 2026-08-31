@@ -270,6 +270,42 @@ function tableHeaderRelationshipFailures(fixture, snapshot) {
   return failures;
 }
 
+function collapsedBorderSegmentMetrics(fixture, pipeline) {
+  const segments = [];
+  const pending = [pipeline.layout.root];
+  const visited = new Set();
+  while (pending.length > 0) {
+    const id = pending.pop();
+    if (id === undefined || visited.has(id)) continue;
+    visited.add(id);
+    const fragment = pipeline.layout.fragment(id);
+    pending.push(...fragment.children);
+    if (fragment.kind === "box") segments.push(...(fragment.tableCollapsedBorderSegments ?? []));
+  }
+  const expectation = fixture.expected.collapsedBorderSegments;
+  const failures = [];
+  if (expectation !== undefined && segments.length < expectation.minimum) {
+    failures.push({
+      reason: "too-few-collapsed-border-segments",
+      expectedMinimum: expectation.minimum,
+      actual: segments.length
+    });
+  }
+  if (expectation?.maximum !== undefined && segments.length > expectation.maximum) {
+    failures.push({
+      reason: "too-many-collapsed-border-segments",
+      expectedMaximum: expectation.maximum,
+      actual: segments.length
+    });
+  }
+  const ids = new Set();
+  for (const segment of segments) {
+    if (ids.has(segment.id)) failures.push({ reason: "duplicate-collapsed-border-segment", id: segment.id });
+    ids.add(segment.id);
+  }
+  return { count: segments.length, failures };
+}
+
 function caseResult(fixture, variant, hash, snapshot, pipeline, deterministic, requests) {
   const logicalText = normalized(pipeline.textSearchIndex.text);
   const paintedText = normalized(pipeline.terminal.cellBuffer.rows.map((row) => row.text).join("\n"));
@@ -307,6 +343,7 @@ function caseResult(fixture, variant, hash, snapshot, pipeline, deterministic, r
     candidate.code === entry.code && candidate.sourceUrl === entry.sourceUrl && candidate.detail === entry.detail
   ) === index);
   const unexpected = uniqueDiagnostics.filter((entry) => !allowedDiagnostic(fixture, entry));
+  const collapsedBorders = collapsedBorderSegmentMetrics(fixture, pipeline);
   return {
     id: `${fixture.id}:${variant.id}`,
     fixture: fixture.id,
@@ -347,6 +384,8 @@ function caseResult(fixture, variant, hash, snapshot, pipeline, deterministic, r
       terminalTruncations: pipeline.terminal.truncations,
       boxRelationshipFailures: boxRelationshipFailures(fixture, variant, snapshot, pipeline),
       tableHeaderRelationshipFailures: tableHeaderRelationshipFailures(fixture, snapshot),
+      collapsedBorderSegmentCount: collapsedBorders.count,
+      collapsedBorderSegmentFailures: collapsedBorders.failures,
       deterministic
     }
   };
@@ -402,6 +441,10 @@ function aggregate(results) {
       failure
     }))),
     tableHeaderRelationshipFailures: results.flatMap((entry) => entry.metrics.tableHeaderRelationshipFailures.map((failure) => ({
+      case: entry.id,
+      failure
+    }))),
+    collapsedBorderSegmentFailures: results.flatMap((entry) => entry.metrics.collapsedBorderSegmentFailures.map((failure) => ({
       case: entry.id,
       failure
     })))
@@ -464,6 +507,7 @@ if (options.check) {
     && summary.cellBufferTruncations.length === 0
     && summary.terminalTruncations.length === 0;
   const structuralGatesPass = summary.boxRelationshipFailures.length === 0
-    && summary.tableHeaderRelationshipFailures.length === 0;
+    && summary.tableHeaderRelationshipFailures.length === 0
+    && summary.collapsedBorderSegmentFailures.length === 0;
   if (!gatesPass || !structuralGatesPass) throw new Error("Offline compatibility gates failed; inspect the machine-readable report.");
 }

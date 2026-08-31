@@ -7,6 +7,7 @@ import {
   cssCoordinateAdd,
   cssCoordinateDifference,
   cssCoordinateFromFixed,
+  cssDivide,
   cssIntersection,
   cssMax,
   cssMin,
@@ -25,7 +26,6 @@ import { measureTableColumns } from "./column-measures.js";
 import { resolveCollapsedTableBorders } from "./collapsed-borders.js";
 import { sizeTableRows } from "./row-layout.js";
 import { usedTableBorderSpacing } from "./separated-borders.js";
-import { buildTableSlotGrid } from "./slot-grid.js";
 import type {
   TableCollapsedBorderWinner,
   TableLayoutHost,
@@ -144,8 +144,12 @@ function captionSequence(
   const fragments: TableLayoutOperationResult[] = [];
   let currentY = y;
   for (const id of ids) {
-    const result = host.layoutChild(id, x, currentY, width, clip, depth + 1, null, null, null);
-    if (result === null) break;
+    const laidOut = host.layoutChild(id, x, currentY, width, clip, depth + 1, null, null, null);
+    if (laidOut === null) break;
+    const free = cssMax(ZERO, sum(width, cssNegate(laidOut.marginRect.width)));
+    const result = free > 0
+      ? host.translate(laidOut, cssDivide(free, 2), ZERO, clip)
+      : laidOut;
     fragments.push(result);
     currentY = cssCoordinateAdd(result.marginRect.y, result.marginRect.height);
   }
@@ -162,7 +166,7 @@ function rowsByGroup(grid: TableSlotGrid): ReadonlyMap<FormattingNodeId | null, 
   return result;
 }
 
-function collapsedBorderSegments(
+export function buildCollapsedTableBorderSegments(
   host: TableLayoutHost,
   winners: readonly TableCollapsedBorderWinner[],
   columns: readonly UsedTableColumn[],
@@ -174,9 +178,11 @@ function collapsedBorderSegments(
   gridHeight: CssPixelLength,
   clipRect: CssRect,
 ): ReadonlyMap<FormattingNodeId, readonly LayoutTableCollapsedBorderSegment[]> {
-  const active = winners.filter(
-    (winner) => winner.style === "solid" && winner.width > 0,
-  );
+  const active: TableCollapsedBorderWinner[] = [];
+  for (const winner of winners) {
+    host.signal?.throwIfAborted();
+    if (winner.style === "solid" && winner.width > 0) active.push(winner);
+  }
   const horizontalJunctions = new Map<string, CssNonNegativeLength>();
   const verticalJunctions = new Map<string, CssNonNegativeLength>();
   const retainJunction = (
@@ -189,6 +195,7 @@ function collapsedBorderSegments(
     map.set(key, cssNonNegativeLength(cssMax(map.get(key) ?? ZERO, width)));
   };
   for (const winner of active) {
+    host.signal?.throwIfAborted();
     if (winner.axis === "horizontal") {
       retainJunction(
         horizontalJunctions,
@@ -218,17 +225,17 @@ function collapsedBorderSegments(
     }
   }
   const columnLine = (index: number): CssCoordinate => {
-    const logical = index >= columns.length
-      ? gridWidth
-      : (columns[index]?.offset ?? gridWidth);
+    const logical = columns.length === 0
+      ? (index === 0 ? ZERO : gridWidth)
+      : index >= columns.length ? gridWidth : (columns[index]?.offset ?? gridWidth);
     return direction === "ltr"
       ? point(contentX, logical)
       : point(contentX, sum(gridWidth, cssNegate(logical)));
   };
   const rowLine = (index: number): CssCoordinate => {
-    const logical = index >= rows.length
-      ? gridHeight
-      : (rows[index]?.offset ?? gridHeight);
+    const logical = rows.length === 0
+      ? (index === 0 ? ZERO : gridHeight)
+      : index >= rows.length ? gridHeight : (rows[index]?.offset ?? gridHeight);
     return point(contentY, logical);
   };
   const junctionWidth = (
@@ -251,14 +258,24 @@ function collapsedBorderSegments(
     if (winner.axis === "horizontal") {
       const first = columnLine(winner.start);
       const last = columnLine(winner.end);
-      const x = cssCoordinateFromFixed(Math.min(first, last));
+      const startJunction = junctionWidth(verticalJunctions, winner.start, winner.line);
+      const endJunction = junctionWidth(verticalJunctions, winner.end, winner.line);
+      const x = point(
+        cssCoordinateFromFixed(Math.min(first, last)),
+        cssNegate(cssDivide(startJunction, 2)),
+      );
       const width = cssNonNegativeLength(
-        cssCoordinateDifference(cssCoordinateFromFixed(Math.max(first, last)), x),
+        sum(
+          cssCoordinateDifference(
+            cssCoordinateFromFixed(Math.max(first, last)),
+            cssCoordinateFromFixed(Math.min(first, last)),
+          ),
+          cssDivide(startJunction, 2),
+          cssDivide(endJunction, 2),
+        ),
       );
       const line = rowLine(winner.line);
-      const y = winner.ownerSide === "bottom"
-        ? point(line, cssNegate(winner.width))
-        : line;
+      const y = point(line, cssNegate(cssDivide(winner.width, 2)));
       borderRect = cssRect(x, y, width, winner.width);
       borderWidths[winner.ownerSide] = winner.width;
       borderWidths.left = junctionWidth(
@@ -274,14 +291,24 @@ function collapsedBorderSegments(
     } else {
       const first = rowLine(winner.start);
       const last = rowLine(winner.end);
-      const y = cssCoordinateFromFixed(Math.min(first, last));
+      const startJunction = junctionWidth(horizontalJunctions, winner.line, winner.start);
+      const endJunction = junctionWidth(horizontalJunctions, winner.line, winner.end);
+      const y = point(
+        cssCoordinateFromFixed(Math.min(first, last)),
+        cssNegate(cssDivide(startJunction, 2)),
+      );
       const height = cssNonNegativeLength(
-        cssCoordinateDifference(cssCoordinateFromFixed(Math.max(first, last)), y),
+        sum(
+          cssCoordinateDifference(
+            cssCoordinateFromFixed(Math.max(first, last)),
+            cssCoordinateFromFixed(Math.min(first, last)),
+          ),
+          cssDivide(startJunction, 2),
+          cssDivide(endJunction, 2),
+        ),
       );
       const line = columnLine(winner.line);
-      const x = winner.ownerSide === "right"
-        ? point(line, cssNegate(winner.width))
-        : line;
+      const x = point(line, cssNegate(cssDivide(winner.width, 2)));
       borderRect = cssRect(x, y, winner.width, height);
       borderWidths[winner.ownerSide] = winner.width;
       borderWidths.top = junctionWidth(
@@ -313,6 +340,13 @@ function collapsedBorderSegments(
     const segments = grouped.get(owner.id) ?? [];
     segments.push(Object.freeze({
       id: `table-collapsed-border:${winner.axis}:${String(winner.line)}:${String(winner.start)}:${String(winner.end)}:${String(winner.formattingNode)}`,
+      edge: Object.freeze({
+        axis: winner.axis,
+        line: winner.line,
+        start: winner.start,
+        end: winner.end,
+      }),
+      paintPhase: "collapsed-border" as const,
       formattingNode: winner.formattingNode,
       documentNode: source.source,
       sourceRange: source.sourceRange,
@@ -329,9 +363,12 @@ function collapsedBorderSegments(
     }));
     grouped.set(owner.id, segments);
   }
-  return new Map(
-    [...grouped].map(([id, segments]) => [id, Object.freeze(segments)] as const),
-  );
+  const result = new Map<FormattingNodeId, readonly LayoutTableCollapsedBorderSegment[]>();
+  for (const [id, segments] of grouped) {
+    host.signal?.throwIfAborted();
+    result.set(id, Object.freeze(segments));
+  }
+  return result;
 }
 
 /** Own the complete horizontal-writing-mode table formatting context. */
@@ -352,17 +389,17 @@ export function layoutTableContainer(
       const empty = cssRect(input.x, input.y, ZERO, ZERO);
       return host.container(input.wrapper, empty, empty, empty, empty, input.clip, [], []);
     }
-    const grid = buildTableSlotGrid(host, table);
-    const initialDimensions = host.dimensions(table, input.width, null, null);
-    const spacing = usedTableBorderSpacing(host, style, initialDimensions.contentWidth);
+    const grid = host.tableSlotGrid(table);
     const collapsedWinners = style.box.borderCollapse === "collapse"
       ? resolveCollapsedTableBorders(
           host,
           grid,
           table,
-          initialDimensions.contentWidth,
+          input.width,
         )
       : Object.freeze([]);
+    const initialDimensions = host.dimensions(table, input.width, null, null);
+    const spacing = usedTableBorderSpacing(host, style, initialDimensions.contentWidth);
     const fixedLayout = style.box.tableLayout === "fixed" && host.usedLength(style.box.width, input.width, style) !== null;
     const measures = measureTableColumns(
       host,
@@ -398,6 +435,8 @@ export function layoutTableContainer(
         ? null
         : cssNonNegativeLength(tableBlockSize),
     );
+    const hasActiveColumns = widthResult.columns.some((column) => !column.collapsed);
+    const hasActiveRows = rows.rows.some((row) => !row.collapsed);
     const outerX = point(input.x, dimensions.marginLeft);
     const top = captionSequence(host, captions.top, outerX, input.y, sum(widthResult.usedGridWidth, dimensions.padding.left, dimensions.padding.right, dimensions.border.left, dimensions.border.right), input.clip, input.depth);
     const tableMarginY = top.nextY;
@@ -430,7 +469,7 @@ export function layoutTableContainer(
       sum(borderRect.height, dimensions.margin.top, dimensions.margin.bottom),
     );
     const tableClip = host.clip(table, paddingRect, borderRect, input.clip);
-    for (const [owner, segments] of collapsedBorderSegments(
+    for (const [owner, segments] of buildCollapsedTableBorderSegments(
       host,
       collapsedWinners,
       widthResult.columns,
@@ -439,7 +478,7 @@ export function layoutTableContainer(
       contentX,
       contentY,
       widthResult.usedGridWidth,
-      rows.usedGridHeight,
+      contentRect.height,
       tableClip,
     )) {
       host.registerCollapsedBorderSegments(owner, segments);
@@ -457,15 +496,19 @@ export function layoutTableContainer(
       depth: number,
     ): readonly TableLayoutOperationResult[] => {
       const fragments: TableLayoutOperationResult[] = [];
+      const ownerNode = host.formattingNode(owner);
+      const ownerEstablishesContainingBlock = host.computed(ownerNode)?.box.position !== "static";
       for (const entry of grid.outOfFlow) {
         if (entry.containingTableBox !== owner) continue;
+        const node = host.formattingNode(entry.formattingNode);
+        const fixed = host.computed(node)?.box.position === "fixed";
         const result = host.layoutOutOfFlow(
-          host.formattingNode(entry.formattingNode),
+          node,
           containingBlock.x,
           containingBlock.y,
           tableClip,
           depth,
-          containingBlock,
+          fixed || !ownerEstablishesContainingBlock ? undefined : containingBlock,
         );
         if (result === null) break;
         fragments.push(result);
@@ -510,8 +553,6 @@ export function layoutTableContainer(
           ZERO,
           sum(
             areaWidth,
-            cssNegate(cellDimensions.marginLeft),
-            cssNegate(cellDimensions.marginRight),
             cssNegate(cellDimensions.padding.left),
             cssNegate(cellDimensions.padding.right),
             cssNegate(cellDimensions.border.left),
@@ -524,8 +565,6 @@ export function layoutTableContainer(
           ZERO,
           sum(
             areaHeight,
-            cssNegate(cellDimensions.margin.top),
-            cssNegate(cellDimensions.margin.bottom),
             cssNegate(cellDimensions.padding.top),
             cssNegate(cellDimensions.padding.bottom),
             cssNegate(cellDimensions.border.top),
@@ -564,10 +603,17 @@ export function layoutTableContainer(
           cellFragments.set(cell.formattingNode, result);
         }
         const baselineCells = (cellsByRow.get(rowIndex) ?? [])
-          .filter((cell) => cell.rowSpan === 1)
           .map((cell) => ({ cell, result: cellFragments.get(cell.formattingNode) }))
-          .filter((entry) => entry.result !== undefined && host.computed(host.formattingNode(entry.cell.formattingNode))?.text.verticalAlign.kind === "keyword"
-            && host.computed(host.formattingNode(entry.cell.formattingNode))?.text.verticalAlign.value === "baseline");
+          .filter((entry) => {
+            if (entry.result === undefined) return false;
+            const alignment = host.computed(
+              host.formattingNode(entry.cell.formattingNode),
+            )?.text.verticalAlign;
+            return alignment === undefined || alignment.kind !== "keyword"
+              || (alignment.value !== "top"
+                && alignment.value !== "middle"
+                && alignment.value !== "bottom");
+          });
         let sharedBaseline: CssPixelLength = ZERO;
         for (const entry of baselineCells) {
           const fragment = entry.result === undefined ? undefined : host.fragment(entry.result.fragment);
@@ -580,19 +626,23 @@ export function layoutTableContainer(
           const offset = sum(sharedBaseline, cssNegate(fragment.baseline));
           if (offset > 0) host.translateChildren(entry.result, offset, tableClip);
         }
-        const rowX = point(contentX, spacing.horizontal);
+        const rowX = hasActiveColumns ? point(contentX, spacing.horizontal) : contentX;
         const rowY = point(contentY, used.offset);
         const rowWidth = cssNonNegativeLength(
           cssMax(
             ZERO,
             sum(
               widthResult.usedGridWidth,
-              cssNegate(spacing.horizontal),
-              cssNegate(spacing.horizontal),
+              cssNegate(hasActiveColumns ? spacing.horizontal : ZERO),
+              cssNegate(hasActiveColumns ? spacing.horizontal : ZERO),
             ),
           ),
         );
         const rect = cssRect(rowX, rowY, rowWidth, used.size);
+        const rowNode = host.formattingNode(row.formattingNode);
+        if (host.computed(rowNode)?.box.position !== "static") {
+          host.registerPositionedContainingBlock(row.formattingNode, rect);
+        }
         const positioned = layoutOwnedOutOfFlow(
           row.formattingNode,
           rect,
@@ -622,15 +672,41 @@ export function layoutTableContainer(
             const used = widthResult.columns[track.index];
             if (used === undefined) continue;
             const x = physicalColumnX(style.text.direction, contentX, widthResult.usedGridWidth, used);
-            const rect = cssRect(x, contentY, used.size, rows.usedGridHeight);
+            const columnY = hasActiveRows ? point(contentY, spacing.vertical) : contentY;
+            const columnHeight = cssNonNegativeLength(cssMax(
+              ZERO,
+              sum(
+                rows.usedGridHeight,
+                cssNegate(hasActiveRows ? spacing.vertical : ZERO),
+                cssNegate(hasActiveRows ? spacing.vertical : ZERO),
+              ),
+            ));
+            const rect = cssRect(x, columnY, used.size, columnHeight);
+            const columnNode = host.formattingNode(track.formattingNode);
+            if (host.computed(columnNode)?.box.position !== "static") {
+              host.registerPositionedContainingBlock(track.formattingNode, rect);
+            }
             const column = host.tryContainerReservation(() => host.container(host.formattingNode(track.formattingNode as FormattingNodeId), rect, rect, rect, rect, tableClip, [], []));
             if (column === null) break;
             columnChildren.push(column);
           }
-          const groupRect = tracks.length === 0 ? cssRect(contentX, contentY, ZERO, rows.usedGridHeight) : cssUnion(tracks.map((track) => {
+          const groupRect = tracks.length === 0 ? cssRect(contentX, contentY, ZERO, ZERO) : cssUnion(tracks.map((track) => {
             const used = widthResult.columns[track.index];
-            return used === undefined ? cssRect(contentX, contentY, ZERO, rows.usedGridHeight) : cssRect(physicalColumnX(style.text.direction, contentX, widthResult.usedGridWidth, used), contentY, used.size, rows.usedGridHeight);
+            const columnY = hasActiveRows ? point(contentY, spacing.vertical) : contentY;
+            const columnHeight = cssNonNegativeLength(cssMax(
+              ZERO,
+              sum(
+                rows.usedGridHeight,
+                cssNegate(hasActiveRows ? spacing.vertical : ZERO),
+                cssNegate(hasActiveRows ? spacing.vertical : ZERO),
+              ),
+            ));
+            return used === undefined ? cssRect(contentX, columnY, ZERO, columnHeight) : cssRect(physicalColumnX(style.text.direction, contentX, widthResult.usedGridWidth, used), columnY, used.size, columnHeight);
           }), contentRect);
+          const columnGroupNode = host.formattingNode(columnGroupId);
+          if (host.computed(columnGroupNode)?.box.position !== "static") {
+            host.registerPositionedContainingBlock(columnGroupId, groupRect);
+          }
           const positioned = layoutOwnedOutOfFlow(
             columnGroupId,
             groupRect,
@@ -644,13 +720,33 @@ export function layoutTableContainer(
       for (const column of grid.columns.filter((entry) => entry.columnGroup === null && entry.formattingNode !== null)) {
         const used = widthResult.columns[column.index];
         if (used === undefined || column.formattingNode === null) continue;
-        const rect = cssRect(physicalColumnX(style.text.direction, contentX, widthResult.usedGridWidth, used), contentY, used.size, rows.usedGridHeight);
+        const columnY = hasActiveRows ? point(contentY, spacing.vertical) : contentY;
+        const columnHeight = cssNonNegativeLength(cssMax(
+          ZERO,
+          sum(
+            rows.usedGridHeight,
+            cssNegate(hasActiveRows ? spacing.vertical : ZERO),
+            cssNegate(hasActiveRows ? spacing.vertical : ZERO),
+          ),
+        ));
+        const rect = cssRect(physicalColumnX(style.text.direction, contentX, widthResult.usedGridWidth, used), columnY, used.size, columnHeight);
+        const columnNode = host.formattingNode(column.formattingNode);
+        if (host.computed(columnNode)?.box.position !== "static") {
+          host.registerPositionedContainingBlock(column.formattingNode, rect);
+        }
         const fragment = host.tryContainerReservation(() => host.container(host.formattingNode(column.formattingNode as FormattingNodeId), rect, rect, rect, rect, tableClip, [], []));
         if (fragment === null) break;
         structuralChildren.push(fragment);
       }
       const groupedRows = rowsByGroup(grid);
-      for (const groupId of grid.rowGroups) {
+      for (const sequenceEntry of grid.rowSequence) {
+        if (sequenceEntry.kind === "row") {
+          const row = layoutRow(sequenceEntry.row);
+          if (row === null) break;
+          structuralChildren.push(row);
+          continue;
+        }
+        const groupId = sequenceEntry.formattingNode;
         const group = host.tryContainerReservation(() => {
           const indexes = groupedRows.get(groupId) ?? [];
           const children: TableLayoutOperationResult[] = [];
@@ -663,15 +759,38 @@ export function layoutTableContainer(
           const lastIndex = indexes[indexes.length - 1];
           const last = lastIndex === undefined ? undefined : rows.rows[lastIndex];
           const rect = first === undefined || last === undefined
-            ? cssRect(contentX, contentY, widthResult.usedGridWidth, ZERO)
+            ? cssRect(
+                hasActiveColumns ? point(contentX, spacing.horizontal) : contentX,
+                contentY,
+                cssNonNegativeLength(cssMax(
+                  ZERO,
+                  sum(
+                    widthResult.usedGridWidth,
+                    cssNegate(hasActiveColumns ? spacing.horizontal : ZERO),
+                    cssNegate(hasActiveColumns ? spacing.horizontal : ZERO),
+                  ),
+                )),
+                ZERO,
+              )
             : cssRect(
-                contentX,
+                hasActiveColumns ? point(contentX, spacing.horizontal) : contentX,
                 point(contentY, first.offset),
-                widthResult.usedGridWidth,
+                cssNonNegativeLength(cssMax(
+                  ZERO,
+                  sum(
+                    widthResult.usedGridWidth,
+                    cssNegate(hasActiveColumns ? spacing.horizontal : ZERO),
+                    cssNegate(hasActiveColumns ? spacing.horizontal : ZERO),
+                  ),
+                )),
                 cssNonNegativeLength(
                   sum(last.offset, last.size, cssNegate(first.offset)),
                 ),
               );
+          const rowGroupNode = host.formattingNode(groupId);
+          if (host.computed(rowGroupNode)?.box.position !== "static") {
+            host.registerPositionedContainingBlock(groupId, rect);
+          }
           const positioned = layoutOwnedOutOfFlow(
             groupId,
             rect,
@@ -681,11 +800,6 @@ export function layoutTableContainer(
         });
         if (group === null) break;
         structuralChildren.push(group);
-      }
-      for (const index of groupedRows.get(null) ?? []) {
-        const row = layoutRow(index);
-        if (row === null) break;
-        structuralChildren.push(row);
       }
       structuralChildren.push(
         ...layoutOwnedOutOfFlow(table.id, paddingRect, input.depth + 2),

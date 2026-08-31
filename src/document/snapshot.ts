@@ -645,9 +645,8 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
         || ["img", "audio", "video", "iframe", "embed", "object"].includes(element.name);
       const tableCell = tableMetadata.cells.get(element.ref);
       const defaultRole = htmlRole(element, get);
-      const role = get("role") === null && tableCell?.header === true &&
-          (tableCell.scope === "row" || tableCell.scope === "rowgroup")
-        ? "rowheader"
+      const role = get("role") === null && tableCell?.headerRole !== null && tableCell?.headerRole !== undefined
+        ? tableCell.headerRole === "row" ? "rowheader" : "columnheader"
         : defaultRole;
       const explicitName = accessibleName(element, nameFromContents.has(role));
       const table = tableMetadata.tables.get(element.ref);
@@ -655,13 +654,29 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
       const name = role === "table" && explicitName.length === 0 && caption !== undefined
         ? cleanText(text(caption))
         : explicitName;
+      let tableHeaders = tableMetadata.headerAssociations.get(element.ref);
+      if (tableHeaders === undefined) {
+        let ancestor = element.parent;
+        while (ancestor !== null) {
+          const ancestorCell = tableMetadata.cells.get(ancestor);
+          if (ancestorCell !== undefined) {
+            tableHeaders = tableMetadata.headerAssociations.get(ancestorCell.node) ?? Object.freeze([]);
+            break;
+          }
+          const ancestorNode = nodes.get(ancestor);
+          ancestor = ancestorNode?.parent ?? null;
+        }
+      }
       const semantic = Object.freeze({
         node: element.ref,
         role,
         landmark: landmarkFor(element, get, name, sectioningAncestors.has(element.ref)),
         accessibleName: name,
         accessibleDescription: accessibleDescription(element),
-        tableHeaders: tableMetadata.headerAssociations.get(element.ref) ?? Object.freeze([]),
+        tableHeaders: tableHeaders ?? Object.freeze([]),
+        tableHeaderLabel: tableCell?.header === true && tableCell.abbreviation !== null
+          ? cleanText(tableCell.abbreviation) || null
+          : null,
         accessibilityHidden: accessibilityHidden.get(element.ref) === true,
         behavior: element.namespace === HTML_NAMESPACE_URI && (element.name === "br" || element.name === "wbr")
           ? element.name === "br" ? "forced-break" : "break-opportunity"

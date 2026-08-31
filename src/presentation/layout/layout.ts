@@ -101,10 +101,13 @@ import {
   intrinsicTableBlockSize,
   intrinsicTableInlineSizes,
   layoutTableContainer,
+  buildTableSlotGrid,
   TableWorkBudgetExceeded,
   type TableBorderOverride,
   type TableBudgetName,
   type TableIntrinsicInlineSizingHost,
+  type TableSlotGrid,
+  type TableSlotGridHost,
   type TableWrapperFormattingNode,
 } from "./table/index.js";
 
@@ -779,6 +782,7 @@ class LayoutBuilder {
   >;
   readonly #marginProfileCache = new Map<string, CollapsibleMarginProfile>();
   readonly #intrinsicContributionCache: IntrinsicContributionCache;
+  readonly #tableSlotGridCache = new Map<FormattingNodeId, TableSlotGrid>();
   readonly #positionedContainingBlocks = new Map<FormattingNodeId, CssRect>();
   readonly #principalFragments = new Map<FormattingNodeId, LayoutFragmentId>();
   readonly #stackingMetadata = new Map<
@@ -1466,7 +1470,7 @@ class LayoutBuilder {
       && TABLE_INTERNAL_MARGINLESS_KINDS.has(this.#formatting.node(formattingNode).kind)
       ? { top: ZERO, right: ZERO, bottom: ZERO, left: ZERO }
       : computedMargin;
-    const padding =
+    const computedPadding =
       style === null
         ? { top: ZERO, right: ZERO, bottom: ZERO, left: ZERO }
         : {
@@ -1475,6 +1479,10 @@ class LayoutBuilder {
             bottom: nonNegative(used(style.box.padding.bottom)),
             left: nonNegative(used(style.box.padding.left)),
           };
+    const padding = formattingNode !== undefined
+      && this.#tableBorderOverrides.get(formattingNode)?.suppressPadding === true
+      ? { top: ZERO, right: ZERO, bottom: ZERO, left: ZERO }
+      : computedPadding;
     const computedBorder = style === null
       ? { top: ZERO, right: ZERO, bottom: ZERO, left: ZERO }
       : {
@@ -1805,8 +1813,16 @@ class LayoutBuilder {
       const id = pending.pop();
       if (id === undefined) continue;
       const child = this.#formatting.node(id);
+      if (this.#outOfFlow(child)) continue;
       if (child.kind === "form-control" || child.kind === "replaced-element" || child.kind === "image-fallback" || child.kind === "forced-line-break") return true;
-      if ((child.kind === "text-sequence" || child.kind === "generated-text" || child.kind === "marker") && child.text.length > 0) return true;
+      if (child.kind === "text-sequence" || child.kind === "generated-text" || child.kind === "marker") {
+        if (/[^\t\n\f\r ]/u.test(child.text)) return true;
+        const whiteSpace = this.#computed(child)?.text.whiteSpace ?? "normal";
+        if (child.text.length > 0 && (whiteSpace === "pre" || whiteSpace === "pre-wrap" || whiteSpace === "break-spaces")) return true;
+      }
+      const style = child.appliesBoxStyle ? this.#computed(child) : null;
+      if ((style?.text.background?.a ?? 0) > 0
+        || (style !== null && Object.values(style.box.borderStyles).some((value) => value === "solid"))) return true;
       pending.push(...child.children);
     }
     return false;
@@ -4507,16 +4523,20 @@ class LayoutBuilder {
     } else if (node.kind === "table" || node.kind === "table-wrapper") {
       automatic = this.#tableBudget(() => intrinsicTableBlockSize(
         {
+          budgets: this.#budgets,
           signal: this.#input.signal,
           formattingNode: (candidate) => this.#formatting.node(candidate),
           computed: (candidate) => this.#computed(candidate),
           htmlTableCell: (candidate) => this.#formatting.document.htmlTableCell(candidate),
+          htmlTableColumn: (candidate) => this.#formatting.document.htmlTableColumn(candidate),
+          htmlTableColumnGroup: (candidate) => this.#formatting.document.htmlTableColumnGroup(candidate),
           isOutOfFlow: (candidate) => this.#outOfFlow(candidate),
           usedLength: (value, basis, computed) => this.#usedLength(value, basis, computed),
           intrinsicOuterBlockSize: (candidate, inlineSize, candidateDepth) =>
             this.#intrinsicOuterBlockSize(candidate, inlineSize, candidateDepth),
-          consumeIntrinsicWork: () => {
-            this.#consumeTableWork("maxTableIntrinsicMeasureWork");
+          tableSlotGrid: (candidate) => this.#tableSlotGrid(candidate),
+          consume: (budget, amount) => {
+            this.#consumeTableWork(budget, amount);
           },
         },
         node,
@@ -4749,6 +4769,27 @@ class LayoutBuilder {
     this.#tableWork.set(budget, retained + amount);
   }
 
+  #tableSlotGrid(table: FormattingNode): TableSlotGrid {
+    const cached = this.#tableSlotGridCache.get(table.id);
+    if (cached !== undefined) return cached;
+    const host: TableSlotGridHost = {
+      budgets: this.#budgets,
+      signal: this.#input.signal,
+      formattingNode: (id) => this.#formatting.node(id),
+      computed: (node) => this.#computed(node),
+      htmlTableCell: (node) => this.#formatting.document.htmlTableCell(node),
+      htmlTableColumn: (node) => this.#formatting.document.htmlTableColumn(node),
+      htmlTableColumnGroup: (node) => this.#formatting.document.htmlTableColumnGroup(node),
+      isOutOfFlow: (node) => this.#outOfFlow(node),
+      consume: (budget, amount) => {
+        this.#consumeTableWork(budget, amount);
+      },
+    };
+    const grid = buildTableSlotGrid(host, table);
+    this.#tableSlotGridCache.set(table.id, grid);
+    return grid;
+  }
+
   #tableBudget<T>(operation: () => T): T {
     try {
       return operation();
@@ -4802,6 +4843,16 @@ class LayoutBuilder {
           this.#consumeTableWork(budget, amount);
         },
         usedLength: (value, basis, style) => this.#usedLength(value, basis, style),
+        inlineBoxOffsets: (node, basis) => {
+          const edges = this.#edges(this.#boxComputed(node) ?? this.#computed(node), basis);
+          return nonNegative(sum(
+            edges.padding.left,
+            edges.padding.right,
+            edges.border.left,
+            edges.border.right,
+          ));
+        },
+        tableSlotGrid: (node) => this.#tableSlotGrid(node),
         dimensions: (node, containingWidth, containingHeight, forcedWidth) =>
           this.#dimensions(node, containingWidth, containingHeight, forcedWidth, node.kind === "table"),
         intrinsicContributions: (id, availableInlineSize) =>
@@ -4896,8 +4947,18 @@ class LayoutBuilder {
         this.#consumeTableWork(budget, amount);
       },
       usedLength: (value, basis, style) => this.#usedLength(value, basis, style),
+      inlineBoxOffsets: (node, basis) => {
+        const edges = this.#edges(this.#boxComputed(node) ?? this.#computed(node), basis);
+        return nonNegative(sum(
+          edges.padding.left,
+          edges.padding.right,
+          edges.border.left,
+          edges.border.right,
+        ));
+      },
       intrinsicContributions: (id, availableInlineSize) =>
         this.#intrinsicContributions(id, availableInlineSize),
+      tableSlotGrid: (node) => this.#tableSlotGrid(node),
       registerCollapsedBorderOverride: (id, value) => {
         this.#tableBorderOverrides.set(id, value);
         this.#paintStyleCache.delete(id);
