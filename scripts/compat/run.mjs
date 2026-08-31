@@ -210,10 +210,14 @@ function principalRectangle(snapshot, pipeline, elementId) {
   };
 }
 
-function gridStructureFailures(fixture, variant, snapshot, pipeline) {
-  const expectations = fixture.expected.gridStructureByVariant?.[variant.id]
+function boxRelationshipFailures(fixture, variant, snapshot, pipeline) {
+  const gridExpectations = fixture.expected.gridStructureByVariant?.[variant.id]
     ?? fixture.expected.gridStructure
     ?? [];
+  const tableExpectations = fixture.expected.tableStructureByVariant?.[variant.id]
+    ?? fixture.expected.tableStructure
+    ?? [];
+  const expectations = [...gridExpectations, ...tableExpectations];
   const failures = [];
   const rectangleCache = new Map();
   const rectangle = (id) => {
@@ -247,6 +251,59 @@ function gridStructureFailures(fixture, variant, snapshot, pipeline) {
     if (!matches) failures.push({ ...expectation, reason: "relationship-mismatch", firstRectangle: first, secondRectangle: second });
   }
   return failures;
+}
+
+function tableHeaderRelationshipFailures(fixture, snapshot) {
+  const failures = [];
+  for (const expectation of fixture.expected.tableHeaders ?? []) {
+    const cell = snapshot.document.elementById(expectation.cell);
+    if (cell === null || cell === undefined) {
+      failures.push({ ...expectation, reason: "missing-cell" });
+      continue;
+    }
+    const actual = new Set(snapshot.document.semantic(cell)?.tableHeaders ?? []);
+    for (const headerId of expectation.headers) {
+      const header = snapshot.document.elementById(headerId);
+      if (header === null || header === undefined || !actual.has(header)) failures.push({ ...expectation, missingHeader: headerId, reason: "missing-header-relationship" });
+    }
+  }
+  return failures;
+}
+
+function collapsedBorderSegmentMetrics(fixture, pipeline) {
+  const segments = [];
+  const pending = [pipeline.layout.root];
+  const visited = new Set();
+  while (pending.length > 0) {
+    const id = pending.pop();
+    if (id === undefined || visited.has(id)) continue;
+    visited.add(id);
+    const fragment = pipeline.layout.fragment(id);
+    pending.push(...fragment.children);
+    if (fragment.kind === "box") segments.push(...(fragment.tableCollapsedBorderSegments ?? []));
+  }
+  const expectation = fixture.expected.collapsedBorderSegments;
+  const failures = [];
+  if (expectation !== undefined && segments.length < expectation.minimum) {
+    failures.push({
+      reason: "too-few-collapsed-border-segments",
+      expectedMinimum: expectation.minimum,
+      actual: segments.length
+    });
+  }
+  if (expectation?.maximum !== undefined && segments.length > expectation.maximum) {
+    failures.push({
+      reason: "too-many-collapsed-border-segments",
+      expectedMaximum: expectation.maximum,
+      actual: segments.length
+    });
+  }
+  const ids = new Set();
+  for (const segment of segments) {
+    if (ids.has(segment.id)) failures.push({ reason: "duplicate-collapsed-border-segment", id: segment.id });
+    ids.add(segment.id);
+  }
+  return { count: segments.length, failures };
 }
 
 function caseResult(fixture, variant, hash, snapshot, pipeline, deterministic, requests) {
@@ -286,6 +343,7 @@ function caseResult(fixture, variant, hash, snapshot, pipeline, deterministic, r
     candidate.code === entry.code && candidate.sourceUrl === entry.sourceUrl && candidate.detail === entry.detail
   ) === index);
   const unexpected = uniqueDiagnostics.filter((entry) => !allowedDiagnostic(fixture, entry));
+  const collapsedBorders = collapsedBorderSegmentMetrics(fixture, pipeline);
   return {
     id: `${fixture.id}:${variant.id}`,
     fixture: fixture.id,
@@ -324,7 +382,10 @@ function caseResult(fixture, variant, hash, snapshot, pipeline, deterministic, r
       cellBufferTruncation: pipeline.terminal.cellBuffer.outcome.status === "truncated"
         ? pipeline.terminal.cellBuffer.outcome : null,
       terminalTruncations: pipeline.terminal.truncations,
-      gridStructureFailures: gridStructureFailures(fixture, variant, snapshot, pipeline),
+      boxRelationshipFailures: boxRelationshipFailures(fixture, variant, snapshot, pipeline),
+      tableHeaderRelationshipFailures: tableHeaderRelationshipFailures(fixture, snapshot),
+      collapsedBorderSegmentCount: collapsedBorders.count,
+      collapsedBorderSegmentFailures: collapsedBorders.failures,
       deterministic
     }
   };
@@ -375,7 +436,15 @@ function aggregate(results) {
     displayListTruncations: results.filter((entry) => entry.metrics.displayListTruncation !== null).map((entry) => entry.id),
     cellBufferTruncations: results.filter((entry) => entry.metrics.cellBufferTruncation !== null).map((entry) => entry.id),
     terminalTruncations: results.filter((entry) => entry.metrics.terminalTruncations.length > 0).map((entry) => entry.id),
-    gridStructureFailures: results.flatMap((entry) => entry.metrics.gridStructureFailures.map((failure) => ({
+    boxRelationshipFailures: results.flatMap((entry) => entry.metrics.boxRelationshipFailures.map((failure) => ({
+      case: entry.id,
+      failure
+    }))),
+    tableHeaderRelationshipFailures: results.flatMap((entry) => entry.metrics.tableHeaderRelationshipFailures.map((failure) => ({
+      case: entry.id,
+      failure
+    }))),
+    collapsedBorderSegmentFailures: results.flatMap((entry) => entry.metrics.collapsedBorderSegmentFailures.map((failure) => ({
       case: entry.id,
       failure
     })))
@@ -437,6 +506,8 @@ if (options.check) {
     && summary.displayListTruncations.length === 0
     && summary.cellBufferTruncations.length === 0
     && summary.terminalTruncations.length === 0;
-  const gridGatesPass = summary.gridStructureFailures.length === 0;
-  if (!gatesPass || !gridGatesPass) throw new Error("Offline compatibility gates failed; inspect the machine-readable report.");
+  const structuralGatesPass = summary.boxRelationshipFailures.length === 0
+    && summary.tableHeaderRelationshipFailures.length === 0
+    && summary.collapsedBorderSegmentFailures.length === 0;
+  if (!gatesPass || !structuralGatesPass) throw new Error("Offline compatibility gates failed; inspect the machine-readable report.");
 }

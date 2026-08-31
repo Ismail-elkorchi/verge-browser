@@ -16,6 +16,7 @@ export function isInlineFormattingNode(node: FormattingNode): boolean {
 /** CSS display-structure classification for an indivisible inline-level box. */
 export function isAtomicInlineBox(tree: FormattingTree, node: FormattingNode): boolean {
   if (node.outer !== "inline") return false;
+  if (node.kind === "table-wrapper") return true;
   if (node.kind === "form-control" || node.kind === "replaced-element" || node.kind === "image-fallback") return true;
   if (!node.appliesBoxStyle || node.styleNode === null) return false;
   const style = node.pseudo === null

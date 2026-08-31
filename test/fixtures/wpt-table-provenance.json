@@ -1,0 +1,233 @@
+{
+  "wptRepository": "https://github.com/web-platform-tests/wpt",
+  "wptCommit": "ef1cea845d70fb84127ff0e1aff2eeda7064f682",
+  "htmlRepository": "https://github.com/whatwg/html",
+  "htmlCommit": "778afd942c67b78335a4becc28c1c725a25d1cab",
+  "license": "WPT 3-clause BSD and WHATWG CC BY 4.0/BSD-3-Clause; Verge tests are independently written behavioral adaptations and copy no upstream source.",
+  "adaptations": [
+    {
+      "source": "css/css-tables/table-model-fixup.html",
+      "behavior": "misparented table-internal boxes generate the required anonymous table wrapper, row group, row, and cell boxes",
+      "terminalAdjustment": "the immutable box-tree kinds and source identities are asserted before layout",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/table-row-group-nested-anonymous-001.html",
+      "behavior": "anonymous table rows and cells remain nested under their owning row group",
+      "terminalAdjustment": "the structural box-tree relationship replaces graphical reference comparison",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "html/semantics/tabular-data/processing-model-1/span-limits.html",
+      "behavior": "hostile colspan and row-span attributes are normalized to bounded HTML table metadata",
+      "terminalAdjustment": "bounded metadata is inspected without allocating a dense slot matrix",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "html/semantics/tabular-data/processing-model-1/rowspan-0.html",
+      "behavior": "rowspan zero extends through the remainder of the current row group",
+      "terminalAdjustment": "the slot intervals and used cell rectangle are asserted",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/table_grid_size_col_colspan.html",
+      "behavior": "column and cell spans grow the immutable table slot grid before sizing",
+      "terminalAdjustment": "resolved column boundaries are compared in fixed-point CSS pixels",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/width-distribution/computing-column-measure-0.html",
+      "behavior": "single-column cells contribute minimum and preferred intrinsic column measures",
+      "terminalAdjustment": "the shared text measurer supplies CSS-pixel intrinsic contributions",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/tentative/colspan-redistribution.html",
+      "behavior": "spanning-cell deficits are planned by span group and applied independently of cell traversal order",
+      "terminalAdjustment": "column measures are asserted before terminal cell snapping",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/width-distribution/computing-table-width-0.html",
+      "behavior": "automatic table layout computes min-content, max-content, and shrink-to-fit table widths",
+      "terminalAdjustment": "used table and column widths are compared in CSS pixels",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/fixed-layout-1.html",
+      "behavior": "fixed table layout derives column widths from columns and applicable first-row cells",
+      "terminalAdjustment": "later-row text overflow is retained in layout fragments rather than graphical pixels",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/fixed-layout-excess-width-distribution-001.html",
+      "behavior": "fixed-layout excess width is distributed only after constrained columns are resolved",
+      "terminalAdjustment": "fixed-point column rectangles expose the distribution",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/width-distribution/td-min-width-auto-layout.html",
+      "behavior": "cell minimum and maximum width constraints participate in automatic column measures",
+      "terminalAdjustment": "constraints are inspected as used CSS values",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/height-distribution/computing-row-measure-0.html",
+      "behavior": "non-rowspanning cells establish row minimum block sizes after final column widths are known",
+      "terminalAdjustment": "wrapped line boxes determine CSS-pixel row heights",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/tentative/rowspan-height-redistribution.html",
+      "behavior": "rowspan block-size deficits are distributed across eligible rows by increasing span",
+      "terminalAdjustment": "used row boundaries are asserted before rasterization",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/baseline-empty-cell-001.html",
+      "behavior": "baseline-aligned cells share a row baseline while empty cells retain valid geometry",
+      "terminalAdjustment": "layout-fragment baselines and child offsets replace pixel comparison",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/height-distribution/percentage-sizing-of-table-cell-children-002.html",
+      "behavior": "cell descendants resolve percentage block sizes only after the cell containing block becomes definite",
+      "terminalAdjustment": "the cell is relaid out against the final row span height",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/caption-side-1.html",
+      "behavior": "top and bottom captions remain outside the table root border box and inside the table wrapper, whose minimum inline size includes caption contributions",
+      "terminalAdjustment": "caption and table rectangles are compared in fixed-point CSS pixels",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/border-spacing-included-in-sizes-001.html",
+      "behavior": "separated border spacing contributes around the grid edge and between active tracks",
+      "terminalAdjustment": "spacing is measured before terminal snapping",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/no-overflow-with-table-cell-margins.html",
+      "behavior": "authored table-cell margins do not participate in used table geometry or overflow",
+      "terminalAdjustment": "the cell margin and border rectangles are compared in fixed-point CSS pixels",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/parsing/empty-cells-computed.html",
+      "behavior": "empty-cells has a typed computed value and suppresses separated empty-cell background and border painting",
+      "terminalAdjustment": "absence of table paint commands is asserted",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/border-conflict-resolution.html",
+      "behavior": "collapsed borders resolve hidden, none, width, origin, and source-order precedence",
+      "terminalAdjustment": "one winning terminal border command is retained per used edge segment",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/tentative/border-collapse-spanning-cells-001.html",
+      "behavior": "collapsed borders crossing mismatched cell spans are split into nonoverlapping slot-edge segments",
+      "terminalAdjustment": "paint-command identities replace graphical corner comparison",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/paint/row-background-paint-remove-last-cell.html",
+      "behavior": "table, column-group, column, row-group, row, and cell backgrounds retain table paint order",
+      "terminalAdjustment": "display-list command order is asserted directly",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/visibility-collapse-border-spacing-001.html",
+      "behavior": "collapsed rows and columns remove their breadth without retaining duplicate border spacing",
+      "terminalAdjustment": "surviving cell rectangles are compared in CSS pixels",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/absolute-tables-001.html",
+      "behavior": "absolute descendants remain outside table row and column sizing and use their final table containing block",
+      "terminalAdjustment": "normal-flow table geometry and positioned fragment geometry are inspected separately",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/paint/col-paint-htb-rtl.html",
+      "behavior": "RTL horizontal table flow reverses physical columns without reversing logical source order",
+      "terminalAdjustment": "column geometry and logical search order are asserted independently",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/row-group-order.html",
+      "behavior": "the first table-header-group is displayed before ordinary groups and the first table-footer-group after them while additional header and footer groups remain in ordinary group order",
+      "terminalAdjustment": "CSS slot-grid row sequence and fixed-layout first-row selection replace pixel comparison",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/tentative/section-no-tbody-fixed-distribution.html",
+      "behavior": "fixed table layout takes width constraints from the first displayed row after CSS row-group ordering",
+      "terminalAdjustment": "fixed-point column boundaries identify the selected first row",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/tentative/colgroup-col.html",
+      "behavior": "column and containing column-group constraints remain distinct and a group width constrains its combined tracks",
+      "terminalAdjustment": "typed column-measure sources and used track widths are asserted before rasterization",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/width-distribution/computing-column-measure-2.html",
+      "behavior": "calculated percentage and mixed column constraints preserve percentage dependence through column measurement",
+      "terminalAdjustment": "length-percentage constraints are resolved against the used table-grid width in fixed-point CSS pixels",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/width-distribution/distribution-algo-min-content-percent-guess.html",
+      "behavior": "automatic width distribution progresses through minimum and intrinsic-percentage sizing categories rather than equal sharing",
+      "terminalAdjustment": "used column boundaries expose the selected sizing interpolation",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/tentative/rowspan-height-redistribution.html",
+      "behavior": "overlapping rowspan requirements are planned by increasing span from an unchanged row-size snapshot",
+      "terminalAdjustment": "item-order permutations compare base, reference, and final row boundaries",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/border-collapse-empty-cell.html",
+      "behavior": "the collapsed-border edge graph retains perimeter and missing-slot edges even when no cell originates in a slot",
+      "terminalAdjustment": "layout-owned segment topology is asserted instead of graphical reference pixels",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/tentative/border-collapse-spanning-cells-004.html",
+      "behavior": "rowspan and colspan sides connect transitive border conflict sets before winners are selected",
+      "terminalAdjustment": "harmonized segment widths and unique edge identities are inspected directly",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/tentative/collapsed-borders-painting-order-001.html",
+      "behavior": "equal collapsed-border ties use logical row and direction-sensitive column position instead of candidate encounter order",
+      "terminalAdjustment": "LTR and RTL winning source identities are asserted on layout paint segments",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-tables/collapsed-border-paint-phase-001.html",
+      "behavior": "collapsed borders retain a dedicated table paint phase after table backgrounds and cell content ordering inputs are established",
+      "terminalAdjustment": "the display list consumes the layout segment paint phase without recalculating border conflicts",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "source#forming-relationships-between-data-cells-and-header-cells",
+      "repository": "https://github.com/whatwg/html",
+      "behavior": "automatic header assignment scans row and column directions through header blocks and makes completed blocks opaque after intervening data cells",
+      "terminalAdjustment": "same-table document-node associations are asserted independently of visual order and painted text",
+      "license": "WHATWG CC BY 4.0 and BSD-3-Clause"
+    },
+    {
+      "source": "source#the-table-element",
+      "repository": "https://github.com/whatwg/html",
+      "behavior": "table, rowgroup, row, cell, columnheader, rowheader, caption name, and headers/scope relationships derive from document semantics rather than painted text",
+      "terminalAdjustment": "header document-node identities and terminal accessibility bounds are both asserted",
+      "license": "WHATWG CC BY 4.0 and BSD-3-Clause"
+    }
+  ]
+}

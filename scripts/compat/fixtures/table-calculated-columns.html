@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Calculated table columns</title></head>
+<body><main>
+  <h1>Calculated column constraints</h1>
+  <table style="width:240px;border-spacing:0">
+    <col style="width:60%"><col style="width:60%">
+    <tr><td id="percent-first">First cumulative percentage</td><td id="percent-second">Second cumulative percentage</td></tr>
+  </table>
+  <table dir="rtl" style="width:240px;border-spacing:0">
+    <colgroup span="2" style="width:calc(75% - 8px)"></colgroup><col style="width:25%">
+    <tr><td id="calculated-first">Calculated first</td><td>Calculated second</td><td id="calculated-third">Absolute remainder</td></tr>
+  </table>
+</main></body>
+</html>

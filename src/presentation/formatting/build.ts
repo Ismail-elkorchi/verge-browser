@@ -24,6 +24,7 @@ import type {
   FormattingTree,
   SuppressedFormattingSubtree
 } from "./types.js";
+import { fixTableChildren, type TableBoxFixupHost } from "./table/index.js";
 
 const DEFAULT_FORMATTING_BUDGETS: FormattingBudgets = Object.freeze({
   maxFormattingNodes: 150_000,
@@ -128,6 +129,18 @@ class FormattingBuilder {
   readonly #listOrdinals = new Map<DocumentNodeRef, number>();
   readonly #indexedListParents = new Set<DocumentNodeRef>();
   readonly #storedIds: FormattingNodeId[] = [];
+  readonly #tableBoxFixupHost: TableBoxFixupHost = {
+    anonymousContainer: (kind, styleNode, children, outer) =>
+      this.#anonymousContainer(kind, styleNode, children, outer),
+    collapsesEntireTextRun,
+    isOutOfFlow: (node) => {
+      if (node.styleNode === null) return false;
+      const style = node.pseudo === null
+        ? this.#styles.style(node.styleNode)
+        : this.#styles.pseudo(node.styleNode, node.pseudo) ?? this.#styles.style(node.styleNode);
+      return style.box.position === "absolute" || style.box.position === "fixed";
+    },
+  };
   #anonymous = 0;
   #textCodeUnits = 0;
   #truncated: keyof FormattingBudgets | null = null;
@@ -369,7 +382,7 @@ class FormattingBuilder {
   }
 
   #column(source: DocumentNodeRef, style: ComputedStyle): FormattingColumnNode {
-    const rawSpan = Number(this.#document.attribute(source, "span") ?? "1");
+    const span = this.#document.htmlTableColumn(source)?.span ?? 1;
     return this.#store({
       id: this.#id(source, "table-column"),
       kind: "table-column",
@@ -380,7 +393,7 @@ class FormattingBuilder {
       children: [],
       semantic: this.#document.semantic(source),
       outer: style.display.box === "principal" ? style.display.outer : "block",
-      span: Number.isSafeInteger(rawSpan) && rawSpan > 0 ? Math.min(1_000, rawSpan) : 1,
+      span,
       appliesBoxStyle: true
     });
   }
@@ -554,124 +567,6 @@ class FormattingBuilder {
     return output;
   }
 
-  #tableFixup(children: readonly FormattingNode[], parent: FormattingNode["kind"], styleNode: DocumentNodeRef): readonly FormattingNodeId[] {
-    const cells = new Set(["table-cell"]);
-    const rows = new Set(["table-row"]);
-    const groups = new Set(["table-header-group", "table-body-group", "table-footer-group"]);
-    const hasTableInternal = children.some((child) => cells.has(child.kind) || rows.has(child.kind)
-      || groups.has(child.kind) || child.kind === "table-caption" || child.kind === "table-column-group"
-      || child.kind === "table-column");
-    const normalizedChildren = hasTableInternal
-      ? children.filter((child) => !collapsesEntireTextRun(child))
-      : children;
-    const expected = (kind: FormattingNode["kind"]): boolean => {
-      if (parent === "table-row") return cells.has(kind);
-      if (parent === "table-column-group") return kind === "table-column";
-      if (groups.has(parent)) return rows.has(kind);
-      if (parent === "table") return groups.has(kind) || kind === "table-caption" || kind === "table-column-group";
-      return !cells.has(kind) && !rows.has(kind) && !groups.has(kind) && kind !== "table-caption" && kind !== "table-column-group" && kind !== "table-column";
-    };
-    if (normalizedChildren.every((child) => expected(child.kind))) return normalizedChildren.map((child) => child.id);
-    if (parent === "table-column-group") {
-      return normalizedChildren.filter((child) => child.kind === "table-column").map((child) => child.id);
-    }
-    if (parent === "table-row") {
-      return normalizedChildren.map((child) => cells.has(child.kind)
-        ? child.id
-        : this.#anonymousContainer("table-cell", styleNode, [child.id], "block").id);
-    }
-    if (groups.has(parent)) {
-      const output: FormattingNodeId[] = [];
-      let cellsRun: FormattingNodeId[] = [];
-      const flush = (): void => {
-        if (cellsRun.length === 0) return;
-        output.push(this.#anonymousContainer("table-row", styleNode, cellsRun, "block").id);
-        cellsRun = [];
-      };
-      for (const child of normalizedChildren) {
-        if (child.kind === "table-row") {
-          flush();
-          output.push(child.id);
-        } else if (child.kind === "table-cell") cellsRun.push(child.id);
-        else cellsRun.push(this.#anonymousContainer("table-cell", styleNode, [child.id], "block").id);
-      }
-      flush();
-      return output;
-    }
-    if (parent === "table") {
-      const output: FormattingNodeId[] = [];
-      let rowsRun: FormattingNodeId[] = [];
-      let cellsRun: FormattingNodeId[] = [];
-      let columnsRun: FormattingNodeId[] = [];
-      const flushCells = (): void => {
-        if (cellsRun.length === 0) return;
-        rowsRun.push(this.#anonymousContainer("table-row", styleNode, cellsRun, "block").id);
-        cellsRun = [];
-      };
-      const flushRows = (): void => {
-        flushCells();
-        if (rowsRun.length === 0) return;
-        output.push(this.#anonymousContainer("table-body-group", styleNode, rowsRun, "block").id);
-        rowsRun = [];
-      };
-      const flushColumns = (): void => {
-        if (columnsRun.length === 0) return;
-        output.push(this.#anonymousContainer("table-column-group", styleNode, columnsRun, "block").id);
-        columnsRun = [];
-      };
-      const flushAll = (): void => {
-        flushRows();
-        flushColumns();
-      };
-      for (const child of normalizedChildren) {
-        if (child.kind === "table-caption") {
-          flushAll();
-          output.push(child.id);
-        } else if (child.kind === "table-column") {
-          flushRows();
-          columnsRun.push(child.id);
-        } else if (child.kind === "table-column-group") {
-          flushAll();
-          output.push(child.id);
-        } else if (groups.has(child.kind)) {
-          flushAll();
-          output.push(child.id);
-        } else if (child.kind === "table-row") {
-          flushColumns();
-          flushCells();
-          rowsRun.push(child.id);
-        } else if (child.kind === "table-cell") {
-          flushColumns();
-          cellsRun.push(child.id);
-        } else {
-          flushColumns();
-          cellsRun.push(this.#anonymousContainer("table-cell", styleNode, [child.id], "block").id);
-        }
-      }
-      flushAll();
-      return output;
-    }
-    const output: FormattingNodeId[] = [];
-    let internalRun: FormattingNode[] = [];
-    const flush = (): void => {
-      if (internalRun.length === 0) return;
-      const tableChildren = this.#tableFixup(internalRun, "table", styleNode);
-      const table = this.#anonymousContainer("table", styleNode, tableChildren, "block");
-      output.push(this.#anonymousContainer("table-wrapper", styleNode, [table.id], "block").id);
-      internalRun = [];
-    };
-    for (const child of normalizedChildren) {
-      if (expected(child.kind)) {
-        flush();
-        output.push(child.id);
-        continue;
-      }
-      internalRun.push(child);
-    }
-    flush();
-    return output;
-  }
-
   #buildElement(source: DocumentNodeRef, depth: number): FormattingNode[] {
     const style = this.#styles.style(source);
     const display = style.display;
@@ -700,9 +595,9 @@ class FormattingBuilder {
     else if (display.inner === "grid") kind = "grid-container";
     else kind = outer === "block" ? "block-container" : "inline-container";
 
-    const open = this.#reserveContainer(kind, source, source, outer, null, kind !== "table");
+    const open = this.#reserveContainer(kind, source, source, outer);
     const wrapper = kind === "table"
-      ? this.#reserveContainer("table-wrapper", source, source, outer)
+      ? this.#reserveContainer("table-wrapper", source, source, outer, null, false)
       : null;
     let marker: FormattingNode | null = null;
     if (kind === "list-item") {
@@ -729,9 +624,9 @@ class FormattingBuilder {
       }
       if (kind === "table" || kind === "table-column-group" || kind === "table-row" || kind === "table-header-group"
         || kind === "table-body-group" || kind === "table-footer-group") {
-        return this.#tableFixup(retained, kind, source);
+        return fixTableChildren(this.#tableBoxFixupHost, retained, kind, source);
       }
-      const fixedChildren = this.#tableFixup(retained, kind, source)
+      const fixedChildren = fixTableChildren(this.#tableBoxFixupHost, retained, kind, source)
         .map((id) => this.#nodes.get(id))
         .filter((node): node is FormattingNode => node !== undefined);
       if (kind === "inline-container" && display.inner === "flow"

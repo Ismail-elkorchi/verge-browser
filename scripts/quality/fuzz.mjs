@@ -17,13 +17,13 @@ const PROFILES = Object.freeze({
   release: Object.freeze({ firstSeed: 20260226, caseCount: 512, maxDepth: 6, sectionCount: 10 })
 });
 const TAGS = Object.freeze([
-  "a", "article", "blockquote", "code", "details", "div", "form", "h1", "h2", "h3",
+  "a", "article", "blockquote", "caption", "code", "col", "colgroup", "details", "div", "form", "h1", "h2", "h3",
   "img", "input", "li", "ol", "p", "pre", "section", "span", "summary", "table",
-  "tbody", "td", "th", "tr", "ul", "x-card"
+  "tbody", "td", "tfoot", "th", "thead", "tr", "ul", "x-card"
 ]);
 const DISPLAYS = Object.freeze([
   "block", "inline", "contents", "none", "list-item", "table", "table-row",
-  "table-cell", "flex", "grid"
+  "table-cell", "table-row-group", "table-column", "table-column-group", "table-caption", "flex", "grid"
 ]);
 const GRID_TRACK_LISTS = Object.freeze([
   "[start] 40px [middle] minmax(min-content,1fr) [end]",
@@ -46,7 +46,10 @@ const GRID_AUTO_FLOWS = Object.freeze([
   "row", "column", "dense", "row dense", "dense row", "column dense", "dense column",
   "row row", "column column", "dense dense", "row column", "row dense column"
 ]);
-const ATTRIBUTES = Object.freeze(["aria-label", "class", "data-k", "hidden", "href", "id", "name", "title", "value"]);
+const ATTRIBUTES = Object.freeze([
+  "aria-label", "class", "colspan", "data-k", "headers", "hidden", "href", "id", "name",
+  "rowspan", "scope", "span", "title", "value"
+]);
 const WORDS = Object.freeze([
   "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa",
   "lambda", "mu", "nu", "xi", "omicron", "pi", "rho", "sigma", "tau", "upsilon", "phi",
@@ -100,6 +103,11 @@ function attributeValue(random, name, index) {
       ? `../${pick(random, WORDS)}?case=${String(index)}`
       : `https://example.test/${pick(random, WORDS)}/${String(index)}`;
   }
+  if (name === "colspan" || name === "rowspan" || name === "span") {
+    return pick(random, ["0", "1", "2", "1000", "65534", "999999999999999999999999", "-4", "invalid"]);
+  }
+  if (name === "scope") return pick(random, ["row", "col", "rowgroup", "colgroup", "auto", "invalid"]);
+  if (name === "headers") return `header-${String(index)} missing-${String(index)}`;
   if (name === "hidden") return "";
   return `${pick(random, WORDS)}-${pick(random, WORDS)}-${String(index)}`;
 }
@@ -120,6 +128,10 @@ function openingTag(random, tagName, index) {
       declarations.push(`grid-template-rows:${pick(random, GRID_TRACK_LISTS)}`);
       declarations.push(`grid-auto-flow:${pick(random, GRID_AUTO_FLOWS)}`);
       declarations.push(`gap:${String(Math.floor(random() * 9))}px`);
+    } else if (display === "table") {
+      declarations.push(`table-layout:${chance(random, 0.5) ? "auto" : "fixed"}`);
+      declarations.push(`border-collapse:${chance(random, 0.5) ? "separate" : "collapse"}`);
+      declarations.push(`border-spacing:${String(Math.floor(random() * 9))}px ${String(Math.floor(random() * 9))}px`);
     } else if (chance(random, 0.35)) {
       declarations.push(`grid-column:${pick(random, GRID_PLACEMENTS)}`);
       declarations.push(`grid-row:${pick(random, GRID_PLACEMENTS)}`);
@@ -142,7 +154,7 @@ function generateNode(random, depth, maxDepth, index) {
   }
   const tagName = pick(random, TAGS);
   const prefix = openingTag(random, tagName, index);
-  if (tagName === "img" || tagName === "input") return prefix;
+  if (tagName === "col" || tagName === "img" || tagName === "input") return prefix;
   if (tagName === "pre" || tagName === "code") {
     return `${prefix}${randomText(random, 2, 6)}\n  ${randomText(random, 2, 5)}\n\t${randomText(random, 1, 4)}${closingTag(random, tagName)}`;
   }
@@ -246,6 +258,39 @@ function evaluate(html) {
   };
 }
 
+const TABLE_ADVERSARIAL_CASES = Object.freeze([
+  `<table><tr><td colspan="999999999999999999999999" rowspan="999999999999999999999999">bounded</td></tr></table>`,
+  `<table><tbody><tr><td rowspan="0">remaining group</td><td>one</td></tr><tr><td>two</td></tr></tbody>
+    <tbody><tr><td>next group</td></tr></tbody></table>`,
+  `<div style="display:table"><span style="display:table-cell">orphan cell</span>
+    <span style="display:table-row-group"><span style="display:table-cell">anonymous row</span></span></div>`,
+  `<table style="border-collapse:collapse"><tr><td colspan="3" style="border:8px solid red">wide</td></tr>
+    <tr><td style="border:1px solid blue">a</td><td style="border:hidden">b</td><td style="border:4px solid green">c</td></tr></table>`,
+  `<table style="table-layout:fixed;width:9007199254740990px"><col span="1000" style="width:9007199254740990px">
+    <tr><td>fixed extreme</td></tr></table>`,
+  `<table style="width:calc(100% - 1px)"><tr><td style="width:calc(50% - 2px)">percentage</td>
+    <td style="min-width:min(25%,20px)">dependent</td></tr></table>`,
+  `${"<table><caption>nested</caption><tr><td>".repeat(12)}deep${"</td></tr></table>".repeat(12)}`,
+  `<table>${Array.from({ length: 50 }, (_, index) => `<caption style="caption-side:${index % 2 === 0 ? "top" : "bottom"}">caption ${String(index)}</caption>`).join("")}
+    <tr><td>many captions</td></tr></table>`,
+  `<table>${Array.from({ length: 20 }, (_, row) => `<tr>${Array.from({ length: 10 }, (_, column) =>
+    `<td colspan="${String(1 + (row + column) % 4)}" rowspan="${String(1 + (row * column) % 3)}">${String(row)}:${String(column)}</td>`).join("")}</tr>`).join("")}</table>`,
+  `<table style="border-spacing:8px"><col><col style="visibility:collapse"><col><tbody>
+    <tr><td>left</td><td>collapsed</td><td>right</td></tr><tr style="visibility:collapse"><td>hidden row</td></tr></tbody></table>`,
+  `<table><tr><th id="root" abbr="R">root</th><th id="branch" headers="root">branch</th>
+    <th id="cycle-a" headers="cycle-b">a</th><th id="cycle-b" headers="cycle-a">b</th></tr>
+    <tr><td headers="branch root branch">explicit graph</td><th headers="branch">header target</th></tr></table>`,
+  `<table><tr>${Array.from({ length: 100 }, (_, column) => `<th id="column-${String(column)}" scope="col">${String(column)}</th>`).join("")}</tr>
+    ${Array.from({ length: 100 }, (_, row) => `<tr><th scope="row">${String(row)}</th><td colspan="99">automatic ${String(row)}</td></tr>`).join("")}</table>`,
+  `<table style="width:calc(100% - 1px)"><colgroup span="128" style="width:min(75%,900px)"></colgroup>
+    <colgroup><col span="64" style="width:calc(1% + 1px)"></colgroup><tr><td colspan="192">groups</td></tr></table>`,
+  `<table><tfoot><tr><td>displayed last</td></tr></tfoot><tbody><tr><td>body</td></tr></tbody>
+    <thead><tr><th>displayed first</th></tr></thead><thead><tr><th>ordinary header group</th></tr></thead></table>`,
+  `<table style="border-collapse:collapse;border:7px solid red"></table>`,
+  `<table dir="rtl" style="border-collapse:collapse;border:3px solid black"><colgroup style="border:3px solid red"><col><col></colgroup>
+    <tbody style="border:3px solid blue"><tr style="border:3px solid green"><td style="border:3px solid purple">right</td><td style="border:3px solid orange">left</td></tr></tbody></table>`
+]);
+
 const profileName = parseProfile(process.argv.slice(2));
 const policy = PROFILES[profileName];
 const failures = [];
@@ -264,10 +309,23 @@ for (let index = 0; index < policy.caseCount; index += 1) {
     });
   }
 }
+for (const [index, html] of TABLE_ADVERSARIAL_CASES.entries()) {
+  try {
+    if (JSON.stringify(evaluate(html)) !== JSON.stringify(evaluate(html))) {
+      failures.push({ seed: `table-${String(index)}`, htmlSha256: sha256(html), reason: "non-deterministic table pipeline output" });
+    }
+  } catch (error) {
+    failures.push({
+      seed: `table-${String(index)}`,
+      htmlSha256: sha256(html),
+      reason: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
 if (failures.length > 0) {
   for (const failure of failures) {
     process.stderr.write(`fuzz failure: seed=${String(failure.seed)} sha256=${failure.htmlSha256} ${failure.reason}\n`);
   }
   throw new Error(`${String(failures.length)} deterministic fuzz case(s) failed`);
 }
-process.stdout.write(`fuzz ${profileName} ok: ${String(policy.caseCount)} crash-free deterministic structural pipeline cases\n`);
+process.stdout.write(`fuzz ${profileName} ok: ${String(policy.caseCount + TABLE_ADVERSARIAL_CASES.length)} crash-free deterministic structural pipeline cases\n`);

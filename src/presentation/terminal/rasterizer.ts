@@ -441,7 +441,7 @@ function terminalColor(color: TerminalColor | null, depth: TerminalDisplayList["
 
 function actualStyle(command: TerminalPaintCommand, under: PaintedUnit | undefined, depth: TerminalDisplayList["context"]["colorDepth"]): TerminalStyle {
   const background = composite(command.style.background, under?.actualStyle.background ?? null);
-  const foregroundSource = command.kind === "border-side" ? command.style.borderColor
+  const foregroundSource = command.kind === "border-side" ? command.style.borderColors[command.side]
     : command.kind === "text" ? command.style.foreground : null;
   return Object.freeze({
     foreground: terminalColor(composite(foregroundSource, background), depth),

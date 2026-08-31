@@ -19,6 +19,8 @@ export interface IntrinsicSizeContributions {
     readonly inline: boolean;
     readonly block: boolean;
   };
+  /** First baseline offset from the contributed border-box block start. */
+  readonly firstBaseline: CssNonNegativeLength | null;
 }
 
 export interface IntrinsicContributionRequest {

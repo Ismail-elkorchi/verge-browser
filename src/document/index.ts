@@ -9,3 +9,9 @@ export type {
 } from "./parse.js";
 export { applyDocumentAction, createDocumentState, snapshotDocumentState } from "./state.js";
 export type * from "./types.js";
+export type {
+  HtmlTableCellMetadata,
+  HtmlTableColumnMetadata,
+  HtmlTableColumnGroupMetadata,
+  HtmlTableMetadata,
+} from "./table/index.js";

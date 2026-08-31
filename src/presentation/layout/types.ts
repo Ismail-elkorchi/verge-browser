@@ -8,10 +8,10 @@ import type {
   FormattingNodeId,
   FormattingTree
 } from "../formatting/index.js";
-import type { CssColor, PseudoElementIdentity } from "../style/index.js";
+import type { CssBorderColors, CssBorderStyles, CssColor, PseudoElementIdentity } from "../style/index.js";
 import type { InlineItemStreamSet } from "../text/index.js";
 import type { BidiLevel } from "../../unicode/index.js";
-import type { CssPixelLength, CssRect, CssSize } from "./fixed.js";
+import type { CssEdges, CssPixelLength, CssRect, CssSize } from "./fixed.js";
 
 export type LayoutFragmentId = string & { readonly __layoutFragmentId: unique symbol };
 export type LineBoxId = string & { readonly __lineBoxId: unique symbol };
@@ -54,6 +54,22 @@ export interface LayoutBudgets {
   readonly maxGridNamedLineResolutions: number;
   readonly maxGridAutoRepeatTracks: number;
   readonly maxGridTrackSizingWork: number;
+  readonly maxTableRoots: number;
+  readonly maxTableRowGroups: number;
+  readonly maxTableRows: number;
+  readonly maxTableColumnGroups: number;
+  readonly maxTableColumns: number;
+  readonly maxTableCells: number;
+  readonly maxTableSlotIntervals: number;
+  readonly maxTableColspanWork: number;
+  readonly maxTableRowspanWork: number;
+  readonly maxTableAnonymousMissingCells: number;
+  readonly maxTableIntrinsicMeasureWork: number;
+  readonly maxTableColumnDistributionWork: number;
+  readonly maxTableRowDistributionWork: number;
+  readonly maxTableCollapsedBorderCandidates: number;
+  readonly maxTableCollapsedBorderSegments: number;
+  readonly maxTableHeaderAssociations: number;
   readonly maxDepth: number;
 }
 
@@ -74,8 +90,8 @@ export interface LayoutPaintStyle {
   readonly italic: boolean;
   readonly underline: boolean;
   readonly strikethrough: boolean;
-  readonly borderColor: CssColor | null;
-  readonly borderStyle: "none" | "solid";
+  readonly borderColors: CssBorderColors;
+  readonly borderStyles: CssBorderStyles;
 }
 
 export interface InlineContinuationGeometry {
@@ -128,6 +144,25 @@ export interface LayoutTextFragment {
   readonly maxContentContribution: CssPixelLength;
 }
 
+export interface LayoutTableCollapsedBorderSegment {
+  readonly id: string;
+  readonly edge: Readonly<{
+    axis: "horizontal" | "vertical";
+    line: number;
+    start: number;
+    end: number;
+  }>;
+  readonly paintPhase: "collapsed-border";
+  readonly formattingNode: FormattingNodeId;
+  readonly documentNode: DocumentNodeRef | null;
+  readonly sourceRange: DocumentSourceRange | null;
+  readonly side: "top" | "right" | "bottom" | "left";
+  readonly borderRect: CssRect;
+  readonly borderWidths: CssEdges;
+  readonly clipRect: CssRect;
+  readonly style: LayoutPaintStyle;
+}
+
 export interface LayoutBoxFragment {
   readonly id: LayoutFragmentId;
   readonly kind: "box" | "control" | "replaced";
@@ -160,6 +195,7 @@ export interface LayoutBoxFragment {
   readonly controlText?: string;
   readonly replacedText?: string;
   readonly visualClusters?: readonly LayoutTextCluster[];
+  readonly tableCollapsedBorderSegments?: readonly LayoutTableCollapsedBorderSegment[];
 }
 
 export type LayoutFragment = LayoutTextFragment | LayoutBoxFragment;

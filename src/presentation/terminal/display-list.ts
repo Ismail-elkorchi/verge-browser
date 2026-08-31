@@ -96,7 +96,6 @@ function commandGroup(fragment: LayoutFragment): readonly Omit<TerminalPaintComm
           rect: box.borderRect
         }));
       }
-      if (fragment.style.borderStyle !== "solid") continue;
       const borderEdge = cssCoordinateAdd(box.borderRect.x, box.borderRect.width);
       const borderBottom = cssCoordinateAdd(box.borderRect.y, box.borderRect.height);
       const paddingEdge = cssCoordinateAdd(box.paddingRect.x, box.paddingRect.width);
@@ -108,6 +107,7 @@ function commandGroup(fragment: LayoutFragment): readonly Omit<TerminalPaintComm
         left: cssMax(cssPx(0), cssCoordinateDifference(box.paddingRect.x, box.borderRect.x))
       });
       for (const side of ["top", "right", "bottom", "left"] as const) {
+        if (fragment.style.borderStyles[side] !== "solid") continue;
         if (borderWidths[side] <= 0) continue;
         commands.push(Object.freeze({
           ...common,
@@ -118,6 +118,33 @@ function commandGroup(fragment: LayoutFragment): readonly Omit<TerminalPaintComm
           borderRect: box.borderRect,
           borderWidths
         }));
+      }
+    }
+    if (
+      fragment.kind === "box" &&
+      fragment.tableCollapsedBorderSegments !== undefined
+    ) {
+      for (const segment of fragment.tableCollapsedBorderSegments) {
+        commands.push(
+          Object.freeze({
+            id: segment.id,
+            kind: "border-side",
+            layoutFragment: fragment.id,
+            formattingNode: segment.formattingNode,
+            documentNode: segment.documentNode,
+            sourceRange: segment.sourceRange,
+            contentStartCodeUnit: null,
+            contentEndCodeUnit: null,
+            rect: segment.borderRect,
+            borderRect: segment.borderRect,
+            borderWidths: segment.borderWidths,
+            clipRect: segment.clipRect,
+            side: segment.side,
+            action: null,
+            semantic: null,
+            style: segment.style,
+          }),
+        );
       }
     }
   }

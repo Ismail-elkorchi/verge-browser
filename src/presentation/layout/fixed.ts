@@ -111,6 +111,10 @@ export function cssMultiply(value: CssPixelLength, factor: number): CssPixelLeng
   return saturatedMultiply(value, factor) as CssPixelLength;
 }
 
+export function cssNegate(value: CssPixelLength): CssPixelLength {
+  return saturatedMultiply(value, -1) as CssPixelLength;
+}
+
 export function cssDivide(value: CssPixelLength, divisor: number): CssPixelLength {
   if (!Number.isFinite(divisor) || divisor === 0) throw new RangeError("CSS fixed-point divisor must be finite and non-zero.");
   requireSafeFixed(value, "CSS fixed-point dividend");

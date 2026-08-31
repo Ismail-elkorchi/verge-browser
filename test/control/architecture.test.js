@@ -234,6 +234,66 @@ test("CSS Grid grammar, item generation, intrinsic sizing, and layout retain one
   );
 });
 
+test("HTML metadata, CSS table fixup, table layout, and terminal painting retain one owner", async () => {
+  const paths = await sourcePaths();
+  const documentTable = (await files(paths.filter((path) => path.startsWith("src/document/table/"))))
+    .map(([, text]) => text).join("\n");
+  const styleTable = (await files(paths.filter((path) => path.startsWith("src/presentation/style/table/"))))
+    .map(([, text]) => text).join("\n");
+  const formattingTable = (await files(paths.filter((path) => path.startsWith("src/presentation/formatting/table/"))))
+    .map(([, text]) => text).join("\n");
+  const layoutTable = (await files(paths.filter((path) => path.startsWith("src/presentation/layout/table/"))))
+    .map(([, text]) => text).join("\n");
+  const genericLayout = await source("src/presentation/layout/layout.ts");
+  const terminal = (await files(paths.filter((path) => path.startsWith("src/presentation/terminal/"))))
+    .map(([, text]) => text).join("\n");
+  const uiAndApplication = (await files(paths.filter((path) => path.startsWith("src/ui/") || path.startsWith("src/app/"))))
+    .map(([, text]) => text).join("\n");
+  const rootDeclaration = await source("dist/mod.d.ts");
+
+  assert.match(documentTable, /HtmlTableMetadata/u);
+  assert.match(documentTable, /HtmlTableCellPlacement/u);
+  assert.match(documentTable, /HtmlTableSlotInterval/u);
+  assert.match(documentTable, /associateTableHeaders/u);
+  assert.match(documentTable, /header block/iu);
+  assert.doesNotMatch(documentTable, /ComputedStyle|LayoutFragment|TerminalCell/u);
+  assert.match(styleTable, /parseTableLayout/u);
+  assert.match(styleTable, /parseBorderCollapse/u);
+  assert.match(styleTable, /parseComponentValues/u);
+  assert.doesNotMatch(styleTable, /FormattingNode|LayoutFragment|TerminalCell/u);
+  assert.match(formattingTable, /fixTableChildren/u);
+  assert.match(formattingTable, /anonymousContainer/u);
+  assert.doesNotMatch(formattingTable, /column measure|rowSpanWork|TerminalCell/iu);
+  assert.match(layoutTable, /buildTableSlotGrid/u);
+  assert.match(layoutTable, /TableSlotGrid/u);
+  assert.match(layoutTable, /measureTableColumns/u);
+  assert.match(layoutTable, /distributeTableWidth/u);
+  assert.match(layoutTable, /buildCollapsedTableBorderGraph/u);
+  assert.match(layoutTable, /resolveCollapsedBorderConflictSets/u);
+  assert.match(layoutTable, /buildCollapsedTableBorderSegments/u);
+  assert.match(layoutTable, /resolveCollapsedTableBorders/u);
+  assert.match(layoutTable, /paintPhase: "collapsed-border"/u);
+  assert.match(layoutTable, /LayoutTableCollapsedBorderSegment/u);
+  assert.match(layoutTable, /layoutTableContainer/u);
+  assert.match(genericLayout, /layoutTableContainer/u);
+  assert.match(genericLayout, /#tableSlotGridCache/u);
+  assert.doesNotMatch(genericLayout, /#table\s*\(|#columnCount\s*\(/u);
+  assert.doesNotMatch(layoutTable, /@ismail-elkorchi\/css-parser|TerminalCell|terminal-ui/u);
+  assert.doesNotMatch(layoutTable, /buildHtmlTableMetadata|associateTableHeaders/u);
+  assert.doesNotMatch(terminal, /(?:colspan|rowspan|slot grid|table-layout|border-collapse|column measure|row distribution)/iu);
+  assert.match(terminal, /tableCollapsedBorderSegments/u);
+  assert.doesNotMatch(terminal, /resolveCollapsedTableBorders|TableCollapsedBorderCandidate/u);
+  assert.doesNotMatch(uiAndApplication, /presentation\/layout\/table|buildTableSlotGrid|distributeTableWidth/u);
+  assert.doesNotMatch(rootDeclaration, /\b(?:TableSlotGrid|TableColumnMeasure|TableCollapsedBorderWinner|HtmlTableMetadataIndex)\b/u);
+  for (const [path, text] of await files(paths)) {
+    assert.doesNotMatch(
+      text,
+      /\b(?:calculateTableColumns|equalWidthTableColumns|legacyTableLayout|simpleTableLayout|fallbackTableLayout|legacyHeaderPlacement)\b/u,
+      `${path} retains a former table algorithm`,
+    );
+  }
+});
+
 test("the document barrel exposes no concrete snapshot or parser implementation", async () => {
   const declaration = await source("dist/document/index.d.ts");
   assert.doesNotMatch(

@@ -84,6 +84,16 @@ import {
   parseContentAlignment,
   parseSelfAlignment
 } from "./alignment.js";
+import {
+  TABLE_PROPERTIES,
+  parseBorderCollapse,
+  parseBorderSpacing,
+  parseCaptionSide,
+  parseEmptyCells,
+  parseTableBorderStyle,
+  parseTableLayout,
+  tablePropertyValueSupported,
+} from "./table/index.js";
 
 const DEFAULT_STYLE_BUDGETS: StyleBudgets = Object.freeze({
   maxStylesheetSources: 64,
@@ -112,7 +122,11 @@ const SUPPORTED_PROPERTIES = new Set([
   "grid-row-start", "grid-row-end", "grid-column", "grid-row", "grid-area", "justify-items",
   "justify-self", "place-items", "place-self", "place-content", "border", "border-width", "border-top-width",
   "border-right-width", "border-bottom-width", "border-left-width", "border-style",
-  "border-color", "overflow", "overflow-x", "overflow-y",
+  "border-top-style", "border-right-style", "border-bottom-style", "border-left-style",
+  "border-color", "border-top-color", "border-right-color", "border-bottom-color", "border-left-color",
+  "border-top", "border-right", "border-bottom", "border-left",
+  "table-layout", "border-collapse", "border-spacing", "caption-side", "empty-cells",
+  "overflow", "overflow-x", "overflow-y",
   "position", "top", "right", "bottom", "left", "inset", "inset-block", "inset-block-start",
   "inset-block-end", "inset-inline", "inset-inline-start", "inset-inline-end", "z-index",
   "float", "clear", "clip", "clip-path",
@@ -122,7 +136,7 @@ const SUPPORTED_PROPERTIES = new Set([
 const INHERITED_PROPERTIES = new Set([
   "visibility", "white-space", "color", "font-weight", "font-style", "font-size", "line-height", "text-transform",
   "direction", "text-align", "text-indent", "line-break", "word-break", "overflow-wrap", "hyphens", "tab-size",
-  "list-style", "list-style-type"
+  "list-style", "list-style-type", "border-collapse", "border-spacing", "caption-side", "empty-cells"
 ]);
 
 const ASCII_INSENSITIVE_ATTRIBUTES = new Set([
@@ -815,6 +829,7 @@ function implementationSupportsDeclaration(source: string): boolean {
     && property !== "row-gap" && property !== "column-gap" && property !== "gap") {
     return gridPropertyValueSupported(property, value);
   }
+  if (TABLE_PROPERTIES.has(property)) return tablePropertyValueSupported(property, value);
   const validation = validateCssPropertyValue(parsed.value);
   if (validation.status !== "valid") return false;
   const keyword = (...values: readonly string[]): boolean => values.includes(value);
@@ -909,10 +924,7 @@ function implementationSupportsDeclaration(source: string): boolean {
       "start", "flex-start", "center", "end", "flex-end", "stretch", "space-between", "space-around", "space-evenly"
     );
     case "border": {
-      const parts = splitTopLevel(value, "space");
-      return parts !== null && parts.length > 0 && parts.every((part) =>
-        parseBorderWidth(part) !== null || part === "none" || part === "solid"
-        || parseColor(part, TRANSPARENT) !== undefined);
+      return parseSupportedBorder(value, TRANSPARENT) !== null;
     }
     case "border-width": return (splitTopLevel(value, "space") ?? []).length >= 1
       && (splitTopLevel(value, "space")?.length ?? 0) <= 4
@@ -921,8 +933,26 @@ function implementationSupportsDeclaration(source: string): boolean {
     case "border-right-width":
     case "border-bottom-width":
     case "border-left-width": return parseBorderWidth(value) !== null;
-    case "border-style": return keyword("none", "solid");
-    case "border-color": return parseColor(value, TRANSPARENT) !== undefined;
+    case "border-style": return (splitTopLevel(value, "space") ?? []).length >= 1
+      && (splitTopLevel(value, "space")?.length ?? 0) <= 4
+      && (splitTopLevel(value, "space") ?? []).every((part) => parseTableBorderStyle(part) !== null);
+    case "border-top-style":
+    case "border-right-style":
+    case "border-bottom-style":
+    case "border-left-style": return parseTableBorderStyle(value) !== null;
+    case "border-color": return (splitTopLevel(value, "space") ?? []).length >= 1
+      && (splitTopLevel(value, "space")?.length ?? 0) <= 4
+      && (splitTopLevel(value, "space") ?? []).every((part) => parseColor(part, TRANSPARENT) !== undefined);
+    case "border-top-color":
+    case "border-right-color":
+    case "border-bottom-color":
+    case "border-left-color": return parseColor(value, TRANSPARENT) !== undefined;
+    case "border-top":
+    case "border-right":
+    case "border-bottom":
+    case "border-left": {
+      return parseSupportedBorder(value, TRANSPARENT) !== null;
+    }
     case "overflow":
     case "overflow-x":
     case "overflow-y": return keyword("visible", "hidden", "clip");
@@ -1488,9 +1518,17 @@ function initialStyle(parent: ComputedStyle | null, replaced: boolean, htmlDirec
       boxSizing: "content-box",
       rowGap: NORMAL_GAP,
       columnGap: NORMAL_GAP,
-      borderStyle: "none",
+      borderStyles: { top: "none", right: "none", bottom: "none", left: "none" },
       borderWidths: edges(MEDIUM_BORDER),
-      borderColor: null,
+      borderColors: { top: null, right: null, bottom: null, left: null },
+      tableLayout: "auto",
+      borderCollapse: parent?.box.borderCollapse ?? "separate",
+      borderSpacing: parent?.box.borderSpacing ?? Object.freeze({
+        horizontal: Object.freeze({ kind: "length", value: 2, unit: "px" }),
+        vertical: Object.freeze({ kind: "length", value: 2, unit: "px" }),
+      }),
+      captionSide: parent?.box.captionSide ?? "top",
+      emptyCells: parent?.box.emptyCells ?? "show",
       flexDirection: "row",
       flexWrap: "nowrap",
       flexGrow: 0,
@@ -1706,7 +1744,46 @@ function parseBorderWidth(value: string): CssLength | null {
   if (normalized === "thin") return Object.freeze({ kind: "length", value: 1, unit: "px" });
   if (normalized === "medium") return MEDIUM_BORDER;
   if (normalized === "thick") return Object.freeze({ kind: "length", value: 5, unit: "px" });
-  return parseLength(normalized, false);
+  const parsed = parseLength(normalized, false);
+  if (parsed?.kind === "length" && parsed.unit === "%") return null;
+  if (parsed?.kind === "calculation" && parsed.calculation.percentageDependence !== "none") return null;
+  return parsed;
+}
+
+interface ParsedSupportedBorder {
+  readonly width: CssLength;
+  readonly style: ComputedStyle["box"]["borderStyles"]["top"];
+  readonly color: CssColor | null;
+}
+
+function parseSupportedBorder(value: string, currentColor: CssColor | null): ParsedSupportedBorder | null {
+  const parts = splitTopLevel(value.trim(), "space");
+  if (parts === null || parts.length < 1 || parts.length > 3) return null;
+  let width: CssLength | null = null;
+  let borderStyle: ParsedSupportedBorder["style"] | null = null;
+  let color: CssColor | null | undefined;
+  for (const part of parts) {
+    const parsedWidth = parseBorderWidth(part);
+    if (parsedWidth !== null) {
+      if (width !== null) return null;
+      width = parsedWidth;
+      continue;
+    }
+    const parsedStyle = parseTableBorderStyle(part);
+    if (parsedStyle !== null) {
+      if (borderStyle !== null) return null;
+      borderStyle = parsedStyle;
+      continue;
+    }
+    const parsedColor = colorFromComponentValues(part, currentColor);
+    if (parsedColor === undefined || color !== undefined) return null;
+    color = parsedColor;
+  }
+  return Object.freeze({
+    width: width ?? MEDIUM_BORDER,
+    style: borderStyle ?? "none",
+    color: color === undefined ? currentColor : color,
+  });
 }
 
 function immutableComputedStyle(style: ComputedStyle): ComputedStyle {
@@ -1728,7 +1805,14 @@ function immutableComputedStyle(style: ComputedStyle): ComputedStyle {
       padding: edge(style.box.padding),
       inset: edge(style.box.inset),
       borderWidths: edge(style.box.borderWidths),
-      borderColor: color(style.box.borderColor),
+      borderStyles: Object.freeze({ ...style.box.borderStyles }),
+      borderColors: Object.freeze({
+        top: color(style.box.borderColors.top),
+        right: color(style.box.borderColors.right),
+        bottom: color(style.box.borderColors.bottom),
+        left: color(style.box.borderColors.left),
+      }),
+      borderSpacing: Object.freeze({ ...style.box.borderSpacing }),
       legacyClip: Object.freeze(style.box.legacyClip.kind === "auto"
         ? { kind: "auto" }
         : { kind: "rect", edges: edge(style.box.legacyClip.edges) }),
@@ -2478,36 +2562,19 @@ function computeStyle(
   placementField("columnEnd", "grid-column-end");
   placementField("rowStart", "grid-row-start");
   placementField("rowEnd", "grid-row-end");
-  const borderStyle = value(["border-style", "border"]);
-  if (borderStyle !== null) {
-    const wide = cssWide(borderStyle.value);
-    const normalized = borderStyle.value.trim().toLowerCase();
-    const computed: ComputedStyle["box"]["borderStyle"] | null = wide === "inherit"
-      ? parent?.box.borderStyle ?? "none"
-      : wide === "initial" || wide === "unset"
-        ? "none"
-        : /\bsolid\b/u.test(normalized)
-          ? "solid"
-          : /\b(?:double|dashed|dotted|groove|ridge|inset|outset)\b/u.test(normalized)
-            ? null
-            : "none";
-    if (computed === null) unsupported(borderStyle);
-    else style = { ...style, box: { ...style.box, borderStyle: computed } };
-  }
   const borderWidthSides = [
-    ["border-top-width", "top", 0], ["border-right-width", "right", 1],
-    ["border-bottom-width", "bottom", 2], ["border-left-width", "left", 3]
+    ["border-top-width", "border-top", "top", 0], ["border-right-width", "border-right", "right", 1],
+    ["border-bottom-width", "border-bottom", "bottom", 2], ["border-left-width", "border-left", "left", 3]
   ] as const;
-  for (const [property, side, index] of borderWidthSides) {
-    const entry = value([property, "border-width", "border"]);
+  for (const [property, sideShorthand, side, index] of borderWidthSides) {
+    const entry = value([property, sideShorthand, "border-width", "border"]);
     if (entry === null) continue;
     const wide = cssWide(entry.value);
     let width: CssLength | null;
     if (wide === "inherit") width = parent?.box.borderWidths[side] ?? MEDIUM_BORDER;
     else if (wide === "initial" || wide === "unset") width = MEDIUM_BORDER;
-    else if (entry.property === "border") {
-      const token = splitTopLevel(entry.value, "space")?.find((part) => parseBorderWidth(part) !== null);
-      width = token === undefined ? MEDIUM_BORDER : parseBorderWidth(token);
+    else if (entry.property === "border" || entry.property === sideShorthand) {
+      width = parseSupportedBorder(entry.value, style.text.color)?.width ?? null;
     } else if (entry.property === "border-width") {
       const parts = splitTopLevel(entry.value, "space") ?? [];
       const expanded = fourSides(parts);
@@ -2519,15 +2586,86 @@ function computeStyle(
       box: { ...style.box, borderWidths: { ...style.box.borderWidths, [side]: width } }
     };
   }
-  const borderColor = value(["border-color", "border"]);
-  if (borderColor !== null) {
-    const wide = cssWide(borderColor.value);
-    const color = wide === "inherit"
-      ? parent?.box.borderColor ?? null
-      : wide === "initial" || wide === "unset"
-        ? null
-        : colorFromComponentValues(borderColor.value, style.text.color);
-    if (color !== undefined) style = { ...style, box: { ...style.box, borderColor: color } };
+  const borderStyleSides = [
+    ["border-top-style", "border-top", "top", 0], ["border-right-style", "border-right", "right", 1],
+    ["border-bottom-style", "border-bottom", "bottom", 2], ["border-left-style", "border-left", "left", 3]
+  ] as const;
+  for (const [property, sideShorthand, side, index] of borderStyleSides) {
+    const entry = value([property, sideShorthand, "border-style", "border"]);
+    if (entry === null) continue;
+    const wide = cssWide(entry.value);
+    let borderStyle: ComputedStyle["box"]["borderStyles"][typeof side] | null;
+    if (wide === "inherit") borderStyle = parent?.box.borderStyles[side] ?? "none";
+    else if (wide === "initial" || wide === "unset") borderStyle = "none";
+    else if (entry.property === "border-style") {
+      const expanded = fourSides(splitTopLevel(entry.value, "space") ?? []);
+      borderStyle = expanded === null ? null : parseTableBorderStyle(expanded[index]);
+    } else if (entry.property === "border" || entry.property === sideShorthand) {
+      borderStyle = parseSupportedBorder(entry.value, style.text.color)?.style ?? null;
+    } else borderStyle = parseTableBorderStyle(entry.value);
+    if (borderStyle === null) unsupported({ ...entry, property });
+    else style = { ...style, box: { ...style.box, borderStyles: { ...style.box.borderStyles, [side]: borderStyle } } };
+  }
+  const borderColorSides = [
+    ["border-top-color", "border-top", "top", 0], ["border-right-color", "border-right", "right", 1],
+    ["border-bottom-color", "border-bottom", "bottom", 2], ["border-left-color", "border-left", "left", 3]
+  ] as const;
+  for (const [property, sideShorthand, side, index] of borderColorSides) {
+    const entry = value([property, sideShorthand, "border-color", "border"]);
+    if (entry === null) continue;
+    const wide = cssWide(entry.value);
+    let borderColor: CssColor | null | undefined;
+    if (wide === "inherit") borderColor = parent?.box.borderColors[side] ?? null;
+    else if (wide === "initial" || wide === "unset") borderColor = null;
+    else if (entry.property === "border-color") {
+      const expanded = fourSides(splitTopLevel(entry.value, "space") ?? []);
+      borderColor = expanded === null ? undefined : colorFromComponentValues(expanded[index], style.text.color);
+    } else if (entry.property === "border" || entry.property === sideShorthand) {
+      borderColor = parseSupportedBorder(entry.value, style.text.color)?.color;
+    } else borderColor = colorFromComponentValues(entry.value, style.text.color);
+    if (borderColor === undefined) unsupported({ ...entry, property });
+    else style = { ...style, box: { ...style.box, borderColors: { ...style.box.borderColors, [side]: borderColor } } };
+  }
+  const tableLayout = value("table-layout");
+  if (tableLayout !== null) {
+    const wide = cssWide(tableLayout.value);
+    const computed = wide === "inherit" ? parent?.box.tableLayout ?? "auto"
+      : wide === "initial" || wide === "unset" ? "auto" : parseTableLayout(tableLayout.value);
+    if (computed === null) unsupported(tableLayout);
+    else style = { ...style, box: { ...style.box, tableLayout: computed } };
+  }
+  const borderCollapse = value("border-collapse");
+  if (borderCollapse !== null) {
+    const wide = cssWide(borderCollapse.value);
+    const computed = wide === "inherit" || wide === "unset" ? parent?.box.borderCollapse ?? "separate"
+      : wide === "initial" ? "separate" : parseBorderCollapse(borderCollapse.value);
+    if (computed === null) unsupported(borderCollapse);
+    else style = { ...style, box: { ...style.box, borderCollapse: computed } };
+  }
+  const borderSpacing = value("border-spacing");
+  if (borderSpacing !== null) {
+    const wide = cssWide(borderSpacing.value);
+    const computed = wide === "inherit" || wide === "unset" ? parent?.box.borderSpacing ?? style.box.borderSpacing
+      : wide === "initial" ? Object.freeze({
+          horizontal: Object.freeze({ kind: "length", value: 2, unit: "px" } as const),
+          vertical: Object.freeze({ kind: "length", value: 2, unit: "px" } as const),
+        })
+        : parseBorderSpacing(borderSpacing.value);
+    if (computed === null) unsupported(borderSpacing);
+    else style = { ...style, box: { ...style.box, borderSpacing: computed } };
+  }
+  for (const [property, initial, parser] of [
+    ["caption-side", "top", parseCaptionSide],
+    ["empty-cells", "show", parseEmptyCells],
+  ] as const) {
+    const entry = value(property);
+    if (entry === null) continue;
+    const wide = cssWide(entry.value);
+    const inherited = property === "caption-side" ? parent?.box.captionSide : parent?.box.emptyCells;
+    const computed = wide === "inherit" || wide === "unset" ? inherited ?? initial
+      : wide === "initial" ? initial : parser(entry.value);
+    if (computed === null) unsupported(entry);
+    else style = { ...style, box: { ...style.box, [property === "caption-side" ? "captionSide" : "emptyCells"]: computed } };
   }
   const overflow = value("overflow");
   const overflowX = value("overflow-x");

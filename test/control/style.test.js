@@ -235,7 +235,7 @@ test("CSS-wide keywords resolve inherited and initial typed box and text values"
   assert.deepEqual(child.box.padding.left, { kind: "zero" });
   assert.deepEqual(child.box.columnGap, { kind: "length", value: 2, unit: "ch" });
   assert.equal(child.box.overflowX, "hidden");
-  assert.equal(child.box.borderStyle, "solid");
+  assert.deepEqual(child.box.borderStyles, { top: "solid", right: "solid", bottom: "solid", left: "solid" });
   assert.deepEqual(child.box.width, { kind: "auto" });
   assert.deepEqual(child.box.maxWidth, { kind: "none" });
 });
