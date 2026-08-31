@@ -1,9 +1,9 @@
 {
   "schemaVersion": 2,
-  "sourceBranch": "feat/web-compatibility-baseline",
+  "sourceBranch": "feat/css-grid-layout",
   "corpusManifest": "corpus.json",
-  "fixtureCount": 14,
-  "caseCount": 40,
+  "fixtureCount": 30,
+  "caseCount": 88,
   "metrics": {
     "logicalMeaningfulTextRecall": 1,
     "paintedCellMeaningfulTextRecall": 1,
@@ -26,6 +26,7 @@
     "unsupportedAtRules": 0,
     "unsupportedProperties": 0,
     "unsupportedValues": 0,
-    "stylesheetAndResourceFailures": 0
+    "stylesheetAndResourceFailures": 0,
+    "gridStructureFailures": 0
   }
 }

@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Grid search results</title><style>
+#search-layout{display:grid;grid-template-columns:[sidebar-start] 176px [results-start] 1fr [results-end];gap:16px}
+#filters{grid-column:sidebar-start/results-start}.result{grid-column:results-start/results-end}
+</style></head><body><main><h1>Library search</h1><div id="search-layout">
+<aside id="filters"><h2>Filters</h2><label>Topic <select><option>History</option></select></label></aside>
+<article class="result" id="result-one"><h2><a href="/atlas">Coastal atlas</a></h2><p>Maps and field notes.</p></article>
+<article class="result" id="result-two"><h2><a href="/archive">Harbor archive</a></h2><p>Historic shipping records.</p></article>
+</div></main></body></html>

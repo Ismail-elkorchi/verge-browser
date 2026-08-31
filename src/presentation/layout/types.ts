@@ -45,6 +45,15 @@ export interface LayoutBudgets {
   readonly maxBreakOpportunities: number;
   readonly maxVisualRuns: number;
   readonly maxFlexSizingWork: number;
+  readonly maxIntrinsicContributionCacheEntries: number;
+  readonly maxGridItems: number;
+  readonly maxExplicitGridTracks: number;
+  readonly maxImplicitGridTracks: number;
+  readonly maxGridOccupancyIntervals: number;
+  readonly maxGridPlacementSteps: number;
+  readonly maxGridNamedLineResolutions: number;
+  readonly maxGridAutoRepeatTracks: number;
+  readonly maxGridTrackSizingWork: number;
   readonly maxDepth: number;
 }
 
@@ -213,7 +222,11 @@ export type LayoutOutcome =
     }
   | {
       readonly status: "rejected";
-      readonly reason: "invalid-context" | "invalid-fixed-point-input" | "invalid-budget";
+      readonly reason:
+        | "invalid-context"
+        | "invalid-fixed-point-input"
+        | "invalid-budget"
+        | "intrinsic-sizing-cycle";
     }
   | { readonly status: "unsupported"; readonly feature: string };
 

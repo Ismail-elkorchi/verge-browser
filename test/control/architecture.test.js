@@ -185,6 +185,55 @@ test("web compatibility tooling and CSS ownership remain outside the runtime ren
   assert.doesNotMatch(compatibilityHarness, /parseWebDocument/u);
 });
 
+test("CSS Grid grammar, item generation, intrinsic sizing, and layout retain one owner", async () => {
+  const paths = await sourcePaths();
+  const styleGrid = (await files(paths.filter((path) => path.startsWith("src/presentation/style/grid/"))))
+    .map(([, text]) => text).join("\n");
+  const formatting = await source("src/presentation/formatting/build.ts");
+  const layoutGrid = (await files(paths.filter((path) => path.startsWith("src/presentation/layout/grid/"))))
+    .map(([, text]) => text).join("\n");
+  const intrinsic = (await files(paths.filter((path) => path.startsWith("src/presentation/layout/intrinsic/"))))
+    .map(([, text]) => text).join("\n");
+  const genericLayout = await source("src/presentation/layout/layout.ts");
+  const gridContainerLayout = await source("src/presentation/layout/grid/container-layout.ts");
+  const gridIntrinsicLayout = await source("src/presentation/layout/grid/intrinsic-layout.ts");
+  const terminal = (await files(paths.filter((path) => path.startsWith("src/presentation/terminal/"))))
+    .map(([, text]) => text).join("\n");
+  const uiAndApplication = (await files(paths.filter((path) => path.startsWith("src/ui/") || path.startsWith("src/app/"))))
+    .map(([, text]) => text).join("\n");
+  const rootDeclaration = await source("dist/mod.d.ts");
+
+  assert.match(styleGrid, /parseGridTrackList/u);
+  assert.match(styleGrid, /parseComponentValues/u);
+  assert.doesNotMatch(styleGrid, /LayoutFragment|TerminalCell/u);
+  assert.match(formatting, /kind === "grid-container"/u);
+  assert.match(formatting, /"grid-item"/u);
+  assert.match(intrinsic, /IntrinsicSizeContributions/u);
+  assert.match(layoutGrid, /placeGridItems/u);
+  assert.match(layoutGrid, /sizeGridTracks/u);
+  assert.match(gridContainerLayout, /export function layoutGridContainer/u);
+  assert.match(gridIntrinsicLayout, /export function intrinsicGrid(?:Inline|Block)Size/u);
+  assert.match(genericLayout, /layoutGridContainer/u);
+  assert.doesNotMatch(
+    genericLayout,
+    /\b(?:expandExplicitGridAxis|buildGridTrackSequence|placeGridItems|sizeGridTracks|resolvedGridArea)\b/u
+  );
+  assert.doesNotMatch(layoutGrid, /@ismail-elkorchi\/css-parser|TerminalCell|terminal-ui/u);
+  assert.doesNotMatch(terminal, /(?:parseGrid|grid-template|auto-placement|track sizing|flexFactor)/iu);
+  assert.doesNotMatch(uiAndApplication, /presentation\/layout\/grid|(?:place|size)GridTracks?/u);
+  for (const [path, text] of await files(paths)) {
+    assert.doesNotMatch(
+      text,
+      /\b(?:CssGridBreadth|CssGridTrack|CssGridItemAlignment|CssGridContainerAlignment|parseGridItemAlignment|parseGridContainerAlignment)\b|#layoutGrid\b/u,
+      `${path} retains a former Grid contract`
+    );
+  }
+  assert.doesNotMatch(
+    rootDeclaration,
+    /\b(?:CssGridTrackBreadth|CssGridTrackSizingFunction|ExpandedGridAxis|GridPlacementResult|GridTrackSizingResult|IntrinsicSizeContributions)\b/u
+  );
+});
+
 test("the document barrel exposes no concrete snapshot or parser implementation", async () => {
   const declaration = await source("dist/document/index.d.ts");
   assert.doesNotMatch(

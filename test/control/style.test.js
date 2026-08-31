@@ -240,36 +240,147 @@ test("CSS-wide keywords resolve inherited and initial typed box and text values"
   assert.deepEqual(child.box.maxWidth, { kind: "none" });
 });
 
-test("grid tracks and fixed repeat/minmax values are typed without overclaiming automatic tracks", () => {
+test("Grid track lists retain structured sizing functions and repeat contracts", () => {
   const supported = setup("<style>x-grid{display:grid;grid-template-columns:2fr 10ch auto}</style><x-grid></x-grid>");
-  assert.deepEqual(supported.styles.style(named(supported.document, "x-grid")).box.gridTemplateColumns, [
-    { kind: "fraction", value: 2 },
-    { kind: "length", value: { kind: "length", value: 10, unit: "ch" } },
-    { kind: "auto" }
+  const tracks = supported.styles.style(named(supported.document, "x-grid")).box.gridTemplateColumns;
+  assert.equal(tracks.kind, "track-list");
+  assert.deepEqual(tracks.entries.map((entry) => entry.kind === "track" ? entry.sizing : entry), [
+    { kind: "breadth", breadth: { kind: "flex", factor: 2 } },
+    { kind: "breadth", breadth: { kind: "length", value: { kind: "length", value: 10, unit: "ch" } } },
+    { kind: "breadth", breadth: { kind: "auto" } }
   ]);
   const repeated = setup("<style>x-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}</style><x-grid></x-grid>");
-  assert.deepEqual(repeated.styles.style(named(repeated.document, "x-grid")).box.gridTemplateColumns, [
-    {
-      kind: "minmax",
-      minimum: { kind: "length", value: { kind: "zero" } },
-      maximum: { kind: "fraction", value: 1 }
-    },
-    {
-      kind: "minmax",
-      minimum: { kind: "length", value: { kind: "zero" } },
-      maximum: { kind: "fraction", value: 1 }
-    }
-  ]);
-  const unsupported = setup("<style>x-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(10ch,1fr))}</style><x-grid></x-grid>");
-  assert.deepEqual(unsupported.styles.style(named(unsupported.document, "x-grid")).box.gridTemplateColumns, []);
-  assert.ok(unsupported.styles.diagnostics.some((entry) => entry.code === "value-unsupported"));
+  const repeatedTracks = repeated.styles.style(named(repeated.document, "x-grid")).box.gridTemplateColumns;
+  assert.equal(repeatedTracks.kind, "track-list");
+  assert.equal(repeatedTracks.entries[0].kind, "repeat");
+  assert.deepEqual(repeatedTracks.entries[0].repetition, { kind: "fixed", count: 2 });
+
+  const automatic = setup("<style>x-grid{display:grid;grid-template-columns:[cards] repeat(auto-fit,minmax(10ch,1fr)) [cards-end]}</style><x-grid></x-grid>");
+  const automaticTracks = automatic.styles.style(named(automatic.document, "x-grid")).box.gridTemplateColumns;
+  assert.equal(automaticTracks.kind, "track-list");
+  assert.equal(automaticTracks.entries[1].kind, "repeat");
+  assert.deepEqual(automaticTracks.entries[1].repetition, { kind: "auto-fit" });
+  assert.equal(automatic.styles.diagnostics.length, 0);
 
   const nestedTrack = "repeat(1,".repeat(40) + "1fr" + ")".repeat(40);
   const nested = setup(`<style>x-grid{display:grid;grid-template-columns:${nestedTrack}}</style><x-grid></x-grid>`);
-  assert.deepEqual(nested.styles.style(named(nested.document, "x-grid")).box.gridTemplateColumns, []);
+  assert.deepEqual(nested.styles.style(named(nested.document, "x-grid")).box.gridTemplateColumns, { kind: "none" });
   assert.ok(nested.styles.diagnostics.some((entry) =>
     entry.code === "value-unsupported" || entry.code === "property-invalid"
   ));
+});
+
+test("Grid computed values retain templates, areas, placements, implicit tracks, and alignment", () => {
+  const { document, styles } = setup(`<style>
+    #grid {
+      display:grid;
+      grid-template:[top] "header header" 20px [middle] "sidebar main" minmax(30px,auto) [bottom]
+        / [left] 80px [content] minmax(0,1fr) [right];
+      grid-auto-columns:min-content 2fr;
+      grid-auto-rows:fit-content(40px) max-content;
+      grid-auto-flow:column dense;
+      place-items:normal baseline;
+      place-content:space-around space-evenly;
+      gap:3px 5px;
+    }
+    #item {
+      grid-area:sidebar-start 2 / content -1 / span 2 footer / span 3 slot;
+      place-self:center stretch;
+    }
+  </style><div id="grid"><div id="item">item</div></div>`);
+  const grid = styles.style(document.elementById("grid")).box;
+  assert.equal(grid.gridTemplateRows.kind, "track-list");
+  assert.equal(grid.gridTemplateRows.entries.at(-1).kind, "line-names");
+  assert.equal(grid.gridTemplateColumns.kind, "track-list");
+  assert.equal(grid.gridTemplateAreas.kind, "areas");
+  assert.deepEqual(grid.gridTemplateAreas.areas.get("sidebar"), {
+    name: "sidebar", rowStart: 1, rowEnd: 2, columnStart: 0, columnEnd: 1
+  });
+  assert.equal(grid.gridAutoColumns.length, 2);
+  assert.equal(grid.gridAutoRows[0].kind, "fit-content");
+  assert.deepEqual(grid.gridAutoFlow, { axis: "column", packing: "dense" });
+  assert.deepEqual(grid.alignItems, { position: "normal", overflow: "default" });
+  assert.deepEqual(grid.justifyItems, { position: "baseline", overflow: "default" });
+  assert.deepEqual(grid.alignContent, { value: "space-around", overflow: "default" });
+  assert.deepEqual(grid.justifyContent, { value: "space-evenly", overflow: "default" });
+  assert.deepEqual(grid.rowGap, { kind: "length", value: 3, unit: "px" });
+  assert.deepEqual(grid.columnGap, { kind: "length", value: 5, unit: "px" });
+
+  const item = styles.style(document.elementById("item")).box;
+  assert.deepEqual(item.gridPlacement.rowStart, {
+    kind: "line", span: false, index: 2, name: "sidebar-start"
+  });
+  assert.deepEqual(item.gridPlacement.columnStart, {
+    kind: "line", span: false, index: -1, name: "content"
+  });
+  assert.deepEqual(item.gridPlacement.rowEnd, {
+    kind: "line", span: true, index: 2, name: "footer"
+  });
+  assert.deepEqual(item.gridPlacement.columnEnd, {
+    kind: "line", span: true, index: 3, name: "slot"
+  });
+  assert.deepEqual(item.alignSelf, { position: "center", overflow: "default" });
+  assert.deepEqual(item.justifySelf, { position: "stretch", overflow: "default" });
+  assert.equal(styles.diagnostics.length, 0);
+
+  const templates = setup(`<style>
+    #tracks{display:grid;grid-template:none / [content] 1fr}
+    #areas{display:grid;grid-template:"main main"}
+  </style><div id="tracks"></div><div id="areas"></div>`);
+  const trackTemplate = templates.styles.style(templates.document.elementById("tracks")).box;
+  assert.equal(trackTemplate.gridTemplateRows.kind, "none");
+  assert.equal(trackTemplate.gridTemplateColumns.kind, "track-list");
+  const areaTemplate = templates.styles.style(templates.document.elementById("areas")).box;
+  assert.equal(areaTemplate.gridTemplateAreas.kind, "areas");
+  assert.equal(areaTemplate.gridTemplateColumns.kind, "none");
+  assert.equal(templates.styles.diagnostics.length, 0);
+
+  const normalGap = setup(`<div id="grid" style="display:grid;gap:normal"></div>`);
+  const normalGapStyle = normalGap.styles.style(normalGap.document.elementById("grid")).box;
+  assert.deepEqual(normalGapStyle.rowGap, { kind: "normal" });
+  assert.deepEqual(normalGapStyle.columnGap, { kind: "normal" });
+  assert.equal(implementationSupportsCondition("gap:normal"), true);
+});
+
+test("invalid Grid grammar remains invalid and implementation support uses the owning parsers", () => {
+  for (const condition of [
+    "grid-template-columns:[start] 1fr [end]",
+    "grid-template-columns:repeat(auto-fit,minmax(10ch,1fr))",
+    "grid-template-areas:\"head head\" \"side main\"",
+    "grid-template:none / [content] 1fr",
+    "grid-template:\"main main\"",
+    "grid-column:content -1 / span 2 item",
+    "grid-auto-flow:row",
+    "grid-auto-flow:column",
+    "grid-auto-flow:dense",
+    "grid-auto-flow:row dense",
+    "grid-auto-flow:dense row",
+    "grid-auto-flow:column dense",
+    "grid-auto-flow:dense column",
+    "place-content:space-around space-evenly",
+    "justify-self:safe end",
+    "align-self:unsafe center"
+  ]) assert.equal(implementationSupportsCondition(condition), true, condition);
+  for (const condition of [
+    "grid-template-columns:repeat(auto-fit,1fr)",
+    "grid-template-columns:repeat(auto-fill,fit-content(20px))",
+    "grid-template-columns:minmax(1fr,20px)",
+    "grid-template-columns:subgrid",
+    "grid-template-columns:masonry",
+    "grid-column:0",
+    "grid-column:span 0",
+    "grid-column:-1 span",
+    "grid-template-areas:\"a a\" \"a b\"",
+    "grid-template:[auto] \"main\"",
+    "grid-template:\"main\" / repeat(2,10px)",
+    "grid-template:\"main\" / repeat(auto-fit,10px)",
+    "grid-auto-flow:row row",
+    "grid-auto-flow:column column",
+    "grid-auto-flow:dense dense",
+    "grid-auto-flow:row column",
+    "grid-auto-flow:row dense column",
+    "grid:auto-flow / 1fr"
+  ]) assert.equal(implementationSupportsCondition(condition), false, condition);
 });
 
 test("flex wrapping and alignment retain typed computed values and CSS-wide semantics", () => {
@@ -281,12 +392,12 @@ test("flex wrapping and alignment retain typed computed values and CSS-wide sema
   const parent = styles.style(document.elementById("parent"));
   assert.equal(parent.box.flexDirection, "column");
   assert.equal(parent.box.flexWrap, "wrap-reverse");
-  assert.equal(parent.box.justifyContent, "space-between");
-  assert.equal(parent.box.alignItems, "center");
+  assert.deepEqual(parent.box.justifyContent, { value: "space-between", overflow: "default" });
+  assert.deepEqual(parent.box.alignItems, { position: "center", overflow: "default" });
   const child = styles.style(document.elementById("child"));
   assert.equal(child.box.flexWrap, "wrap-reverse");
-  assert.equal(child.box.justifyContent, "space-between");
-  assert.equal(child.box.alignItems, "stretch");
+  assert.deepEqual(child.box.justifyContent, { value: "space-between", overflow: "default" });
+  assert.deepEqual(child.box.alignItems, { position: "normal", overflow: "default" });
 });
 
 test("cascade layers, revert-layer, and implementation-backed supports conditions are ordered", () => {
@@ -507,7 +618,7 @@ test("flex item and positioned-flow properties retain typed computed values", ()
   assert.equal(item.flexShrink, 3);
   assert.equal(item.flexBasis.kind, "calculation");
   assert.equal(item.order, -2);
-  assert.equal(item.alignSelf, "baseline");
+  assert.deepEqual(item.alignSelf, { position: "baseline", overflow: "default" });
   assert.deepEqual(item.inset.left, { kind: "length", value: 4, unit: "px" });
   assert.equal(item.zIndex, 7);
   assert.equal(item.float, "right");

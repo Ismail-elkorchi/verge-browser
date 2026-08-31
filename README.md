@@ -52,7 +52,7 @@ replacing the current page.
 
 Author CSS contributes page colors, emphasis, visibility, spacing, borders,
 block/inline flow, flexible sizing and alignment, positioned layout, floats,
-and grids with explicit CSS-pixel tracks. Verge resolves typed custom-property
+and horizontal-writing-mode Grid placement, track sizing, and alignment. Verge resolves typed custom-property
 fallbacks and media queries against the CSS viewport before terminal cell
 snapping. Reader view ignores author styling, and page CSS
 never controls browser chrome. Document focus participates in selector matching
@@ -108,9 +108,11 @@ Verge is an HTML browser, not a Chromium replacement. It does not execute page
 JavaScript or attempt pixel layout. Its CSS profile covers block/inline flow,
 lists, structured tables, generated text, horizontal-writing-mode flex sizing,
 relative/absolute/fixed/sticky positioning, stacking, floats, and explicit grid
-tracks. It does not yet cover complete grid placement, table spans and border
-collapse, vertical writing modes, animation, web fonts, raster image decoding,
-or page JavaScript. Client-rendered
+and implicit Grid tracks, named lines and areas, spans, sparse and dense
+auto-placement, intrinsic and flexible track sizing, auto-fill/auto-fit, and
+Grid item/content alignment. It does not cover subgrid, masonry, vertical
+writing modes, table spans and border collapse, animation, web fonts, raster
+image decoding, or page JavaScript. Client-rendered
 sites, anti-bot challenges, media, and unsupported form encodings may therefore
 be unavailable. Network access remains constrained by the package’s protocol,
 redirect, content-type, timeout, and size policies.

@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Named Grid documentation</title><style>
+#shell{display:grid;grid-template-columns:160px 1fr;grid-template-rows:auto 1fr auto;
+grid-template-areas:"header header" "nav content" "footer footer";gap:8px}
+header{grid-area:header}nav{grid-area:nav}main{grid-area:content}footer{grid-area:footer}
+</style></head><body><div id="shell"><header id="doc-header"><h1>Harbor API</h1></header>
+<nav id="doc-nav" aria-label="Documentation"><a href="#routes">Routes</a></nav>
+<main id="doc-main"><h2 id="routes">Routes</h2><p>Requests use stable resource identifiers.</p></main>
+<footer id="doc-footer">Harbor API reference</footer></div></body></html>

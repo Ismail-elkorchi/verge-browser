@@ -196,6 +196,59 @@ function stablePayload(snapshot, pipeline, requests) {
   });
 }
 
+function principalRectangle(snapshot, pipeline, elementId) {
+  const documentNode = snapshot.document.elementById(elementId);
+  if (documentNode === undefined || documentNode === null) return null;
+  const fragment = pipeline.layout.forDocumentNode(documentNode)
+    .find((candidate) => candidate.kind === "box" && candidate.borderRect.width > 0 && candidate.borderRect.height > 0);
+  if (fragment === undefined) return null;
+  return {
+    x: cssPixels(fragment.borderRect.x),
+    y: cssPixels(fragment.borderRect.y),
+    width: cssPixels(fragment.borderRect.width),
+    height: cssPixels(fragment.borderRect.height)
+  };
+}
+
+function gridStructureFailures(fixture, variant, snapshot, pipeline) {
+  const expectations = fixture.expected.gridStructureByVariant?.[variant.id]
+    ?? fixture.expected.gridStructure
+    ?? [];
+  const failures = [];
+  const rectangleCache = new Map();
+  const rectangle = (id) => {
+    if (!rectangleCache.has(id)) rectangleCache.set(id, principalRectangle(snapshot, pipeline, id));
+    return rectangleCache.get(id);
+  };
+  for (const expectation of expectations) {
+    const first = rectangle(expectation.first);
+    const second = rectangle(expectation.second);
+    if (first === null || second === null) {
+      failures.push({ ...expectation, reason: first === null ? "missing-first-fragment" : "missing-second-fragment" });
+      continue;
+    }
+    const firstEndX = first.x + first.width;
+    const firstEndY = first.y + first.height;
+    const secondEndX = second.x + second.width;
+    const secondEndY = second.y + second.height;
+    const matches = expectation.relation === "same-row" ? first.y < secondEndY && second.y < firstEndY
+      : expectation.relation === "same-column" ? first.x < secondEndX && second.x < firstEndX
+      : expectation.relation === "left-of" ? firstEndX <= second.x
+      : expectation.relation === "right-of" ? secondEndX <= first.x
+      : expectation.relation === "above" ? first.y < second.y
+      : expectation.relation === "below" ? second.y < first.y
+      : expectation.relation === "contains" ? first.x <= second.x && first.y <= second.y
+        && firstEndX >= secondEndX && firstEndY >= secondEndY
+      : expectation.relation === "overlaps" ? first.x < secondEndX && second.x < firstEndX
+        && first.y < secondEndY && second.y < firstEndY
+      : expectation.relation === "wider-than" ? first.width > second.width
+      : expectation.relation === "taller-than" ? first.height > second.height
+      : false;
+    if (!matches) failures.push({ ...expectation, reason: "relationship-mismatch", firstRectangle: first, secondRectangle: second });
+  }
+  return failures;
+}
+
 function caseResult(fixture, variant, hash, snapshot, pipeline, deterministic, requests) {
   const logicalText = normalized(pipeline.textSearchIndex.text);
   const paintedText = normalized(pipeline.terminal.cellBuffer.rows.map((row) => row.text).join("\n"));
@@ -271,6 +324,7 @@ function caseResult(fixture, variant, hash, snapshot, pipeline, deterministic, r
       cellBufferTruncation: pipeline.terminal.cellBuffer.outcome.status === "truncated"
         ? pipeline.terminal.cellBuffer.outcome : null,
       terminalTruncations: pipeline.terminal.truncations,
+      gridStructureFailures: gridStructureFailures(fixture, variant, snapshot, pipeline),
       deterministic
     }
   };
@@ -320,7 +374,11 @@ function aggregate(results) {
     layoutTruncations: results.filter((entry) => entry.metrics.layoutTruncation !== null).map((entry) => entry.id),
     displayListTruncations: results.filter((entry) => entry.metrics.displayListTruncation !== null).map((entry) => entry.id),
     cellBufferTruncations: results.filter((entry) => entry.metrics.cellBufferTruncation !== null).map((entry) => entry.id),
-    terminalTruncations: results.filter((entry) => entry.metrics.terminalTruncations.length > 0).map((entry) => entry.id)
+    terminalTruncations: results.filter((entry) => entry.metrics.terminalTruncations.length > 0).map((entry) => entry.id),
+    gridStructureFailures: results.flatMap((entry) => entry.metrics.gridStructureFailures.map((failure) => ({
+      case: entry.id,
+      failure
+    })))
   };
 }
 
@@ -379,5 +437,6 @@ if (options.check) {
     && summary.displayListTruncations.length === 0
     && summary.cellBufferTruncations.length === 0
     && summary.terminalTruncations.length === 0;
-  if (!gatesPass) throw new Error("Offline compatibility gates failed; inspect the machine-readable report.");
+  const gridGatesPass = summary.gridStructureFailures.length === 0;
+  if (!gatesPass || !gridGatesPass) throw new Error("Offline compatibility gates failed; inspect the machine-readable report.");
 }

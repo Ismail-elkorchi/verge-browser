@@ -621,17 +621,9 @@ function addTruncation(truncations: TerminalTruncation[], budget: TerminalTrunca
 
 function layoutFragmentsInPaintOrder(list: TerminalDisplayList, signal: AbortSignal | undefined): readonly LayoutFragment[] {
   const fragments: LayoutFragment[] = [];
-  const pending = [list.layout.root];
-  while (pending.length > 0) {
+  for (const id of list.fragmentPaintOrder) {
     signal?.throwIfAborted();
-    const id = pending.pop();
-    if (id === undefined) continue;
-    const fragment = list.layout.fragment(id);
-    fragments.push(fragment);
-    for (let index = fragment.children.length - 1; index >= 0; index -= 1) {
-      const child = fragment.children[index];
-      if (child !== undefined) pending.push(child);
-    }
+    fragments.push(list.layout.fragment(id));
   }
   return fragments;
 }
@@ -820,7 +812,9 @@ function geometryAndIndexes(
     }));
   }
   const focusTargets: TerminalFocusTarget[] = [];
-  for (const [node, value] of focus) {
+  for (const node of documentOrder) {
+    const value = focus.get(node);
+    if (value === undefined) continue;
     focusTargets.push(Object.freeze({
       node,
       action: value.action,

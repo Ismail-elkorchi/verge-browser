@@ -16,6 +16,27 @@ All notable changes are documented in this file.
 - Model ordinary `button` controls without debug prose, keep them out of
   successful form entries, and report rendering truncation ahead of stale
   navigation-success status text.
+- Replace the simple Grid row-slicing allocator with one standards-derived,
+  bounded horizontal-writing-mode Grid engine. Add typed Grid track, line,
+  area, placement, auto-repeat, flow, gap, and alignment computed values;
+  explicit and implicit grids; named lines and areas; positive and negative
+  lines; spans; sparse and dense row/column auto-placement; shared intrinsic
+  contributions; fixed, intrinsic, fit-content, minmax, and flexible track
+  sizing; auto-fill/auto-fit; column-dependent row sizing; item and content
+  alignment; positioned Grid areas; order-modified painting; Grid work budgets;
+  focused WPT adaptations; and sixteen MIT-licensed offline Grid corpus fixtures.
+  Resolve intrinsic tracks through staged, source-order-independent planned
+  increases; preserve finite/infinite growth-limit state; correct sub-one `fr`
+  distribution and max-content constraints; retain sparse locked-axis
+  frontiers; normalize placement conflicts once; reject duplicate
+  `grid-auto-flow` components and `repeat()` in ASCII-art templates; collapse
+  auto-fit gutters by boundary; and retain safe/unsafe overflow alignment.
+  Move complete Grid container and intrinsic orchestration into Grid-owned
+  layout modules.
+  Keep the separate `grid` shorthand, subgrid, masonry, and vertical writing
+  modes typed unsupported. Consume exact `@ismail-elkorchi/css-parser@0.2.4`,
+  whose parser-owned declaration grammar now admits structured Grid line-name
+  blocks without moving nested Grid syntax parsing into Verge.
 
 - Add an offline, checksum-pinned, MIT-licensed compatibility corpus for
   articles, documentation, forums, search, commerce forms, dashboards,

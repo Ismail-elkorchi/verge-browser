@@ -3,6 +3,14 @@ import type {
   DocumentState,
   IndexedWebDocumentSnapshot
 } from "../../document/index.js";
+import type {
+  CssGridAutoFlow,
+  CssGridAutoTrackList,
+  CssGridPlacement,
+  CssGridTemplateAreas,
+  CssGridTrackList
+} from "./grid/index.js";
+import type { CssContentAlignment, CssSelfAlignment } from "./alignment.js";
 
 export interface CssColor {
   readonly r: number;
@@ -44,6 +52,7 @@ export type CssLength =
   | { readonly kind: "none" };
 
 export type CssFlexBasis = CssLength | { readonly kind: "content" };
+export type CssGap = CssLength | { readonly kind: "normal" };
 
 export interface CssEdges {
   readonly top: CssLength;
@@ -126,8 +135,8 @@ export interface ComputedBoxStyle {
   readonly minHeight: CssLength;
   readonly maxHeight: CssLength;
   readonly boxSizing: "content-box" | "border-box";
-  readonly rowGap: CssLength;
-  readonly columnGap: CssLength;
+  readonly rowGap: CssGap;
+  readonly columnGap: CssGap;
   readonly borderStyle: "none" | "solid";
   readonly borderWidths: CssEdges;
   readonly borderColor: CssColor | null;
@@ -137,10 +146,12 @@ export interface ComputedBoxStyle {
   readonly flexShrink: number;
   readonly flexBasis: CssFlexBasis;
   readonly order: number;
-  readonly justifyContent: "start" | "center" | "end" | "space-between" | "space-around" | "space-evenly";
-  readonly alignItems: "start" | "center" | "end" | "stretch" | "baseline";
-  readonly alignSelf: "auto" | "start" | "center" | "end" | "stretch" | "baseline";
-  readonly alignContent: "start" | "center" | "end" | "stretch" | "space-between" | "space-around" | "space-evenly";
+  readonly justifyContent: CssContentAlignment;
+  readonly alignItems: CssSelfAlignment;
+  readonly alignSelf: CssSelfAlignment;
+  readonly alignContent: CssContentAlignment;
+  readonly justifyItems: CssSelfAlignment;
+  readonly justifySelf: CssSelfAlignment;
   readonly position: "static" | "relative" | "absolute" | "fixed" | "sticky";
   readonly inset: CssEdges;
   readonly zIndex: number | null;
@@ -148,22 +159,16 @@ export interface ComputedBoxStyle {
   readonly clear: "none" | "left" | "right" | "both";
   readonly legacyClip: CssLegacyClip;
   readonly clipPath: CssClipPath;
-  readonly gridTemplateColumns: readonly CssGridTrack[];
-  readonly gridColumn: number | null;
+  readonly gridTemplateColumns: CssGridTrackList;
+  readonly gridTemplateRows: CssGridTrackList;
+  readonly gridTemplateAreas: CssGridTemplateAreas;
+  readonly gridAutoColumns: CssGridAutoTrackList;
+  readonly gridAutoRows: CssGridAutoTrackList;
+  readonly gridAutoFlow: CssGridAutoFlow;
+  readonly gridPlacement: CssGridPlacement;
   readonly overflowX: "visible" | "hidden" | "clip";
   readonly overflowY: "visible" | "hidden" | "clip";
 }
-
-export type CssGridBreadth =
-  | { readonly kind: "auto" }
-  | { readonly kind: "fraction"; readonly value: number }
-  | { readonly kind: "length"; readonly value: CssLength };
-
-export type CssGridTrack = CssGridBreadth | {
-  readonly kind: "minmax";
-  readonly minimum: CssGridBreadth;
-  readonly maximum: CssGridBreadth;
-};
 
 export interface ComputedStyle {
   readonly display: ComputedDisplay;

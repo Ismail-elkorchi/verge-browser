@@ -39,8 +39,6 @@ import type {
   CssDisplayInternal,
   CssEdges,
   CssFlexBasis,
-  CssGridBreadth,
-  CssGridTrack,
   CssLegacyClip,
   CssLength,
   CssLengthPercentageExpression,
@@ -60,6 +58,32 @@ import {
   resolveCssVariables,
   splitCssComponentValues
 } from "./css-values.js";
+import {
+  GRID_AUTO_LINE,
+  GRID_AUTO_TRACKS,
+  GRID_NONE_AREAS,
+  GRID_NONE_TRACK_LIST,
+  GRID_LONGHAND_PROPERTIES,
+  gridPropertyValueSupported,
+  parseGridAreaShorthand,
+  parseGridAutoFlow,
+  parseGridAutoTracks,
+  parseGridAxisShorthand,
+  parseGridLine,
+  parseGridPair,
+  parseGridTemplateAreas,
+  parseGridTemplateShorthand,
+  parseGridTrackList,
+  type CssGridLine,
+  type CssGridPlacement
+} from "./grid/index.js";
+import {
+  AUTO_SELF_ALIGNMENT,
+  NORMAL_CONTENT_ALIGNMENT,
+  NORMAL_SELF_ALIGNMENT,
+  parseContentAlignment,
+  parseSelfAlignment
+} from "./alignment.js";
 
 const DEFAULT_STYLE_BUDGETS: StyleBudgets = Object.freeze({
   maxStylesheetSources: 64,
@@ -83,7 +107,10 @@ const SUPPORTED_PROPERTIES = new Set([
   "width", "min-width", "max-width", "height", "min-height", "max-height", "box-sizing", "gap",
   "row-gap", "column-gap", "flex", "flex-grow", "flex-shrink", "flex-basis", "order",
   "flex-direction", "flex-wrap", "justify-content", "align-items", "align-self", "align-content",
-  "grid-template-columns", "grid-column", "border", "border-width", "border-top-width",
+  "grid-template-columns", "grid-template-rows", "grid-template-areas", "grid-template",
+  "grid-auto-columns", "grid-auto-rows", "grid-auto-flow", "grid-column-start", "grid-column-end",
+  "grid-row-start", "grid-row-end", "grid-column", "grid-row", "grid-area", "justify-items",
+  "justify-self", "place-items", "place-self", "place-content", "border", "border-width", "border-top-width",
   "border-right-width", "border-bottom-width", "border-left-width", "border-style",
   "border-color", "overflow", "overflow-x", "overflow-y",
   "position", "top", "right", "bottom", "left", "inset", "inset-block", "inset-block-start",
@@ -107,6 +134,7 @@ const ASCII_INSENSITIVE_ATTRIBUTES = new Set([
 const ZERO: CssLength = Object.freeze({ kind: "zero" });
 const AUTO: CssLength = Object.freeze({ kind: "auto" });
 const NONE: CssLength = Object.freeze({ kind: "none" });
+const NORMAL_GAP = Object.freeze({ kind: "normal" as const });
 const MEDIUM_BORDER: CssLength = Object.freeze({ kind: "length", value: 3, unit: "px" });
 const TRANSPARENT: CssColor = Object.freeze({ r: 0, g: 0, b: 0, a: 0 });
 
@@ -781,10 +809,14 @@ function implementationSupportsDeclaration(source: string): boolean {
   if (!parsed.ok) return false;
   const property = canonicalProperty(parsed.value.name);
   if (property === null || !SUPPORTED_PROPERTIES.has(property)) return false;
-  const validation = validateCssPropertyValue(parsed.value);
-  if (validation.status !== "valid") return false;
   const value = cssValue(parsed.value).trim().toLowerCase();
   if (cssWide(value) !== null || value === "revert" || value === "revert-layer") return true;
+  if (GRID_LONGHAND_PROPERTIES.has(property)
+    && property !== "row-gap" && property !== "column-gap" && property !== "gap") {
+    return gridPropertyValueSupported(property, value);
+  }
+  const validation = validateCssPropertyValue(parsed.value);
+  if (validation.status !== "valid") return false;
   const keyword = (...values: readonly string[]): boolean => values.includes(value);
   const length = (allowAuto = false, allowNegative = false, allowNone = false): boolean =>
     parseLength(value, allowAuto, allowNegative, allowNone) !== null;
@@ -857,10 +889,10 @@ function implementationSupportsDeclaration(source: string): boolean {
     case "max-width":
     case "max-height": return length(true, false, true);
     case "box-sizing": return keyword("content-box", "border-box");
-    case "gap": return (splitTopLevel(value, "space") ?? []).every((part) => parseLength(part, false) !== null)
+    case "gap": return (splitTopLevel(value, "space") ?? []).every((part) => part === "normal" || parseLength(part, false) !== null)
       && (splitTopLevel(value, "space")?.length ?? 0) >= 1 && (splitTopLevel(value, "space")?.length ?? 0) <= 2;
     case "row-gap":
-    case "column-gap": return length();
+    case "column-gap": return value === "normal" || length();
     case "flex": return parseFlexShorthand(value) !== null;
     case "flex-grow":
     case "flex-shrink": return nonNegativeCssNumber(value) !== null;
@@ -876,8 +908,6 @@ function implementationSupportsDeclaration(source: string): boolean {
     case "align-content": return keyword(
       "start", "flex-start", "center", "end", "flex-end", "stretch", "space-between", "space-around", "space-evenly"
     );
-    case "grid-template-columns": return parseGridTracks(value) !== null;
-    case "grid-column": return /^\d+$/u.test(value) && Number(value) >= 1;
     case "border": {
       const parts = splitTopLevel(value, "space");
       return parts !== null && parts.length > 0 && parts.every((part) =>
@@ -1391,7 +1421,14 @@ function validatedValue(
       diagnostics.add("property-invalid", candidate.sourceUrl, `Invalid value for ${selectedName}.`);
       return null;
     }
-    const validation = validateCssPropertyValue(parsed.value);
+    const gridOwned = (selectedName.startsWith("grid-") || selectedName === "justify-items"
+      || selectedName === "justify-self" || selectedName.startsWith("place-"))
+      && cssWide(value) === null;
+    if (gridOwned && !gridPropertyValueSupported(selectedName, value)) {
+      diagnostics.add("property-invalid", candidate.sourceUrl, `Invalid value for ${selectedName}.`);
+      return null;
+    }
+    const validation = gridOwned ? { status: "valid" as const } : validateCssPropertyValue(parsed.value);
     if (validation.status === "invalid") {
       diagnostics.add("property-invalid", candidate.sourceUrl, `Invalid value for ${selectedName}.`);
       return null;
@@ -1449,8 +1486,8 @@ function initialStyle(parent: ComputedStyle | null, replaced: boolean, htmlDirec
       minHeight: AUTO,
       maxHeight: NONE,
       boxSizing: "content-box",
-      rowGap: ZERO,
-      columnGap: ZERO,
+      rowGap: NORMAL_GAP,
+      columnGap: NORMAL_GAP,
       borderStyle: "none",
       borderWidths: edges(MEDIUM_BORDER),
       borderColor: null,
@@ -1460,10 +1497,12 @@ function initialStyle(parent: ComputedStyle | null, replaced: boolean, htmlDirec
       flexShrink: 1,
       flexBasis: AUTO,
       order: 0,
-      justifyContent: "start",
-      alignItems: "stretch",
-      alignSelf: "auto",
-      alignContent: "stretch",
+      justifyContent: NORMAL_CONTENT_ALIGNMENT,
+      alignItems: NORMAL_SELF_ALIGNMENT,
+      alignSelf: AUTO_SELF_ALIGNMENT,
+      alignContent: NORMAL_CONTENT_ALIGNMENT,
+      justifyItems: NORMAL_SELF_ALIGNMENT,
+      justifySelf: AUTO_SELF_ALIGNMENT,
       position: "static",
       inset: edges(AUTO),
       zIndex: null,
@@ -1471,8 +1510,18 @@ function initialStyle(parent: ComputedStyle | null, replaced: boolean, htmlDirec
       clear: "none",
       legacyClip: { kind: "auto" },
       clipPath: { kind: "none" },
-      gridTemplateColumns: [],
-      gridColumn: null,
+      gridTemplateColumns: GRID_NONE_TRACK_LIST,
+      gridTemplateRows: GRID_NONE_TRACK_LIST,
+      gridTemplateAreas: GRID_NONE_AREAS,
+      gridAutoColumns: GRID_AUTO_TRACKS,
+      gridAutoRows: GRID_AUTO_TRACKS,
+      gridAutoFlow: Object.freeze({ axis: "row", packing: "sparse" }),
+      gridPlacement: Object.freeze({
+        columnStart: GRID_AUTO_LINE,
+        columnEnd: GRID_AUTO_LINE,
+        rowStart: GRID_AUTO_LINE,
+        rowEnd: GRID_AUTO_LINE
+      }),
       overflowX: "visible",
       overflowY: "visible"
     },
@@ -1686,7 +1735,13 @@ function immutableComputedStyle(style: ComputedStyle): ComputedStyle {
       clipPath: Object.freeze(style.box.clipPath.kind === "none"
         ? { kind: "none" }
         : { kind: "inset", offsets: edge(style.box.clipPath.offsets) }),
-      gridTemplateColumns: Object.freeze([...style.box.gridTemplateColumns])
+      gridTemplateColumns: style.box.gridTemplateColumns,
+      gridTemplateRows: style.box.gridTemplateRows,
+      gridTemplateAreas: style.box.gridTemplateAreas,
+      gridAutoColumns: Object.freeze([...style.box.gridAutoColumns]),
+      gridAutoRows: Object.freeze([...style.box.gridAutoRows]),
+      gridAutoFlow: Object.freeze({ ...style.box.gridAutoFlow }),
+      gridPlacement: Object.freeze({ ...style.box.gridPlacement })
     }),
     customProperties: style.customProperties instanceof ImmutableStringMap
       ? style.customProperties
@@ -1748,73 +1803,6 @@ function parseFlexShorthand(value: string): FlexShorthandValue | null {
     };
   }
   return null;
-}
-
-function parseGridBreadth(token: string): CssGridBreadth | null {
-  const parsed = parseComponentValues(token);
-  if (!parsed.ok) return null;
-  const values = parsed.value.filter((value) => value.kind !== "whitespace");
-  const component = values.length === 1 ? values[0] : undefined;
-  if (component?.kind === "ident" && component.value.toLowerCase() === "auto") return { kind: "auto" };
-  if (component?.kind === "dimension" && component.unit.toLowerCase() === "fr") {
-    return Number.isFinite(component.value) && component.value > 0
-      ? { kind: "fraction", value: component.value } : null;
-  }
-  const length = parseLength(token, false);
-  return length === null ? null : { kind: "length", value: length };
-}
-
-function parseGridTrack(token: string): CssGridTrack | null {
-  const parsed = parseComponentValues(token);
-  if (!parsed.ok) return null;
-  const values = parsed.value.filter((value) => value.kind !== "whitespace");
-  const component = values.length === 1 ? values[0] : undefined;
-  if (component?.kind === "function-block" && component.name.toLowerCase() === "minmax") {
-    const parts = splitTopLevel(serializeCssComponentValues(component.value), "comma");
-    if (parts?.length !== 2) return null;
-    const minimum = parts[0] === undefined ? null : parseGridBreadth(parts[0]);
-    const maximum = parts[1] === undefined ? null : parseGridBreadth(parts[1]);
-    return minimum === null || maximum === null ? null : { kind: "minmax", minimum, maximum };
-  }
-  return parseGridBreadth(token);
-}
-
-function parseGridTracks(
-  value: string,
-  nestingDepth = 0
-): readonly CssGridTrack[] | null {
-  if (nestingDepth > 32) return null;
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "none") return [];
-  const tokens = splitTopLevel(normalized, "space");
-  if (tokens === null) return null;
-  const tracks: CssGridTrack[] = [];
-  for (const token of tokens) {
-    const parsed = parseComponentValues(token);
-    const values = parsed.ok ? parsed.value.filter((value) => value.kind !== "whitespace") : [];
-    const component = values.length === 1 ? values[0] : undefined;
-    if (component?.kind === "function-block" && component.name.toLowerCase() === "repeat") {
-      const comma = component.value.findIndex((value) => value.kind === "comma");
-      const prefix = component.value.slice(0, comma).filter((value) => value.kind !== "whitespace");
-      const count = prefix.length === 1 && prefix[0]?.kind === "number" ? prefix[0].value : Number.NaN;
-      const repeated = comma < 0 ? null : parseGridTracks(
-        serializeCssComponentValues(component.value.slice(comma + 1)),
-        nestingDepth + 1
-      );
-      if (!Number.isSafeInteger(count) || count < 1 || count > 64 || repeated === null
-        || repeated.length === 0 || tracks.length + repeated.length * count > 64) return null;
-      for (let index = 0; index < count; index += 1) tracks.push(...repeated);
-      continue;
-    }
-    const track = parseGridTrack(token);
-    if (track === null || tracks.length >= 64) return null;
-    tracks.push(track);
-  }
-  return tracks.length === 0 ? null : Object.freeze(tracks.map((track) => Object.freeze(
-    track.kind === "minmax"
-      ? { ...track, minimum: Object.freeze(track.minimum), maximum: Object.freeze(track.maximum) }
-      : track
-  )));
 }
 
 function fourSides(parts: readonly string[]): readonly [string, string, string, string] | null {
@@ -2258,10 +2246,10 @@ function computeStyle(
     const part = columnGap.property === "gap" ? gapParts?.[1] ?? gapParts?.[0] : columnGap.value;
     const wide = cssWide(columnGap.value);
     const length = wide === "inherit"
-      ? parent?.box.columnGap ?? ZERO
+      ? parent?.box.columnGap ?? NORMAL_GAP
       : wide === "initial" || wide === "unset"
-        ? ZERO
-        : parseLength(part ?? "0", false);
+        ? NORMAL_GAP
+        : part?.trim().toLowerCase() === "normal" ? NORMAL_GAP : parseLength(part ?? "0", false);
     if (length === null) unsupported(columnGap);
     else style = { ...style, box: { ...style.box, columnGap: length } };
   }
@@ -2271,10 +2259,10 @@ function computeStyle(
       : rowGap.value;
     const wide = cssWide(rowGap.value);
     const length = wide === "inherit"
-      ? parent?.box.rowGap ?? ZERO
+      ? parent?.box.rowGap ?? NORMAL_GAP
       : wide === "initial" || wide === "unset"
-        ? ZERO
-        : parseLength(part, false);
+        ? NORMAL_GAP
+        : part.trim().toLowerCase() === "normal" ? NORMAL_GAP : parseLength(part, false);
     if (length === null) unsupported(rowGap);
     else style = { ...style, box: { ...style.box, rowGap: length } };
   }
@@ -2348,73 +2336,148 @@ function computeStyle(
     if (!Number.isSafeInteger(parsed)) unsupported(order);
     else style = { ...style, box: { ...style.box, order: parsed } };
   }
-  const justifyContent = value("justify-content");
+  const justifyContent = value(["justify-content", "place-content"]);
   if (justifyContent !== null) {
     const wide = cssWide(justifyContent.value);
-    const raw = wide === "inherit"
-      ? parent?.box.justifyContent ?? "start"
-      : wide === "initial" || wide === "unset"
-        ? "start"
-        : justifyContent.value.trim().toLowerCase();
-    const computed = raw === "flex-start" ? "start" : raw === "flex-end" ? "end" : raw;
-    if (computed === "start" || computed === "center" || computed === "end" || computed === "space-between"
-      || computed === "space-around" || computed === "space-evenly") {
+    const computed = wide === "inherit" ? parent?.box.justifyContent ?? NORMAL_CONTENT_ALIGNMENT
+      : wide === "initial" || wide === "unset" ? NORMAL_CONTENT_ALIGNMENT
+        : justifyContent.property === "place-content"
+          ? parseGridPair(justifyContent.value, parseContentAlignment)?.second ?? null
+          : parseContentAlignment(justifyContent.value);
+    if (computed !== null) {
       style = { ...style, box: { ...style.box, justifyContent: computed } };
     } else unsupported(justifyContent);
   }
-  const alignItems = value("align-items");
+  const alignItems = value(["align-items", "place-items"]);
   if (alignItems !== null) {
     const wide = cssWide(alignItems.value);
-    const raw = wide === "inherit"
-      ? parent?.box.alignItems ?? "stretch"
-      : wide === "initial" || wide === "unset"
-        ? "stretch"
-        : alignItems.value.trim().toLowerCase();
-    const computed = raw === "flex-start" ? "start" : raw === "flex-end" ? "end" : raw;
-    if (computed === "start" || computed === "center" || computed === "end" || computed === "stretch" || computed === "baseline") {
+    const computed = wide === "inherit" ? parent?.box.alignItems ?? NORMAL_SELF_ALIGNMENT
+      : wide === "initial" || wide === "unset" ? NORMAL_SELF_ALIGNMENT
+        : alignItems.property === "place-items"
+          ? parseGridPair(alignItems.value, (source) => parseSelfAlignment(source, false))?.first ?? null
+          : parseSelfAlignment(alignItems.value, false);
+    if (computed !== null && computed.position !== "auto") {
       style = { ...style, box: { ...style.box, alignItems: computed } };
     } else unsupported(alignItems);
   }
-  for (const [property, field, initial] of [
-    ["align-self", "alignSelf", "auto"],
-    ["align-content", "alignContent", "stretch"]
+  const alignSelf = value(["align-self", "place-self"]);
+  if (alignSelf !== null) {
+    const wide = cssWide(alignSelf.value);
+    const computed = wide === "inherit" ? parent?.box.alignSelf ?? AUTO_SELF_ALIGNMENT
+      : wide === "initial" || wide === "unset" ? AUTO_SELF_ALIGNMENT
+        : alignSelf.property === "place-self"
+          ? parseGridPair(alignSelf.value, (source) => parseSelfAlignment(source, true))?.first ?? null
+          : parseSelfAlignment(alignSelf.value, true);
+    if (computed === null) unsupported(alignSelf);
+    else style = { ...style, box: { ...style.box, alignSelf: computed } };
+  }
+  const alignContent = value(["align-content", "place-content"]);
+  if (alignContent !== null) {
+    const wide = cssWide(alignContent.value);
+    const computed = wide === "inherit" ? parent?.box.alignContent ?? NORMAL_CONTENT_ALIGNMENT
+      : wide === "initial" || wide === "unset" ? NORMAL_CONTENT_ALIGNMENT
+        : alignContent.property === "place-content"
+          ? parseGridPair(alignContent.value, parseContentAlignment)?.first ?? null
+          : parseContentAlignment(alignContent.value);
+    if (computed === null) unsupported(alignContent);
+    else style = { ...style, box: { ...style.box, alignContent: computed } };
+  }
+  const justifyItems = value(["justify-items", "place-items"]);
+  if (justifyItems !== null) {
+    const wide = cssWide(justifyItems.value);
+    const computed = wide === "inherit" ? parent?.box.justifyItems ?? NORMAL_SELF_ALIGNMENT
+      : wide === "initial" || wide === "unset" ? NORMAL_SELF_ALIGNMENT
+        : justifyItems.property === "place-items"
+          ? parseGridPair(justifyItems.value, (source) => parseSelfAlignment(source, false))?.second ?? null
+          : parseSelfAlignment(justifyItems.value, false);
+    if (computed === null || computed.position === "auto") unsupported(justifyItems);
+    else style = { ...style, box: { ...style.box, justifyItems: computed } };
+  }
+  const justifySelf = value(["justify-self", "place-self"]);
+  if (justifySelf !== null) {
+    const wide = cssWide(justifySelf.value);
+    const computed = wide === "inherit" ? parent?.box.justifySelf ?? AUTO_SELF_ALIGNMENT
+      : wide === "initial" || wide === "unset" ? AUTO_SELF_ALIGNMENT
+        : justifySelf.property === "place-self"
+          ? parseGridPair(justifySelf.value, (source) => parseSelfAlignment(source, true))?.second ?? null
+          : parseSelfAlignment(justifySelf.value, true);
+    if (computed === null) unsupported(justifySelf);
+    else style = { ...style, box: { ...style.box, justifySelf: computed } };
+  }
+
+  for (const [property, field] of [
+    ["grid-template-columns", "gridTemplateColumns"],
+    ["grid-template-rows", "gridTemplateRows"]
+  ] as const) {
+    const entry = value([property, "grid-template"]);
+    if (entry === null) continue;
+    const wide = cssWide(entry.value);
+    const tracks = wide === "inherit" ? parent?.box[field] ?? GRID_NONE_TRACK_LIST
+      : wide === "initial" || wide === "unset" ? GRID_NONE_TRACK_LIST
+        : entry.property === "grid-template"
+          ? parseGridTemplateShorthand(entry.value)?.[field === "gridTemplateColumns" ? "columns" : "rows"] ?? null
+          : parseGridTrackList(entry.value);
+    if (tracks === null) unsupported({ ...entry, property });
+    else style = { ...style, box: { ...style.box, [field]: tracks } };
+  }
+  const templateAreas = value(["grid-template-areas", "grid-template"]);
+  if (templateAreas !== null) {
+    const wide = cssWide(templateAreas.value);
+    const areas = wide === "inherit" ? parent?.box.gridTemplateAreas ?? GRID_NONE_AREAS
+      : wide === "initial" || wide === "unset" ? GRID_NONE_AREAS
+        : templateAreas.property === "grid-template"
+          ? parseGridTemplateShorthand(templateAreas.value)?.areas ?? null
+          : parseGridTemplateAreas(templateAreas.value);
+    if (areas === null) unsupported({ ...templateAreas, property: "grid-template-areas" });
+    else style = { ...style, box: { ...style.box, gridTemplateAreas: areas } };
+  }
+  for (const [property, field] of [
+    ["grid-auto-columns", "gridAutoColumns"],
+    ["grid-auto-rows", "gridAutoRows"]
   ] as const) {
     const entry = value(property);
     if (entry === null) continue;
     const wide = cssWide(entry.value);
-    const raw = wide === "inherit" ? parent?.box[field] ?? initial
-      : wide === "initial" || wide === "unset" ? initial : entry.value.trim().toLowerCase();
-    const computed = raw === "flex-start" ? "start" : raw === "flex-end" ? "end" : raw;
-    const supported = field === "alignSelf"
-      ? ["auto", "start", "center", "end", "stretch", "baseline"]
-      : ["start", "center", "end", "stretch", "space-between", "space-around", "space-evenly"];
-    if (!supported.includes(computed)) unsupported(entry);
-    else style = { ...style, box: { ...style.box, [field]: computed } };
+    const tracks = wide === "inherit" ? parent?.box[field] ?? GRID_AUTO_TRACKS
+      : wide === "initial" || wide === "unset" ? GRID_AUTO_TRACKS : parseGridAutoTracks(entry.value);
+    if (tracks === null) unsupported(entry);
+    else style = { ...style, box: { ...style.box, [field]: tracks } };
   }
-  const gridTemplate = value("grid-template-columns");
-  if (gridTemplate !== null) {
-    const wide = cssWide(gridTemplate.value);
-    const tracks = wide === "inherit"
-      ? parent?.box.gridTemplateColumns ?? []
-      : wide === "initial" || wide === "unset"
-        ? []
-        : parseGridTracks(gridTemplate.value);
-    if (tracks === null) unsupported(gridTemplate);
-    else style = { ...style, box: { ...style.box, gridTemplateColumns: tracks } };
+  const autoFlow = value("grid-auto-flow");
+  if (autoFlow !== null) {
+    const wide = cssWide(autoFlow.value);
+    const computed = wide === "inherit" ? parent?.box.gridAutoFlow ?? { axis: "row", packing: "sparse" }
+      : wide === "initial" || wide === "unset" ? { axis: "row" as const, packing: "sparse" as const }
+        : parseGridAutoFlow(autoFlow.value);
+    if (computed === null) unsupported(autoFlow);
+    else style = { ...style, box: { ...style.box, gridAutoFlow: computed } };
   }
-  const gridColumn = value("grid-column");
-  if (gridColumn !== null) {
-    const wide = cssWide(gridColumn.value);
-    const column = wide === "inherit"
-      ? parent?.box.gridColumn ?? null
-      : wide === "initial" || wide === "unset"
-        ? null
-        : /^\d+$/u.test(gridColumn.value.trim())
-          ? Number.parseInt(gridColumn.value, 10)
-          : Number.NaN;
-    if (column !== null && (!Number.isSafeInteger(column) || column < 1)) unsupported(gridColumn);
-    else style = { ...style, box: { ...style.box, gridColumn: column } };
-  }
+  const placementField = (
+    field: keyof CssGridPlacement,
+    property: "grid-column-start" | "grid-column-end" | "grid-row-start" | "grid-row-end"
+  ): void => {
+    const axisShorthand = property.startsWith("grid-column") ? "grid-column" : "grid-row";
+    const entry = value([property, axisShorthand, "grid-area"]);
+    if (entry === null) return;
+    const wide = cssWide(entry.value);
+    let computed: CssGridLine | null;
+    if (wide === "inherit") computed = parent?.box.gridPlacement[field] ?? GRID_AUTO_LINE;
+    else if (wide === "initial" || wide === "unset") computed = GRID_AUTO_LINE;
+    else if (entry.property === "grid-area") computed = parseGridAreaShorthand(entry.value)?.[field] ?? null;
+    else if (entry.property === axisShorthand) {
+      const axis = parseGridAxisShorthand(entry.value);
+      computed = axis?.[field.endsWith("Start") ? 0 : 1] ?? null;
+    } else computed = parseGridLine(entry.value);
+    if (computed === null) unsupported({ ...entry, property });
+    else style = {
+      ...style,
+      box: { ...style.box, gridPlacement: { ...style.box.gridPlacement, [field]: computed } }
+    };
+  };
+  placementField("columnStart", "grid-column-start");
+  placementField("columnEnd", "grid-column-end");
+  placementField("rowStart", "grid-row-start");
+  placementField("rowEnd", "grid-row-end");
   const borderStyle = value(["border-style", "border"]);
   if (borderStyle !== null) {
     const wide = cssWide(borderStyle.value);

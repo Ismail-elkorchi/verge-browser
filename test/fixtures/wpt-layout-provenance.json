@@ -132,7 +132,7 @@
     {
       "source": "css/css-grid/grid-model/display-inline-grid.html",
       "behavior": "an inline grid container participates atomically in surrounding inline flow",
-      "terminalAdjustment": "the adaptation covers Verge's simple explicit-track grid slice",
+      "terminalAdjustment": "its inner horizontal-writing-mode Grid formatting context uses the same placement and track-sizing engine as block-level Grid",
       "license": "WPT 3-clause BSD"
     },
     {
@@ -307,6 +307,198 @@
       "source": "css/CSS2/positioning/position-relative-001.xht",
       "behavior": "relative positioning offsets inline box continuations and descendants without changing their normal-flow allocation",
       "terminalAdjustment": "layout fragments, background paint commands, hit regions, and source-linked search spans are compared before and after an eight-CSS-pixel offset",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/grid-definition/grid-layout-basic.html",
+      "behavior": "explicit row and column track lists establish the explicit grid",
+      "terminalAdjustment": "track and item rectangles are asserted in fixed-point CSS pixels before terminal snapping",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/grid-definition/grid-support-named-grid-lines-001.html",
+      "behavior": "named line groups and repeated line names resolve item placements without serialized-string lookup",
+      "terminalAdjustment": "the typed computed Grid contract and resolved grid-area rectangle are inspected",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/grid-definition/grid-inline-support-grid-template-areas-001.html",
+      "behavior": "rectangular named areas create area placements and generated start and end line names",
+      "terminalAdjustment": "semantic document identities are retained on the resulting layout fragments",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/placement/grid-layout-lines.html",
+      "behavior": "positive and negative integer grid lines resolve from the applicable explicit-grid edges",
+      "terminalAdjustment": "physical rectangles are asserted only for horizontal writing mode",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/placement/grid-layout-grid-span.html",
+      "behavior": "integer and named spans establish multi-track grid areas",
+      "terminalAdjustment": "span width and containment are compared in CSS pixels",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/placement/grid-auto-placement-implicit-tracks-001.html",
+      "behavior": "definite outlying placements and automatic placement grow repeating implicit track sequences",
+      "terminalAdjustment": "configured track and placement budgets bound implicit growth",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/placement/grid-auto-flow-sparse-001.html",
+      "behavior": "row and column sparse packing advance a persistent placement cursor",
+      "terminalAdjustment": "source-order fragment positions are asserted rather than graphical pixels",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/grid-lanes/item-placement/dense-packing/row-dense-packing-001.html",
+      "behavior": "dense auto-placement restarts its search and fills an earlier compatible hole",
+      "terminalAdjustment": "a sparse interval occupancy structure replaces a dense cell matrix",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/implicit-grids/grid-support-grid-auto-columns-rows-001.html",
+      "behavior": "grid-auto-columns and grid-auto-rows sequences size tracks before and after the explicit grid",
+      "terminalAdjustment": "used track sizes remain fixed-point CSS pixels",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/layout-algorithm/grid-intrinsic-track-sizes-001.html",
+      "behavior": "non-spanning and spanning item min-content and max-content contributions grow intrinsic tracks",
+      "terminalAdjustment": "terminal text metrics supply CSS-pixel advances without cell quantization during track sizing",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/grid-definition/grid-template-columns-fit-content-001.html",
+      "behavior": "fit-content track growth is clamped by its typed limit and is not stretched as an auto-max track",
+      "terminalAdjustment": "the one-fixed-point-unit rounding boundary is asserted before rasterization",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/layout-algorithm/grid-find-fr-size-gutters-001.html",
+      "behavior": "flex fractions account for gutters, intrinsic bases, and frozen flexible tracks",
+      "terminalAdjustment": "26.6 fixed-point truncation is deterministic and no non-normative remainder-filling pass is applied",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/layout-algorithm/flex-tracks-with-fractional-size.html",
+      "behavior": "fractional flexible factors below one retain unfilled free space according to the Grid flex fraction",
+      "terminalAdjustment": "unused CSS-pixel space is preserved until content alignment and cell snapping",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/grid-definition/grid-auto-fill-columns-001.html",
+      "behavior": "auto-fill expansion derives its bounded repeat count from a definite available inline size and gaps",
+      "terminalAdjustment": "terminal width enters only through the CSS viewport",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/grid-definition/grid-auto-fit-columns-001.html",
+      "behavior": "auto-fit collapses empty repeated tracks after placement while retaining repeated line names",
+      "terminalAdjustment": "responsive cases exercise 40, 80, and 120 terminal columns through three CSS viewports",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/grid-definition/grid-auto-repeat-minmax.html",
+      "behavior": "auto-repeat accepts fixed-size minmax track functions and rejects intrinsically indefinite repetitions",
+      "terminalAdjustment": "the style-owned parser and implementation-support evaluator share the same grammar",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/grid-items/grid-item-block-axis-content-contribution-001.html",
+      "behavior": "row intrinsic contributions are recomputed after final column sizes change inline text wrapping",
+      "terminalAdjustment": "row heights use CSS-pixel line boxes produced by the terminal text-metrics adapter",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/alignment/grid-align-justify-stretch.html",
+      "behavior": "auto-sized Grid items stretch in each axis and relayout descendants against the resolved area",
+      "terminalAdjustment": "descendant line boxes are inspected before actual-value cell snapping",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/alignment/grid-align-content-distribution.html",
+      "behavior": "start, end, center, stretch, and space distribution align the resolved track collection",
+      "terminalAdjustment": "row and column alignment offsets are asserted independently",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/layout-algorithm/grid-item-margin-auto-columns-rows-001.html",
+      "behavior": "automatic item margins absorb Grid-area free space before self-alignment",
+      "terminalAdjustment": "margin-box offsets are asserted in fixed-point CSS pixels",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/grid-items/grid-inline-order-property-auto-placement-001.html",
+      "behavior": "Grid auto-placement consumes order-modified document order with source order as the tie breaker",
+      "terminalAdjustment": "document and source identities remain unchanged by placement order",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/grid-items/grid-inline-order-property-painting-001.html",
+      "behavior": "overlapping Grid items paint in order-modified document order where no stack level intervenes",
+      "terminalAdjustment": "cell collisions are resolved from layout-owned paint order",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/grid-items/grid-inline-z-axis-ordering-overlapped-items-001.html",
+      "behavior": "a static Grid item with a non-auto z-index establishes stacking metadata",
+      "terminalAdjustment": "hit-test results and surviving cell text are checked with the same paint order",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/abspos/absolute-positioning-grid-container-containing-block-001.html",
+      "behavior": "resolved Grid lines establish an absolute descendant's positioned containing block without entering Grid sizing",
+      "terminalAdjustment": "the positioned border rectangle and focus identity are asserted in CSS pixels and cells",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/layout-algorithm/grid-intrinsic-track-sizes-001.html",
+      "behavior": "spanning intrinsic contributions use phase-local planned increases and are independent of item traversal order",
+      "terminalAdjustment": "base sizes and finite or infinite growth-limit state are asserted before free-space maximization",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/placement/grid-auto-placement-implicit-tracks-001.html",
+      "behavior": "sparse locked-row and locked-column placement retains an independent frontier while dense placement restarts at the earliest line",
+      "terminalAdjustment": "physical item rectangles expose implicit fifth-track placement and dense hole filling",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/parsing/grid-area-shorthand.html",
+      "behavior": "Grid placement shorthands preserve integer and named spans before the placement algorithm uniformly handles span conflicts, named-only spans, equal lines, and reversed lines",
+      "terminalAdjustment": "the typed placement contract and resulting fixed-point grid areas are both asserted",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/parsing/grid-auto-flow-valid.html",
+      "behavior": "grid-auto-flow accepts one optional axis and one optional dense component in either order and rejects duplicate components",
+      "terminalAdjustment": "declaration acceptance and @supports use the same style-owned component-value parser",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/parsing/grid-template-shorthand-invalid.html",
+      "behavior": "the ASCII-art grid-template form rejects fixed and automatic repeat functions in its row and column track listings",
+      "terminalAdjustment": "declaration acceptance and @supports consume the same component-tree validation",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/alignment/grid-content-distribution-with-collapsed-tracks-001.html",
+      "behavior": "a gutter collapses whenever either adjacent auto-fit track is collapsed, including distributed alignment space",
+      "terminalAdjustment": "an active/collapsed/active track sequence is asserted in CSS-pixel geometry",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/alignment/grid-align-justify-overflow.html",
+      "behavior": "safe overflow alignment falls back to start while unsafe end and center retain negative offsets",
+      "terminalAdjustment": "oversized Grid items and track collections are checked before clipping and cell snapping",
+      "license": "WPT 3-clause BSD"
+    },
+    {
+      "source": "css/css-grid/grid-items/grid-item-direction-rtl-001.html",
+      "behavior": "computed RTL direction mirrors horizontal Grid column geometry while preserving logical source order",
+      "terminalAdjustment": "vertical writing modes are excluded and terminal search remains logical-order",
       "license": "WPT 3-clause BSD"
     }
   ]

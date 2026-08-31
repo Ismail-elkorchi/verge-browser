@@ -1,0 +1,6 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Positioned Grid descendant</title><style>
+#board{position:relative;display:grid;width:360px;grid-template-columns:[first] 120px [second] 120px [third] 120px;grid-template-rows:64px}
+#first-card{grid-column:first/second}#badge{position:absolute;grid-column:second/third;grid-row:1;right:0;bottom:0}
+</style></head><body><main><h1>Release board</h1><div id="board"><article id="first-card">Candidate build</article>
+<a id="badge" href="/status">Ready for review</a></div></main></body></html>
