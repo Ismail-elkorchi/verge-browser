@@ -11,6 +11,15 @@ import type {
   CssGridTrackList
 } from "./grid/index.js";
 import type { CssContentAlignment, CssSelfAlignment } from "./alignment.js";
+import type {
+  CssBorderCollapse,
+  CssBorderColors,
+  CssBorderSpacing,
+  CssBorderStyles,
+  CssCaptionSide,
+  CssEmptyCells,
+  CssTableLayout,
+} from "./table/index.js";
 
 export interface CssColor {
   readonly r: number;
@@ -137,9 +146,14 @@ export interface ComputedBoxStyle {
   readonly boxSizing: "content-box" | "border-box";
   readonly rowGap: CssGap;
   readonly columnGap: CssGap;
-  readonly borderStyle: "none" | "solid";
+  readonly borderStyles: CssBorderStyles;
   readonly borderWidths: CssEdges;
-  readonly borderColor: CssColor | null;
+  readonly borderColors: CssBorderColors;
+  readonly tableLayout: CssTableLayout;
+  readonly borderCollapse: CssBorderCollapse;
+  readonly borderSpacing: CssBorderSpacing;
+  readonly captionSide: CssCaptionSide;
+  readonly emptyCells: CssEmptyCells;
   readonly flexDirection: "row" | "row-reverse" | "column" | "column-reverse";
   readonly flexWrap: "nowrap" | "wrap" | "wrap-reverse";
   readonly flexGrow: number;

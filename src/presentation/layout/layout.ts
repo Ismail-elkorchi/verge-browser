@@ -70,6 +70,7 @@ import type {
   LayoutOutcome,
   LayoutPaintStyle,
   LayoutStackingMetadata,
+  LayoutTableCollapsedBorderSegment,
   LayoutTextCluster,
   LayoutTextFragment,
   LineBox,
@@ -96,6 +97,16 @@ import {
   intrinsicContributions,
   type IntrinsicSizeContributions,
 } from "./intrinsic/index.js";
+import {
+  intrinsicTableBlockSize,
+  intrinsicTableInlineSizes,
+  layoutTableContainer,
+  TableWorkBudgetExceeded,
+  type TableBorderOverride,
+  type TableBudgetName,
+  type TableIntrinsicInlineSizingHost,
+  type TableWrapperFormattingNode,
+} from "./table/index.js";
 
 const DEFAULT_LAYOUT_BUDGETS: LayoutBudgets = Object.freeze({
   maxFragments: 100_000,
@@ -119,10 +130,35 @@ const DEFAULT_LAYOUT_BUDGETS: LayoutBudgets = Object.freeze({
   maxGridNamedLineResolutions: 250_000,
   maxGridAutoRepeatTracks: 2_048,
   maxGridTrackSizingWork: 2_000_000,
+  maxTableRoots: 1_024,
+  maxTableRowGroups: 25_000,
+  maxTableRows: 100_000,
+  maxTableColumnGroups: 25_000,
+  maxTableColumns: 4_096,
+  maxTableCells: 100_000,
+  maxTableSlotIntervals: 250_000,
+  maxTableColspanWork: 1_000_000,
+  maxTableRowspanWork: 1_000_000,
+  maxTableAnonymousMissingCells: 250_000,
+  maxTableIntrinsicMeasureWork: 2_000_000,
+  maxTableColumnDistributionWork: 2_000_000,
+  maxTableRowDistributionWork: 2_000_000,
+  maxTableCollapsedBorderCandidates: 2_000_000,
+  maxTableCollapsedBorderSegments: 500_000,
+  maxTableHeaderAssociations: 1_000_000,
   maxDepth: 512,
 });
 
 const ZERO = cssNonNegativeLength(cssPx(0));
+const TABLE_INTERNAL_MARGINLESS_KINDS = new Set<FormattingNode["kind"]>([
+  "table-column-group",
+  "table-column",
+  "table-header-group",
+  "table-body-group",
+  "table-footer-group",
+  "table-row",
+  "table-cell",
+]);
 type PhysicalSide = "top" | "right" | "bottom" | "left";
 
 interface FlexAxes {
@@ -573,6 +609,22 @@ function normalizeBudgets(
       value?.maxGridTrackSizingWork,
       DEFAULT_LAYOUT_BUDGETS.maxGridTrackSizingWork,
     ),
+    maxTableRoots: integer(value?.maxTableRoots, DEFAULT_LAYOUT_BUDGETS.maxTableRoots),
+    maxTableRowGroups: integer(value?.maxTableRowGroups, DEFAULT_LAYOUT_BUDGETS.maxTableRowGroups),
+    maxTableRows: integer(value?.maxTableRows, DEFAULT_LAYOUT_BUDGETS.maxTableRows),
+    maxTableColumnGroups: integer(value?.maxTableColumnGroups, DEFAULT_LAYOUT_BUDGETS.maxTableColumnGroups),
+    maxTableColumns: integer(value?.maxTableColumns, DEFAULT_LAYOUT_BUDGETS.maxTableColumns),
+    maxTableCells: integer(value?.maxTableCells, DEFAULT_LAYOUT_BUDGETS.maxTableCells),
+    maxTableSlotIntervals: integer(value?.maxTableSlotIntervals, DEFAULT_LAYOUT_BUDGETS.maxTableSlotIntervals),
+    maxTableColspanWork: integer(value?.maxTableColspanWork, DEFAULT_LAYOUT_BUDGETS.maxTableColspanWork),
+    maxTableRowspanWork: integer(value?.maxTableRowspanWork, DEFAULT_LAYOUT_BUDGETS.maxTableRowspanWork),
+    maxTableAnonymousMissingCells: integer(value?.maxTableAnonymousMissingCells, DEFAULT_LAYOUT_BUDGETS.maxTableAnonymousMissingCells),
+    maxTableIntrinsicMeasureWork: integer(value?.maxTableIntrinsicMeasureWork, DEFAULT_LAYOUT_BUDGETS.maxTableIntrinsicMeasureWork),
+    maxTableColumnDistributionWork: integer(value?.maxTableColumnDistributionWork, DEFAULT_LAYOUT_BUDGETS.maxTableColumnDistributionWork),
+    maxTableRowDistributionWork: integer(value?.maxTableRowDistributionWork, DEFAULT_LAYOUT_BUDGETS.maxTableRowDistributionWork),
+    maxTableCollapsedBorderCandidates: integer(value?.maxTableCollapsedBorderCandidates, DEFAULT_LAYOUT_BUDGETS.maxTableCollapsedBorderCandidates),
+    maxTableCollapsedBorderSegments: integer(value?.maxTableCollapsedBorderSegments, DEFAULT_LAYOUT_BUDGETS.maxTableCollapsedBorderSegments),
+    maxTableHeaderAssociations: integer(value?.maxTableHeaderAssociations, DEFAULT_LAYOUT_BUDGETS.maxTableHeaderAssociations),
     maxDepth: integer(value?.maxDepth, DEFAULT_LAYOUT_BUDGETS.maxDepth),
   };
   for (const candidate of Object.values(result))
@@ -734,6 +786,12 @@ class LayoutBuilder {
     LayoutStackingMetadata
   >();
   readonly #floatManagers: FloatExclusionManager[] = [];
+  readonly #tableWork = new Map<TableBudgetName, number>();
+  readonly #tableBorderOverrides = new Map<FormattingNodeId, TableBorderOverride>();
+  readonly #tableCollapsedBorderSegments = new Map<
+    FormattingNodeId,
+    readonly LayoutTableCollapsedBorderSegment[]
+  >();
   #reserved = 0;
   #reservedLineBoxes = 0;
   #textFragments = 0;
@@ -1387,6 +1445,7 @@ class LayoutBuilder {
   #edges(
     style: ComputedStyle | null,
     containingWidth: CssPixelLength,
+    formattingNode?: FormattingNodeId,
   ): {
     readonly margin: CssSignedEdges;
     readonly padding: CssEdges;
@@ -1394,7 +1453,7 @@ class LayoutBuilder {
   } {
     const used = (value: CssLength): CssPixelLength =>
       this.#usedLength(value, containingWidth, style) ?? ZERO;
-    const margin =
+    const computedMargin =
       style === null
         ? { top: ZERO, right: ZERO, bottom: ZERO, left: ZERO }
         : {
@@ -1403,6 +1462,10 @@ class LayoutBuilder {
             bottom: used(style.box.margin.bottom),
             left: used(style.box.margin.left),
           };
+    const margin = formattingNode !== undefined
+      && TABLE_INTERNAL_MARGINLESS_KINDS.has(this.#formatting.node(formattingNode).kind)
+      ? { top: ZERO, right: ZERO, bottom: ZERO, left: ZERO }
+      : computedMargin;
     const padding =
       style === null
         ? { top: ZERO, right: ZERO, bottom: ZERO, left: ZERO }
@@ -1412,15 +1475,17 @@ class LayoutBuilder {
             bottom: nonNegative(used(style.box.padding.bottom)),
             left: nonNegative(used(style.box.padding.left)),
           };
-    const border =
-      style?.box.borderStyle !== "solid"
-        ? { top: ZERO, right: ZERO, bottom: ZERO, left: ZERO }
-        : {
-            top: nonNegative(used(style.box.borderWidths.top)),
-            right: nonNegative(used(style.box.borderWidths.right)),
-            bottom: nonNegative(used(style.box.borderWidths.bottom)),
-            left: nonNegative(used(style.box.borderWidths.left)),
-          };
+    const computedBorder = style === null
+      ? { top: ZERO, right: ZERO, bottom: ZERO, left: ZERO }
+      : {
+          top: style.box.borderStyles.top === "solid" ? nonNegative(used(style.box.borderWidths.top)) : ZERO,
+          right: style.box.borderStyles.right === "solid" ? nonNegative(used(style.box.borderWidths.right)) : ZERO,
+          bottom: style.box.borderStyles.bottom === "solid" ? nonNegative(used(style.box.borderWidths.bottom)) : ZERO,
+          left: style.box.borderStyles.left === "solid" ? nonNegative(used(style.box.borderWidths.left)) : ZERO,
+        };
+    const border = formattingNode === undefined
+      ? computedBorder
+      : (this.#tableBorderOverrides.get(formattingNode)?.widths ?? computedBorder);
     return { margin, padding, border };
   }
 
@@ -1429,9 +1494,10 @@ class LayoutBuilder {
     containingWidth: CssPixelLength,
     containingHeight: CssPixelLength | null,
     forcedContentWidth: CssPixelLength | null = null,
+    distributeForcedAutoMargins = false,
   ): UsedDimensions {
     const style = this.#boxComputed(node);
-    const { margin, padding, border } = this.#edges(style, containingWidth);
+    const { margin, padding, border } = this.#edges(style, containingWidth, node.id);
     const horizontalChrome = sum(
       padding.left,
       padding.right,
@@ -1484,7 +1550,7 @@ class LayoutBuilder {
     const autoRight = style?.box.margin.right.kind === "auto";
     let marginLeft = fixedLeft;
     let marginRight = fixedRight;
-    if (forcedContentWidth !== null) {
+    if (forcedContentWidth !== null && !distributeForcedAutoMargins) {
       marginLeft = autoLeft ? ZERO : fixedLeft;
       marginRight = autoRight ? ZERO : fixedRight;
     } else if (remaining >= 0 && autoLeft && autoRight) {
@@ -1702,10 +1768,13 @@ class LayoutBuilder {
       lineThrough ||= computed?.text.lineThrough === true;
       this.#decorationCache.set(entry.id, { underline, lineThrough });
     }
+    const tableBorder = this.#tableBorderOverrides.get(node.id);
+    const hideEmptyCell = node.kind === "table-cell" && style?.box.emptyCells === "hide"
+      && style.box.borderCollapse === "separate" && !this.#tableCellHasContent(node);
     const paintStyle = Object.freeze({
       visible: style?.visibility === "visible",
       foreground: style?.text.color ?? null,
-      background: node.appliesBoxStyle
+      background: node.appliesBoxStyle && !hideEmptyCell
         ? (style?.text.background ?? null)
         : null,
       bold: (style?.text.fontWeight ?? 400) >= 600,
@@ -1714,15 +1783,33 @@ class LayoutBuilder {
         style.text.fontStyle !== "normal",
       underline,
       strikethrough: lineThrough,
-      borderColor: node.appliesBoxStyle
-        ? (style?.box.borderColor ?? style?.text.color ?? null)
-        : null,
-      borderStyle: node.appliesBoxStyle
-        ? (style?.box.borderStyle ?? "none")
-        : "none",
+      borderColors: hideEmptyCell ? { top: null, right: null, bottom: null, left: null } : tableBorder?.colors ?? (node.appliesBoxStyle && style !== null
+        ? {
+            top: style.box.borderColors.top ?? style.text.color,
+            right: style.box.borderColors.right ?? style.text.color,
+            bottom: style.box.borderColors.bottom ?? style.text.color,
+            left: style.box.borderColors.left ?? style.text.color,
+          }
+        : { top: null, right: null, bottom: null, left: null }),
+      borderStyles: hideEmptyCell ? { top: "none" as const, right: "none" as const, bottom: "none" as const, left: "none" as const } : tableBorder?.styles ?? (node.appliesBoxStyle && style !== null
+        ? style.box.borderStyles
+        : { top: "none" as const, right: "none" as const, bottom: "none" as const, left: "none" as const }),
     });
     this.#paintStyleCache.set(node.id, paintStyle);
     return paintStyle;
+  }
+
+  #tableCellHasContent(node: FormattingNode): boolean {
+    const pending = [...node.children];
+    while (pending.length > 0) {
+      const id = pending.pop();
+      if (id === undefined) continue;
+      const child = this.#formatting.node(id);
+      if (child.kind === "form-control" || child.kind === "replaced-element" || child.kind === "image-fallback" || child.kind === "forced-line-break") return true;
+      if ((child.kind === "text-sequence" || child.kind === "generated-text" || child.kind === "marker") && child.text.length > 0) return true;
+      pending.push(...child.children);
+    }
+    return false;
   }
 
   #action(node: FormattingNode): DocumentActionIdentity | null {
@@ -3095,7 +3182,7 @@ class LayoutBuilder {
     const containingWidth = nonNegative(
       cssCoordinateDifference(cursor.maxX, cursor.continuationX),
     );
-    const { margin, padding, border } = this.#edges(style, containingWidth);
+    const { margin, padding, border } = this.#edges(style, containingWidth, node.id);
     const horizontalChrome = sum(
       padding.left,
       padding.right,
@@ -3291,7 +3378,7 @@ class LayoutBuilder {
     containingWidth: CssPixelLength,
   ): CssPixelLength {
     const style = this.#boxComputed(node) ?? this.#computed(node);
-    const { margin, padding, border } = this.#edges(style, containingWidth);
+    const { margin, padding, border } = this.#edges(style, containingWidth, node.id);
     const horizontalChrome = sum(
       padding.left,
       padding.right,
@@ -3438,6 +3525,8 @@ class LayoutBuilder {
   ): LayoutResult {
     const style = this.#computed(node);
     const visible = style?.visibility === "visible";
+    const tableCollapsedBorderSegments =
+      this.#tableCollapsedBorderSegments.get(node.id);
     const onlyChild =
       children.length === 1 && children[0] !== undefined
         ? this.#fragments.get(children[0])
@@ -3539,6 +3628,11 @@ class LayoutBuilder {
                 inlineContinuations.map((entry) => Object.freeze(entry)),
               ),
             }),
+        ...(tableCollapsedBorderSegments === undefined
+          ? {}
+          : {
+              tableCollapsedBorderSegments,
+            }),
       },
       true,
     );
@@ -3562,7 +3656,8 @@ class LayoutBuilder {
       const fragment = this.#fragments.get(id);
       if (fragment === undefined) continue;
       const node = this.#formatting.node(fragment.formattingNode);
-      if (this.#outOfFlow(node) || this.#boxComputed(node)?.box.float !== "none")
+      const float = this.#boxComputed(node)?.box.float;
+      if (this.#outOfFlow(node) || (float !== undefined && float !== "none"))
         continue;
       if (fragment.baseline !== null)
         return point(fragment.borderRect.y, fragment.baseline);
@@ -3830,7 +3925,7 @@ class LayoutBuilder {
     const containingWidth = nonNegative(
       cssCoordinateDifference(cursor.maxX, cursor.continuationX),
     );
-    const decoration = this.#edges(style, containingWidth);
+    const decoration = this.#edges(style, containingWidth, node.id);
     const leading = sum(
       decoration.margin.left,
       decoration.border.left,
@@ -4214,20 +4309,23 @@ class LayoutBuilder {
       () => {
         const maximum = cssLengthFromFixed(Number.MAX_SAFE_INTEGER);
         const inlineSize = availableInlineSize ?? maximum;
-        let minimumInline = this.#intrinsicInlineContribution(
+        const node = this.#formatting.node(id);
+        const tableSizes = node.kind === "table" || node.kind === "table-wrapper"
+          ? this.#tableBudget(() => intrinsicTableInlineSizes(this.#tableIntrinsicSizingHost(), node))
+          : null;
+        let minimumInline = tableSizes?.minContent ?? this.#intrinsicInlineContribution(
           id,
           "min-content",
           maximum,
         );
-        let maximumInline = this.#intrinsicInlineContribution(
+        let maximumInline = tableSizes?.maxContent ?? this.#intrinsicInlineContribution(
           id,
           "max-content",
           maximum,
         );
         const block = this.#intrinsicBlockSize(id, inlineSize);
-        const node = this.#formatting.node(id);
         const style = this.#boxComputed(node) ?? this.#computed(node);
-        const edges = this.#edges(style, availableInlineSize ?? ZERO);
+        const edges = this.#edges(style, availableInlineSize ?? ZERO, node.id);
         const inlineBorderPadding = sum(
           edges.border.left,
           edges.padding.left,
@@ -4303,6 +4401,7 @@ class LayoutBuilder {
                   style.box.padding.bottom,
                 ].some(percentageDependent),
             },
+            this.#intrinsicFirstBaseline(id, inlineSize),
           ),
         });
       },
@@ -4405,6 +4504,25 @@ class LayoutBuilder {
         availableInlineSize,
         depth + 1,
       );
+    } else if (node.kind === "table" || node.kind === "table-wrapper") {
+      automatic = this.#tableBudget(() => intrinsicTableBlockSize(
+        {
+          signal: this.#input.signal,
+          formattingNode: (candidate) => this.#formatting.node(candidate),
+          computed: (candidate) => this.#computed(candidate),
+          htmlTableCell: (candidate) => this.#formatting.document.htmlTableCell(candidate),
+          isOutOfFlow: (candidate) => this.#outOfFlow(candidate),
+          usedLength: (value, basis, computed) => this.#usedLength(value, basis, computed),
+          intrinsicOuterBlockSize: (candidate, inlineSize, candidateDepth) =>
+            this.#intrinsicOuterBlockSize(candidate, inlineSize, candidateDepth),
+          consumeIntrinsicWork: () => {
+            this.#consumeTableWork("maxTableIntrinsicMeasureWork");
+          },
+        },
+        node,
+        availableInlineSize,
+        depth,
+      ));
     } else if (node.kind === "table-row") {
       automatic = ZERO;
       for (const child of node.children) {
@@ -4452,6 +4570,65 @@ class LayoutBuilder {
     );
   }
 
+  #intrinsicFirstBaseline(
+    id: FormattingNodeId,
+    availableInlineSize: CssPixelLength,
+    depth = 0,
+  ): CssNonNegativeLength | null {
+    this.#input.signal?.throwIfAborted();
+    if (depth > this.#budgets.maxDepth) return null;
+    const node = this.#formatting.node(id);
+    const style = this.#boxComputed(node) ?? this.#computed(node);
+    const edges = this.#edges(style, availableInlineSize, node.id);
+    const contentStart = sum(edges.border.top, edges.padding.top);
+    if (
+      node.kind === "text-sequence" ||
+      node.kind === "generated-text" ||
+      node.kind === "marker" ||
+      node.kind === "forced-line-break" ||
+      node.kind === "line-break-opportunity" ||
+      node.kind === "form-control"
+    ) {
+      const metrics = this.#metrics(style);
+      return nonNegative(sum(
+        contentStart,
+        this.#inlineExtents(metrics, this.#lineHeight(style, metrics)).ascent,
+      ));
+    }
+    if (node.kind === "replaced-element" || node.kind === "image-fallback") {
+      return nonNegative(sum(
+        contentStart,
+        this.#intrinsicBlockSize(id, availableInlineSize, depth + 1),
+        edges.padding.bottom,
+        edges.border.bottom,
+      ));
+    }
+    const children = node.children
+      .map((child) => this.#formatting.node(child))
+      .filter((child) => !this.#outOfFlow(child));
+    if (children.length === 0) return null;
+    if (children.every((child) => isInlineFormattingNode(child))) {
+      let baseline: CssPixelLength | null = null;
+      for (const child of children) {
+        const candidate = this.#intrinsicFirstBaseline(child.id, availableInlineSize, depth + 1);
+        if (candidate !== null) baseline = baseline === null ? candidate : cssMax(baseline, candidate);
+      }
+      return baseline === null ? null : nonNegative(sum(contentStart, baseline));
+    }
+    let offset: CssPixelLength = contentStart;
+    for (const child of children) {
+      const childStyle = this.#boxComputed(child) ?? this.#computed(child);
+      const childEdges = this.#edges(childStyle, availableInlineSize);
+      const baseline = this.#intrinsicFirstBaseline(child.id, availableInlineSize, depth + 1);
+      if (baseline !== null) return nonNegative(sum(offset, childEdges.margin.top, baseline));
+      offset = sum(
+        offset,
+        this.#intrinsicOuterBlockSize(child.id, availableInlineSize, depth + 1),
+      );
+    }
+    return null;
+  }
+
   #intrinsicOuterBlockSize(
     id: FormattingNodeId,
     availableInlineSize: CssPixelLength,
@@ -4462,7 +4639,7 @@ class LayoutBuilder {
     const style = itemStyle
       ? (this.#boxComputed(node) ?? this.#computed(node))
       : this.#boxComputed(node);
-    const edges = this.#edges(style, availableInlineSize);
+    const edges = this.#edges(style, availableInlineSize, node.id);
     return nonNegative(
       sum(
         this.#intrinsicBlockSize(id, availableInlineSize, depth),
@@ -4563,6 +4740,172 @@ class LayoutBuilder {
     }
   }
 
+  #consumeTableWork(budget: TableBudgetName, amount = 1): void {
+    if (!Number.isSafeInteger(amount) || amount < 0) throw new RangeError("Table work amount must be a non-negative safe integer.");
+    this.#input.signal?.throwIfAborted();
+    const retained = this.#tableWork.get(budget) ?? 0;
+    const limit = this.#budgets[budget];
+    if (amount > limit - retained) throw new TableWorkBudgetExceeded(budget);
+    this.#tableWork.set(budget, retained + amount);
+  }
+
+  #tableBudget<T>(operation: () => T): T {
+    try {
+      return operation();
+    } catch (error) {
+      if (!(error instanceof TableWorkBudgetExceeded)) throw error;
+      this.#truncated ??= error.budget;
+      throw new LayoutBudgetExhausted();
+    }
+  }
+
+  #translateFragmentChildren(
+    result: LayoutResult,
+    blockOffset: CssPixelLength,
+    containingClip: CssRect,
+  ): void {
+    if (blockOffset === 0) return;
+    const fragment = this.#fragments.get(result.fragment);
+    if (fragment === undefined) return;
+    for (const child of fragment.children) {
+      const childFragment = this.#fragments.get(child);
+      if (childFragment === undefined) continue;
+      this.#translate(
+        { fragment: child, borderRect: childFragment.borderRect, marginRect: childFragment.marginRect },
+        ZERO,
+        blockOffset,
+        containingClip,
+      );
+    }
+  }
+
+  #tableFormattingContext(
+    wrapper: TableWrapperFormattingNode,
+    x: CssCoordinate,
+    y: CssCoordinate,
+    width: CssPixelLength,
+    clip: CssRect,
+    depth: number,
+  ): LayoutResult {
+    return layoutTableContainer(
+      {
+        budgets: this.#budgets,
+        signal: this.#input.signal,
+        formattingNode: (id) => this.#formatting.node(id),
+        computed: (node) => this.#computed(node),
+        boxComputed: (node) => this.#boxComputed(node),
+        htmlTableCell: (node) => this.#formatting.document.htmlTableCell(node),
+        htmlTableColumn: (node) => this.#formatting.document.htmlTableColumn(node),
+        htmlTableColumnGroup: (node) => this.#formatting.document.htmlTableColumnGroup(node),
+        isOutOfFlow: (node) => this.#outOfFlow(node),
+        consume: (budget, amount) => {
+          this.#consumeTableWork(budget, amount);
+        },
+        usedLength: (value, basis, style) => this.#usedLength(value, basis, style),
+        dimensions: (node, containingWidth, containingHeight, forcedWidth) =>
+          this.#dimensions(node, containingWidth, containingHeight, forcedWidth, node.kind === "table"),
+        intrinsicContributions: (id, availableInlineSize) =>
+          this.#intrinsicContributions(id, availableInlineSize),
+        layoutChild: (
+          id,
+          childX,
+          childY,
+          childWidth,
+          childClip,
+          childDepth,
+          containingHeight,
+          forcedWidth,
+          forcedHeight,
+        ) => this.#tryLayoutNode(
+          id,
+          childX,
+          childY,
+          childWidth,
+          childClip,
+          childDepth,
+          containingHeight,
+          forcedWidth,
+          forcedHeight,
+        ),
+        layoutOutOfFlow: (node, staticX, staticY, inheritedClip, childDepth, containingBlock) =>
+          this.#layoutOutOfFlow(node, staticX, staticY, inheritedClip, childDepth, containingBlock),
+        translate: (result, inlineOffset, blockOffset, containingClip) =>
+          this.#translate(result, inlineOffset, blockOffset, containingClip),
+        translateChildren: (result, blockOffset, containingClip) => {
+          this.#translateFragmentChildren(result, blockOffset, containingClip);
+        },
+        fragment: (id) => this.#fragments.get(id),
+        clip: (node, paddingRect, borderRect, inheritedClip) =>
+          this.#clip(node, paddingRect, borderRect, inheritedClip),
+        registerPositionedContainingBlock: (id, rect) => {
+          this.#positionedContainingBlocks.set(id, rect);
+        },
+        registerCollapsedBorderOverride: (id, value) => {
+          this.#tableBorderOverrides.set(id, value);
+          this.#paintStyleCache.delete(id);
+          this.#intrinsicContributionCache.clear();
+        },
+        paintStyle: (node) => this.#paintStyle(node),
+        registerCollapsedBorderSegments: (id, segments) => {
+          this.#tableCollapsedBorderSegments.set(id, segments);
+        },
+        container: (node, contentRect, paddingRect, borderRect, marginRect, clipRect, children, lines) =>
+          this.#container(node, contentRect, paddingRect, borderRect, marginRect, clipRect, children, lines),
+        withContainerReservation: (operation) => {
+          this.#reserve();
+          try {
+            return operation();
+          } finally {
+            this.#reserved -= 1;
+          }
+        },
+        tryContainerReservation: (operation) => {
+          try {
+            this.#reserve();
+          } catch (error) {
+            if (error instanceof LayoutBudgetExhausted) return null;
+            throw error;
+          }
+          try {
+            return operation();
+          } catch (error) {
+            if (error instanceof LayoutBudgetExhausted) return null;
+            throw error;
+          } finally {
+            this.#reserved -= 1;
+          }
+        },
+        withTableBudget: (operation) => this.#tableBudget(operation),
+      },
+      { wrapper, x, y, width, clip, depth },
+    );
+  }
+
+  #tableIntrinsicSizingHost(): TableIntrinsicInlineSizingHost {
+    const host: TableIntrinsicInlineSizingHost = {
+      budgets: this.#budgets,
+      signal: this.#input.signal,
+      formattingNode: (id) => this.#formatting.node(id),
+      computed: (node) => this.#computed(node),
+      boxComputed: (node) => this.#boxComputed(node),
+      htmlTableCell: (node) => this.#formatting.document.htmlTableCell(node),
+      htmlTableColumn: (node) => this.#formatting.document.htmlTableColumn(node),
+      htmlTableColumnGroup: (node) => this.#formatting.document.htmlTableColumnGroup(node),
+      isOutOfFlow: (node) => this.#outOfFlow(node),
+      consume: (budget, amount) => {
+        this.#consumeTableWork(budget, amount);
+      },
+      usedLength: (value, basis, style) => this.#usedLength(value, basis, style),
+      intrinsicContributions: (id, availableInlineSize) =>
+        this.#intrinsicContributions(id, availableInlineSize),
+      registerCollapsedBorderOverride: (id, value) => {
+        this.#tableBorderOverrides.set(id, value);
+        this.#paintStyleCache.delete(id);
+      },
+    };
+    return Object.freeze(host);
+  }
+
   #gridIntrinsicSizingHost(): GridIntrinsicSizingHost {
     const host: GridIntrinsicSizingHost = {
       budgets: this.#budgets,
@@ -4635,6 +4978,23 @@ class LayoutBuilder {
                     paddingRect: move(continuation.paddingRect),
                     borderRect: move(continuation.borderRect),
                     marginRect: move(continuation.marginRect),
+                  }),
+                ),
+              ),
+            }
+          : {}),
+        ...(fragment.kind === "box" &&
+        fragment.tableCollapsedBorderSegments !== undefined
+          ? {
+              tableCollapsedBorderSegments: Object.freeze(
+                fragment.tableCollapsedBorderSegments.map((segment) =>
+                  Object.freeze({
+                    ...segment,
+                    borderRect: move(segment.borderRect),
+                    clipRect: cssIntersection(
+                      move(segment.clipRect),
+                      containingClip,
+                    ),
                   }),
                 ),
               ),
@@ -4858,7 +5218,6 @@ class LayoutBuilder {
         ? this.#input.context.scrollport
         : inheritedClip,
       depth,
-      undefined,
       containingBlock.height,
       forcedWidth,
       forcedHeight,
@@ -5318,7 +5677,6 @@ class LayoutBuilder {
           dimensions.contentWidth,
           childClip,
           depth + 1,
-          undefined,
           definiteContentHeight,
           floatContentWidth,
         );
@@ -5430,7 +5788,6 @@ class LayoutBuilder {
         dimensions.contentWidth,
         childClip,
         depth + 1,
-        undefined,
         definiteContentHeight,
         childForcedWidth,
         sizedItem ? forcedContentHeight : null,
@@ -5538,91 +5895,6 @@ class LayoutBuilder {
     );
   }
 
-  #table(
-    node: FormattingNode,
-    x: CssCoordinate,
-    y: CssCoordinate,
-    width: CssPixelLength,
-    clip: CssRect,
-    depth: number,
-    columns = this.#columnCount(node),
-  ): LayoutResult {
-    if (node.kind === "table-row") {
-      const cells = node.children;
-      const count = Math.max(columns, cells.length, 1);
-      const cellWidth = cssDivide(width, count);
-      const children: LayoutFragmentId[] = [];
-      let bottom = y;
-      for (const [index, child] of cells.entries()) {
-        const result = this.#tryLayoutNode(
-          child,
-          point(x, cssMultiply(cellWidth, index)),
-          y,
-          cellWidth,
-          clip,
-          depth + 1,
-          columns,
-        );
-        if (result === null) break;
-        children.push(result.fragment);
-        bottom = cssCoordinateFromFixed(
-          Math.max(
-            bottom,
-            cssCoordinateAdd(result.marginRect.y, result.marginRect.height),
-          ),
-        );
-      }
-      const box = cssRect(
-        x,
-        y,
-        width,
-        nonNegative(cssCoordinateDifference(bottom, y)),
-      );
-      return this.#container(node, box, box, box, box, clip, children, []);
-    }
-    const children: LayoutFragmentId[] = [];
-    let currentY = y;
-    for (const child of node.children) {
-      const result = this.#tryLayoutNode(
-        child,
-        x,
-        currentY,
-        width,
-        clip,
-        depth + 1,
-        columns,
-      );
-      if (result === null) break;
-      children.push(result.fragment);
-      currentY = cssCoordinateAdd(
-        result.marginRect.y,
-        result.marginRect.height,
-      );
-    }
-    const box = cssRect(
-      x,
-      y,
-      width,
-      nonNegative(cssCoordinateDifference(currentY, y)),
-    );
-    return this.#container(node, box, box, box, box, clip, children, []);
-  }
-
-  #columnCount(node: FormattingNode): number {
-    let maximum = 1;
-    const pending = [...node.children];
-    while (pending.length > 0) {
-      const id = pending.pop();
-      if (id === undefined) continue;
-      const child = this.#formatting.node(id);
-      if (child.kind === "table-row")
-        maximum = Math.max(maximum, child.children.length);
-      else if (child.kind.endsWith("group"))
-        for (const grandchild of child.children) pending.push(grandchild);
-    }
-    return maximum;
-  }
-
   #gridFormattingContext(
     node: FormattingNode,
     x: CssCoordinate,
@@ -5686,7 +5958,6 @@ class LayoutBuilder {
             childWidth,
             childClip,
             childDepth,
-            undefined,
             containingHeight,
             forcedWidth,
             forcedHeight,
@@ -6122,7 +6393,6 @@ class LayoutBuilder {
           crossWidth,
           clip,
           depth + 1,
-          undefined,
           rowAxis ? null : mainSize,
           rowAxis ? item.targetMainSize : crossWidth,
           rowAxis ? null : item.targetMainSize,
@@ -6284,7 +6554,6 @@ class LayoutBuilder {
               rowAxis ? entry.crossWidth : dimensions.contentWidth,
               clip,
               depth + 1,
-              undefined,
               rowAxis ? null : mainSize,
               rowAxis ? entry.item.targetMainSize : forcedCrossSize,
               rowAxis ? forcedCrossSize : entry.item.targetMainSize,
@@ -6479,7 +6748,6 @@ class LayoutBuilder {
     width: CssPixelLength,
     clip: CssRect,
     depth: number,
-    tableColumns?: number,
     containingHeight: CssPixelLength | null = null,
     forcedContentWidth: CssPixelLength | null = null,
     forcedContentHeight: CssPixelLength | null = null,
@@ -6551,21 +6819,24 @@ class LayoutBuilder {
         this.#releaseLineReservation(cursor);
         return result;
       }
-      if (node.kind === "table-column" || node.kind === "table-column-group") {
-        const children: LayoutFragmentId[] = [];
-        for (const child of node.children) {
-          const result = this.#tryLayoutNode(
-            child,
-            x,
-            y,
-            ZERO,
-            clip,
-            depth + 1,
-            tableColumns,
-          );
-          if (result === null) break;
-          children.push(result.fragment);
-        }
+      if (node.kind === "table-wrapper") {
+        return this.#tableFormattingContext(
+          node as TableWrapperFormattingNode,
+          x,
+          y,
+          width,
+          clip,
+          depth,
+        );
+      }
+      if (
+        node.kind === "table-column" ||
+        node.kind === "table-column-group" ||
+        node.kind === "table-header-group" ||
+        node.kind === "table-body-group" ||
+        node.kind === "table-footer-group" ||
+        node.kind === "table-row"
+      ) {
         const empty = cssRect(x, y, ZERO, ZERO);
         return this.#container(
           node,
@@ -6574,18 +6845,9 @@ class LayoutBuilder {
           empty,
           empty,
           clip,
-          children,
+          [],
           [],
         );
-      }
-      if (
-        node.kind === "table" ||
-        node.kind === "table-header-group" ||
-        node.kind === "table-body-group" ||
-        node.kind === "table-footer-group" ||
-        node.kind === "table-row"
-      ) {
-        return this.#table(node, x, y, width, clip, depth, tableColumns);
       }
       if (node.kind === "flex-container") {
         return this.#layoutFlex(
@@ -6634,7 +6896,6 @@ class LayoutBuilder {
     width: CssPixelLength,
     clip: CssRect,
     depth: number,
-    columns?: number,
     containingHeight: CssPixelLength | null = null,
     forcedContentWidth: CssPixelLength | null = null,
     forcedContentHeight: CssPixelLength | null = null,
@@ -6647,7 +6908,6 @@ class LayoutBuilder {
         width,
         clip,
         depth,
-        columns,
         containingHeight,
         forcedContentWidth,
         forcedContentHeight,
@@ -6905,7 +7165,6 @@ class LayoutBuilder {
         context.initialContainingBlock.width,
         this.#documentCanvasClip(),
         0,
-        undefined,
         context.initialContainingBlock.height,
       );
     } catch (error) {
@@ -7117,8 +7376,8 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
         italic: false,
         underline: false,
         strikethrough: false,
-        borderColor: null,
-        borderStyle: "none",
+        borderColors: { top: null, right: null, bottom: null, left: null },
+        borderStyles: { top: "none" as const, right: "none" as const, bottom: "none" as const, left: "none" as const },
       }),
       minContentContribution: ZERO,
       maxContentContribution: ZERO,

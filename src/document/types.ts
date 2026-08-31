@@ -1,3 +1,10 @@
+import type {
+  HtmlTableCellMetadata,
+  HtmlTableColumnGroupMetadata,
+  HtmlTableColumnMetadata,
+  HtmlTableMetadata,
+} from "./table/types.js";
+
 /** Opaque identity for one node in a single immutable web document snapshot. */
 export type DocumentNodeRef = string & { readonly __documentNodeRef: unique symbol };
 
@@ -116,6 +123,8 @@ export interface DocumentSemanticEntry {
   readonly landmark: DocumentLandmark | null;
   readonly accessibleName: string;
   readonly accessibleDescription: string;
+  /** HTML table headers associated through `headers`, `scope`, or implicit slot rules. */
+  readonly tableHeaders: readonly DocumentNodeRef[];
   /** Excluded from semantic/accessibility projections; this does not itself suppress CSS boxes. */
   readonly accessibilityHidden: boolean;
   readonly behavior: "normal" | "forced-break" | "break-opportunity" | "replaced" | "form-control";
@@ -325,6 +334,8 @@ export interface DocumentIndexLimits {
   readonly maxControlsPerForm: number;
   readonly maxOptionsPerSelect: number;
   readonly maxHeadings: number;
+  readonly maxHtmlTableSlotWork: number;
+  readonly maxHtmlTableHeaderAssociationWork: number;
 }
 
 export type DocumentIndexOutcome = {
@@ -417,4 +428,8 @@ export interface IndexedWebDocumentSnapshot extends WebDocumentSnapshot {
   disclosure(ref: DocumentNodeRef): DocumentDisclosure | null;
   directionality(ref: DocumentNodeRef): DocumentDirectionality;
   directionForRenderedText(ref: DocumentNodeRef, value: string): DocumentDirection;
+  htmlTable(ref: DocumentNodeRef): HtmlTableMetadata | null;
+  htmlTableCell(ref: DocumentNodeRef): HtmlTableCellMetadata | null;
+  htmlTableColumn(ref: DocumentNodeRef): HtmlTableColumnMetadata | null;
+  htmlTableColumnGroup(ref: DocumentNodeRef): HtmlTableColumnGroupMetadata | null;
 }

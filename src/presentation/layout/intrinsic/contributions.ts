@@ -11,7 +11,8 @@ export function intrinsicContributions(
     readonly maximumBlockContribution: CssPixelLength;
   },
   borderPadding: { readonly inline: CssPixelLength; readonly block: CssPixelLength },
-  dependencies: { readonly inline?: boolean; readonly block?: boolean } = {}
+  dependencies: { readonly inline?: boolean; readonly block?: boolean } = {},
+  firstBaseline: CssPixelLength | null = null,
 ): IntrinsicSizeContributions {
   const box = (inlineAddition: CssPixelLength, blockAddition: CssPixelLength) => {
     const minimumInline = cssNonNegativeLength(cssMax(ZERO, cssAdd(content.minContentInlineSize, inlineAddition)));
@@ -37,6 +38,7 @@ export function intrinsicContributions(
     percentageDependence: Object.freeze({
       inline: dependencies.inline ?? false,
       block: dependencies.block ?? false
-    })
+    }),
+    firstBaseline: firstBaseline === null ? null : cssNonNegativeLength(cssMax(ZERO, firstBaseline)),
   });
 }

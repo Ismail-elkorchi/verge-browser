@@ -5,3 +5,4 @@ export { formattingNodeLogicalText } from "./logical-text.js";
 export { isAtomicInlineBox, isInlineFormattingNode } from "./inline-structure.js";
 export { documentActionIdentity } from "./action-identity.js";
 export type * from "./types.js";
+export * from "./table/index.js";

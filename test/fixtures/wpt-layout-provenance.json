@@ -120,7 +120,7 @@
     {
       "source": "css/CSS2/normal-flow/inline-table-003.xht",
       "behavior": "an inline-table remains an atomic inline participant between surrounding text",
-      "terminalAdjustment": "only Verge's currently supported simple table layout is adapted",
+      "terminalAdjustment": "the inline table uses Verge's sole horizontal-writing-mode table layout engine",
       "license": "WPT 3-clause BSD"
     },
     {
@@ -156,7 +156,7 @@
     {
       "source": "css/css-tables/paint/row-background-paint-remove-last-cell.html",
       "behavior": "table, row-group, row, and cell backgrounds retain structural paint order",
-      "terminalAdjustment": "only the table background order in Verge's current table slice is adapted",
+      "terminalAdjustment": "the table layout engine exposes structural background phases directly to the terminal display list",
       "license": "WPT 3-clause BSD"
     },
     {

@@ -21,4 +21,5 @@ library examples and defines the package's runtime boundaries.
 - [Error model](./reference/error-model.md)
 - [Rendering architecture and ownership](./architecture/rendering-pipeline.md)
 - [CSS Grid layout contracts](./architecture/css-grid.md)
+- [HTML/CSS table layout contracts](./architecture/css-tables.md)
 - [Unicode text layout](./architecture/unicode-text.md)

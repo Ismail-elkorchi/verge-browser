@@ -194,6 +194,16 @@ then rows after wrapping, relayouts stretch-eligible items, and records Grid
 paint order in ordinary stacking metadata. The detailed internal contract and
 work limits are documented in [CSS Grid layout](./css-grid.md).
 
+Horizontal-writing-mode table layout similarly has one slot model and one
+layout engine. The document subsystem indexes HTML spans, groups, captions, and
+header relationships; formatting performs CSS table box fixup; layout builds a
+bounded sparse slot grid, resolves intrinsic or fixed column widths, sizes rows
+after wrapping, distributes rowspan requirements, positions captions, and
+resolves separated or collapsed borders. Table paint metadata preserves table,
+column-group, column, row-group, row, cell, border, and content phases without
+moving sizing or span logic into terminal code. The detailed contract and work
+limits are documented in [HTML/CSS table layout](./css-tables.md).
+
 Sticky positioning is currently constrained only against the root terminal
 scrollport and the sticky box's containing block. Nested scrolling boxes remain
 unsupported; values such as `overflow:auto` and `overflow:scroll` therefore

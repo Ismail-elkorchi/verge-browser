@@ -210,10 +210,14 @@ function principalRectangle(snapshot, pipeline, elementId) {
   };
 }
 
-function gridStructureFailures(fixture, variant, snapshot, pipeline) {
-  const expectations = fixture.expected.gridStructureByVariant?.[variant.id]
+function boxRelationshipFailures(fixture, variant, snapshot, pipeline) {
+  const gridExpectations = fixture.expected.gridStructureByVariant?.[variant.id]
     ?? fixture.expected.gridStructure
     ?? [];
+  const tableExpectations = fixture.expected.tableStructureByVariant?.[variant.id]
+    ?? fixture.expected.tableStructure
+    ?? [];
+  const expectations = [...gridExpectations, ...tableExpectations];
   const failures = [];
   const rectangleCache = new Map();
   const rectangle = (id) => {
@@ -245,6 +249,23 @@ function gridStructureFailures(fixture, variant, snapshot, pipeline) {
       : expectation.relation === "taller-than" ? first.height > second.height
       : false;
     if (!matches) failures.push({ ...expectation, reason: "relationship-mismatch", firstRectangle: first, secondRectangle: second });
+  }
+  return failures;
+}
+
+function tableHeaderRelationshipFailures(fixture, snapshot) {
+  const failures = [];
+  for (const expectation of fixture.expected.tableHeaders ?? []) {
+    const cell = snapshot.document.elementById(expectation.cell);
+    if (cell === null || cell === undefined) {
+      failures.push({ ...expectation, reason: "missing-cell" });
+      continue;
+    }
+    const actual = new Set(snapshot.document.semantic(cell)?.tableHeaders ?? []);
+    for (const headerId of expectation.headers) {
+      const header = snapshot.document.elementById(headerId);
+      if (header === null || header === undefined || !actual.has(header)) failures.push({ ...expectation, missingHeader: headerId, reason: "missing-header-relationship" });
+    }
   }
   return failures;
 }
@@ -324,7 +345,8 @@ function caseResult(fixture, variant, hash, snapshot, pipeline, deterministic, r
       cellBufferTruncation: pipeline.terminal.cellBuffer.outcome.status === "truncated"
         ? pipeline.terminal.cellBuffer.outcome : null,
       terminalTruncations: pipeline.terminal.truncations,
-      gridStructureFailures: gridStructureFailures(fixture, variant, snapshot, pipeline),
+      boxRelationshipFailures: boxRelationshipFailures(fixture, variant, snapshot, pipeline),
+      tableHeaderRelationshipFailures: tableHeaderRelationshipFailures(fixture, snapshot),
       deterministic
     }
   };
@@ -375,7 +397,11 @@ function aggregate(results) {
     displayListTruncations: results.filter((entry) => entry.metrics.displayListTruncation !== null).map((entry) => entry.id),
     cellBufferTruncations: results.filter((entry) => entry.metrics.cellBufferTruncation !== null).map((entry) => entry.id),
     terminalTruncations: results.filter((entry) => entry.metrics.terminalTruncations.length > 0).map((entry) => entry.id),
-    gridStructureFailures: results.flatMap((entry) => entry.metrics.gridStructureFailures.map((failure) => ({
+    boxRelationshipFailures: results.flatMap((entry) => entry.metrics.boxRelationshipFailures.map((failure) => ({
+      case: entry.id,
+      failure
+    }))),
+    tableHeaderRelationshipFailures: results.flatMap((entry) => entry.metrics.tableHeaderRelationshipFailures.map((failure) => ({
       case: entry.id,
       failure
     })))
@@ -437,6 +463,7 @@ if (options.check) {
     && summary.displayListTruncations.length === 0
     && summary.cellBufferTruncations.length === 0
     && summary.terminalTruncations.length === 0;
-  const gridGatesPass = summary.gridStructureFailures.length === 0;
-  if (!gatesPass || !gridGatesPass) throw new Error("Offline compatibility gates failed; inspect the machine-readable report.");
+  const structuralGatesPass = summary.boxRelationshipFailures.length === 0
+    && summary.tableHeaderRelationshipFailures.length === 0;
+  if (!gatesPass || !structuralGatesPass) throw new Error("Offline compatibility gates failed; inspect the machine-readable report.");
 }

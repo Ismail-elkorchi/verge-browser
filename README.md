@@ -52,9 +52,10 @@ replacing the current page.
 
 Author CSS contributes page colors, emphasis, visibility, spacing, borders,
 block/inline flow, flexible sizing and alignment, positioned layout, floats,
-and horizontal-writing-mode Grid placement, track sizing, and alignment. Verge resolves typed custom-property
-fallbacks and media queries against the CSS viewport before terminal cell
-snapping. Reader view ignores author styling, and page CSS
+horizontal-writing-mode Grid placement, track sizing, and alignment, and
+horizontal-writing-mode table sizing, spans, captions, and border models.
+Verge resolves typed custom-property fallbacks and media queries against the
+CSS viewport before terminal cell snapping. Reader view ignores author styling, and page CSS
 never controls browser chrome. Document focus participates in selector matching
 and computed style; Verge's user-agent stylesheet supplies the default visible
 focus indicator.
@@ -110,9 +111,12 @@ lists, structured tables, generated text, horizontal-writing-mode flex sizing,
 relative/absolute/fixed/sticky positioning, stacking, floats, and explicit grid
 and implicit Grid tracks, named lines and areas, spans, sparse and dense
 auto-placement, intrinsic and flexible track sizing, auto-fill/auto-fit, and
-Grid item/content alignment. It does not cover subgrid, masonry, vertical
-writing modes, table spans and border collapse, animation, web fonts, raster
-image decoding, or page JavaScript. Client-rendered
+Grid item/content alignment. Tables use HTML span metadata, CSS table box
+fixup, automatic or fixed column layout, row and rowspan distribution, top and
+bottom captions, separated or collapsed borders, RTL geometry, and source-owned
+header associations. Verge does not cover subgrid, masonry, vertical writing
+modes, table fragmentation, animation, web fonts, raster image decoding, or
+page JavaScript. Client-rendered
 sites, anti-bot challenges, media, and unsupported form encodings may therefore
 be unavailable. Network access remains constrained by the package’s protocol,
 redirect, content-type, timeout, and size policies.

@@ -12,6 +12,7 @@ import {
   buildLayoutFragmentTree,
   cssCoordinate,
   cssLengthFromFixed,
+  cssMultiply,
   cssPx,
   cssRect,
   selectLogicalLines
@@ -21,6 +22,13 @@ import {
   placeGridItems,
   sizeGridTracks
 } from "../../dist/presentation/layout/grid/index.js";
+import {
+  buildTableSlotGrid,
+  distributeTableWidth,
+  measureTableColumns,
+  resolveCollapsedTableBorders,
+  sizeTableRows
+} from "../../dist/presentation/layout/table/index.js";
 import { buildTextSearchIndex } from "../../dist/presentation/search/index.js";
 import { embeddedStylesheetSources, resolveStyles } from "../../dist/presentation/style/index.js";
 import {
@@ -119,7 +127,27 @@ const LIMITS_MS = Object.freeze({
   gridSpanGroups: 5_000,
   gridGrowthLimits: 5_000,
   gridSparseFrontiers: 5_000,
-  gridCollapsedAutoFitTracks: 5_000
+  gridCollapsedAutoFitTracks: 5_000,
+  tableMetadataIndexingP95: 500,
+  tableSlotGridConstructionP95: 500,
+  tableCellIntrinsicMeasurementP95: 500,
+  tableColumnMeasureAggregationP95: 1_000,
+  tableAutomaticWidthDistributionP95: 500,
+  tableFixedWidthDistributionP95: 500,
+  tableFirstCellLayoutPassP95: 3_000,
+  tableRowHeightAndRowspanDistributionP95: 1_000,
+  tableSecondCellLayoutPassP95: 3_000,
+  tableCollapsedBorderResolutionP95: 2_000,
+  tableDisplayListConstructionP95: 1_000,
+  tableCellRasterizationP95: 2_000,
+  completeTableLayoutP95: 3_000,
+  tableRepeatedResizeP95: 5_000,
+  tableOrdinaryCells10000P95: 15_000,
+  tableColspanStressP95: 5_000,
+  tableRowspanStressP95: 5_000,
+  tableWideStressP95: 5_000,
+  tableNestedStressP95: 5_000,
+  tableCollapsedBorderStressP95: 5_000
 });
 const LIMITS_MEMORY_MIB = Object.freeze({
   hundredThousandNodePeakHeapGrowth: 384,
@@ -134,7 +162,10 @@ const LIMITS_MEMORY_MIB = Object.freeze({
   repeatedResizeRetainedHeap: 64,
   gridLayoutFragmentPeakHeapGrowth: 192,
   gridLayoutFragmentRetainedHeap: 48,
-  gridRepeatedResizeRetainedHeap: 64
+  gridRepeatedResizeRetainedHeap: 64,
+  tableLayoutFragmentPeakHeapGrowth: 256,
+  tableLayoutFragmentRetainedHeap: 64,
+  tableRepeatedResizeRetainedHeap: 64
 });
 
 function createBenchmarkHtml(index) {
@@ -1044,6 +1075,197 @@ const gridStageMetrics = {
   })
 };
 
+const tableBenchmarkHtml = `<table id="benchmark-table" style="width:960px;border-collapse:collapse"><caption>benchmark</caption>
+  <colgroup><col span="10"></colgroup><tbody>${Array.from(
+    { length: 100 },
+    (_, row) => `<tr>${Array.from(
+      { length: 10 },
+      (_, column) => `<td style="border:${String(1 + column % 3)}px solid"${column === 0 && row % 10 === 0 ? " colspan=\"2\"" : ""}>${String(row)}:${String(column)} benchmark content</td>`
+    ).join("")}</tr>`
+  ).join("")}</tbody></table>`;
+const tableParsedDocument = parse(tableBenchmarkHtml, {
+  scriptingMode: "disabled",
+  captureSpans: true,
+  sourceRetention: "text",
+  trace: "none"
+});
+const tableFormatting = formattingFixture(tableBenchmarkHtml, "table-stage");
+const tableFormattingNode = (() => {
+  const pending = [tableFormatting.root];
+  while (pending.length > 0) {
+    const id = pending.pop();
+    if (id === undefined) continue;
+    const node = tableFormatting.node(id);
+    if (node.kind === "table") return node;
+    pending.push(...node.children);
+  }
+  throw new Error("table benchmark formatting tree has no table root");
+})();
+const tableBudgets = Object.freeze({
+  maxTableRoots: 10_000,
+  maxTableRowGroups: 100_000,
+  maxTableRows: 100_000,
+  maxTableColumnGroups: 100_000,
+  maxTableColumns: 4_096,
+  maxTableCells: 100_000,
+  maxTableSlotIntervals: 500_000,
+  maxTableColspanWork: 2_000_000,
+  maxTableRowspanWork: 2_000_000,
+  maxTableAnonymousMissingCells: 500_000,
+  maxTableIntrinsicMeasureWork: 2_000_000,
+  maxTableColumnDistributionWork: 2_000_000,
+  maxTableRowDistributionWork: 2_000_000,
+  maxTableCollapsedBorderCandidates: 4_000_000,
+  maxTableCollapsedBorderSegments: 1_000_000,
+  maxTableHeaderAssociations: 2_000_000
+});
+function tableComputed(formatting, node) {
+  if (node.styleNode === null) return null;
+  return node.pseudo === null
+    ? formatting.styles.style(node.styleNode)
+    : formatting.styles.pseudo(node.styleNode, node.pseudo) ?? formatting.styles.style(node.styleNode);
+}
+function tableUsedLength(value, basis) {
+  if (value.kind === "zero") return cssPx(0);
+  if (value.kind !== "length") return null;
+  if (value.unit === "px") return cssPx(value.value);
+  if (value.unit === "%" && basis !== null) return cssMultiply(basis, value.value / 100);
+  return null;
+}
+function syntheticTableContributions(id) {
+  const variation = String(id).length % 8;
+  const minimumInline = cssPx(16 + variation * 4);
+  const maximumInline = cssPx(64 + variation * 8);
+  const minimumBlock = cssPx(16 + variation * 2);
+  const box = Object.freeze({
+    minContentInlineSize: minimumInline,
+    maxContentInlineSize: maximumInline,
+    minimumBlockContribution: minimumBlock,
+    maximumBlockContribution: minimumBlock
+  });
+  return Object.freeze({
+    contentBox: box,
+    borderBox: box,
+    automaticMinimumSize: Object.freeze({ inline: minimumInline, block: minimumBlock }),
+    percentageDependence: Object.freeze({ inline: false, block: false })
+  });
+}
+function tableHost(formatting) {
+  const work = new Map();
+  return {
+    budgets: tableBudgets,
+    signal: undefined,
+    formattingNode: (id) => formatting.node(id),
+    computed: (node) => tableComputed(formatting, node),
+    boxComputed: (node) => tableComputed(formatting, node),
+    htmlTableCell: (node) => formatting.document.htmlTableCell(node),
+    htmlTableColumn: (node) => formatting.document.htmlTableColumn(node),
+    htmlTableColumnGroup: (node) => formatting.document.htmlTableColumnGroup(node),
+    isOutOfFlow: (node) => {
+      const position = tableComputed(formatting, node)?.box.position;
+      return position === "absolute" || position === "fixed";
+    },
+    consume: (budget, amount = 1) => work.set(budget, (work.get(budget) ?? 0) + amount),
+    usedLength: (value, basis) => tableUsedLength(value, basis),
+    intrinsicContributions: (id) => syntheticTableContributions(id),
+    registerCollapsedBorderOverride: () => {}
+  };
+}
+const measuredTableHost = tableHost(tableFormatting);
+const measuredTableGrid = buildTableSlotGrid(measuredTableHost, tableFormattingNode);
+const measuredTableStyle = tableComputed(tableFormatting, tableFormattingNode);
+if (measuredTableStyle === null) throw new Error("table benchmark has no computed style");
+const measuredTableColumns = measureTableColumns(measuredTableHost, measuredTableGrid, cssPx(960));
+const measuredTableWidth = distributeTableWidth(measuredTableHost, measuredTableStyle, measuredTableColumns, cssPx(960), cssPx(0));
+const tableSimpleFormatting = formattingFixture(`<table style="width:960px">${Array.from(
+  { length: 100 }, (_, row) => `<tr>${Array.from({ length: 10 }, (_, column) => `<td>${String(row)}:${String(column)}</td>`).join("")}</tr>`
+).join("")}</table>`, "table-first-cell-pass");
+const tableSecondPassFormatting = formattingFixture(`<table style="width:960px;height:800px">${Array.from(
+  { length: 100 }, (_, row) => `<tr><td rowspan="${String(1 + row % 4)}" style="vertical-align:${row % 2 === 0 ? "middle" : "bottom"}">row ${String(row)} wrapped content</td><td><div style="height:50%">dependent</div></td></tr>`
+).join("")}</table>`, "table-second-cell-pass");
+const tableMeasuredLayout = layoutFragments(tableFormatting, 120);
+const tableMeasuredDisplayList = displayList(tableMeasuredLayout, 120);
+const tableStageMetrics = {
+  tableMetadataIndexing: repeatedStage(() => {
+    const document = createIndexedWebDocumentSnapshot(tableParsedDocument, {
+      requestUrl: "https://bench.example/table-metadata",
+      finalUrl: "https://bench.example/table-metadata"
+    });
+    const table = document.elementById("benchmark-table");
+    if (table === null || document.htmlTable(table)?.cells.length !== 1_000) {
+      throw new Error("table metadata benchmark lost cells");
+    }
+  }),
+  tableSlotGridConstruction: repeatedStage(() => {
+    const grid = buildTableSlotGrid(tableHost(tableFormatting), tableFormattingNode);
+    if (grid.cells.length !== 1_000) throw new Error("slot-grid benchmark lost cells");
+  }),
+  tableCellIntrinsicMeasurement: repeatedStage(() => {
+    let total = 0;
+    for (const cell of measuredTableGrid.cells) total += syntheticTableContributions(cell.formattingNode).borderBox.maxContentInlineSize;
+    if (total <= 0) throw new Error("table intrinsic benchmark produced no contribution");
+  }),
+  tableColumnMeasureAggregation: repeatedStage(() => {
+    const measures = measureTableColumns(tableHost(tableFormatting), measuredTableGrid, cssPx(960));
+    if (measures.length === 0) throw new Error("table column-measure benchmark produced no columns");
+  }),
+  tableAutomaticWidthDistribution: repeatedStage(() => {
+    const width = distributeTableWidth(tableHost(tableFormatting), measuredTableStyle, measuredTableColumns, cssPx(960), cssPx(2));
+    if (width.columns.length === 0) throw new Error("automatic table width benchmark produced no columns");
+  }),
+  tableFixedWidthDistribution: repeatedStage(() => {
+    const style = Object.freeze({ ...measuredTableStyle, box: Object.freeze({ ...measuredTableStyle.box, tableLayout: "fixed" }) });
+    const width = distributeTableWidth(tableHost(tableFormatting), style, measuredTableColumns, cssPx(960), cssPx(2));
+    if (width.mode !== "fixed") throw new Error("fixed table width benchmark did not use fixed layout");
+  }),
+  tableFirstCellLayoutPass: repeatedStage(() => {
+    if (layoutFragments(tableSimpleFormatting, 120).outcome.status !== "complete") throw new Error("first table cell-layout workload was incomplete");
+  }),
+  tableRowHeightAndRowspanDistribution: repeatedStage(() => {
+    const result = sizeTableRows(tableHost(tableFormatting), measuredTableGrid, measuredTableWidth.columns, cssPx(0), cssPx(0), cssPx(1_600));
+    if (result.rows.length !== 100) throw new Error("table row-sizing benchmark lost rows");
+  }),
+  tableSecondCellLayoutPass: repeatedStage(() => {
+    if (layoutFragments(tableSecondPassFormatting, 120).outcome.status !== "complete") throw new Error("second table cell-layout workload was incomplete");
+  }),
+  tableCollapsedBorderResolution: repeatedStage(() => {
+    const winners = resolveCollapsedTableBorders(tableHost(tableFormatting), measuredTableGrid, tableFormattingNode, cssPx(960));
+    if (winners.length === 0) throw new Error("collapsed-border benchmark produced no segments");
+  }),
+  tableDisplayListConstruction: repeatedStage(() => {
+    if (displayList(tableMeasuredLayout, 120).outcome.status === "rejected") throw new Error("table display-list benchmark was rejected");
+  }),
+  tableCellRasterization: repeatedStage(() => {
+    if (cellRasterization(tableMeasuredDisplayList).cellBuffer.outcome.status === "rejected") throw new Error("table cell-rasterization benchmark was rejected");
+  }),
+  completeTableLayout: repeatedStage(() => {
+    if (layoutFragments(tableFormatting, 120).outcome.status !== "complete") throw new Error("complete table layout benchmark was incomplete");
+  }),
+  tableRepeatedResize: repeatedStage(() => {
+    for (const columns of [40, 80, 120]) {
+      if (layoutFragments(tableFormatting, columns).outcome.status !== "complete") throw new Error("table resize benchmark was incomplete");
+    }
+  })
+};
+
+const tableStressFormatting = {
+  tableOrdinaryCells10000: formattingFixture(`<table>${Array.from({ length: 100 }, (_, row) => `<tr>${Array.from(
+    { length: 100 }, (_, column) => `<td>${String(row)}:${String(column)}</td>`
+  ).join("")}</tr>`).join("")}</table>`, "table-ordinary-cells-10000"),
+  tableColspanStress: formattingFixture(`<table>${Array.from({ length: 100 }, (_, row) => `<tr>${Array.from(
+    { length: 10 }, (_, column) => `<td colspan="${String(1 + (row + column) % 10)}">span ${String(row)}:${String(column)}</td>`
+  ).join("")}</tr>`).join("")}</table>`, "table-colspan-stress"),
+  tableRowspanStress: formattingFixture(`<table>${Array.from({ length: 500 }, (_, row) => `<tr><td rowspan="${String(1 + row % 8)}">span ${String(row)}</td><td>value</td></tr>`).join("")}</table>`, "table-rowspan-stress"),
+  tableWideStress: formattingFixture(`<table><tr>${Array.from({ length: 1_000 }, (_, column) => `<td>${String(column)}</td>`).join("")}</tr></table>`, "table-wide-stress"),
+  tableNestedStress: formattingFixture(`${"<table><tr><td>".repeat(30)}nested${"</td></tr></table>".repeat(30)}`, "table-nested-stress"),
+  tableCollapsedBorderStress: formattingFixture(`<table style="border-collapse:collapse">${Array.from({ length: 100 }, (_, row) => `<tr>${Array.from(
+    { length: 10 }, (_, column) => `<td style="border:${String(1 + (row + column) % 4)}px solid">${String(row)}:${String(column)}</td>`
+  ).join("")}</tr>`).join("")}</table>`, "table-collapsed-border-stress")
+};
+const tableStressMetrics = Object.fromEntries(Object.entries(tableStressFormatting).map(([name, formatting]) => [name, repeatedStage(() => {
+  if (layoutFragments(formatting, 120).outcome.status !== "complete") throw new Error(`${name} table stress workload was incomplete`);
+}, 5)]));
+
 const unicodePropertyPoints = Array.from(
   { length: 100_000 },
   (_, index) => [0x41, 0x5d0, 0x627, 0x1f469, 0x4e00][index % 5]
@@ -1193,6 +1415,8 @@ const layoutFragmentsMemory = await layoutFragmentMemory(inlineFormatting);
 const repeatedResizeRetainedHeap = await repeatedResizeMemory(inlineFormatting);
 const gridLayoutFragmentsMemory = await layoutFragmentMemory(gridItemLayoutFormatting);
 const gridRepeatedResizeRetainedHeap = await repeatedResizeMemory(gridResizeFormatting);
+const tableLayoutFragmentsMemory = await layoutFragmentMemory(tableFormatting);
+const tableRepeatedResizeRetainedHeap = await repeatedResizeMemory(tableFormatting);
 
 const metrics = {
   htmlParseP95: percentile(timings.htmlParse, 0.95),
@@ -1237,6 +1461,21 @@ const metrics = {
   gridDisplayListConstructionP95: gridStageMetrics.gridDisplayListConstruction.p95,
   gridCellRasterizationP95: gridStageMetrics.gridCellRasterization.p95,
   gridAutoRepeatResizeP95: gridStageMetrics.gridAutoRepeatResize.p95,
+  tableMetadataIndexingP95: tableStageMetrics.tableMetadataIndexing.p95,
+  tableSlotGridConstructionP95: tableStageMetrics.tableSlotGridConstruction.p95,
+  tableCellIntrinsicMeasurementP95: tableStageMetrics.tableCellIntrinsicMeasurement.p95,
+  tableColumnMeasureAggregationP95: tableStageMetrics.tableColumnMeasureAggregation.p95,
+  tableAutomaticWidthDistributionP95: tableStageMetrics.tableAutomaticWidthDistribution.p95,
+  tableFixedWidthDistributionP95: tableStageMetrics.tableFixedWidthDistribution.p95,
+  tableFirstCellLayoutPassP95: tableStageMetrics.tableFirstCellLayoutPass.p95,
+  tableRowHeightAndRowspanDistributionP95: tableStageMetrics.tableRowHeightAndRowspanDistribution.p95,
+  tableSecondCellLayoutPassP95: tableStageMetrics.tableSecondCellLayoutPass.p95,
+  tableCollapsedBorderResolutionP95: tableStageMetrics.tableCollapsedBorderResolution.p95,
+  tableDisplayListConstructionP95: tableStageMetrics.tableDisplayListConstruction.p95,
+  tableCellRasterizationP95: tableStageMetrics.tableCellRasterization.p95,
+  completeTableLayoutP95: tableStageMetrics.completeTableLayout.p95,
+  tableRepeatedResizeP95: tableStageMetrics.tableRepeatedResize.p95,
+  ...Object.fromEntries(Object.entries(tableStressMetrics).map(([name, value]) => [`${name}P95`, value.p95])),
   compatibilityCorpusP95: percentile(realPageCompatibilitySamples, 0.95),
   ...workloadMetrics
 };
@@ -1253,7 +1492,10 @@ const memoryMetrics = {
   repeatedResizeRetainedHeap,
   gridLayoutFragmentPeakHeapGrowth: gridLayoutFragmentsMemory.peakHeapGrowth,
   gridLayoutFragmentRetainedHeap: gridLayoutFragmentsMemory.retainedHeap,
-  gridRepeatedResizeRetainedHeap
+  gridRepeatedResizeRetainedHeap,
+  tableLayoutFragmentPeakHeapGrowth: tableLayoutFragmentsMemory.peakHeapGrowth,
+  tableLayoutFragmentRetainedHeap: tableLayoutFragmentsMemory.retainedHeap,
+  tableRepeatedResizeRetainedHeap
 };
 const failures = Object.entries(LIMITS_MS)
   .filter(([name, limit]) => metrics[name] > limit)
@@ -1267,6 +1509,7 @@ if (!hundredThousandNodes.released || !largeSourceAttributes.released) {
 }
 if (!layoutFragmentsMemory.released) failures.push("released layout fragments remained reachable after forced GC");
 if (!gridLayoutFragmentsMemory.released) failures.push("released Grid layout fragments remained reachable after forced GC");
+if (!tableLayoutFragmentsMemory.released) failures.push("released table layout fragments remained reachable after forced GC");
 const report = {
   suite: "structural-pipeline-bench",
   timestamp: new Date().toISOString(),
@@ -1277,6 +1520,8 @@ const report = {
   realPageCompatibilityMetricsMs: realPageCompatibilityMetrics,
   unicodeTextStageMetricsMs: unicodeStageMetrics,
   gridStageMetricsMs: gridStageMetrics,
+  tableStageMetricsMs: tableStageMetrics,
+  tableStressMetricsMs: tableStressMetrics,
   unicodeStressControlsMs: unicodeStressControls,
   limitsMs: LIMITS_MS,
   metricsMemoryMiB: memoryMetrics,
@@ -1285,6 +1530,7 @@ const report = {
   releasedLargeDocumentsCollected: hundredThousandNodes.released && largeSourceAttributes.released,
   releasedLayoutFragmentsCollected: layoutFragmentsMemory.released,
   releasedGridLayoutFragmentsCollected: gridLayoutFragmentsMemory.released,
+  releasedTableLayoutFragmentsCollected: tableLayoutFragmentsMemory.released,
   reviewedPr129BaselineMs: {
     fragmentationP95: 7.148973,
     resizeP95: 5.855096,
@@ -1301,7 +1547,8 @@ const report = {
     stressControls: "Every rendering stress workload is warmed and reports p50 and p95 separately for layout fragment construction, display-list construction, cell rasterization, index construction, and complete rendering.",
     unicodeTextControls: "Unicode stage limits are new workload-specific controls measured after two warmups; PR #130 thresholds remain unchanged. One-shot controls cover one million LTR code points, mixed scripts, isolates, maximum valid embedding depth, CJK, emoji, and repeated resize with cached invariant text analysis.",
     compatibilityCorpus: "Every offline compatibility fixture is warmed twice and measured over seven complete native renderings; the 500ms p95 control is unchanged.",
-    gridControls: "Grid parsing, explicit-grid construction, named-line resolution, ordinary and locked-axis sparse placement, dense placement, non-spanning and spanning intrinsic sizing, planned-increase distribution, flexible-track sizing, collapsed-gutter construction, column and row sizing, container orchestration, item layout, complete nested-Grid layout, display-list construction, cell rasterization, and auto-repeat resize are each warmed and report p50/p95. Stress controls include equal and overlapping spans, every span group through the configured fixture track count, growth-limit saturation, sparse row frontiers, and collapsed auto-fit tracks. New Grid workload and memory limits do not alter prior controls."
+    gridControls: "Grid parsing, explicit-grid construction, named-line resolution, ordinary and locked-axis sparse placement, dense placement, non-spanning and spanning intrinsic sizing, planned-increase distribution, flexible-track sizing, collapsed-gutter construction, column and row sizing, container orchestration, item layout, complete nested-Grid layout, display-list construction, cell rasterization, and auto-repeat resize are each warmed and report p50/p95. Stress controls include equal and overlapping spans, every span group through the configured fixture track count, growth-limit saturation, sparse row frontiers, and collapsed auto-fit tracks. New Grid workload and memory limits do not alter prior controls.",
+    tableControls: "Table metadata indexing, sparse slot-grid construction, synthetic intrinsic-cell measurement, column-measure aggregation, automatic and fixed width distribution, first and second cell-layout workloads, row-height and rowspan distribution, collapsed-border resolution, complete layout, display-list construction, cell rasterization, and resize are warmed and report p50/p95. Stress workloads cover 10,000 ordinary cells, colspan, rowspan, 1,000 columns, nested tables, and collapsed-border edges. Existing limits are unchanged; table limits are new workload-specific controls."
   },
   ok: failures.length === 0,
   failures

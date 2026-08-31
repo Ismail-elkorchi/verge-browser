@@ -56,15 +56,20 @@ rasterization. The currently supported CSS slice includes:
   column auto-placement, fixed/intrinsic/flexible sizing, `minmax()`,
   `fit-content()`, fixed and automatic `repeat()`, item alignment, content
   alignment, automatic margins, overlap, and Grid-aware positioned descendants;
+- horizontal-writing-mode tables with CSS table box fixup, HTML `colspan` and
+  `rowspan`, automatic and fixed column layout, column and row groups, row-height
+  distribution, top and bottom captions, separated borders, collapsed-border
+  conflict resolution, empty-cell painting, RTL geometry, and positioned
+  descendants that remain outside table sizing;
 - relative, absolute, fixed, and sticky positioning, insets, shrink-to-fit
   sizing, z-index stacking, left/right/logical floats, clearing, and line boxes
   shortened around floats;
 - bounded widths, heights, gaps, solid borders, functional RGB/HSL colors,
   alpha composition, and overflow clipping.
 
-The `grid` shorthand, subgrid, masonry, vertical writing modes, table spans and
-border collapse, multi-column layout, web fonts, raster image decoding, and
-page JavaScript remain explicit gaps. The implemented `grid-template` shorthand
+The `grid` shorthand, subgrid, masonry, vertical writing modes, table
+fragmentation, multi-column layout, web fonts, raster image decoding, and page
+JavaScript remain explicit gaps. The implemented `grid-template` shorthand
 does not imply support for the separate `grid` shorthand. Supported positioned clipping retains document
 semantics while its actual paint and pointer geometry stays clipped. Sticky
 positioning uses the root terminal scrollport; nested scrolling boxes remain

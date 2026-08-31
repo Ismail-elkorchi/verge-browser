@@ -6,6 +6,13 @@ import {
   type Span
 } from "@ismail-elkorchi/html-parser";
 import { bidiClass } from "../unicode/index.js";
+import { buildHtmlTableMetadata } from "./table/index.js";
+import type {
+  HtmlTableCellMetadata,
+  HtmlTableColumnMetadata,
+  HtmlTableColumnGroupMetadata,
+  HtmlTableMetadata,
+} from "./table/index.js";
 
 import type {
   DocumentAttribute,
@@ -46,7 +53,9 @@ const DEFAULT_INDEX_LIMITS: DocumentIndexLimits = Object.freeze({
   maxForms: 256,
   maxControlsPerForm: 2_000,
   maxOptionsPerSelect: 2_000,
-  maxHeadings: 10_000
+  maxHeadings: 10_000,
+  maxHtmlTableSlotWork: 250_000,
+  maxHtmlTableHeaderAssociationWork: 1_000_000,
 });
 const KNOWN_INPUT_TYPES = new Set([
   "hidden", "text", "search", "tel", "url", "email", "password", "date", "month", "week",
@@ -279,6 +288,10 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
   readonly #replaced: ReadonlyMap<DocumentNodeRef, DocumentReplacedContent>;
   readonly #disclosures: ReadonlyMap<DocumentNodeRef, DocumentDisclosure>;
   readonly #directionalities: ReadonlyMap<DocumentNodeRef, DocumentDirectionality>;
+  readonly #htmlTables: ReadonlyMap<DocumentNodeRef, HtmlTableMetadata>;
+  readonly #htmlTableCells: ReadonlyMap<DocumentNodeRef, HtmlTableCellMetadata>;
+  readonly #htmlTableColumns: ReadonlyMap<DocumentNodeRef, HtmlTableColumnMetadata>;
+  readonly #htmlTableColumnGroups: ReadonlyMap<DocumentNodeRef, HtmlTableColumnGroupMetadata>;
   readonly #textRanges: ReadonlyMap<DocumentNodeRef, readonly [number, number]>;
   readonly #directTextSourceMappings: ReadonlySet<DocumentNodeRef>;
   readonly #documentText: string;
@@ -509,6 +522,33 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
       if (id !== null && !elementByHtmlId.has(id)) elementByHtmlId.set(id, element.ref);
     }
     this.#elementsById = elementByHtmlId;
+    const tableMetadata = buildHtmlTableMetadata({
+      elements,
+      maxSlotWork: limits.maxHtmlTableSlotWork,
+      maxHeaderAssociationWork: limits.maxHtmlTableHeaderAssociationWork,
+      node: (ref) => {
+        const node = nodes.get(ref);
+        if (node === undefined) throw new RangeError(`Unknown document node reference: ${ref}`);
+        return node;
+      },
+      attribute: (ref, name) => attribute(ref, name),
+      elementById: (id) => elementByHtmlId.get(id) ?? null,
+    });
+    this.#htmlTables = tableMetadata.tables;
+    this.#htmlTableCells = tableMetadata.cells;
+    this.#htmlTableColumns = tableMetadata.columns;
+    this.#htmlTableColumnGroups = tableMetadata.columnGroups;
+    if (tableMetadata.truncation !== null) {
+      const exhausted = tableMetadata.truncation === "slot-work"
+        ? "maxHtmlTableSlotWork" as const
+        : "maxHtmlTableHeaderAssociationWork" as const;
+      markTruncated(
+        mutableOutcome,
+        exhausted,
+        limits[exhausted],
+        indexedNodes,
+      );
+    }
 
     const titleElement = elements.find((element) => element.namespace === HTML_NAMESPACE_URI && element.name === "title");
     this.title = cleanText(titleElement === undefined ? "" : text(titleElement.ref)) || this.finalUrl;
@@ -603,14 +643,25 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
         && ["input", "textarea", "select", "button"].includes(element.name);
       const isReplaced = element.namespace !== HTML_NAMESPACE_URI
         || ["img", "audio", "video", "iframe", "embed", "object"].includes(element.name);
-      const role = htmlRole(element, get);
-      const name = accessibleName(element, nameFromContents.has(role));
+      const tableCell = tableMetadata.cells.get(element.ref);
+      const defaultRole = htmlRole(element, get);
+      const role = get("role") === null && tableCell?.header === true &&
+          (tableCell.scope === "row" || tableCell.scope === "rowgroup")
+        ? "rowheader"
+        : defaultRole;
+      const explicitName = accessibleName(element, nameFromContents.has(role));
+      const table = tableMetadata.tables.get(element.ref);
+      const caption = table?.captions[0];
+      const name = role === "table" && explicitName.length === 0 && caption !== undefined
+        ? cleanText(text(caption))
+        : explicitName;
       const semantic = Object.freeze({
         node: element.ref,
         role,
         landmark: landmarkFor(element, get, name, sectioningAncestors.has(element.ref)),
         accessibleName: name,
         accessibleDescription: accessibleDescription(element),
+        tableHeaders: tableMetadata.headerAssociations.get(element.ref) ?? Object.freeze([]),
         accessibilityHidden: accessibilityHidden.get(element.ref) === true,
         behavior: element.namespace === HTML_NAMESPACE_URI && (element.name === "br" || element.name === "wbr")
           ? element.name === "br" ? "forced-break" : "break-opportunity"
@@ -1308,6 +1359,26 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
   public directionForRenderedText(ref: DocumentNodeRef, value: string): DocumentDirection {
     const entry = this.directionality(ref);
     return entry.htmlMode === "auto" ? firstStrongDirection(value) ?? "ltr" : entry.direction;
+  }
+
+  public htmlTable(ref: DocumentNodeRef): HtmlTableMetadata | null {
+    this.node(ref);
+    return this.#htmlTables.get(ref) ?? null;
+  }
+
+  public htmlTableCell(ref: DocumentNodeRef): HtmlTableCellMetadata | null {
+    this.node(ref);
+    return this.#htmlTableCells.get(ref) ?? null;
+  }
+
+  public htmlTableColumn(ref: DocumentNodeRef): HtmlTableColumnMetadata | null {
+    this.node(ref);
+    return this.#htmlTableColumns.get(ref) ?? null;
+  }
+
+  public htmlTableColumnGroup(ref: DocumentNodeRef): HtmlTableColumnGroupMetadata | null {
+    this.node(ref);
+    return this.#htmlTableColumnGroups.get(ref) ?? null;
   }
 
 }

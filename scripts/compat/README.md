@@ -14,7 +14,10 @@ RTL flow, overlap and z-index, auto-repeat reflow, positioned descendants,
 nested grids, dense packing, staged intrinsic spanning contributions, sparse
 locked-axis frontiers, placement conflict normalization, invalid grammar,
 collapsed auto-fit gutters, and overflow alignment. Normal qualification
-performs no network access.
+performs no network access. Fourteen independently authored table fixtures add
+grouped financial headers, row and column spans, percentage and fixed columns,
+automatic intrinsic columns, captions, separated and collapsed borders, RTL,
+nested tables, tables inside Grid and Flex, actions, and collapsed tracks.
 
 Run `npm run compat:check` to build Verge, load every fixture through the same
 `BrowserSession` resource path as the CLI, and render it through the
@@ -24,8 +27,8 @@ medium, and wide terminal widths; positioned-resource fixtures also run at a
 nonzero scroll position. The report separately records logical meaningful-text
 recall and source-linked painted-cell recall, semantic and action recall,
 reading order, request contracts, unsupported CSS, resource failures,
-determinism, Grid row/column/containment/overlap relationships, and every typed
-layout/display-list/cell-buffer truncation.
+determinism, Grid and table row/column/containment/span relationships, table
+header associations, and every typed layout/display-list/cell-buffer truncation.
 
 `compat:check` rejects any diagnostic not allowed by that individual fixture.
 There is no global unsupported-feature allowlist.
@@ -34,8 +37,10 @@ There is no global unsupported-feature allowlist.
 protected main and explicitly identifies the metrics that old harness did not
 measure. `baseline-grid-before.json` pins the protected-main result immediately
 before the Grid milestone; `baseline-after.json` records the 30-fixture,
-88-variant native matrix after it. They are evidence, not expected-output
-snapshots.
+88-variant native matrix after it. `baseline-table-before.json` measures that
+protected main against the expanded 44-fixture, 130-case table corpus;
+`baseline-table-after.json` records the table engine result. They are evidence,
+not expected-output snapshots.
 
 ## Optional Chromium comparison
 

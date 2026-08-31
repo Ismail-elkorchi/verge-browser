@@ -72,8 +72,8 @@ content-box and border-box min-content/max-content inline contributions,
 minimum/maximum block contributions, automatic minimum sizes, and percentage
 dependence. Text uses the existing grapheme, line-break, white-space, and
 CSS-pixel text-metrics contracts. Controls, replaced boxes, block, flex, Grid,
-and the currently supported table slice contribute without invoking terminal
-painting. Nested Grid can therefore size a parent Grid directly.
+and the table layout engine contribute without invoking terminal painting.
+Nested Grid and table containers can therefore size a parent Grid directly.
 
 For each axis, track sizing retains finite or infinite growth limits and
 initializes fixed and intrinsic sizing functions separately. It resolves all
@@ -138,6 +138,4 @@ or sizing cannot be committed produces the exact typed layout truncation while
 already finalized unrelated page fragments remain reachable.
 
 The current boundary excludes subgrid, masonry, vertical writing modes,
-fragmentation, and complete graphical-browser paint fidelity. Complete table
-intrinsic sizing, cell spans, captions, row-height distribution, and collapsed
-borders remain the recommended next layout milestone.
+fragmentation, and complete graphical-browser paint fidelity.

@@ -603,7 +603,7 @@ test("tables preserve rows, cells, captions, columns, and nested table geometry"
       throw new Error("Missing table column");
     })()
   )][0];
-  assert.ok(column && column.borderRect.width === 0 && column.borderRect.height === 0);
+  assert.ok(column && column.borderRect.width > 0 && column.borderRect.height > 0);
 });
 
 test("flex and grid geometry is fixed-point layout-owned", () => {

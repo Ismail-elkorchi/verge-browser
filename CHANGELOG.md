@@ -16,6 +16,18 @@ All notable changes are documented in this file.
 - Model ordinary `button` controls without debug prose, keep them out of
   successful form entries, and report rendering truncation ahead of stale
   navigation-success status text.
+- Replace the former equal-width table allocator with one bounded
+  horizontal-writing-mode HTML/CSS table engine. Index HTML spans, groups,
+  captions, and header relationships in the document tree; perform CSS table
+  box fixup in box generation; build one sparse immutable table slot grid; and
+  resolve intrinsic and fixed columns, percentage and span constraints,
+  column-driven row sizing, rowspan distribution, cell relayout, baselines,
+  vertical alignment, captions, RTL geometry, visibility collapse, separated
+  borders, and collapsed-border conflicts in table-owned layout modules. Add
+  source-owned table accessibility relationships, typed table work budgets,
+  focused WPT and HTML adaptations, deterministic fuzzing, stage benchmarks,
+  and fourteen MIT-licensed offline corpus fixtures. Terminal painting consumes
+  table paint metadata and owns no span, sizing, or border-conflict algorithm.
 - Replace the simple Grid row-slicing allocator with one standards-derived,
   bounded horizontal-writing-mode Grid engine. Add typed Grid track, line,
   area, placement, auto-repeat, flow, gap, and alignment computed values;
