@@ -76,16 +76,15 @@ test("layout, display-list, and cell-rasterizer boundaries are explicit", async 
   const terminalFiles = await readdir(resolve(root, "src/presentation/terminal"));
   assert.match(displayList, /LayoutFragment/u);
   assert.match(displayList, /inlineContinuations/u);
-  assert.match(displayList, /buildTerminalDisplayList/u);
+  assert.match(displayList, /buildDocumentDisplayList/u);
   assert.match(displayList, /input\.layout\.fragment\(childId\)/u);
   assert.match(displayList, /input\.layout\.stacking\(/u);
   assert.match(displayList, /paintStackingContext/u);
   assert.doesNotMatch(displayList, /visualFragment|visualLineFragments|lineForFragment/u);
   assert.doesNotMatch(displayList, /FormattingTree|ComputedStyle|CssLength/u);
   assert.match(rasterizer, /TerminalPaintCommand/u);
-  assert.match(rasterizer, /rasterizeTerminalDisplayList/u);
-  assert.match(rasterizer, /rasterizeTerminalCells/u);
-  assert.match(rasterizer, /buildTerminalIndexes/u);
+  assert.match(rasterizer, /rasterizeViewportDisplayList/u);
+  assert.doesNotMatch(rasterizer, /rasterizeTerminalDisplayList|rasterizeTerminalCells|buildTerminalIndexes/u);
   assert.doesNotMatch(rasterizer, /FormattingTree|ComputedStyle|CssLength/u);
   assert.doesNotMatch(rasterizer, /Math\.(?:min|max)\(\.\.\./u);
   const fixed = await source("src/presentation/layout/fixed.ts");
@@ -102,14 +101,17 @@ test("layout, display-list, and cell-rasterizer boundaries are explicit", async 
 });
 
 test("rendering cancellation and text ownership have one precise boundary", async () => {
-  const pipeline = await source("src/presentation/pipeline.ts");
+  const rendererTypes = await source("src/presentation/renderer/types.ts");
+  const cancellation = await source("src/presentation/renderer/cancellation.ts");
   const layoutTypes = await source("src/presentation/layout/types.ts");
   const terminalTypes = await source("src/presentation/terminal/types.ts");
   const search = await source("src/presentation/search/text-search-index.ts");
   const inlineItems = await source("src/presentation/text/inline-item-stream.ts");
   const formattingText = await source("src/presentation/formatting/control-display-text.ts");
   const sharedText = await source("src/presentation/text/css-text.ts");
-  assert.match(pipeline, /interface RenderDocumentInput[\s\S]*signal\?: AbortSignal/u);
+  assert.match(rendererTypes, /interface DocumentAnalysisRequest[\s\S]*signal\?: AbortSignal/u);
+  assert.match(cancellation, /interface CancellationSignal[\s\S]*throwIfAborted/u);
+  assert.match(cancellation, /class AtomicCancellationSignal implements AbortSignal, CancellationSignal/u);
   assert.doesNotMatch(layoutTypes, /interface LayoutContext\s*\{[^}]*\bsignal/u);
   assert.doesNotMatch(terminalTypes, /interface TerminalRenderContext\s*\{[^}]*\bsignal/u);
   assert.doesNotMatch(search, /FormattingFormControlNode|controlDisplayText/u);
@@ -122,6 +124,43 @@ test("rendering cancellation and text ownership have one precise boundary", asyn
   assert.doesNotMatch(layoutTypes, /TextSearchIndex/u);
   assert.match(sharedText, /transformTextWithSourceRanges/u);
   assert.doesNotMatch(search, /matchAll\(\/\\s\+\|\\S\+/u);
+});
+
+test("interactive rendering has one retained viewport path", async () => {
+  const paths = await sourcePaths();
+  const rendererTypes = await source("src/presentation/renderer/types.ts");
+  const artifactStore = await source("src/presentation/renderer/artifact-store.ts");
+  const terminalTypes = await source("src/presentation/terminal/types.ts");
+  const rasterizer = await source("src/presentation/terminal/rasterizer.ts");
+  const view = await source("src/ui/view.ts");
+  const update = await source("src/ui/app.ts");
+  const documentLayout = await source("src/ui/document-layout.ts");
+  const worker = await source("src/ui/render-worker/worker-entry.ts");
+
+  assert.ok(!paths.includes("src/presentation/pipeline.ts"));
+  assert.doesNotMatch(rendererTypes, /scrollRow|scrollPosition/u);
+  assert.match(rendererTypes, /interface DocumentRenderArtifacts/u);
+  assert.match(rendererTypes, /interface RetainedViewportRenderResult/u);
+  assert.match(artifactStore, /no scroll-keyed complete render results/u);
+  assert.doesNotMatch(artifactStore, /RenderPipelineCache|MAX_RENDER_PIPELINE_CACHE_ENTRIES/u);
+  assert.match(terminalTypes, /interface ViewportCellBuffer/u);
+  assert.doesNotMatch(terminalTypes, /interface TerminalCellBuffer\b|interface TerminalRenderResult\b/u);
+  assert.match(rasterizer, /rasterizeViewportDisplayList/u);
+  assert.doesNotMatch(rasterizer, /rasterizeTerminalDisplayList|rasterizeTerminalCells|buildTerminalIndexes/u);
+  assert.doesNotMatch(view, /renderDocumentViewport|RenderArtifactStore|rasterizeViewportDisplayList/u);
+  assert.doesNotMatch(update, /renderDocumentViewport|RenderArtifactStore|rasterizeViewportDisplayList/u);
+  assert.doesNotMatch(update, /presentation\/(?:style|formatting|layout|terminal)\//u);
+  assert.doesNotMatch(documentLayout, /presentation\/(?:style|formatting|layout|terminal|renderer)\//u);
+  assert.doesNotMatch(worker, /from\s+["']node:(?:fs|http|https|net|tls)|\bfetch\s*\(/u);
+});
+
+test("stylesheet programs consume retained parser trees without selector serialization", async () => {
+  const program = await source("src/presentation/style/stylesheet-program.ts");
+  const cascade = await source("src/presentation/style/cascade.ts");
+  assert.match(program, /parseSelectorListFromComponentValues\(rule\.prelude/u);
+  assert.match(cascade, /parseSelectorListFromComponentValues\(condition\.value/u);
+  assert.doesNotMatch(program, /parseSelectorList\(serializeCssComponentValues/u);
+  assert.doesNotMatch(cascade, /parseSelectorList\(serializeCssComponentValues/u);
 });
 
 test("Unicode text analysis has one pinned internal ownership path", async () => {
@@ -175,7 +214,7 @@ test("web compatibility tooling and CSS ownership remain outside the runtime ren
   }
   assert.doesNotMatch(dependencyInspection, /(?:fetch\(|Http|Cookie|node:)/u);
   assert.match(valueEvaluator, /parseComponentValues/u);
-  assert.match(valueEvaluator, /resolveCssVariables/u);
+  assert.match(valueEvaluator, /resolveCssVariableValues/u);
   assert.match(flexLayout, /resolveFlexibleLengths/u);
   assert.match(flexLayout, /collectLines/u);
   assert.doesNotMatch(terminal, /(?:flexBaseSize|resolveFlexLines|positionedContainingBlock|float:\s*["'])/u);
@@ -313,6 +352,6 @@ test("the root API does not publish document construction, editing, or mutable s
   }
   assert.doesNotMatch(
     declaration,
-    /\b(?:StyleSnapshot|FormattingTree|InlineItemStreamSet|LayoutFragmentTree|TerminalDisplayList|TerminalCellBuffer|TextSearchIndex|RenderPipelineResult|ReaderDocument)\b/u
+    /\b(?:StyleSnapshot|FormattingTree|InlineItemStreamSet|LayoutFragmentTree|DocumentDisplayList|TerminalCellBuffer|TextSearchIndex|RenderPipelineResult|ReaderDocument)\b/u
   );
 });

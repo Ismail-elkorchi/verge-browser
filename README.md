@@ -18,8 +18,10 @@ Pass a URL to open it directly:
 verge https://example.com
 ```
 
-Without a URL, Verge restores the previous tabs and scroll positions. A new
-profile starts on the New Tab dashboard.
+Without a URL, Verge creates placeholders for the previous tabs and scroll
+positions, shows the browser shell immediately, restores the active tab first,
+and then loads background tabs with bounded concurrency. A new profile starts
+on the New Tab dashboard.
 
 ## Browser controls
 
@@ -66,8 +68,9 @@ overwritten.
 
 ## Plain output
 
-`--once` loads one target, consumes the same terminal display list and cell
-buffer used by the interactive page view, and exits without terminal control
+`--once` loads one target, consumes the same retained document display list,
+spatial query, and viewport cell rasterizer used by the interactive page view,
+and exits without terminal control
 sequences:
 
 ```sh

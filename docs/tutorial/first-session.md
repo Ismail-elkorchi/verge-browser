@@ -23,8 +23,9 @@ Once a page loads:
 - `q` exits when a text control is not consuming input.
 
 Verge restores open tabs, scroll positions, the selected tab, and the library
-panel on the next normal startup. Supplying an explicit target starts with that
-target instead.
+panel on the next normal startup. The shell appears before navigation finishes:
+the active tab loads first and background placeholders restore independently.
+Supplying an explicit target starts with that target instead.
 
 Verge renders server-provided HTML. It does not execute page JavaScript or
 provide graphical CSS layout.

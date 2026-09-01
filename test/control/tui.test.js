@@ -14,12 +14,13 @@ import { BrowserStore } from "../../dist/app/storage.js";
 import {
   browserMediaEnvironment,
   browserRenderPreferences,
+  committedDocumentScrollRow,
   documentScrollRow,
   documentWithScrollRow,
-  renderDocumentForViewport,
   scrollToSource
 } from "../../dist/ui/document-layout.js";
 import { prepareBrowserTui, renderBrowserOnce } from "../../dist/ui/run.js";
+import { updateBrowser } from "../../dist/ui/app.js";
 
 function response(requestUrl, html) {
   return {
@@ -103,18 +104,25 @@ async function preparedFixture(options = {}) {
   const host = createMemoryTerminalHost({ terminalSize: options.terminalSize ?? { columns: 100, rows: 28 } });
   const runtime = createTuiRuntime({ app: prepared.app, host });
   await runtime.start();
+  if (options.waitForRender !== false) {
+    await waitUntil(runtime, () => {
+      const status = runtime.state().documents[0]?.rendering?.status;
+      return status === "ready" || status === "failed";
+    });
+    const rendering = runtime.state().documents[0]?.rendering;
+    assert.equal(rendering?.status, "ready", rendering?.error ?? "The initial viewport did not render.");
+  }
   return { runtime, prepared };
 }
 
 async function waitUntil(runtime, predicate) {
-  const signal = globalThis.AbortSignal.timeout(5_000);
+  const deadline = Date.now() + 20_000;
   while (!predicate()) {
-    try {
-      await runtime.nextChange(signal);
-    } catch (error) {
-      if (signal.aborted) assert.fail("Timed out waiting for browser state");
-      throw error;
+    if (Date.now() >= deadline) {
+      const rendering = runtime.state().documents[0]?.rendering;
+      assert.fail(`Timed out waiting for browser state (${rendering?.status ?? "missing"}: ${rendering?.error ?? "no error"}); diagnostics=${JSON.stringify(runtime.diagnostics())}`);
     }
+    await new Promise((resolve) => setTimeout(resolve, 5));
   }
 }
 
@@ -129,19 +137,136 @@ function key(key, modifiers = {}) {
   };
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+test("workspace restoration paints placeholders first, loads the active tab first, and isolates failures", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "verge-placeholder-restore-"));
+  const store = await BrowserStore.open({ statePath: join(directory, "state.json") });
+  const urls = ["https://restore.test/zero", "https://restore.test/one", "https://restore.test/active", "https://restore.test/three"];
+  await store.saveWorkspace({
+    documents: urls.map((url) => ({ url, scrollAnchor: { target: null, rowOffset: 0 } })),
+    activeDocumentIndex: 2,
+    sidePanel: null,
+  });
+  const pending = new Map();
+  const starts = [];
+  let sessions = 0;
+  const prepared = await prepareBrowserTui(urls[0], {
+    store,
+    restoreWorkspace: true,
+    services: {
+      async writeTextFile() {}, async downloadFile() { throw new Error("not used"); },
+      async openExternal() {}, async openPath() {}, async close() {},
+    },
+    createSession: () => {
+      sessions += 1;
+      return new BrowserSession({
+        loader: async (requestUrl) => {
+          starts.push(requestUrl);
+          const operation = deferred();
+          pending.set(requestUrl, operation);
+          return operation.promise;
+        },
+        stylesheetLoader: async () => { throw new Error("unexpected stylesheet"); },
+        defaultParseMode: "text",
+      });
+    },
+  });
+  assert.equal(sessions, 0);
+  assert.ok(prepared.state.documents.every((tab) => tab.kind === "restoring"));
+  const host = createMemoryTerminalHost({ terminalSize: { columns: 80, rows: 24 } });
+  const runtime = createTuiRuntime({ app: prepared.app, host });
+  try {
+    await runtime.start();
+    assert.ok(runtime.frame());
+    assert.equal(runtime.state().documents[2].kind, "loading");
+    await waitUntil(runtime, () => starts.length === 1);
+    assert.deepEqual(starts, [urls[2]]);
+    assert.equal(sessions, 1);
+
+    pending.get(urls[2]).resolve(response(urls[2], "<title>Active</title><h1>Active restored tab</h1>"));
+    await waitUntil(runtime, () => runtime.state().documents[2].kind === "ready" && starts.length === 3);
+    assert.deepEqual(new Set(starts.slice(1)), new Set([urls[0], urls[1]]));
+    assert.equal(sessions, 3);
+
+    pending.get(urls[0]).reject(new Error("isolated background failure"));
+    pending.get(urls[1]).resolve(response(urls[1], "<title>One</title><p>One</p>"));
+    await waitUntil(runtime, () => starts.includes(urls[3]));
+    pending.get(urls[3]).resolve(response(urls[3], "<title>Three</title><p>Three</p>"));
+    await waitUntil(runtime, () => runtime.state().documents.every((tab) => tab.kind === "ready" || tab.kind === "failed"));
+    await waitUntil(runtime, () => runtime.state().documents[2].rendering?.status === "ready");
+    assert.equal(runtime.state().documents[0].kind, "failed");
+    assert.deepEqual(runtime.state().documents.slice(1).map((tab) => tab.kind), ["ready", "ready", "ready"]);
+    assert.match(renderFramePlain(runtime.frame()), /Active restored tab/u);
+  } finally {
+    for (const operation of pending.values()) operation.resolve(response("https://restore.test/cleanup", "<p>cleanup</p>"));
+    await runtime.dispose();
+    await prepared.controller.close();
+  }
+});
+
+test("a rendering-worker failure retains the last frame and restarts only after explicit retry", async () => {
+  const { runtime, prepared } = await preparedFixture();
+  try {
+    const current = runtime.state();
+    const ready = current.documents[0];
+    assert.equal(ready?.kind, "ready");
+    const failed = {
+      ...current,
+      documents: current.documents.map((tab, index) => index === 0 && tab.kind === "ready"
+        ? {
+            ...tab,
+            rendering: { ...tab.rendering, status: "failed", error: "worker stopped" },
+          }
+        : tab),
+    };
+    const context = { terminalSize: { columns: 100, rows: 28 } };
+    const ignoredScroll = updateBrowser(prepared.controller, failed, { kind: "scroll", rows: 3 }, context);
+    assert.equal(ignoredScroll.state.documents[0]?.rendering?.status, "failed");
+    assert.equal(ignoredScroll.effects?.some((effect) => effect.id.startsWith("render:")) ?? false, false);
+
+    const retry = updateBrowser(prepared.controller, failed, { kind: "requestActiveViewport" }, context);
+    assert.equal(retry.state.documents[0]?.rendering?.status, "rendering");
+    assert.equal(retry.effects?.some((effect) => effect.id.startsWith("render:")), true);
+  } finally {
+    await runtime.dispose();
+    await prepared.controller.close();
+  }
+});
+
 test("interactive browser renders the cell buffer and preserves link focus across resize", async () => {
   const { runtime, prepared } = await preparedFixture({ terminalSize: { columns: 72, rows: 24 } });
   try {
     const document = runtime.state().documents[0];
     assert.equal(document.snapshot.document.title, "Index");
-    assert.equal(renderDocumentForViewport(document, 71, 21), renderDocumentForViewport(document, 71, 21));
+    assert.equal(document.rendering.status, "ready");
     assert.match(renderFramePlain(runtime.frame()), /Next page with a wrapping label/u);
+    const pendingScroll = documentWithScrollRow(document, documentScrollRow(document) + 3, 20);
+    assert.notEqual(documentScrollRow(pendingScroll), documentScrollRow(document));
+    assert.equal(committedDocumentScrollRow(pendingScroll), committedDocumentScrollRow(document));
+    const metricsBeforeFocus = await prepared.controller.renderingMetrics();
+    const renderStateRevisionBeforeFocus = document.stateRevision;
     const linkId = `link:${document.snapshot.document.links[0].node}`;
     for (let count = 0; count < 20 && !runtime.frame().focusPath?.includes(linkId); count += 1) {
       await runtime.handleInput(key("tab"));
     }
     assert.ok(runtime.frame().focusPath?.includes(linkId));
     assert.equal(runtime.state().documents[0].documentState.focus, document.snapshot.document.links[0].node);
+    const metricsAfterFocus = await prepared.controller.renderingMetrics();
+    assert.equal(runtime.state().documents[0].stateRevision, renderStateRevisionBeforeFocus);
+    assert.equal(metricsAfterFocus.viewportRequests, metricsBeforeFocus.viewportRequests);
+    assert.equal(
+      metricsAfterFocus.stages.find((stage) => stage.stage === "computed-style-resolution")?.invocations,
+      metricsBeforeFocus.stages.find((stage) => stage.stage === "computed-style-resolution")?.invocations
+    );
     const focusedLinkCells = runtime.frame().cells.filter((cell) =>
       cell.link?.href === "https://example.test/next"
     );
@@ -173,22 +298,26 @@ test("terminal control focus reveals offscreen fragment geometry through the pag
     }
     assert.ok(runtime.frame().focusPath?.includes(linkId));
     await runtime.handleInput(key("arrowDown"));
+    await waitUntil(runtime, () => runtime.frame().focusPath?.includes(query.node));
     assert.ok(runtime.frame().focusPath?.includes(query.node));
     assert.equal(runtime.state().documents[0].documentState.focus, query.node);
     await runtime.handleInput(key("tab"));
+    await waitUntil(runtime, () => runtime.frame().focusPath?.includes(language.node));
     assert.ok(runtime.frame().focusPath?.includes(language.node));
     assert.equal(runtime.state().documents[0].documentState.focus, language.node);
     await runtime.handleInput(key("tab", { shift: true }));
+    await waitUntil(runtime, () => runtime.frame().focusPath?.includes(query.node));
     assert.ok(runtime.frame().focusPath?.includes(query.node));
     assert.equal(runtime.state().documents[0].documentState.focus, query.node);
     assert.ok(runtime.frame().focusPath?.includes(query.node));
     const current = runtime.state().documents[0];
-    const layout = renderDocumentForViewport(current, 71, 21).terminal;
-    assert.ok(documentScrollRow(current, layout) > 0);
+    assert.ok(documentScrollRow(current) > 0);
     assert.match(renderFramePlain(runtime.frame()), /Query/u);
     await runtime.handleInput(key("tab"));
+    await waitUntil(runtime, () => runtime.frame().focusPath?.includes(language.node));
     assert.ok(runtime.frame().focusPath?.includes(language.node));
     await runtime.handleInput(key("tab", { shift: true }));
+    await waitUntil(runtime, () => runtime.frame().focusPath?.includes(query.node));
     assert.ok(runtime.frame().focusPath?.includes(query.node));
   } finally {
     await runtime.dispose();
@@ -202,9 +331,8 @@ test("outline document nodes resolve through layout-fragment geometry", async ()
     const document = runtime.state().documents[0];
     const heading = document.snapshot.document.headings.find((entry) => entry.text === "Forms");
     assert.ok(heading);
-    const layout = renderDocumentForViewport(document, 79, 24).terminal;
     const anchored = scrollToSource(document, heading.node);
-    assert.ok(documentScrollRow(anchored, layout) > 20);
+    assert.ok(documentScrollRow(anchored) > 20);
   } finally {
     await runtime.dispose();
     await prepared.controller.close();
@@ -217,11 +345,9 @@ test("sticky and fixed paint does not replace the normal-flow scroll anchor", as
   const { runtime, prepared } = await preparedFixture({ loader: async (requestUrl) => response(requestUrl, page) });
   try {
     const document = runtime.state().documents[0];
-    const initial = renderDocumentForViewport(document, 50, 10).terminal;
-    const scrolled = documentWithScrollRow(document, initial, 12, 10);
+    const scrolled = documentWithScrollRow(document, 12, 10);
     assert.notEqual(scrolled.scrollAnchor.source, document.snapshot.document.elementById("sticky"));
-    const rendered = renderDocumentForViewport(scrolled, 50, 10).terminal;
-    assert.equal(documentScrollRow(scrolled, rendered), 12);
+    assert.equal(documentScrollRow(scrolled), 12);
   } finally {
     await runtime.dispose();
     await prepared.controller.close();
@@ -242,7 +368,8 @@ test("summary activation updates document state and reveals details through the 
     await runtime.dispatch({ kind: "activateActionAt", actionId: `disclosure:${disclosure.node}` });
     const opened = runtime.state().documents[0];
     assert.equal(opened.documentState.open.has(disclosure.node), true);
-    assert.match(renderDocumentForViewport(opened, 80).terminal.cellBuffer.rows.map((row) => row.text).join("\n"), /Secret text/u);
+    await waitUntil(runtime, () => renderFramePlain(runtime.frame()).includes("Secret text"));
+    assert.match(renderFramePlain(runtime.frame()), /Secret text/u);
   } finally {
     await runtime.dispose();
     await prepared.controller.close();
@@ -290,6 +417,7 @@ test("find and scrolling preserve layout-fragment and document-node identities",
       kind: "findAction",
       transition: { kind: "edit", operation: { kind: "insert", text: "alpha" } }
     });
+    await waitUntil(runtime, () => runtime.state().documents[0].search?.query === "alpha");
     const search = runtime.state().documents[0].search;
     assert.ok(search?.matches.length > 1);
     assert.ok(search.matches.every((match) => match.sources.every((source) => source !== null)));
@@ -310,18 +438,21 @@ test("interactive find keeps one logical match while resize reprojects its highl
       kind: "findAction",
       transition: { kind: "edit", operation: { kind: "insert", text: query } }
     });
+    await waitUntil(runtime, () => runtime.state().documents[0].search?.query === query
+      && runtime.state().documents[0].rendering.viewport?.search?.query === query);
     const narrowDocument = runtime.state().documents[0];
     const narrowSearch = narrowDocument.search;
     assert.equal(narrowSearch?.matches.length, 1);
     const matchId = narrowSearch.matches[0].id;
-    const narrowSearchResult = renderDocumentForViewport(narrowDocument, 23, 16).terminal.search(query);
+    const narrowSearchResult = narrowDocument.rendering.viewport.search;
     assert.equal(narrowSearchResult.matches[0]?.id, matchId);
     assert.ok(new Set(narrowSearchResult.matches[0].ranges.map((range) => range.row)).size > 1);
 
     await runtime.resize({ columns: 80, rows: 24 });
+    await waitUntil(runtime, () => runtime.state().documents[0].rendering.viewport?.cellBuffer.columns === 79);
     const wideDocument = runtime.state().documents[0];
     assert.equal(wideDocument.search?.matches[0]?.id, matchId);
-    const wideSearchResult = renderDocumentForViewport(wideDocument, 79, 20).terminal.search(query);
+    const wideSearchResult = wideDocument.rendering.viewport.search;
     assert.equal(wideSearchResult.matches[0]?.id, matchId);
     assert.equal(new Set(wideSearchResult.matches[0].ranges.map((range) => range.row)).size, 1);
   } finally {
@@ -378,7 +509,7 @@ test("terminal-ui form controls update document state and submit through semanti
     const query = form.controls.find((control) => control.name === "q");
     const language = form.controls.find((control) => control.name === "lang");
     const submit = form.controls.find((control) => control.kind === "submit");
-    assert.ok(renderDocumentForViewport(initial, 80).terminal.focusMap.targets.some((target) => target.node === query.node));
+    assert.ok(initial.rendering.summary.focusOrder.some((target) => target.node === query.node));
     await runtime.dispatch({
       kind: "formText",
       controlId: query.node,
@@ -432,7 +563,7 @@ test("standalone controls use the same terminal-ui editing path without inventin
     const control = initial.snapshot.document.controls[0];
     assert.ok(control);
     assert.equal(control.form, null);
-    assert.ok(renderDocumentForViewport(initial, 80).terminal.focusMap.targets.some((target) => target.node === control.node));
+    assert.ok(initial.rendering.summary.focusOrder.some((target) => target.node === control.node));
     await runtime.dispatch({
       kind: "formText",
       controlId: control.node,
@@ -476,7 +607,7 @@ test("ordinary buttons use the native terminal control path without debug prose"
 });
 
 test("rendering truncation takes precedence over a stale navigation success status", async () => {
-  const rules = Array.from({ length: 4_097 }, () => "p { color:red }").join("\n");
+  const rules = Array.from({ length: 4_097 }, (_, index) => `.selector-${index} { color:red }`).join("\n");
   const incompleteLoader = async (requestUrl) => response(
     requestUrl,
     `<title>Incomplete</title><style>${rules}</style><main><p>Visible text</p></main>`
@@ -537,7 +668,7 @@ test("one-shot output and the interactive view consume the same cell-buffer rows
   assert.match(output, /Second page/u);
   const { runtime, prepared } = await preparedFixture({ terminalSize: { columns: 80, rows: 24 } });
   try {
-    const terminalRender = renderDocumentForViewport(runtime.state().documents[0], 79).terminal;
+    const terminalRender = runtime.state().documents[0].rendering.viewport;
     assert.ok(terminalRender.cellBuffer.rows.some((row) => row.text.includes("Index")));
     assert.match(renderFramePlain(runtime.frame()), /Index/u);
   } finally {

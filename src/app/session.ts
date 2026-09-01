@@ -14,6 +14,7 @@ import {
   type CascadeLayerPath,
   type StyleDiagnostic,
   type StylesheetDependencyInspection,
+  type StylesheetSyntaxInstrumentation,
   type StylesheetResource
 } from "../presentation/style/index.js";
 import {
@@ -114,6 +115,7 @@ export interface BrowserSessionOptions {
   readonly parseOptions?: Omit<WebDocumentParseOptions, "signal">;
   readonly defaultParseMode?: ParseMode;
   readonly localFileReader?: LocalFileReader;
+  readonly instrumentation?: StylesheetSyntaxInstrumentation;
 }
 
 function stylesheetLimit(value: number | undefined, fallback: number, name: string): number {
@@ -205,6 +207,7 @@ export class BrowserSession {
   readonly #localFileReader: LocalFileReader | undefined;
   readonly #parseOptions: Omit<WebDocumentParseOptions, "signal">;
   readonly #defaultParseMode: ParseMode;
+  readonly #instrumentation: StylesheetSyntaxInstrumentation | undefined;
   readonly #history: HistoryEntry[] = [];
   #historyIndex = -1;
   #current: IndexedPageSnapshot | null = null;
@@ -217,6 +220,7 @@ export class BrowserSession {
       throw new TypeError("BrowserSession accepts either networkClient or httpSession, not both.");
     }
     this.#localFileReader = options.localFileReader;
+    this.#instrumentation = options.instrumentation;
     const needsNetworkClient = options.loader === undefined
       || options.streamLoader === undefined
       || options.stylesheetLoader === undefined;
@@ -632,7 +636,8 @@ export class BrowserSession {
         const importedInspection = inspectStylesheetBytes(
           fetched.bytes,
           fetched.transportEncodingLabel ?? null,
-          requestOptions.signal
+          requestOptions.signal,
+          this.#instrumentation,
         );
         const nextActive = new Set(active);
         nextActive.add(finalIdentity);
@@ -648,8 +653,10 @@ export class BrowserSession {
           requestUrl: fetched.requestUrl,
           finalUrl: fetched.finalUrl,
           contentType: fetched.contentType,
-          bytes: fetched.bytes,
-          transportEncodingLabel: fetched.transportEncodingLabel ?? null,
+          syntax: importedInspection.syntax,
+          byteSize: importedInspection.byteSize,
+          contentFingerprint: importedInspection.contentFingerprint,
+          parserDiagnostics: importedInspection.parserDiagnostics,
           rootOrder,
           dependencyOrder: dependencyOrder++,
           importDepth: depth,
@@ -666,8 +673,7 @@ export class BrowserSession {
       requestOptions.signal?.throwIfAborted();
       const rootMedia = reference.media === null ? Object.freeze([]) : Object.freeze([reference.media]);
       if (reference.kind === "embedded") {
-        const bytes = new TextEncoder().encode(reference.cssText);
-        const inspection = inspectStylesheetText(reference.cssText, requestOptions.signal);
+        const inspection = inspectStylesheetText(reference.cssText, requestOptions.signal, this.#instrumentation);
         const sourceUrl = `${document.finalUrl}#style-${String(reference.order)}`;
         if (!completeInspection(inspection, sourceUrl)) continue;
         await loadImported(
@@ -681,8 +687,10 @@ export class BrowserSession {
           requestUrl: sourceUrl,
           finalUrl: sourceUrl,
           contentType: "text/css",
-          bytes,
-          transportEncodingLabel: "utf-8",
+          syntax: inspection.syntax,
+          byteSize: inspection.byteSize,
+          contentFingerprint: inspection.contentFingerprint,
+          parserDiagnostics: inspection.parserDiagnostics,
           rootOrder: reference.order,
           dependencyOrder: dependencyOrder++,
           importDepth: 0,
@@ -711,7 +719,12 @@ export class BrowserSession {
       const fetched = await fetchResource(target, Math.min(this.#stylesheetPolicy.maxStylesheetBytes, remainingBytes));
       if (fetched === null) continue;
       totalBytes += fetched.bytes.byteLength;
-      const inspection = inspectStylesheetBytes(fetched.bytes, fetched.transportEncodingLabel ?? null, requestOptions.signal);
+      const inspection = inspectStylesheetBytes(
+        fetched.bytes,
+        fetched.transportEncodingLabel ?? null,
+        requestOptions.signal,
+        this.#instrumentation,
+      );
       if (!completeInspection(inspection, fetched.finalUrl)) continue;
       await loadImported(
         reference.owner, reference.order, fetched.finalUrl, inspection, 1, fetched.finalUrl,
@@ -724,8 +737,10 @@ export class BrowserSession {
         requestUrl: fetched.requestUrl,
         finalUrl: fetched.finalUrl,
         contentType: fetched.contentType,
-        bytes: fetched.bytes,
-        transportEncodingLabel: fetched.transportEncodingLabel ?? null,
+        syntax: inspection.syntax,
+        byteSize: inspection.byteSize,
+        contentFingerprint: inspection.contentFingerprint,
+        parserDiagnostics: inspection.parserDiagnostics,
         rootOrder: reference.order,
         dependencyOrder: dependencyOrder++,
         importDepth: 0,

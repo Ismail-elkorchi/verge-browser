@@ -13,9 +13,10 @@ import {
   cssPx,
   cssRect
 } from "../../dist/presentation/layout/index.js";
-import { renderDocument } from "../../dist/presentation/pipeline.js";
+import { renderDocumentViewport } from "../../dist/presentation/renderer/index.js";
 import {
   embeddedStylesheetSources,
+  compileStylesheetProgram,
   implementationSupportsCondition,
   resolveStyles
 } from "../../dist/presentation/style/index.js";
@@ -63,7 +64,7 @@ function render(html, columns = 60, rows = 40, layoutBudgets) {
   const resources = embeddedStylesheetSources(document);
   const width = cssLengthFromFixed(columns * CELL_WIDTH);
   const height = cssLengthFromFixed(rows * ROW_HEIGHT);
-  const pipeline = renderDocument({
+  const rendered = renderDocumentViewport({
     document,
     state,
     resources,
@@ -84,18 +85,24 @@ function render(html, columns = 60, rows = 40, layoutBudgets) {
       ambiguousWidth: 1,
       colorDepth: 24,
       cellMeasurer: terminalCellMeasurer()
+    },
+    window: {
+      scrollRow: 0,
+      viewportRows: rows,
+      overscanBefore: 0,
+      overscanAfter: 0
     }
   });
-  return { document, state, resources, pipeline };
+  return { document, state, resources, ...rendered };
 }
 
 function fragmentFor(result, id, formattingKind) {
   const node = result.document.elementById(id);
   assert.ok(node, `Missing #${id}`);
-  const fragment = result.pipeline.layout.forDocumentNode(node).find((candidate) =>
+  const fragment = result.artifacts.documentLayout.forDocumentNode(node).find((candidate) =>
     candidate.kind === "box"
       && candidate.borderRect.width > 0
-      && result.pipeline.formatting.node(candidate.formattingNode).kind === formattingKind);
+      && result.artifacts.boxTree.node(candidate.formattingNode).kind === formattingKind);
   assert.ok(fragment, `Missing ${formattingKind} fragment for #${id}`);
   return fragment;
 }
@@ -116,7 +123,7 @@ function firstDescendantBaseline(result, id, formattingKind) {
   const root = fragmentFor(result, id, formattingKind);
   const pending = [root.id];
   while (pending.length > 0) {
-    const fragment = result.pipeline.layout.fragment(pending.shift());
+    const fragment = result.artifacts.documentLayout.fragment(pending.shift());
     if (fragment.kind === "text" && fragment.baseline !== null) {
       return fragment.borderRect.y + fragment.baseline;
     }
@@ -354,10 +361,10 @@ test("table computed values and @supports share one implemented parser contract"
     requestUrl: "https://tables.example.test/",
     finalUrl: "https://tables.example.test/"
   });
+  const resources = embeddedStylesheetSources(document);
   const styles = resolveStyles({
-    document,
+    program: compileStylesheetProgram({ document, resources }),
     state: createDocumentState(document),
-    resources: embeddedStylesheetSources(document),
     environment: environment(60, 40)
   });
   const style = styles.style(document.elementById("table"));
@@ -395,7 +402,7 @@ test("the slot grid drives colspan, rowspan, missing cells, and row sizing", () 
   assert.equal(span.borderRect.width, left.borderRect.width + right.borderRect.width);
   assert.equal(left.borderRect.y, right.borderRect.y);
   assert.ok(side.borderRect.height >= span.borderRect.height + left.borderRect.height);
-  assert.equal(result.pipeline.layout.outcome.status, "complete");
+  assert.equal(result.artifacts.documentLayout.outcome.status, "complete");
 
   const spacedSpan = render(`<style>table{border-spacing:10px}td{padding:0;border:0}</style><table id="spaced">
     <tr><td colspan="2" style="width:100px"></td></tr><tr><td></td><td></td></tr></table>`, 50);
@@ -432,9 +439,9 @@ test("CSS header and footer groups define one display row sequence used by fixed
   assert.equal(cssPixels(header.borderRect.width), 40);
   const paintOrder = ["header-one", "body", "header-two", "footer-two", "footer-one"].map((id) => {
     const node = result.document.elementById(id);
-    const fragment = result.pipeline.layout.forDocumentNode(node).find((candidate) => candidate.kind === "box");
+    const fragment = result.artifacts.documentLayout.forDocumentNode(node).find((candidate) => candidate.kind === "box");
     assert.ok(fragment);
-    const index = result.pipeline.displayList.commands.findIndex((command) =>
+    const index = result.artifacts.documentDisplayList.commands.findIndex((command) =>
       command.kind === "background" && command.layoutFragment === fragment.id);
     assert.ok(index >= 0);
     return index;
@@ -567,7 +574,7 @@ test("final cell relayout resolves wrapping, percentage descendants, and table-c
   const half = fragmentFor(result, "half", "block-container");
   const bottom = fragmentFor(result, "bottom", "table-cell");
   const bottomText = fragmentFor(result, "bottom-text", "inline-container");
-  assert.ok(result.pipeline.layout.lineBoxes.some((line) => line.rect.width <= wrapped.contentRect.width));
+  assert.ok(result.artifacts.documentLayout.lineBoxes.some((line) => line.rect.width <= wrapped.contentRect.width));
   assert.equal(half.borderRect.height, middle.contentRect.height / 2);
   assert.ok(bottomText.borderRect.y > bottom.contentRect.y);
 });
@@ -613,7 +620,7 @@ test("nested intrinsic queries reuse one immutable CSS slot grid per table root"
     40,
     { maxTableRoots: depth },
   );
-  assert.equal(result.pipeline.layout.outcome.status, "complete");
+  assert.equal(result.artifacts.documentLayout.outcome.status, "complete");
 });
 
 test("separated and collapsed borders retain one layout-owned geometry path", () => {
@@ -622,7 +629,7 @@ test("separated and collapsed borders retain one layout-owned geometry path", ()
   const one = fragmentFor(separated, "one", "table-cell");
   const empty = fragmentFor(separated, "empty", "table-cell");
   assert.ok(empty.borderRect.x >= one.borderRect.x + one.borderRect.width + cssPx(8));
-  assert.equal(separated.pipeline.displayList.commands.some((command) => command.layoutFragment === empty.id
+  assert.equal(separated.artifacts.documentDisplayList.commands.some((command) => command.layoutFragment === empty.id
     && (command.kind === "background-fill" || command.kind === "border-side")), false);
 
   const margins = render(`<table style="border-spacing:8px"><tr><td id="plain">one</td><td id="authored" style="margin:40px">two</td></tr></table>`, 50);
@@ -638,7 +645,7 @@ test("separated and collapsed borders retain one layout-owned geometry path", ()
   const right = fragmentFor(collapsed, "right", "table-cell");
   assert.equal(left.borderRect.width - left.paddingRect.width, cssPx(2));
   assert.equal(right.borderRect.width - right.paddingRect.width, cssPx(2));
-  const shared = collapsed.pipeline.displayList.commands.filter((command) => command.kind === "border-side"
+  const shared = collapsed.artifacts.documentDisplayList.commands.filter((command) => command.kind === "border-side"
     && (command.layoutFragment === left.id || command.layoutFragment === right.id)
     && (command.side === "left" || command.side === "right"));
   assert.equal(shared.length, 1);
@@ -649,7 +656,7 @@ test("separated and collapsed borders retain one layout-owned geometry path", ()
     <td id="lower-right" style="border-top:2px solid blue">right</td></tr></table>`, 50);
   const spanEdgeFragments = ["wide", "lower-left", "lower-right"]
     .map((id) => fragmentFor(mismatchedSpans, id, "table-cell").id);
-  const spanEdgeCommands = mismatchedSpans.pipeline.displayList.commands.filter((command) =>
+  const spanEdgeCommands = mismatchedSpans.artifacts.documentDisplayList.commands.filter((command) =>
     command.kind === "border-side" && spanEdgeFragments.includes(command.layoutFragment)
       && (command.side === "top" || command.side === "bottom"));
   assert.equal(spanEdgeCommands.length, 2);
@@ -672,17 +679,17 @@ test("collapsed tables suppress padding and retain perimeter edges across empty 
       <tr><td id="only-cell" style="border:1px solid green">only</td><td></td></tr><tr><td>short</td></tr>
     </table>`, 50);
   const emptyNode = result.document.elementById("empty-table");
-  const empty = result.pipeline.layout.forDocumentNode(emptyNode).find((candidate) =>
-    candidate.kind === "box" && result.pipeline.formatting.node(candidate.formattingNode).kind === "table");
+  const empty = result.artifacts.documentLayout.forDocumentNode(emptyNode).find((candidate) =>
+    candidate.kind === "box" && result.artifacts.boxTree.node(candidate.formattingNode).kind === "table");
   assert.ok(empty);
   assert.deepEqual(empty.paddingRect, empty.contentRect);
-  const emptySegments = result.pipeline.displayList.commands.filter((command) =>
+  const emptySegments = result.artifacts.documentDisplayList.commands.filter((command) =>
     command.kind === "border-side" && command.documentNode === emptyNode);
   assert.equal(emptySegments.length, 4);
   assert.ok(emptySegments.every((command) => command.borderRect.width > 0 && command.borderRect.height > 0));
 
   const missing = fragmentFor(result, "missing-table", "table");
-  const perimeter = result.pipeline.displayList.commands.filter((command) =>
+  const perimeter = result.artifacts.documentDisplayList.commands.filter((command) =>
     command.kind === "border-side" && command.documentNode === result.document.elementById("missing-table"));
   assert.ok(perimeter.length >= 2);
   assert.ok(missing.borderRect.width >= fragmentFor(result, "only-cell", "table-cell").borderRect.width);
@@ -695,7 +702,7 @@ test("collapsed-border conflict precedence is deterministic in LTR and RTL and h
       <td id="logical-second" style="border-left:4px solid blue">second</td></tr></table>`, 50);
     const first = fragmentFor(result, "logical-first", "table-cell");
     const second = fragmentFor(result, "logical-second", "table-cell");
-    const shared = result.pipeline.displayList.commands.find((command) => command.kind === "border-side"
+    const shared = result.artifacts.documentDisplayList.commands.find((command) => command.kind === "border-side"
       && (command.layoutFragment === first.id || command.layoutFragment === second.id)
       && (command.side === "left" || command.side === "right"));
     assert.ok(shared);
@@ -706,7 +713,7 @@ test("collapsed-border conflict precedence is deterministic in LTR and RTL and h
     <td id="hidden-left" style="border-right:8px hidden red">left</td>
     <td id="hidden-right" style="border-left:12px solid blue">right</td></tr></table>`, 50);
   const hiddenFragments = ["hidden-left", "hidden-right"].map((id) => fragmentFor(hidden, id, "table-cell").id);
-  assert.equal(hidden.pipeline.displayList.commands.some((command) => command.kind === "border-side"
+  assert.equal(hidden.artifacts.documentDisplayList.commands.some((command) => command.kind === "border-side"
     && hiddenFragments.includes(command.layoutFragment) && (command.side === "left" || command.side === "right")), false);
 
   const connected = render(`<table style="border-collapse:collapse"><tr>
@@ -714,7 +721,7 @@ test("collapsed-border conflict precedence is deterministic in LTR and RTL and h
     <td id="left-span" rowspan="2" style="border-top:2px solid blue;border-right:3px solid blue">left</td>
     <td style="border-top:2px solid blue">right</td></tr><tr><td style="border-left:3px solid green">bottom</td></tr></table>`, 50);
   const top = fragmentFor(connected, "top-span", "table-cell");
-  const harmonized = connected.pipeline.displayList.commands.filter((command) => command.kind === "border-side"
+  const harmonized = connected.artifacts.documentDisplayList.commands.filter((command) => command.kind === "border-side"
     && command.borderRect.y >= top.borderRect.y + top.borderRect.height - cssPx(3));
   assert.ok(harmonized.length >= 2);
   assert.ok(harmonized.some((command) => command.style.borderColors[command.side]?.r === 255));
@@ -730,9 +737,9 @@ test("collapsed rows and columns remove their track breadth without retaining du
   const groupedColumns = render(`<table style="border-spacing:8px 4px"><colgroup style="visibility:collapse"><col></colgroup><col>
     <tr><td id="group-hidden">hidden</td><td id="group-visible">visible</td></tr></table>`, 50);
   const hiddenNode = groupedColumns.document.elementById("group-hidden");
-  const hiddenCell = groupedColumns.pipeline.layout.forDocumentNode(hiddenNode).find((candidate) =>
+  const hiddenCell = groupedColumns.artifacts.documentLayout.forDocumentNode(hiddenNode).find((candidate) =>
     candidate.kind === "box"
-      && groupedColumns.pipeline.formatting.node(candidate.formattingNode).kind === "table-cell");
+      && groupedColumns.artifacts.boxTree.node(candidate.formattingNode).kind === "table-cell");
   assert.ok(hiddenCell);
   assert.equal(hiddenCell.borderRect.width, 0);
   assert.ok(fragmentFor(groupedColumns, "group-visible", "table-cell").borderRect.width > 0);
@@ -753,16 +760,16 @@ test("empty-cells hiding follows collapsed white space without removing actions 
     </tr></table>`, 50);
   const hasCellPaint = (id) => {
     const fragment = fragmentFor(result, id, "table-cell");
-    return result.pipeline.displayList.commands.some((command) => command.layoutFragment === fragment.id
+    return result.artifacts.documentDisplayList.commands.some((command) => command.layoutFragment === fragment.id
       && (command.kind === "background" || command.kind === "border-side"));
   };
   assert.equal(hasCellPaint("collapsed-space"), false);
   assert.equal(hasCellPaint("preserved-space"), true);
   assert.equal(hasCellPaint("generated"), true);
   assert.equal(hasCellPaint("out-of-flow-only"), false);
-  assert.ok(result.pipeline.terminal.focusMap.targets.some((target) =>
+  assert.ok(result.viewport.terminal.focusMap.targets.some((target) =>
     target.action.node === result.document.elementById("floating-action")));
-  assert.ok(result.pipeline.terminal.accessibilityBounds.some((entry) =>
+  assert.ok(result.viewport.terminal.accessibilityBounds.some((entry) =>
     entry.documentNode === result.document.elementById("out-of-flow-only")));
 });
 
@@ -781,7 +788,7 @@ test("table paint metadata preserves structural background phases and positioned
     ["cell", "table-cell"]
   ].map(([id, kind]) => {
     const fragment = fragmentFor(painted, id, kind);
-    const index = painted.pipeline.displayList.commands.findIndex((command) =>
+    const index = painted.artifacts.documentDisplayList.commands.findIndex((command) =>
       command.kind === "background" && command.layoutFragment === fragment.id);
     assert.ok(index >= 0, `Missing background for ${id}`);
     return index;
@@ -797,7 +804,7 @@ test("table paint metadata preserves structural background phases and positioned
   const badge = fragmentFor(positioned, "badge", "block-container");
   assert.ok(cell.borderRect.width <= table.contentRect.width);
   assert.ok(badge.borderRect.x >= table.paddingRect.x);
-  assert.ok(positioned.pipeline.terminal.hitTestIndex.regions.some((region) => region.action.node === positioned.document.elementById("badge")));
+  assert.ok(positioned.viewport.terminal.hitTestIndex.regions.some((region) => region.action.node === positioned.document.elementById("badge")));
 
   const ownedPositioning = render(`<div style="display:table;position:relative;width:200px">
     <div id="positioned-row" style="display:table-row;position:relative">
@@ -808,7 +815,7 @@ test("table paint metadata preserves structural background phases and positioned
   const rowBadge = fragmentFor(ownedPositioning, "row-badge", "block-container");
   assert.ok(rowBadge.borderRect.x >= positionedRow.paddingRect.x);
   const captionNode = ownedPositioning.document.elementById("floating-caption");
-  assert.equal(ownedPositioning.pipeline.layout.forDocumentNode(captionNode).filter((fragment) => fragment.kind === "box").length, 1);
+  assert.equal(ownedPositioning.artifacts.documentLayout.forDocumentNode(captionNode).filter((fragment) => fragment.kind === "box").length, 1);
 });
 
 test("table actions, semantics, and typed work exhaustion survive through terminal indexes", () => {
@@ -816,21 +823,21 @@ test("table actions, semantics, and typed work exhaustion survive through termin
     <tr><td id="cell"><a href="/next">Open</a><button>Apply</button></td></tr></table>`, 50);
   const cell = result.document.elementById("cell");
   assert.deepEqual(result.document.semantic(cell).tableHeaders, [result.document.elementById("header")]);
-  assert.ok(result.pipeline.terminal.focusMap.targets.some((target) => target.action.kind === "link"));
-  assert.ok(result.pipeline.terminal.focusMap.targets.some((target) => target.action.kind === "form-control"));
-  assert.ok(result.pipeline.terminal.accessibilityBounds.some((entry) => entry.role === "table" && entry.name === "Actions"));
+  assert.ok(result.viewport.terminal.focusMap.targets.some((target) => target.action.kind === "link"));
+  assert.ok(result.viewport.terminal.focusMap.targets.some((target) => target.action.kind === "form-control"));
+  assert.ok(result.viewport.terminal.accessibilityBounds.some((entry) => entry.role === "table" && entry.name === "Actions"));
 
   const truncated = render(`<p>prefix remains</p><table><tr><td>one</td><td>two</td></tr></table>`, 50, 40, {
     maxTableCells: 1
   });
-  assert.deepEqual(truncated.pipeline.layout.outcome, {
+  assert.deepEqual(truncated.artifacts.documentLayout.outcome, {
     status: "truncated",
-    fragments: truncated.pipeline.layout.outcome.fragments,
-    lineBoxes: truncated.pipeline.layout.outcome.lineBoxes,
+    fragments: truncated.artifacts.documentLayout.outcome.fragments,
+    lineBoxes: truncated.artifacts.documentLayout.outcome.lineBoxes,
     budget: "maxTableCells",
     limit: 1
   });
-  assert.match(truncated.pipeline.terminal.cellBuffer.rows.map((row) => row.text).join("\n"), /prefix remains/u);
+  assert.match(truncated.viewport.terminal.cellBuffer.rows.map((row) => row.text).join("\n"), /prefix remains/u);
 });
 
 test("table fragment exhaustion finalizes only connected reserved structural prefixes", () => {
@@ -840,9 +847,9 @@ test("table fragment exhaustion finalizes only connected reserved structural pre
     <tr><td>five</td><td>six</td></tr></tbody></table><p>after table</p>`;
   for (let maxFragments = 8; maxFragments <= 48; maxFragments += 1) {
     const result = render(html, 50, 40, { maxFragments });
-    assert.equal(reachableFragments(result.pipeline.layout).size, result.pipeline.layout.outcome.fragments);
-    if (result.pipeline.layout.outcome.status === "truncated") {
-      assert.equal(result.pipeline.layout.outcome.budget, "maxFragments");
+    assert.equal(reachableFragments(result.artifacts.documentLayout).size, result.artifacts.documentLayout.outcome.fragments);
+    if (result.artifacts.documentLayout.outcome.status === "truncated") {
+      assert.equal(result.artifacts.documentLayout.outcome.budget, "maxFragments");
     }
   }
 });
@@ -872,10 +879,10 @@ test("every table work budget reports its owning resource and retains a connecte
   ];
   for (const budget of budgets) {
     const result = render(common, 50, 40, { [budget]: 0 });
-    assert.equal(result.pipeline.layout.outcome.status, "truncated", budget);
-    assert.equal(result.pipeline.layout.outcome.budget, budget);
-    assert.equal(reachableFragments(result.pipeline.layout).size, result.pipeline.layout.outcome.fragments);
-    assert.match(result.pipeline.terminal.cellBuffer.rows.map((row) => row.text).join("\n"), /retained prefix/u);
+    assert.equal(result.artifacts.documentLayout.outcome.status, "truncated", budget);
+    assert.equal(result.artifacts.documentLayout.outcome.budget, budget);
+    assert.equal(reachableFragments(result.artifacts.documentLayout).size, result.artifacts.documentLayout.outcome.fragments);
+    assert.match(result.viewport.terminal.cellBuffer.rows.map((row) => row.text).join("\n"), /retained prefix/u);
   }
 });
 
@@ -888,7 +895,11 @@ test("table slot construction, intrinsic sizing, distribution, and collapsed edg
   });
   const state = createDocumentState(document);
   const resources = embeddedStylesheetSources(document);
-  const styles = resolveStyles({ document, state, resources, environment: environment(80, 40) });
+  const styles = resolveStyles({
+    program: compileStylesheetProgram({ document, resources }),
+    state,
+    environment: environment(80, 40)
+  });
   const formatting = buildFormattingTree({ document, state, styles });
   let checks = 0;
   const signal = {
@@ -923,11 +934,11 @@ test("collapsed-border candidate work is admitted incrementally for large edge g
   const html = `<p>retained edge prefix</p><table style="border-collapse:collapse">${rows}</table>`;
   const first = render(html, 80, 40, { maxTableCollapsedBorderCandidates: 200 });
   const second = render(html, 80, 40, { maxTableCollapsedBorderCandidates: 200 });
-  assert.deepEqual(first.pipeline.layout.outcome, second.pipeline.layout.outcome);
-  assert.equal(first.pipeline.layout.outcome.status, "truncated");
-  assert.equal(first.pipeline.layout.outcome.budget, "maxTableCollapsedBorderCandidates");
-  assert.equal(reachableFragments(first.pipeline.layout).size, first.pipeline.layout.outcome.fragments);
-  assert.match(first.pipeline.terminal.cellBuffer.rows.map((row) => row.text).join("\n"), /retained edge prefix/u);
+  assert.deepEqual(first.artifacts.documentLayout.outcome, second.artifacts.documentLayout.outcome);
+  assert.equal(first.artifacts.documentLayout.outcome.status, "truncated");
+  assert.equal(first.artifacts.documentLayout.outcome.budget, "maxTableCollapsedBorderCandidates");
+  assert.equal(reachableFragments(first.artifacts.documentLayout).size, first.artifacts.documentLayout.outcome.fragments);
+  assert.match(first.viewport.terminal.cellBuffer.rows.map((row) => row.text).join("\n"), /retained edge prefix/u);
 });
 
 test("CSS table fixup keeps HTML spans source-owned and CSS-created cells at span one", () => {
@@ -938,11 +949,11 @@ test("CSS table fixup keeps HTML spans source-owned and CSS-created cells at spa
   const htmlCell = result.document.elementById("html-cell");
   assert.equal(result.document.htmlTableCell(cssCell), null);
   assert.equal(result.document.htmlTableCell(htmlCell).columnSpan, 2);
-  assert.equal(result.pipeline.layout.outcome.status, "complete");
+  assert.equal(result.artifacts.documentLayout.outcome.status, "complete");
   const formatting = buildFormattingTree({
     document: result.document,
     state: result.state,
-    styles: result.pipeline.styles
+    styles: result.artifacts.computedStyles
   });
   const cssFormattingCell = formatting.forSource(cssCell).find((node) => node.kind === "table-cell");
   assert.ok(cssFormattingCell);

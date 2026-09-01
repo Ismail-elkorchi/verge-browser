@@ -1,44 +1,30 @@
-import type { DocumentNodeRef, DocumentSourceRange } from "../../document/index.js";
+import type { DocumentSourceRange } from "../../document/index.js";
 import {
   cssCoordinateAdd,
   cssIntersection,
-  type CssRect,
-  type LayoutFragment,
-  type LayoutFragmentId
+  cssLengthFromFixed,
+  type CssRect
 } from "../layout/index.js";
-import {
-  mapTextSearchMatchesToLayout,
-  type TextSearchIndex,
-  type TextSearchMatchId
-} from "../search/index.js";
 import { terminalPaintBudgets, validTerminalRenderContext } from "./display-list.js";
 import type {
-  RasterizeTerminalDisplayListInput,
-  TerminalAccessibilityBound,
+  RasterizeViewportDisplayListInput,
   TerminalCell,
-  TerminalCellBuffer,
-  TerminalCellRasterizationResult,
-  TerminalCellBufferOutcome,
+  ViewportCellBufferOutcome,
   TerminalCellRect,
   TerminalCellRow,
   TerminalCellSpan,
   TerminalCellStyleSpan,
-  TerminalDisplayList,
-  TerminalFocusMap,
-  TerminalFocusTarget,
-  TerminalHitRegion,
-  TerminalHitTestIndex,
-  TerminalIndexConstructionResult,
+  DocumentDisplayList,
   TerminalPaintBudgets,
   TerminalPaintCommand,
-  TerminalRenderResult,
-  TerminalScrollAnchor,
-  TerminalSearchMatch,
-  TerminalSearchRange,
-  TerminalSearchResult,
   TerminalStyle,
-  TerminalTruncation
+  TerminalTruncation,
+  ViewportCellBuffer,
+  ViewportCellRasterizationResult
 } from "./types.js";
+
+type RasterizationDisplayList = Pick<DocumentDisplayList,
+  "layout" | "context" | "fragmentPaintOrder" | "commands" | "outcome">;
 
 interface PaintUnit {
   readonly command: TerminalPaintCommand;
@@ -56,23 +42,6 @@ interface PaintUnit {
 
 interface PaintedUnit extends PaintUnit {
   readonly actualStyle: TerminalStyle;
-}
-
-interface MutableDocumentCellGeometry {
-  readonly fragments: LayoutFragmentId[];
-  readonly fragmentSet: Set<LayoutFragmentId>;
-  readonly rects: TerminalCellRect[];
-}
-
-interface MutableAccessibilityCellGeometry {
-  readonly fragments: LayoutFragmentId[];
-  readonly fragmentSet: Set<LayoutFragmentId>;
-  rect: TerminalCellRect | null;
-}
-
-interface DocumentCellGeometry {
-  readonly layoutFragments: readonly LayoutFragmentId[];
-  readonly rects: readonly TerminalCellRect[];
 }
 
 class InvalidTerminalCellMeasurement extends Error {}
@@ -123,33 +92,7 @@ function cellIntersection(left: TerminalCellRect, right: TerminalCellRect): Term
   return cellRect(row, column, Math.max(0, safeSubtract(edge, column)), Math.max(0, safeSubtract(bottom, row)));
 }
 
-function cellUnion(rectangles: Iterable<TerminalCellRect>): TerminalCellRect | null {
-  let row = 0;
-  let column = 0;
-  let bottom = 0;
-  let edge = 0;
-  let initialized = false;
-  for (const rectangle of rectangles) {
-    if (rectangle.width === 0 || rectangle.height === 0) continue;
-    const rectangleBottom = safeAdd(rectangle.row, rectangle.height);
-    const rectangleEdge = safeAdd(rectangle.column, rectangle.width);
-    if (!initialized) {
-      row = rectangle.row;
-      column = rectangle.column;
-      bottom = rectangleBottom;
-      edge = rectangleEdge;
-      initialized = true;
-      continue;
-    }
-    row = Math.min(row, rectangle.row);
-    column = Math.min(column, rectangle.column);
-    bottom = Math.max(bottom, rectangleBottom);
-    edge = Math.max(edge, rectangleEdge);
-  }
-  return initialized ? cellRect(row, column, safeSubtract(edge, column), safeSubtract(bottom, row)) : null;
-}
-
-function snapCssRect(rect: CssRect, clip: CssRect, list: TerminalDisplayList, budgets: TerminalPaintBudgets): TerminalCellRect {
+function snapCssRect(rect: CssRect, clip: CssRect, list: RasterizationDisplayList, budgets: TerminalPaintBudgets): TerminalCellRect {
   if (rect.width === 0 || rect.height === 0 || clip.width === 0 || clip.height === 0) {
     return cellRect(
       Math.floor(rect.y / list.context.rowHeightCssPx),
@@ -180,7 +123,7 @@ function snapCssRect(rect: CssRect, clip: CssRect, list: TerminalDisplayList, bu
   ));
 }
 
-function snapUnclippedCssRect(rect: CssRect, list: TerminalDisplayList): TerminalCellRect {
+function snapUnclippedCssRect(rect: CssRect, list: RasterizationDisplayList): TerminalCellRect {
   if (rect.width === 0 || rect.height === 0) {
     return cellRect(
       Math.floor(rect.y / list.context.rowHeightCssPx),
@@ -196,7 +139,7 @@ function snapUnclippedCssRect(rect: CssRect, list: TerminalDisplayList): Termina
   return cellRect(row, column, safeSubtract(edge, column), safeSubtract(bottom, row));
 }
 
-function textClip(command: Extract<TerminalPaintCommand, { readonly kind: "text" }>, list: TerminalDisplayList, budgets: TerminalPaintBudgets): TerminalCellRect {
+function textClip(command: Extract<TerminalPaintCommand, { readonly kind: "text" }>, list: RasterizationDisplayList, budgets: TerminalPaintBudgets): TerminalCellRect {
   return snapCssRect(command.clipRect, command.clipRect, list, budgets);
 }
 
@@ -204,6 +147,13 @@ interface PaintUnitGenerationState {
   readonly limit: number;
   generated: number;
   truncated: boolean;
+}
+
+function cancellationCheckpoint(
+  state: PaintUnitGenerationState,
+  signal: AbortSignal | undefined,
+): void {
+  if ((state.generated & 255) === 0) signal?.throwIfAborted();
 }
 
 function reservePaintUnit(state: PaintUnitGenerationState): boolean {
@@ -217,7 +167,7 @@ function reservePaintUnit(state: PaintUnitGenerationState): boolean {
 
 function* textUnits(
   command: Extract<TerminalPaintCommand, { readonly kind: "text" }>,
-  list: TerminalDisplayList,
+  list: RasterizationDisplayList,
   budgets: TerminalPaintBudgets,
   generation: PaintUnitGenerationState,
   signal: AbortSignal | undefined
@@ -232,7 +182,7 @@ function* textUnits(
   let previousEnd = Math.floor(command.rect.x / list.context.cellWidthCssPx);
   for (const grapheme of command.clusters) {
     if (!reservePaintUnit(generation)) return;
-    signal?.throwIfAborted();
+    cancellationCheckpoint(generation, signal);
     const cells = list.context.cellMeasurer.width(grapheme.text);
     if (!Number.isSafeInteger(grapheme.visualStartCodeUnit)
       || !Number.isSafeInteger(grapheme.visualEndCodeUnit)
@@ -257,7 +207,7 @@ function* textUnits(
     const end = safeAdd(column, width);
     previousEnd = end;
     cssCursor = cssCoordinateAdd(cssCursor, grapheme.advance);
-    yield Object.freeze({
+    yield {
       command,
       row,
       column,
@@ -269,14 +219,14 @@ function* textUnits(
       contentEndCodeUnit: grapheme.contentEndCodeUnit,
       sourceRange: grapheme.sourceRange,
       visible: rowVisible && column >= clip.column && end <= clipEdge
-    });
+    };
   }
   if (previousCodeUnit !== command.text.length) throw new InvalidTerminalCellMeasurement();
 }
 
 function* backgroundUnits(
   command: Extract<TerminalPaintCommand, { readonly kind: "background" }>,
-  list: TerminalDisplayList,
+  list: RasterizationDisplayList,
   budgets: TerminalPaintBudgets,
   generation: PaintUnitGenerationState,
   signal: AbortSignal | undefined
@@ -285,8 +235,8 @@ function* backgroundUnits(
   for (let row = box.row; row < safeAdd(box.row, box.height); row += 1) {
     for (let column = box.column; column < safeAdd(box.column, box.width); column += 1) {
       if (!reservePaintUnit(generation)) return;
-      signal?.throwIfAborted();
-      yield Object.freeze({
+      cancellationCheckpoint(generation, signal);
+      yield {
         command,
         row,
         column,
@@ -298,7 +248,7 @@ function* backgroundUnits(
         contentEndCodeUnit: null,
         sourceRange: null,
         visible: true
-      });
+      };
     }
   }
 }
@@ -329,7 +279,7 @@ function borderGlyph(
 
 function* borderUnits(
   command: Extract<TerminalPaintCommand, { readonly kind: "border-side" }>,
-  list: TerminalDisplayList,
+  list: RasterizationDisplayList,
   budgets: TerminalPaintBudgets,
   generation: PaintUnitGenerationState,
   signal: AbortSignal | undefined
@@ -345,9 +295,9 @@ function* borderUnits(
     if (row < clipped.row || row >= safeAdd(clipped.row, clipped.height)
       || column < clipped.column || column >= safeAdd(clipped.column, clipped.width)) return null;
     if (!reservePaintUnit(generation)) return null;
-    signal?.throwIfAborted();
+    cancellationCheckpoint(generation, signal);
     const glyph = borderGlyph(command, whole, row, column, list.context.unicode);
-    return Object.freeze({
+    return {
       command,
       row,
       column,
@@ -359,7 +309,7 @@ function* borderUnits(
       contentEndCodeUnit: null,
       sourceRange: null,
       visible: true
-    });
+    };
   };
   if (command.side === "top" || command.side === "bottom") {
     const row = command.side === "top" ? top : bottom;
@@ -386,7 +336,7 @@ function* borderUnits(
 
 function unitsFor(
   command: TerminalPaintCommand,
-  list: TerminalDisplayList,
+  list: RasterizationDisplayList,
   budgets: TerminalPaintBudgets,
   generation: PaintUnitGenerationState,
   signal: AbortSignal | undefined
@@ -420,7 +370,7 @@ function composite(top: TerminalColor | null, bottom: TerminalColor | null): Ter
   });
 }
 
-function terminalColor(color: TerminalColor | null, depth: TerminalDisplayList["context"]["colorDepth"]): TerminalColor | null {
+function terminalColor(color: TerminalColor | null, depth: RasterizationDisplayList["context"]["colorDepth"]): TerminalColor | null {
   if (color === null || color.a <= 0 || depth === 0) return null;
   if (depth === 24) return color;
   if (depth === 8) {
@@ -439,7 +389,7 @@ function terminalColor(color: TerminalColor | null, depth: TerminalDisplayList["
   return Object.freeze({ r: nearest[0], g: nearest[1], b: nearest[2], a: color.a });
 }
 
-function actualStyle(command: TerminalPaintCommand, under: PaintedUnit | undefined, depth: TerminalDisplayList["context"]["colorDepth"]): TerminalStyle {
+function actualStyle(command: TerminalPaintCommand, under: PaintedUnit | undefined, depth: RasterizationDisplayList["context"]["colorDepth"]): TerminalStyle {
   const background = composite(command.style.background, under?.actualStyle.background ?? null);
   const foregroundSource = command.kind === "border-side" ? command.style.borderColors[command.side]
     : command.kind === "text" ? command.style.foreground : null;
@@ -453,470 +403,12 @@ function actualStyle(command: TerminalPaintCommand, under: PaintedUnit | undefin
   });
 }
 
-function positionKey(row: number, column: number): string {
-  return `${String(row)}:${String(column)}`;
-}
-
-class ImmutableHitTestIndex implements TerminalHitTestIndex {
-  readonly regions: readonly TerminalHitRegion[];
-
-  public constructor(regions: readonly TerminalHitRegion[]) {
-    this.regions = Object.freeze([...regions]);
-    Object.freeze(this);
-  }
-
-  public at(row: number, column: number): TerminalHitRegion | null {
-    for (let index = this.regions.length - 1; index >= 0; index -= 1) {
-      const region = this.regions[index];
-      if (region !== undefined && row >= region.rect.row && row < safeAdd(region.rect.row, region.rect.height)
-        && column >= region.rect.column && column < safeAdd(region.rect.column, region.rect.width)) return region;
-    }
-    return null;
-  }
-}
-
-class ImmutableFocusMap implements TerminalFocusMap {
-  readonly targets: readonly TerminalFocusTarget[];
-  readonly #byNode: ReadonlyMap<DocumentNodeRef, TerminalFocusTarget>;
-
-  public constructor(targets: readonly TerminalFocusTarget[]) {
-    this.targets = Object.freeze([...targets]);
-    this.#byNode = new Map(targets.map((target) => [target.node, target]));
-    Object.freeze(this);
-  }
-
-  public forNode(node: DocumentNodeRef): TerminalFocusTarget | null {
-    return this.#byNode.get(node) ?? null;
-  }
-}
-
-class ImmutableTerminalRenderResult implements TerminalRenderResult {
-  readonly layout: TerminalRenderResult["layout"];
-  readonly displayList: TerminalDisplayList;
-  readonly cellBuffer: TerminalCellBuffer;
-  readonly hitTestIndex: TerminalHitTestIndex;
-  readonly focusMap: TerminalFocusMap;
-  readonly accessibilityBounds: readonly TerminalAccessibilityBound[];
-  readonly scrollAnchors: readonly TerminalScrollAnchor[];
-  readonly truncations: readonly TerminalTruncation[];
-  readonly #cellRectsForDocumentNode: (node: DocumentNodeRef) => readonly TerminalCellRect[];
-  readonly #spansByFragment: ReadonlyMap<LayoutFragmentId, readonly { readonly row: number; readonly span: TerminalCellSpan }[]>;
-  readonly #searchCache = new Map<string, TerminalSearchResult>();
-  readonly #textSearchIndex: TextSearchIndex;
-  readonly #maxLogicalSearchMatches: number;
-  readonly #maxRetainedSearchCellSpans: number;
-
-  public constructor(
-    displayList: TerminalDisplayList,
-    textSearchIndex: TextSearchIndex,
-    cellBuffer: TerminalCellBuffer,
-    hitTestIndex: TerminalHitTestIndex,
-    focusMap: TerminalFocusMap,
-    accessibilityBounds: readonly TerminalAccessibilityBound[],
-    scrollAnchors: readonly TerminalScrollAnchor[],
-    cellRectsForDocumentNode: (node: DocumentNodeRef) => readonly TerminalCellRect[],
-    truncations: readonly TerminalTruncation[],
-    budgets: TerminalPaintBudgets | null
-  ) {
-    this.layout = displayList.layout;
-    this.#textSearchIndex = textSearchIndex;
-    this.displayList = displayList;
-    this.cellBuffer = cellBuffer;
-    this.hitTestIndex = hitTestIndex;
-    this.focusMap = focusMap;
-    this.accessibilityBounds = Object.freeze([...accessibilityBounds]);
-    this.scrollAnchors = Object.freeze([...scrollAnchors]);
-    this.truncations = Object.freeze([...truncations]);
-    this.#cellRectsForDocumentNode = cellRectsForDocumentNode;
-    this.#maxLogicalSearchMatches = budgets?.maxLogicalSearchMatches ?? 0;
-    this.#maxRetainedSearchCellSpans = budgets?.maxRetainedSearchCellSpans ?? 0;
-    const spans = new Map<LayoutFragmentId, { readonly row: number; readonly span: TerminalCellSpan }[]>();
-    for (const row of cellBuffer.rows) {
-      for (const span of row.spans) {
-        const entries = spans.get(span.layoutFragment) ?? [];
-        entries.push(Object.freeze({ row: row.row, span }));
-        spans.set(span.layoutFragment, entries);
-      }
-    }
-    this.#spansByFragment = spans;
-    Object.freeze(this);
-  }
-
-  public cellRectsForDocumentNode(node: DocumentNodeRef): readonly TerminalCellRect[] {
-    return this.#cellRectsForDocumentNode(node);
-  }
-
-  public search(query: string): TerminalSearchResult {
-    const bounded = query.slice(0, 1_024);
-    const cached = this.#searchCache.get(bounded);
-    if (cached !== undefined) return cached;
-    const indexed = this.#textSearchIndex.search(bounded, this.#maxLogicalSearchMatches);
-    const spans = mapTextSearchMatchesToLayout(
-      this.#textSearchIndex,
-      this.layout,
-      bounded,
-      this.#maxLogicalSearchMatches
-    );
-    const byMatch = new Map<TextSearchMatchId, TerminalSearchRange[]>();
-    let retainedRanges = 0;
-    let cellSpanTruncated = false;
-    outer: for (const layoutSpan of spans) {
-      for (const entry of this.#spansByFragment.get(layoutSpan.fragment) ?? []) {
-        const cellSpan = entry.span;
-        if (cellSpan.contentStartCodeUnit === null || cellSpan.contentEndCodeUnit === null
-          || layoutSpan.contentStartCodeUnit >= cellSpan.contentEndCodeUnit
-          || layoutSpan.contentEndCodeUnit <= cellSpan.contentStartCodeUnit) continue;
-        if (retainedRanges >= this.#maxRetainedSearchCellSpans) {
-          cellSpanTruncated = true;
-          break outer;
-        }
-        const contentLength = cellSpan.contentEndCodeUnit - cellSpan.contentStartCodeUnit;
-        const rowLength = cellSpan.endCodeUnit - cellSpan.startCodeUnit;
-        const exact = contentLength === rowLength;
-        const startCodeUnit = exact
-          ? cellSpan.startCodeUnit + Math.max(layoutSpan.contentStartCodeUnit, cellSpan.contentStartCodeUnit) - cellSpan.contentStartCodeUnit
-          : cellSpan.startCodeUnit;
-        const endCodeUnit = exact
-          ? cellSpan.startCodeUnit + Math.min(layoutSpan.contentEndCodeUnit, cellSpan.contentEndCodeUnit) - cellSpan.contentStartCodeUnit
-          : cellSpan.endCodeUnit;
-        const range = Object.freeze({
-          match: layoutSpan.match,
-          row: entry.row,
-          startCodeUnit,
-          endCodeUnit,
-          layoutFragment: layoutSpan.fragment,
-          documentNode: layoutSpan.documentNode,
-          sourceRange: layoutSpan.sourceRange
-        });
-        const ranges = byMatch.get(layoutSpan.match) ?? [];
-        ranges.push(range);
-        byMatch.set(layoutSpan.match, ranges);
-        retainedRanges += 1;
-      }
-    }
-    const matches: TerminalSearchMatch[] = indexed.matches.flatMap((match) => {
-      const ranges = byMatch.get(match.id) ?? [];
-      return ranges.length === 0 ? [] : [Object.freeze({ id: match.id, ranges: Object.freeze(ranges) })];
-    });
-    const ranges = matches.flatMap((match) => match.ranges);
-    const result = Object.freeze({
-      query: bounded,
-      matches: Object.freeze(matches),
-      ranges: Object.freeze(ranges),
-      truncated: indexed.truncated || cellSpanTruncated
-    });
-    if (this.#searchCache.size >= 8) {
-      const oldest = this.#searchCache.keys().next().value;
-      if (oldest !== undefined) this.#searchCache.delete(oldest);
-    }
-    this.#searchCache.set(bounded, result);
-    return result;
-  }
-}
-
 function addTruncation(truncations: TerminalTruncation[], budget: TerminalTruncation["budget"], limit: number): void {
   if (truncations.some((entry) => entry.budget === budget)) return;
   truncations.push(Object.freeze({ budget, limit }));
 }
 
-function layoutFragmentsInPaintOrder(list: TerminalDisplayList, signal: AbortSignal | undefined): readonly LayoutFragment[] {
-  const fragments: LayoutFragment[] = [];
-  for (const id of list.fragmentPaintOrder) {
-    signal?.throwIfAborted();
-    fragments.push(list.layout.fragment(id));
-  }
-  return fragments;
-}
-
-function geometryAndIndexes(
-  list: TerminalDisplayList,
-  budgets: TerminalPaintBudgets,
-  signal: AbortSignal | undefined,
-  truncations: TerminalTruncation[]
-): {
-  readonly geometry: ReadonlyMap<DocumentNodeRef, DocumentCellGeometry>;
-  readonly hitTestIndex: TerminalHitTestIndex;
-  readonly focusMap: TerminalFocusMap;
-  readonly accessibilityBounds: readonly TerminalAccessibilityBound[];
-  readonly scrollAnchors: readonly TerminalScrollAnchor[];
-} {
-  const document = list.layout.formatting.document;
-  const fragments = layoutFragmentsInPaintOrder(list, signal);
-  const geometry = new Map<DocumentNodeRef, MutableDocumentCellGeometry>();
-  const accessibilityGeometry = new Map<DocumentNodeRef, MutableAccessibilityCellGeometry>();
-  const directRectangleNodes = new Set<DocumentNodeRef>();
-  const hitRegions: TerminalHitRegion[] = [];
-  const scrollAnchors: TerminalScrollAnchor[] = [];
-  const focus = new Map<DocumentNodeRef, {
-    action: NonNullable<LayoutFragment["action"]>;
-    fragments: LayoutFragmentId[];
-    fragmentSet: Set<LayoutFragmentId>;
-    rects: TerminalCellRect[];
-  }>();
-  let documentRectangles = 0;
-  let focusRectangles = 0;
-  const excludedFromAccessibility = new Map<DocumentNodeRef, boolean>();
-  const accessibilityExcluded = (start: DocumentNodeRef): boolean => {
-    const path: DocumentNodeRef[] = [];
-    let node: DocumentNodeRef | null = start;
-    let excluded = false;
-    while (node !== null) {
-      signal?.throwIfAborted();
-      const cached = excludedFromAccessibility.get(node);
-      if (cached !== undefined) {
-        excluded = cached;
-        break;
-      }
-      path.push(node);
-      const semantic = document.semantic(node);
-      if (semantic?.accessibilityHidden === true) {
-        excluded = true;
-        break;
-      }
-      node = document.parent(node)?.ref ?? null;
-    }
-    for (const ref of path) excludedFromAccessibility.set(ref, excluded);
-    return excluded;
-  };
-  const ensureGeometry = (node: DocumentNodeRef): MutableDocumentCellGeometry => {
-    let value = geometry.get(node);
-    if (value === undefined) {
-      value = { fragments: [], fragmentSet: new Set(), rects: [] };
-      geometry.set(node, value);
-    }
-    return value;
-  };
-  const ensureAccessibilityGeometry = (node: DocumentNodeRef): MutableAccessibilityCellGeometry => {
-    let value = accessibilityGeometry.get(node);
-    if (value === undefined) {
-      value = { fragments: [], fragmentSet: new Set(), rect: null };
-      accessibilityGeometry.set(node, value);
-    }
-    return value;
-  };
-  const retainFragment = (
-    value: MutableDocumentCellGeometry | MutableAccessibilityCellGeometry,
-    fragment: LayoutFragmentId
-  ): void => {
-    if (value.fragmentSet.has(fragment)) return;
-    value.fragmentSet.add(fragment);
-    value.fragments.push(fragment);
-  };
-  for (const fragment of fragments) {
-    signal?.throwIfAborted();
-    let focusTarget: typeof focus extends Map<DocumentNodeRef, infer Value> ? Value | null : never = null;
-    if (fragment.action !== null) {
-      const control = document.control(fragment.action.node);
-      if (control === null || !control.disabled) {
-        focusTarget = focus.get(fragment.action.node) ?? null;
-        if (focusTarget === null) {
-          focusTarget = { action: fragment.action, fragments: [], fragmentSet: new Set(), rects: [] };
-          focus.set(fragment.action.node, focusTarget);
-        }
-        if (!focusTarget.fragmentSet.has(fragment.id)) {
-          focusTarget.fragmentSet.add(fragment.id);
-          focusTarget.fragments.push(fragment.id);
-        }
-      }
-    }
-    const documentGeometry = fragment.documentNode === null ? null : ensureGeometry(fragment.documentNode);
-    if (documentGeometry !== null) retainFragment(documentGeometry, fragment.id);
-    const accessibleGeometry = fragment.documentNode !== null && fragment.style.visible
-      && !accessibilityExcluded(fragment.documentNode)
-      ? ensureAccessibilityGeometry(fragment.documentNode)
-      : null;
-    if (accessibleGeometry !== null) retainFragment(accessibleGeometry, fragment.id);
-    if (!fragment.style.visible) continue;
-    const boxes = function* (): Generator<CssRect> {
-      if (fragment.kind !== "text" && fragment.inlineContinuations !== undefined) {
-        for (const continuation of fragment.inlineContinuations) yield continuation.borderRect;
-      } else yield fragment.borderRect;
-    };
-    for (const box of boxes()) {
-      signal?.throwIfAborted();
-      const rect = snapCssRect(box, fragment.clipRect, list, budgets);
-      if (rect.width === 0 || rect.height === 0) continue;
-      if (fragment.action !== null && focusTarget !== null) {
-          if (hitRegions.length < budgets.maxRetainedHitTestRegions) {
-            hitRegions.push(Object.freeze({
-              id: `terminal-hit-region:${fragment.id}:${String(hitRegions.length + 1)}`,
-              action: fragment.action,
-              layoutFragment: fragment.id,
-              rect
-            }));
-          } else addTruncation(truncations, "maxRetainedHitTestRegions", budgets.maxRetainedHitTestRegions);
-          if (focusRectangles < budgets.maxRetainedFocusRectangles) {
-            focusTarget.rects.push(rect);
-            focusRectangles += 1;
-          } else addTruncation(truncations, "maxRetainedFocusRectangles", budgets.maxRetainedFocusRectangles);
-      }
-      if (documentGeometry !== null) {
-        if (documentRectangles < budgets.maxRetainedDocumentRectangles) {
-          documentGeometry.rects.push(rect);
-          if (fragment.documentNode !== null) directRectangleNodes.add(fragment.documentNode);
-          documentRectangles += 1;
-        } else addTruncation(truncations, "maxRetainedDocumentRectangles", budgets.maxRetainedDocumentRectangles);
-      }
-      if (accessibleGeometry !== null) {
-        accessibleGeometry.rect = accessibleGeometry.rect === null
-          ? rect
-          : cellUnion([accessibleGeometry.rect, rect]);
-      }
-    }
-  }
-  const documentOrder: DocumentNodeRef[] = [];
-  const documentPending = [document.root];
-  while (documentPending.length > 0) {
-    signal?.throwIfAborted();
-    const node = documentPending.pop();
-    if (node === undefined) continue;
-    documentOrder.push(node);
-    const children = document.node(node).children;
-    for (let index = children.length - 1; index >= 0; index -= 1) {
-      const child = children[index];
-      if (child !== undefined) documentPending.push(child);
-    }
-  }
-  for (let index = documentOrder.length - 1; index > 0; index -= 1) {
-    signal?.throwIfAborted();
-    const node = documentOrder[index];
-    if (node === undefined) continue;
-    const parent = document.parent(node)?.ref ?? null;
-    if (parent === null) continue;
-    const childGeometry = geometry.get(node);
-    if (childGeometry !== undefined && !directRectangleNodes.has(parent)) {
-      const parentGeometry = ensureGeometry(parent);
-      for (const fragment of childGeometry.fragments) retainFragment(parentGeometry, fragment);
-      for (const rect of childGeometry.rects) {
-        if (documentRectangles < budgets.maxRetainedDocumentRectangles) {
-          parentGeometry.rects.push(rect);
-          documentRectangles += 1;
-        } else addTruncation(truncations, "maxRetainedDocumentRectangles", budgets.maxRetainedDocumentRectangles);
-      }
-    }
-    const childAccessibility = accessibilityGeometry.get(node);
-    if (childAccessibility === undefined || accessibilityExcluded(parent)) continue;
-    const parentAccessibility = ensureAccessibilityGeometry(parent);
-    for (const fragment of childAccessibility.fragments) retainFragment(parentAccessibility, fragment);
-    if (childAccessibility.rect !== null) {
-      parentAccessibility.rect = parentAccessibility.rect === null
-        ? childAccessibility.rect
-        : cellUnion([parentAccessibility.rect, childAccessibility.rect]);
-    }
-  }
-  const immutableGeometry = new Map<DocumentNodeRef, DocumentCellGeometry>();
-  for (const [node, value] of geometry) {
-    immutableGeometry.set(node, Object.freeze({
-      layoutFragments: Object.freeze(value.fragments),
-      rects: Object.freeze(value.rects)
-    }));
-  }
-  const focusTargets: TerminalFocusTarget[] = [];
-  for (const node of documentOrder) {
-    const value = focus.get(node);
-    if (value === undefined) continue;
-    focusTargets.push(Object.freeze({
-      node,
-      action: value.action,
-      layoutFragments: Object.freeze(value.fragments),
-      rects: Object.freeze(value.rects),
-      label: document.semantic(node)?.accessibleName || "Action"
-    }));
-  }
-  const accessibilityBounds: TerminalAccessibilityBound[] = [];
-  for (const node of documentOrder) {
-    signal?.throwIfAborted();
-    const semantic = document.semantic(node);
-    const value = accessibilityGeometry.get(node);
-    if (semantic === null || semantic.accessibilityHidden || value === undefined) continue;
-    if (accessibilityBounds.length >= budgets.maxRetainedAccessibilityRectangles) {
-      addTruncation(
-        truncations,
-        "maxRetainedAccessibilityRectangles",
-        budgets.maxRetainedAccessibilityRectangles
-      );
-    } else {
-      let rect = value.rect;
-      if (rect === null) {
-        const first = value.fragments[0] === undefined ? null : list.layout.fragment(value.fragments[0]);
-        rect = first === null ? cellRect(0, 0, 0, 0) : cellRect(
-          Math.floor(first.borderRect.y / list.context.rowHeightCssPx),
-          Math.floor(first.borderRect.x / list.context.cellWidthCssPx),
-          0,
-          0
-        );
-      }
-      accessibilityBounds.push(Object.freeze({
-        documentNode: node,
-        layoutFragments: Object.freeze(value.fragments),
-        role: semantic.role,
-        name: semantic.accessibleName,
-        description: semantic.accessibleDescription,
-        rect
-      }));
-    }
-    const first = value.fragments[0];
-    if (first === undefined) continue;
-    if (scrollAnchors.length < budgets.maxRetainedScrollAnchors) {
-      const fragment = list.layout.fragment(first);
-      scrollAnchors.push(Object.freeze({
-        id: `terminal-scroll-anchor:${node}`,
-        documentNode: node,
-        layoutFragment: fragment.id,
-        row: Math.floor(fragment.borderRect.y / list.context.rowHeightCssPx)
-      }));
-    } else addTruncation(truncations, "maxRetainedScrollAnchors", budgets.maxRetainedScrollAnchors);
-  }
-  return {
-    geometry: immutableGeometry,
-    hitTestIndex: new ImmutableHitTestIndex(hitRegions),
-    focusMap: new ImmutableFocusMap(focusTargets),
-    accessibilityBounds: Object.freeze(accessibilityBounds),
-    scrollAnchors: Object.freeze(scrollAnchors)
-  };
-}
-
-function emptyRenderResult(
-  list: TerminalDisplayList,
-  textSearchIndex: TextSearchIndex,
-  reason: "invalid-context" | "invalid-budget"
-): TerminalRenderResult {
-  const buffer: TerminalCellBuffer = Object.freeze({
-    columns: Math.max(0, safeInteger(list.context.columns)),
-    viewportRows: Math.max(0, safeInteger(list.context.rows)),
-    rows: Object.freeze([]),
-    outcome: Object.freeze({ status: "rejected", reason })
-  });
-  return new ImmutableTerminalRenderResult(
-    list,
-    textSearchIndex,
-    buffer,
-    new ImmutableHitTestIndex([]),
-    new ImmutableFocusMap([]),
-    [],
-    [],
-    () => [],
-    [],
-    null
-  );
-}
-
-function emptyCellRasterization(
-  list: TerminalDisplayList,
-  reason: "invalid-context" | "invalid-budget" | "invalid-cell-measurement"
-): TerminalCellRasterizationResult {
-  return Object.freeze({
-    cellBuffer: Object.freeze({
-      columns: Math.max(0, safeInteger(list.context.columns)),
-      viewportRows: Math.max(0, safeInteger(list.context.rows)),
-      rows: Object.freeze([]),
-      outcome: Object.freeze({ status: "rejected", reason })
-    }),
-    truncations: Object.freeze([])
-  });
-}
-
-function initialTruncations(list: TerminalDisplayList, budgets: TerminalPaintBudgets): TerminalTruncation[] {
+function initialTruncations(list: RasterizationDisplayList, budgets: TerminalPaintBudgets): TerminalTruncation[] {
   const truncations: TerminalTruncation[] = [];
   if (list.outcome.status === "truncated") {
     addTruncation(truncations, list.outcome.budget, list.outcome.limit);
@@ -927,90 +419,149 @@ function initialTruncations(list: TerminalDisplayList, budgets: TerminalPaintBud
   return truncations;
 }
 
-function rasterizeTerminalCellsUnchecked(input: RasterizeTerminalDisplayListInput): TerminalCellRasterizationResult {
+function viewportLocalCommand(command: TerminalPaintCommand, blockOffset: number): TerminalPaintCommand {
+  const move = (rect: CssRect): CssRect => Object.freeze({
+    ...rect,
+    y: cssCoordinateAdd(rect.y, cssLengthFromFixed(-blockOffset))
+  });
+  const moved = {
+    ...command,
+    rect: move(command.rect),
+    clipRect: move(command.clipRect)
+  };
+  return command.kind === "border-side"
+    ? Object.freeze({ ...moved, borderRect: move(command.borderRect) })
+    : Object.freeze(moved);
+}
+
+function rejectedViewportBuffer(
+  input: RasterizeViewportDisplayListInput,
+  reason: "invalid-context" | "invalid-budget" | "invalid-cell-measurement"
+): ViewportCellRasterizationResult {
   const list = input.displayList;
-  const budgets = terminalPaintBudgets(list.context.budgets);
-  if (!validTerminalRenderContext(list.context)) return emptyCellRasterization(list, "invalid-context");
-  if (budgets === null) return emptyCellRasterization(list, "invalid-budget");
-  const truncations = initialTruncations(list, budgets);
-  const ownerByPosition = new Map<string, PaintedUnit>();
-  let generatedUnits = 0;
-  let paintStopped = false;
-  for (const command of list.commands) {
-    input.signal?.throwIfAborted();
-    const generation: PaintUnitGenerationState = {
-      limit: Math.max(0, budgets.maxGeneratedPaintUnits - generatedUnits),
-      generated: 0,
-      truncated: false
-    };
-    for (const unit of unitsFor(command, list, budgets, generation, input.signal)) {
-      if (!unit.visible || unit.row < 0 || unit.row >= budgets.maxRetainedCellBufferRows
-        || unit.column < 0 || safeAdd(unit.column, unit.width) > budgets.maxRetainedCellBufferColumns) continue;
-      const collided = new Set<PaintedUnit>();
-      const positions: string[] = [];
-      for (let cell = unit.column; cell < safeAdd(unit.column, unit.width); cell += 1) {
-        const key = positionKey(unit.row, cell);
-        positions.push(key);
-        const previous = ownerByPosition.get(key);
-        if (previous !== undefined) collided.add(previous);
-      }
-      const removedKeys = new Set<string>();
-      for (const previous of collided) {
-        for (let cell = previous.column; cell < safeAdd(previous.column, previous.width); cell += 1) {
-          const key = positionKey(previous.row, cell);
-          if (ownerByPosition.get(key) === previous) removedKeys.add(key);
-        }
-      }
-      let added = 0;
-      for (const key of positions) if (!ownerByPosition.has(key) || removedKeys.has(key)) added += 1;
-      const projected = ownerByPosition.size - removedKeys.size + added;
-      if (projected > budgets.maxRetainedPaintCells) {
-        addTruncation(truncations, "maxRetainedPaintCells", budgets.maxRetainedPaintCells);
-        paintStopped = true;
-        break;
-      }
-      const under = collided.values().next().value;
-      for (const key of removedKeys) ownerByPosition.delete(key);
-      const painted = Object.freeze({
-        ...unit,
-        actualStyle: actualStyle(command, under, list.context.colorDepth)
-      });
-      for (const key of positions) ownerByPosition.set(key, painted);
-    }
-    generatedUnits += generation.generated;
-    if (!paintStopped && generation.truncated) {
-      addTruncation(truncations, "maxGeneratedPaintUnits", budgets.maxGeneratedPaintUnits);
-      paintStopped = true;
-    }
-    if (paintStopped) break;
-  }
-  const visibleUnits = [...new Set(ownerByPosition.values())].sort(
-    (left, right) => left.row - right.row || left.column - right.column || left.command.paintOrder - right.command.paintOrder
-  );
-  const unitsByRow = new Map<number, PaintedUnit[]>();
-  for (const unit of visibleUnits) {
-    const entries = unitsByRow.get(unit.row) ?? [];
-    entries.push(unit);
-    unitsByRow.set(unit.row, entries);
-  }
-  const root = list.layout.fragment(list.layout.root);
-  const rootBottom = cssCoordinateAdd(root.overflowRect.y, root.overflowRect.height);
-  const naturalRows = Math.max(1, Math.ceil(rootBottom / list.context.rowHeightCssPx));
-  const rowCount = Math.min(naturalRows, budgets.maxRetainedCellBufferRows);
-  if (naturalRows > budgets.maxRetainedCellBufferRows) {
+  const start = Math.max(0, list.window.scrollRow - list.window.overscanBefore);
+  return Object.freeze({
+    cellBuffer: Object.freeze({
+      columns: Math.max(0, safeInteger(list.context.columns)),
+      documentRowCount: 0,
+      windowStartRow: start,
+      viewportRows: Math.max(0, safeInteger(list.window.viewportRows)),
+      overscanBefore: list.window.scrollRow - start,
+      overscanAfter: list.window.overscanAfter,
+      rows: Object.freeze([]),
+      outcome: Object.freeze({ status: "rejected", reason })
+    }),
+    truncations: Object.freeze([])
+  });
+}
+
+/** Rasterizes only the selected viewport and overscan commands into numeric row buckets. */
+export function rasterizeViewportDisplayList(
+  input: RasterizeViewportDisplayListInput
+): ViewportCellRasterizationResult {
+  const viewport = input.displayList;
+  const budgets = terminalPaintBudgets(viewport.context.budgets);
+  if (!validTerminalRenderContext(viewport.context)) return rejectedViewportBuffer(input, "invalid-context");
+  if (budgets === null) return rejectedViewportBuffer(input, "invalid-budget");
+  const windowStartRow = Math.max(0, viewport.window.scrollRow - viewport.window.overscanBefore);
+  const overscanBefore = viewport.window.scrollRow - windowStartRow;
+  const requestedRows = viewport.window.viewportRows + overscanBefore + viewport.window.overscanAfter;
+  const rowCount = Math.min(requestedRows, budgets.maxRetainedCellBufferRows);
+  const blockOffset = windowStartRow * viewport.context.rowHeightCssPx;
+  const localCommands = viewport.commands.map((command) => viewportLocalCommand(command, blockOffset));
+  const localList: RasterizationDisplayList = Object.freeze({
+    layout: viewport.documentDisplayList.layout,
+    context: Object.freeze({ ...viewport.context, rows: Math.max(1, rowCount) }),
+    fragmentPaintOrder: viewport.documentDisplayList.fragmentPaintOrder,
+    commands: Object.freeze(localCommands),
+    outcome: viewport.outcome
+  });
+  const truncations = initialTruncations(localList, budgets);
+  if (requestedRows > budgets.maxRetainedCellBufferRows) {
     addTruncation(truncations, "maxRetainedCellBufferRows", budgets.maxRetainedCellBufferRows);
+  }
+  const owners: (PaintedUnit | undefined)[][] = Array.from({ length: rowCount }, () => []);
+  const terminalStyles = new Map<TerminalPaintCommand, Map<TerminalStyle | null, TerminalStyle>>();
+  const styleFor = (command: TerminalPaintCommand, under: PaintedUnit | undefined): TerminalStyle => {
+    const byUnder = terminalStyles.get(command) ?? new Map<TerminalStyle | null, TerminalStyle>();
+    terminalStyles.set(command, byUnder);
+    const underStyle = under?.actualStyle ?? null;
+    const retained = byUnder.get(underStyle);
+    if (retained !== undefined) return retained;
+    const style = actualStyle(command, under, localList.context.colorDepth);
+    byUnder.set(underStyle, style);
+    return style;
+  };
+  let generatedUnits = 0;
+  let retainedCells = 0;
+  let paintStopped = false;
+  try {
+    for (const command of localList.commands) {
+      input.signal?.throwIfAborted();
+      const generation: PaintUnitGenerationState = {
+        limit: Math.max(0, budgets.maxGeneratedPaintUnits - generatedUnits),
+        generated: 0,
+        truncated: false
+      };
+      for (const unit of unitsFor(command, localList, budgets, generation, input.signal)) {
+        if (!unit.visible || unit.row < 0 || unit.row >= rowCount
+          || unit.column < 0 || safeAdd(unit.column, unit.width) > budgets.maxRetainedCellBufferColumns) continue;
+        const row = owners[unit.row];
+        if (row === undefined) continue;
+        const collided: PaintedUnit[] = [];
+        for (let column = unit.column; column < safeAdd(unit.column, unit.width); column += 1) {
+          const previous = row[column];
+          if (previous !== undefined && !collided.includes(previous)) collided.push(previous);
+        }
+        let removed = 0;
+        for (const previous of collided) {
+          for (let column = previous.column; column < safeAdd(previous.column, previous.width); column += 1) {
+            if (row[column] === previous) {
+              row[column] = undefined;
+              removed += 1;
+            }
+          }
+        }
+        let added = 0;
+        for (let column = unit.column; column < safeAdd(unit.column, unit.width); column += 1) {
+          if (row[column] === undefined) added += 1;
+        }
+        if (retainedCells - removed + added > budgets.maxRetainedPaintCells) {
+          addTruncation(truncations, "maxRetainedPaintCells", budgets.maxRetainedPaintCells);
+          paintStopped = true;
+          break;
+        }
+        const under = collided[0];
+        const painted: PaintedUnit = {
+          ...unit,
+          actualStyle: styleFor(command, under)
+        };
+        for (let column = unit.column; column < safeAdd(unit.column, unit.width); column += 1) row[column] = painted;
+        retainedCells = retainedCells - removed + added;
+      }
+      generatedUnits += generation.generated;
+      if (!paintStopped && generation.truncated) {
+        addTruncation(truncations, "maxGeneratedPaintUnits", budgets.maxGeneratedPaintUnits);
+        paintStopped = true;
+      }
+      if (paintStopped) break;
+    }
+  } catch (error) {
+    if (error instanceof InvalidTerminalCellMeasurement) return rejectedViewportBuffer(input, "invalid-cell-measurement");
+    throw error;
   }
   const rows: TerminalCellRow[] = [];
   let retainedTextSpans = 0;
-  for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+  for (let localRow = 0; localRow < rowCount; localRow += 1) {
     input.signal?.throwIfAborted();
-    const units = (unitsByRow.get(rowIndex) ?? []).sort((left, right) => left.column - right.column);
+    const visibleUnits = [...new Set((owners[localRow] ?? []).filter((unit): unit is PaintedUnit => unit !== undefined))]
+      .sort((left, right) => left.column - right.column || left.command.paintOrder - right.command.paintOrder);
     let text = "";
     let column = 0;
     const cells: TerminalCell[] = [];
     const spans: TerminalCellSpan[] = [];
     const styles: TerminalCellStyleSpan[] = [];
-    for (const unit of units) {
+    for (const unit of visibleUnits) {
       const gap = Math.max(0, unit.column - column);
       if (gap > 0) {
         text += " ".repeat(gap);
@@ -1037,6 +588,7 @@ function rasterizeTerminalCellsUnchecked(input: RasterizeTerminalDisplayListInpu
           layoutFragment: command.layoutFragment,
           formattingNode: command.formattingNode,
           documentNode: command.documentNode,
+          action: command.action,
           sourceRange: unit.sourceRange,
           contentStartCodeUnit: unit.contentStartCodeUnit,
           contentEndCodeUnit: unit.contentEndCodeUnit,
@@ -1076,88 +628,33 @@ function rasterizeTerminalCellsUnchecked(input: RasterizeTerminalDisplayListInpu
       column = safeAdd(unit.column, unit.width);
     }
     rows.push(Object.freeze({
-      row: rowIndex,
+      row: windowStartRow + localRow,
       text,
       cells: Object.freeze(cells),
       spans: Object.freeze(spans),
       styles: Object.freeze(styles)
     }));
   }
-  const outcome: TerminalCellBufferOutcome = truncations.length === 0
-    ? { status: "complete", cells: ownerByPosition.size, rows: rows.length }
+  const root = localList.layout.fragment(localList.layout.root);
+  const rootBottom = cssCoordinateAdd(root.overflowRect.y, root.overflowRect.height);
+  const documentRowCount = Math.max(1, Math.ceil(rootBottom / localList.context.rowHeightCssPx));
+  const outcome: ViewportCellBufferOutcome = truncations.length === 0
+    ? { status: "complete", cells: retainedCells, rows: rows.length }
     : {
         status: "truncated",
-        cells: ownerByPosition.size,
+        cells: retainedCells,
         rows: rows.length,
         truncations: Object.freeze([...truncations])
       };
-  const buffer: TerminalCellBuffer = Object.freeze({
-    columns: Math.min(list.context.columns, budgets.maxRetainedCellBufferColumns),
-    viewportRows: list.context.rows,
+  const cellBuffer: ViewportCellBuffer = Object.freeze({
+    columns: Math.min(localList.context.columns, budgets.maxRetainedCellBufferColumns),
+    documentRowCount,
+    windowStartRow,
+    viewportRows: viewport.window.viewportRows,
+    overscanBefore,
+    overscanAfter: Math.max(0, rowCount - viewport.window.viewportRows - overscanBefore),
     rows: Object.freeze(rows),
     outcome: Object.freeze(outcome)
   });
-  return Object.freeze({ cellBuffer: buffer, truncations: Object.freeze(truncations) });
-}
-
-export function rasterizeTerminalCells(input: RasterizeTerminalDisplayListInput): TerminalCellRasterizationResult {
-  try {
-    return rasterizeTerminalCellsUnchecked(input);
-  } catch (error) {
-    if (error instanceof InvalidTerminalCellMeasurement) {
-      return emptyCellRasterization(input.displayList, "invalid-cell-measurement");
-    }
-    throw error;
-  }
-}
-
-export function buildTerminalIndexes(input: RasterizeTerminalDisplayListInput): TerminalIndexConstructionResult {
-  const list = input.displayList;
-  const budgets = terminalPaintBudgets(list.context.budgets);
-  if (!validTerminalRenderContext(list.context) || budgets === null) {
-    const geometry = new Map<DocumentNodeRef, DocumentCellGeometry>();
-    return Object.freeze({
-      hitTestIndex: new ImmutableHitTestIndex([]),
-      focusMap: new ImmutableFocusMap([]),
-      accessibilityBounds: Object.freeze([]),
-      scrollAnchors: Object.freeze([]),
-      truncations: Object.freeze([]),
-      cellRectsForDocumentNode: (node: DocumentNodeRef): readonly TerminalCellRect[] => geometry.get(node)?.rects ?? []
-    });
-  }
-  const truncations = initialTruncations(list, budgets);
-  const indexes = geometryAndIndexes(list, budgets, input.signal, truncations);
-  return Object.freeze({
-    hitTestIndex: indexes.hitTestIndex,
-    focusMap: indexes.focusMap,
-    accessibilityBounds: indexes.accessibilityBounds,
-    scrollAnchors: indexes.scrollAnchors,
-    truncations: Object.freeze(truncations),
-    cellRectsForDocumentNode: (node: DocumentNodeRef): readonly TerminalCellRect[] => indexes.geometry.get(node)?.rects ?? []
-  });
-}
-
-export function rasterizeTerminalDisplayList(input: RasterizeTerminalDisplayListInput): TerminalRenderResult {
-  const list = input.displayList;
-  const budgets = terminalPaintBudgets(list.context.budgets);
-  if (!validTerminalRenderContext(list.context)) return emptyRenderResult(list, input.textSearchIndex, "invalid-context");
-  if (budgets === null) return emptyRenderResult(list, input.textSearchIndex, "invalid-budget");
-  const cells = rasterizeTerminalCells(input);
-  const indexes = buildTerminalIndexes(input);
-  const truncations: TerminalTruncation[] = [];
-  for (const entry of [...cells.truncations, ...indexes.truncations]) {
-    addTruncation(truncations, entry.budget, entry.limit);
-  }
-  return new ImmutableTerminalRenderResult(
-    list,
-    input.textSearchIndex,
-    cells.cellBuffer,
-    indexes.hitTestIndex,
-    indexes.focusMap,
-    indexes.accessibilityBounds,
-    indexes.scrollAnchors,
-    (node) => indexes.cellRectsForDocumentNode(node),
-    truncations,
-    budgets
-  );
+  return Object.freeze({ cellBuffer, truncations: Object.freeze(truncations) });
 }

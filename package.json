@@ -54,7 +54,7 @@
     "smoke:node": "npm run build && node scripts/smoke/runtime-smoke.mjs --runtime=node --report=reports/smoke-node.json",
     "start": "npm run build && node dist/cli.js",
     "test": "npm run build && node --test",
-    "test:bench": "npm run build && node --expose-gc scripts/bench/run-bench.mjs",
+    "test:bench": "npm run build && node --expose-gc scripts/bench/run-bench.mjs && node scripts/bench/incremental-rendering.mjs",
     "test:fuzz": "npm run build && node scripts/quality/fuzz.mjs --profile=ci",
     "test:fuzz:release": "npm run build && node scripts/quality/fuzz.mjs --profile=release",
     "typecheck": "tsc --noEmit -p tsconfig.build.json",
@@ -62,7 +62,7 @@
     "unicode:generate": "node scripts/unicode/generate-unicode-data.mjs"
   },
   "dependencies": {
-    "@ismail-elkorchi/css-parser": "0.2.4",
+    "@ismail-elkorchi/css-parser": "0.2.7",
     "@ismail-elkorchi/html-parser": "0.2.1",
     "@ismail-elkorchi/http-client": "0.1.1",
     "@ismail-elkorchi/terminal-ui": "0.1.5",

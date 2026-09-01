@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { createDocumentState, parseWebDocument } from "../../dist/document/index.js";
-import { renderDocument } from "../../dist/presentation/pipeline.js";
+import { renderDocumentViewport } from "../../dist/presentation/renderer/index.js";
 import { embeddedStylesheetSources } from "../../dist/presentation/style/index.js";
 import {
   cssCoordinate,
@@ -205,7 +205,7 @@ function evaluate(html) {
   });
   const viewportWidth = cssLengthFromFixed(TERMINAL_CONTEXT.columns * CELL_WIDTH);
   const viewportHeight = cssLengthFromFixed(TERMINAL_CONTEXT.rows * ROW_HEIGHT);
-  const renderPipeline = renderDocument({
+  const rendered = renderDocumentViewport({
     document,
     state: createDocumentState(document),
     resources: embeddedStylesheetSources(document),
@@ -228,33 +228,36 @@ function evaluate(html) {
         cssCoordinate(cssPx(0)), cssCoordinate(cssPx(0)), viewportWidth, viewportHeight
       )
     },
-    terminalContext: TERMINAL_CONTEXT
+    terminalContext: TERMINAL_CONTEXT,
+    window: { scrollRow: 0, viewportRows: TERMINAL_CONTEXT.rows, overscanBefore: 0, overscanAfter: 0 }
   });
+  const artifacts = rendered.artifacts;
+  const terminal = rendered.viewport.terminal;
   const formatting = treePayload(
-    renderPipeline.formatting,
-    renderPipeline.formatting.root,
-    (id) => renderPipeline.formatting.node(id),
-    (id) => renderPipeline.formatting.children(id)
+    artifacts.boxTree,
+    artifacts.boxTree.root,
+    (id) => artifacts.boxTree.node(id),
+    (id) => artifacts.boxTree.children(id)
   );
   const layoutFragments = treePayload(
-    renderPipeline.layout,
-    renderPipeline.layout.root,
-    (id) => renderPipeline.layout.fragment(id),
-    (id) => renderPipeline.layout.children(id)
+    artifacts.documentLayout,
+    artifacts.documentLayout.root,
+    (id) => artifacts.documentLayout.fragment(id),
+    (id) => artifacts.documentLayout.children(id)
   );
   return {
     diagnostics: document.diagnostics.map(({ id }) => id),
     title: document.title,
     links: document.links.map(({ node, destination }) => ({ node, destination })),
-    styleOutcome: renderPipeline.styles.outcome,
-    formattingOutcome: renderPipeline.formatting.outcome,
-    layoutOutcome: renderPipeline.layout.outcome,
-    displayListOutcome: renderPipeline.displayList.outcome,
-    cellBufferOutcome: renderPipeline.terminal.cellBuffer.outcome,
+    styleOutcome: artifacts.computedStyles.outcome,
+    formattingOutcome: artifacts.boxTree.outcome,
+    layoutOutcome: artifacts.documentLayout.outcome,
+    displayListOutcome: artifacts.documentDisplayList.outcome,
+    cellBufferOutcome: terminal.cellBuffer.outcome,
     formatting,
     layoutFragments,
-    rows: renderPipeline.terminal.cellBuffer.rows.map((row) => row.text),
-    actions: renderPipeline.terminal.focusMap.targets.map(({ node, action }) => ({ node, action }))
+    rows: terminal.cellBuffer.rows.map((row) => row.text),
+    actions: terminal.focusMap.targets.map(({ node, action }) => ({ node, action }))
   };
 }
 

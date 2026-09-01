@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { createDocumentState, parseWebDocument } from "../../dist/document/index.js";
 import { buildFormattingTree } from "../../dist/presentation/formatting/index.js";
-import { embeddedStylesheetSources, resolveStyles } from "../../dist/presentation/style/index.js";
+import { compileStylesheetProgram, embeddedStylesheetSources, resolveStyles } from "../../dist/presentation/style/index.js";
 
 const environment = {
   viewportWidthCssPx: 800,
@@ -21,10 +21,14 @@ function formatted(html, budgets, styleBudgets) {
     finalUrl: "https://example.test/"
   });
   const state = createDocumentState(document);
+  const resources = embeddedStylesheetSources(document);
   const styles = resolveStyles({
-    document,
+    program: compileStylesheetProgram({
+      document,
+      resources,
+      ...(styleBudgets ? { budgets: styleBudgets } : {})
+    }),
     state,
-    resources: embeddedStylesheetSources(document),
     environment,
     ...(styleBudgets ? { budgets: styleBudgets } : {})
   });
