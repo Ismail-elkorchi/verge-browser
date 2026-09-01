@@ -39,9 +39,17 @@ export interface TextSearchLayoutSpan {
   readonly contentEndCodeUnit: number;
 }
 
+export interface TextSearchLayoutProjection {
+  readonly query: string;
+  readonly matches: readonly TextSearchMatch[];
+  readonly truncated: boolean;
+  readonly spans: readonly TextSearchLayoutSpan[];
+  readonly spansByFragment: ReadonlyMap<LayoutFragmentId, readonly TextSearchLayoutSpan[]>;
+}
+
 export interface TextSearchIndex {
   readonly text: string;
-  search(query: string, limit: number): TextSearchResult;
+  search(query: string, limit: number, signal?: AbortSignal): TextSearchResult;
 }
 
 interface TextSearchSegment {
@@ -54,37 +62,31 @@ interface TextSearchSegment {
   readonly sourceRange: DocumentSourceRange | null;
 }
 
-function foldedBoundaries(value: string, targets: readonly number[]): ReadonlyMap<number, number> {
-  const result = new Map<number, number>();
+function foldText(value: string): {
+  readonly text: string;
+  readonly originalBoundaryByFoldedOffset: Uint32Array;
+} {
+  const parts: string[] = [];
+  const boundaries: number[] = [0];
   let originalOffset = 0;
-  let foldedOffset = 0;
-  let targetIndex = 0;
-  while (targetIndex < targets.length && targets[targetIndex] === 0) {
-    result.set(0, 0);
-    targetIndex += 1;
-  }
   for (const codePoint of value) {
-    const foldedLength = codePoint.toLowerCase().length;
-    const nextFolded = foldedOffset + foldedLength;
+    const folded = codePoint.toLowerCase();
+    parts.push(folded);
     const nextOriginal = originalOffset + codePoint.length;
-    while (targetIndex < targets.length && (targets[targetIndex] ?? Number.POSITIVE_INFINITY) <= nextFolded) {
-      const target = targets[targetIndex];
-      if (target !== undefined) result.set(target, target === foldedOffset ? originalOffset : nextOriginal);
-      targetIndex += 1;
-    }
+    for (let offset = 0; offset < folded.length; offset += 1) boundaries.push(nextOriginal);
     originalOffset = nextOriginal;
-    foldedOffset = nextFolded;
   }
-  for (; targetIndex < targets.length; targetIndex += 1) {
-    const target = targets[targetIndex];
-    if (target !== undefined) result.set(target, value.length);
-  }
-  return result;
+  return Object.freeze({
+    text: parts.join(""),
+    originalBoundaryByFoldedOffset: Uint32Array.from(boundaries),
+  });
 }
 
 class ImmutableTextSearchIndex implements TextSearchIndex {
   readonly text: string;
   readonly #segments: readonly TextSearchSegment[];
+  readonly #foldedText: string;
+  readonly #originalBoundaryByFoldedOffset: Uint32Array;
 
   public constructor(
     text: string,
@@ -92,18 +94,21 @@ class ImmutableTextSearchIndex implements TextSearchIndex {
   ) {
     this.text = text;
     this.#segments = Object.freeze(segments.map((segment) => Object.freeze(segment)));
+    const folded = foldText(text);
+    this.#foldedText = folded.text;
+    this.#originalBoundaryByFoldedOffset = folded.originalBoundaryByFoldedOffset;
     Object.freeze(this);
   }
 
-  public search(query: string, limit: number): TextSearchResult {
+  public search(query: string, limit: number, signal?: AbortSignal): TextSearchResult {
     const needle = query.toLowerCase().replace(/\s+/gu, " ").trim().slice(0, 1_024);
     if (needle.length === 0) return Object.freeze({ matches: Object.freeze([]), truncated: false });
-    const haystack = this.text.toLowerCase();
     const foldedMatches: { readonly start: number; readonly end: number }[] = [];
     let cursor = 0;
     let truncated = false;
-    while (cursor <= haystack.length - needle.length) {
-      const start = haystack.indexOf(needle, cursor);
+    while (cursor <= this.#foldedText.length - needle.length) {
+      if ((foldedMatches.length & 255) === 0) signal?.throwIfAborted();
+      const start = this.#foldedText.indexOf(needle, cursor);
       if (start < 0) break;
       if (foldedMatches.length >= limit) {
         truncated = true;
@@ -112,15 +117,22 @@ class ImmutableTextSearchIndex implements TextSearchIndex {
       foldedMatches.push({ start, end: start + needle.length });
       cursor = Math.max(start + needle.length, start + 1);
     }
-    const targets = [...new Set(foldedMatches.flatMap((match) => [match.start, match.end]))]
-      .sort((left, right) => left - right);
-    const boundaries = foldedBoundaries(this.text, targets);
-    const matches = foldedMatches.map((folded): TextSearchMatch => {
-      const start = boundaries.get(folded.start) ?? 0;
-      const end = boundaries.get(folded.end) ?? this.text.length;
+    const matches = foldedMatches.map((folded, matchIndex): TextSearchMatch => {
+      if ((matchIndex & 255) === 0) signal?.throwIfAborted();
+      const start = this.#originalBoundaryByFoldedOffset[folded.start] ?? 0;
+      const end = this.#originalBoundaryByFoldedOffset[folded.end] ?? this.text.length;
       const slices: TextSearchMatchSlice[] = [];
-      for (const segment of this.#segments) {
-        if (segment.formatting === null || start >= segment.end || end <= segment.start) continue;
+      let lower = 0;
+      let upper = this.#segments.length;
+      while (lower < upper) {
+        const middle = lower + Math.floor((upper - lower) / 2);
+        if ((this.#segments[middle]?.end ?? Number.POSITIVE_INFINITY) <= start) lower = middle + 1;
+        else upper = middle;
+      }
+      for (let segmentIndex = lower; segmentIndex < this.#segments.length; segmentIndex += 1) {
+        const segment = this.#segments[segmentIndex];
+        if (segment === undefined || segment.start >= end) break;
+        if (segment.formatting === null || end <= segment.start) continue;
         const overlapStart = Math.max(start, segment.start);
         const overlapEnd = Math.min(end, segment.end);
         const segmentLength = segment.end - segment.start;
@@ -264,10 +276,24 @@ export function mapTextSearchMatchesToLayout(
   index: TextSearchIndex,
   layout: LayoutFragmentTree,
   query: string,
-  limit: number
+  limit: number,
+  signal?: AbortSignal,
 ): readonly TextSearchLayoutSpan[] {
+  return projectTextSearchToLayout(index, layout, query, limit, signal).spans;
+}
+
+/** Retains one logical query and its fragment mapping for viewport projection. */
+export function projectTextSearchToLayout(
+  index: TextSearchIndex,
+  layout: LayoutFragmentTree,
+  query: string,
+  limit: number,
+  signal?: AbortSignal,
+): TextSearchLayoutProjection {
   const spans: TextSearchLayoutSpan[] = [];
-  for (const match of index.search(query, limit).matches) {
+  const logical = index.search(query, limit, signal);
+  for (const [matchIndex, match] of logical.matches.entries()) {
+    if ((matchIndex & 255) === 0) signal?.throwIfAborted();
     for (const slice of match.slices) {
       for (const fragment of layout.forFormattingNode(slice.formatting)) {
         const fragmentStart = fragment.contentStartCodeUnit;
@@ -296,5 +322,20 @@ export function mapTextSearchMatchesToLayout(
       }
     }
   }
-  return Object.freeze(spans);
+  const spansByFragment = new Map<LayoutFragmentId, TextSearchLayoutSpan[]>();
+  for (const span of spans) {
+    const retained = spansByFragment.get(span.fragment) ?? [];
+    retained.push(span);
+    spansByFragment.set(span.fragment, retained);
+  }
+  return Object.freeze({
+    query,
+    matches: logical.matches,
+    truncated: logical.truncated,
+    spans: Object.freeze(spans),
+    spansByFragment: new Map([...spansByFragment].map(([fragment, values]) => [
+      fragment,
+      Object.freeze(values),
+    ])),
+  });
 }

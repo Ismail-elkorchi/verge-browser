@@ -69,6 +69,7 @@ import type {
   InlineContinuationGeometry,
   LayoutOutcome,
   LayoutPaintStyle,
+  LayoutScrollAttachment,
   LayoutStackingMetadata,
   LayoutTableCollapsedBorderSegment,
   LayoutTextCluster,
@@ -788,6 +789,10 @@ class LayoutBuilder {
   readonly #stackingMetadata = new Map<
     LayoutFragmentId,
     LayoutStackingMetadata
+  >();
+  readonly #scrollAttachments = new Map<
+    LayoutFragmentId,
+    LayoutScrollAttachment
   >();
   readonly #floatManagers: FloatExclusionManager[] = [];
   readonly #tableWork = new Map<TableBudgetName, number>();
@@ -5299,7 +5304,7 @@ class LayoutBuilder {
               ),
             )
           : borderY;
-    return this.#translate(
+    const positioned = this.#translate(
       result,
       ZERO,
       cssCoordinateDifference(targetBorderY, result.borderRect.y),
@@ -5307,6 +5312,17 @@ class LayoutBuilder {
         ? this.#input.context.scrollport
         : inheritedClip,
     );
+    if (style?.box.position === "fixed") {
+      const fragment = this.#fragments.get(positioned.fragment);
+      if (fragment !== undefined) {
+        this.#scrollAttachments.set(positioned.fragment, Object.freeze({
+          kind: "fixed",
+          root: positioned.fragment,
+          normalBorderRect: fragment.borderRect,
+        }));
+      }
+    }
+    return positioned;
   }
 
   #applyInFlowPosition(
@@ -5324,76 +5340,32 @@ class LayoutBuilder {
     )
       return result;
     const containingBlock = this.#inFlowContainingBlock(node);
+    if (style.box.position === "sticky") {
+      this.#scrollAttachments.set(result.fragment, Object.freeze({
+        kind: "sticky",
+        root: result.fragment,
+        normalBorderRect: result.borderRect,
+        containingBlock,
+        top: this.#usedInset(style, "top", this.#input.context.viewport.height),
+        right: this.#usedInset(style, "right", this.#input.context.viewport.width),
+        bottom: this.#usedInset(style, "bottom", this.#input.context.viewport.height),
+        left: this.#usedInset(style, "left", this.#input.context.viewport.width),
+      }));
+      return result;
+    }
     const insetBasis =
-      style.box.position === "sticky"
-        ? this.#input.context.scrollport
-        : containingBlock;
+      containingBlock;
     const left = this.#usedInset(style, "left", insetBasis.width);
     const right = this.#usedInset(style, "right", insetBasis.width);
     const top = this.#usedInset(style, "top", insetBasis.height);
     const bottom = this.#usedInset(style, "bottom", insetBasis.height);
-    let inlineOffset =
+    const inlineOffset =
       left !== null && right !== null
         ? style.text.direction === "rtl"
           ? negate(right)
           : left
         : (left ?? (right === null ? ZERO : negate(right)));
-    let blockOffset = top ?? (bottom === null ? ZERO : negate(bottom));
-    if (style.box.position === "sticky") {
-      const scrollport = this.#input.context.scrollport;
-      const movedX = point(result.borderRect.x, inlineOffset);
-      const movedY = point(result.borderRect.y, blockOffset);
-      if (left !== null && movedX < point(scrollport.x, left)) {
-        inlineOffset = cssCoordinateDifference(
-          point(scrollport.x, left),
-          result.borderRect.x,
-        );
-      } else if (right !== null) {
-        const maximum = point(
-          cssCoordinateAdd(scrollport.x, scrollport.width),
-          sum(negate(right), negate(result.borderRect.width)),
-        );
-        if (movedX > maximum)
-          inlineOffset = cssCoordinateDifference(maximum, result.borderRect.x);
-      }
-      if (top !== null && movedY < point(scrollport.y, top)) {
-        blockOffset = cssCoordinateDifference(
-          point(scrollport.y, top),
-          result.borderRect.y,
-        );
-      } else if (bottom !== null) {
-        const maximum = point(
-          cssCoordinateAdd(scrollport.y, scrollport.height),
-          sum(negate(bottom), negate(result.borderRect.height)),
-        );
-        if (movedY > maximum)
-          blockOffset = cssCoordinateDifference(maximum, result.borderRect.y);
-      }
-      const minimumX = containingBlock.x;
-      const maximumX = point(
-        cssCoordinateAdd(containingBlock.x, containingBlock.width),
-        negate(result.borderRect.width),
-      );
-      const minimumY = containingBlock.y;
-      const maximumY = point(
-        cssCoordinateAdd(containingBlock.y, containingBlock.height),
-        negate(result.borderRect.height),
-      );
-      const constrainedX = cssCoordinateFromFixed(
-        Math.max(
-          minimumX,
-          Math.min(maximumX, point(result.borderRect.x, inlineOffset)),
-        ),
-      );
-      const constrainedY = cssCoordinateFromFixed(
-        Math.max(
-          minimumY,
-          Math.min(maximumY, point(result.borderRect.y, blockOffset)),
-        ),
-      );
-      inlineOffset = cssCoordinateDifference(constrainedX, result.borderRect.x);
-      blockOffset = cssCoordinateDifference(constrainedY, result.borderRect.y);
-    }
+    const blockOffset = top ?? (bottom === null ? ZERO : negate(bottom));
     this.#translate(result, inlineOffset, blockOffset, containingClip);
     // Relative and sticky positioning move the painted box without changing
     // the position it occupies in normal flow.
@@ -7265,6 +7237,7 @@ class LayoutBuilder {
       this.#parentIndex,
       this.#lineBoxes,
       this.#stackingMetadata,
+      this.#scrollAttachments,
       outcome,
       this.#rootFontMetrics,
     );
@@ -7292,6 +7265,10 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
     LayoutFragmentId,
     LayoutStackingMetadata
   >;
+  readonly #scrollAttachments: ReadonlyMap<
+    LayoutFragmentId,
+    LayoutScrollAttachment
+  >;
 
   public constructor(
     input: BuildLayoutFragmentTreeInput,
@@ -7302,6 +7279,7 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
     parentIndex: ReadonlyMap<LayoutFragmentId, LayoutFragmentId>,
     lineBoxes: readonly LineBox[],
     stackingMetadata: ReadonlyMap<LayoutFragmentId, LayoutStackingMetadata>,
+    scrollAttachments: ReadonlyMap<LayoutFragmentId, LayoutScrollAttachment>,
     outcome: LayoutOutcome,
     rootMetrics: UsedFontMetrics,
   ) {
@@ -7375,6 +7353,9 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
     this.#stackingMetadata = complete
       ? stackingMetadata
       : new Map([...stackingMetadata].filter(([id]) => reachable.has(id)));
+    this.#scrollAttachments = complete
+      ? scrollAttachments
+      : new Map([...scrollAttachments].filter(([id]) => reachable.has(id)));
     this.outcome = Object.freeze(
       outcome.status === "complete"
         ? {
@@ -7464,6 +7445,7 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
           }),
         ],
       ]),
+      new Map(),
       { status: "rejected", reason },
       REJECTED_FONT_METRICS,
     );
@@ -7490,6 +7472,10 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
     if (metadata === undefined)
       throw new RangeError(`Unknown layout stacking metadata: ${id}`);
     return metadata;
+  }
+
+  public scrollAttachment(id: LayoutFragmentId): LayoutScrollAttachment | null {
+    return this.#scrollAttachments.get(id) ?? null;
   }
 
   public forFormattingNode(node: FormattingNodeId): readonly LayoutFragment[] {

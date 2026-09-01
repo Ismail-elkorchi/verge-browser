@@ -55,20 +55,22 @@ import type {
   DocumentNodeRef
 } from "../document/index.js";
 import type {
+  TerminalAccessibilityBound,
   TerminalCellRow,
-  TerminalRenderResult,
+  TerminalFocusTarget,
+  TerminalHitRegion,
+  TerminalSearchResult,
   TerminalStyle as ActualTerminalStyle
 } from "../presentation/terminal/index.js";
+import { documentActionId } from "../presentation/formatting/index.js";
 import {
-  actionId,
-  documentContentBounds,
-  renderDocumentForViewport,
-  documentScrollRow,
-  renderPipelineIncompleteCauses
+  committedDocumentScrollRow,
+  documentContentBounds
 } from "./document-layout.js";
 import type {
   ActionPaletteOverlay,
   BrowserDocumentState,
+  BrowserTabState,
   BrowserTuiMessage,
   BrowserTuiState,
   DetailOverlay,
@@ -84,7 +86,7 @@ const TERMINAL_CELL_MEASURER = terminalCellMeasurer();
 interface BrowserDocumentComponentModel {
   readonly id: string;
   readonly source: BrowserDocumentState;
-  readonly terminalRender: TerminalRenderResult;
+  readonly terminalRender: BrowserViewportTerminal;
   readonly finalUrl: string;
   readonly search: BrowserDocumentState["search"];
   readonly searchRangesByRow: ReadonlyMap<number, readonly {
@@ -94,6 +96,17 @@ interface BrowserDocumentComponentModel {
   }[]>;
   readonly controlGroups: readonly BrowserControlGroup[];
   readonly formEditors: BrowserDocumentState["formEditors"];
+}
+
+interface BrowserViewportTerminal {
+  readonly cellBuffer: NonNullable<BrowserDocumentState["rendering"]["viewport"]>["cellBuffer"];
+  readonly hitTestIndex: { readonly regions: readonly TerminalHitRegion[] };
+  readonly focusMap: { readonly targets: readonly TerminalFocusTarget[] };
+  readonly accessibilityBounds: readonly TerminalAccessibilityBound[];
+  readonly search: TerminalSearchResult | null;
+  readonly documentRowCount: number;
+  readonly visibleDocumentNodes: readonly DocumentNodeRef[];
+  cellRectsForDocumentNode(node: DocumentNodeRef): readonly Rect[];
 }
 
 interface BrowserControlGroup {
@@ -219,10 +232,9 @@ function rowSegments(
   } & ({ readonly kind: "link"; readonly destination: string } | { readonly kind: "disclosure" });
   const rowText = cellRow.text;
   const snapshot = document.source.snapshot.document;
-  const commandById = new Map(document.terminalRender.displayList.commands.map((command) => [command.id, command]));
   const inlineActions = cellRow.spans.flatMap((entry): InlineRowAction[] => {
-    const action = commandById.get(entry.command)?.action;
-    if (action === undefined || action === null || action.kind === "form-control") return [];
+    const action = entry.action;
+    if (action === null || action.kind === "form-control") return [];
     const range = {
       start: entry.startCodeUnit,
       end: entry.endCodeUnit
@@ -346,7 +358,7 @@ function documentNodeForTerminalFocusTarget(
       ?? null;
   }
   const action = document.terminalRender.focusMap.targets.find(
-    (candidate) => actionId(candidate.action) === targetId
+    (candidate) => documentActionId(candidate.action) === targetId
   );
   return action?.node ?? null;
 }
@@ -710,12 +722,7 @@ function browserDocumentChildBounds(
     const rectangles = entry.controls.flatMap((control) => terminalRender.cellRectsForDocumentNode(control.node))
       .filter((rect) => rect.width > 0 && rect.height > 0);
     if (rectangles.length === 0) {
-      const anchor = entry.controls.map((control) =>
-        terminalRender.scrollAnchors.find((candidate) => candidate.documentNode === control.node)
-      ).find((candidate) => candidate !== undefined);
-      return anchor === undefined
-        ? { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 }
-        : { row: contentBounds.row + anchor.row, column: contentBounds.column, width: 1, height: 1 };
+      return { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 };
     }
     let row = rectangles[0]?.row ?? 0;
     let column = rectangles[0]?.column ?? 0;
@@ -776,7 +783,7 @@ const browserDocumentComponent = defineComponent<
       preferredWidth: bounds.width,
       preferredHeight: childBounds.reduce(
         (height, child) => Math.max(height, child.row - bounds.row + child.height),
-        terminalRender.cellBuffer.rows.length
+        terminalRender.documentRowCount
       )
     };
   },
@@ -795,13 +802,11 @@ const browserDocumentComponent = defineComponent<
     const terminalRender = document.terminalRender;
     const contentBounds = documentContentBounds(bounds);
     const startIndex = Math.max(0, visibleBounds.row - contentBounds.row);
-    const endIndexExclusive = Math.min(
-      terminalRender.cellBuffer.rows.length,
-      visibleBounds.row + visibleBounds.height - contentBounds.row
-    );
-    for (let rowIndex = startIndex; rowIndex < endIndexExclusive; rowIndex += 1) {
-      const cellRow = terminalRender.cellBuffer.rows[rowIndex];
-      if (!cellRow) continue;
+    const endIndexExclusive = Math.min(terminalRender.documentRowCount,
+      visibleBounds.row + visibleBounds.height - contentBounds.row);
+    for (const cellRow of terminalRender.cellBuffer.rows) {
+      const rowIndex = cellRow.row;
+      if (rowIndex < startIndex || rowIndex >= endIndexExclusive) continue;
       target.write(
         contentBounds.row + rowIndex,
         contentBounds.column,
@@ -815,11 +820,11 @@ const browserDocumentComponent = defineComponent<
     const contentBounds = documentContentBounds(bounds);
     const startIndex = Math.min(
       Math.max(0, visibleBounds.row - contentBounds.row),
-      terminalRender.cellBuffer.rows.length
+      terminalRender.documentRowCount
     );
     const endIndexExclusive = Math.min(
       Math.max(startIndex, visibleBounds.row + visibleBounds.height - contentBounds.row),
-      terminalRender.cellBuffer.rows.length
+      terminalRender.documentRowCount
     );
     const visibleSemantic = terminalRender.accessibilityBounds.filter((entry) => {
       if (document.source.snapshot.document.control(entry.documentNode) !== null) return false;
@@ -838,9 +843,9 @@ const browserDocumentComponent = defineComponent<
       window: {
         startIndex,
         endIndexExclusive,
-        totalCount: terminalRender.cellBuffer.rows.length,
+        totalCount: terminalRender.documentRowCount,
         omittedBefore: startIndex,
-        omittedAfter: terminalRender.cellBuffer.rows.length - endIndexExclusive
+        omittedAfter: terminalRender.documentRowCount - endIndexExclusive
       },
       children: [
         ...visibleSemantic.map((entry) => ({
@@ -866,8 +871,7 @@ const browserDocumentComponent = defineComponent<
     return terminalRender.focusMap.targets
       .filter((target) => target.action.kind !== "form-control")
       .map((target) => {
-      const anchor = terminalRender.scrollAnchors.find((entry) => entry.documentNode === target.node);
-      let row = target.rects[0]?.row ?? anchor?.row ?? 0;
+      let row = target.rects[0]?.row ?? 0;
       let column = target.rects[0]?.column ?? 0;
       let bottom = row;
       let edge = column;
@@ -877,18 +881,14 @@ const browserDocumentComponent = defineComponent<
         bottom = Math.max(bottom, rect.row + rect.height);
         edge = Math.max(edge, rect.column + rect.width);
       }
-      if (target.rects.length === 0 && anchor !== undefined) {
-        bottom = row + 1;
-        edge = column + 1;
-      }
       return {
-        id: actionId(target.action),
+        id: documentActionId(target.action),
         bounds: {
           row: contentBounds.row + row,
           column: contentBounds.column + column,
-          width: target.rects.length === 0 && anchor === undefined
+          width: target.rects.length === 0
             ? 0 : Math.max(1, Math.min(edge - column, contentBounds.width - column)),
-          height: target.rects.length === 0 && anchor === undefined ? 0 : Math.max(1, bottom - row)
+          height: target.rects.length === 0 ? 0 : Math.max(1, bottom - row)
         }
       };
       });
@@ -915,7 +915,7 @@ const browserDocumentComponent = defineComponent<
         && contentBounds.row + placement.rect.row < visibleBounds.row + visibleBounds.height
         && contentBounds.row + placement.rect.row + placement.rect.height > visibleBounds.row)
       .map((placement) => {
-        const placementActionId = actionId(placement.action);
+        const placementActionId = documentActionId(placement.action);
         const columnIndex = Math.min(contentBounds.width - 1, placement.rect.column);
         return {
           id: `activate:${placementActionId}:${placement.id}`,
@@ -956,9 +956,9 @@ const browserDocumentComponent = defineComponent<
 
 function browserDocument(
   document: BrowserDocumentState,
-  terminalRender: TerminalRenderResult
+  terminalRender: BrowserViewportTerminal
 ): Element<BrowserTuiMessage> {
-  const scrollRow = documentScrollRow(document, terminalRender);
+  const scrollRow = committedDocumentScrollRow(document);
   const model = browserDocumentComponentModel(document, terminalRender);
   const children = model.controlGroups.flatMap((group) => {
     const element = inlineControlGroup(model, group);
@@ -985,9 +985,26 @@ function browserDocument(
   });
 }
 
+function committedBrowserViewport(document: BrowserDocumentState): BrowserViewportTerminal | null {
+  const payload = document.rendering.viewport;
+  if (payload === null) return null;
+  const rects = new Map(payload.cellRectsByDocumentNode);
+  return {
+    cellBuffer: payload.cellBuffer,
+    hitTestIndex: { regions: payload.hitRegions },
+    focusMap: { targets: payload.focusTargets },
+    accessibilityBounds: payload.accessibilityBounds,
+    search: payload.search,
+    visibleDocumentNodes: Object.freeze([...rects.keys()]),
+    documentRowCount: document.rendering.summary?.documentRowCount
+      ?? payload.cellBuffer.documentRowCount,
+    cellRectsForDocumentNode: (node) => rects.get(node) ?? [],
+  };
+}
+
 function browserDocumentComponentModel(
   document: BrowserDocumentState,
-  terminalRender: TerminalRenderResult
+  terminalRender: BrowserViewportTerminal
 ): BrowserDocumentComponentModel {
   const searchRangesByRow = new Map<number, {
     readonly match: string;
@@ -996,7 +1013,7 @@ function browserDocumentComponentModel(
   }[]>();
   if (document.search !== null) {
     const retained = new Set(document.search.matches.map((match) => match.id));
-    for (const match of terminalRender.search(document.search.query).matches) {
+    for (const match of terminalRender.search?.matches ?? []) {
       if (!retained.has(match.id)) continue;
       for (const range of match.ranges) {
         const entries = searchRangesByRow.get(range.row) ?? [];
@@ -1012,7 +1029,10 @@ function browserDocumentComponentModel(
     finalUrl: document.snapshot.finalUrl,
     search: document.search,
     searchRangesByRow,
-    controlGroups: controlGroups(document.snapshot.document.controls),
+    controlGroups: controlGroups(terminalRender.visibleDocumentNodes.flatMap((node) => {
+      const control = document.snapshot.document.control(node);
+      return control === null ? [] : [control];
+    })),
     formEditors: document.formEditors
   };
 }
@@ -1180,13 +1200,16 @@ function sidePanel(state: BrowserTuiState): Element<BrowserTuiMessage> {
 
 function browserToolbar(
   state: BrowserTuiState,
-  document: BrowserDocumentState,
+  document: BrowserTabState,
   columns: number
 ): Element<BrowserTuiMessage> {
-  const bookmarked = state.bookmarks.some((entry) => entry.url === document.snapshot.finalUrl);
+  const ready = document.kind === "ready" ? document : null;
+  const currentUrl = document.kind === "ready" ? document.snapshot.finalUrl : document.requestedUrl;
+  const loading = ready?.loading ?? document.kind === "loading";
+  const bookmarked = state.bookmarks.some((entry) => entry.url === currentUrl);
   const omnibox = commandInput({
     id: "browser-omnibox",
-    prompt: document.loading ? "… " : "⌕ ",
+    prompt: loading ? "… " : "⌕ ",
     placeholder: "Search or enter address",
     view: commandInputView(state.omnibox),
     display: "popup",
@@ -1200,7 +1223,7 @@ function browserToolbar(
     meta: { accessibleName: "Address and search" }
   });
   const showLibrary = columns >= 96;
-  const back = document.canGoBack
+  const back = ready?.canGoBack === true
     ? button({
       id: "browser-back",
       label: "←",
@@ -1217,7 +1240,7 @@ function browserToolbar(
       tone: "ghost",
       disabled: true
     });
-  const forward = document.canGoForward
+  const forward = ready?.canGoForward === true
     ? button({
       id: "browser-forward",
       label: "→",
@@ -1239,11 +1262,11 @@ function browserToolbar(
     forward,
     button({
       id: "browser-reload",
-      label: document.loading ? "■" : "↻",
-      accessibleName: document.loading ? "Stop loading" : "Reload",
+      label: loading ? "■" : "↻",
+      accessibleName: loading ? "Stop loading" : "Reload",
       density: "compact",
       tone: "ghost",
-      onPress: buttonAction({ kind: "navigate", operation: document.loading ? "stop" : "reload" })
+      onPress: buttonAction({ kind: "navigate", operation: loading ? "stop" : "reload" })
     }),
     button({
       id: "browser-new-tab",
@@ -1316,7 +1339,7 @@ function browserToolbar(
 function findBar(state: BrowserTuiState): Element<BrowserTuiMessage> | null {
   if (state.findBar === null) return null;
   const document = state.documents[state.activeDocumentIndex];
-  const search = document?.search;
+  const search = document?.kind === "ready" ? document.search : null;
   return row([
     textInput({
       id: "browser-find-input",
@@ -1327,7 +1350,7 @@ function findBar(state: BrowserTuiState): Element<BrowserTuiMessage> | null {
       meta: { accessibleName: "Find in page" }
     }),
     text({
-      content: search === null || search === undefined || search.matches.length === 0
+      content: search === null || search.matches.length === 0
         ? "0/0"
         : `${String(search.activeMatchIndex + 1)}/${String(search.matches.length)}${search.truncated ? "+" : ""}`
     }),
@@ -1351,21 +1374,57 @@ function findBar(state: BrowserTuiState): Element<BrowserTuiMessage> | null {
 function baseView(state: BrowserTuiState, columns: number, rows: number): Element<BrowserTuiMessage> {
   const selected = state.documents[state.activeDocumentIndex] ?? state.documents[0];
   if (!selected) throw new Error("The browser view requires an open document.");
+  const selectedUrl = selected.kind === "ready" ? selected.snapshot.finalUrl : selected.requestedUrl;
   const pageColumns = state.sidePanel !== null && columns >= 100 ? columns - 41 : columns;
-  const viewportRows = Math.max(1, rows - (state.findBar === null ? 3 : 4));
-  const renderPipeline = renderDocumentForViewport(
-    selected,
-    Math.max(1, pageColumns - 1),
-    viewportRows
-  );
-  const terminalRender = renderPipeline.terminal;
-  const incompleteRendering = renderPipelineIncompleteCauses(renderPipeline);
-  const incompleteStatus = incompleteRendering.length === 0
+  void pageColumns;
+  void rows;
+  const ready = selected.kind === "ready" ? selected : null;
+  const terminalRender = ready === null ? null : committedBrowserViewport(ready);
+  const incompleteRendering = terminalRender?.cellBuffer.outcome.status === "rejected"
+    ? [`cell-buffer.${terminalRender.cellBuffer.outcome.reason}`]
+    : terminalRender?.cellBuffer.outcome.status === "truncated"
+      ? terminalRender.cellBuffer.outcome.truncations.map((entry) =>
+        `terminal.${entry.budget}=${String(entry.limit)}`
+      )
+      : [];
+  const allIncompleteRendering = [
+    ...(ready?.rendering.summary?.incomplete ?? []),
+    ...incompleteRendering,
+  ];
+  const incompleteStatus = allIncompleteRendering.length === 0
     ? null
-    : `${selected.snapshot.finalUrl} — rendering incomplete (${incompleteRendering.join(", ")})`;
-  const pagePanel = selected.snapshot.finalUrl === "about:newtab"
+    : `${selectedUrl} — rendering incomplete (${allIncompleteRendering.join(", ")})`;
+  const pagePanel = ready === null
+    ? surface(column([
+        text({
+          content: selected.kind === "failed"
+            ? `Could not restore ${selectedUrl}`
+            : `Restoring ${selectedUrl}…`,
+        }),
+        ...(selected.error === null ? [] : [text({ content: selected.error })]),
+        ...(selected.kind === "failed"
+          ? [button({
+              id: `retry-${selected.id}`,
+              label: "Retry",
+              onPress: buttonAction({ kind: "restoreTab", documentId: selected.id }),
+            })]
+          : []),
+      ]), { appearance: "neutral" })
+    : ready.snapshot.finalUrl === "about:newtab"
     ? newTabDashboard(state)
-    : browserDocument(selected, terminalRender);
+    : terminalRender === null
+      ? surface(column([
+          text({ content: ready.rendering.status === "failed" ? "Rendering failed" : "Rendering page…" }),
+          ...(ready.rendering.error === null ? [] : [text({ content: ready.rendering.error })]),
+          ...(ready.rendering.status === "failed"
+            ? [button({
+                id: `retry-render-${ready.id}`,
+                label: "Retry rendering",
+                onPress: buttonAction({ kind: "requestActiveViewport" }),
+              })]
+            : []),
+        ]), { appearance: "neutral" })
+      : browserDocument(ready, terminalRender);
   const body = state.sidePanel !== null
     ? columns >= 100
       ? splitPane([pagePanel, sidePanel(state)], {
@@ -1396,7 +1455,9 @@ function baseView(state: BrowserTuiState, columns: number, rows: number): Elemen
       maxTabWidth: 36,
       tabs: state.documents.map((document) => ({
         id: document.id,
-        label: `${document.loading ? "◌ " : ""}${document.snapshot.document.title}`,
+        label: `${document.kind === "loading" || (document.kind === "ready" && document.loading) ? "◌ " : ""}${
+          document.kind === "ready" ? document.snapshot.document.title : document.label
+        }`,
         closable: true,
         panel: document.id === selected.id ? selectedPanel : text({ content: "" })
       })),
@@ -1412,17 +1473,22 @@ function baseView(state: BrowserTuiState, columns: number, rows: number): Elemen
       leading: [{
         id: "status",
         kind: "status",
-        text: selected.error ?? incompleteStatus ?? state.status?.text ?? selected.snapshot.finalUrl,
+        text: selected.error ?? incompleteStatus ?? state.status?.text
+          ?? (selected.kind === "ready" ? selected.snapshot.finalUrl : selected.requestedUrl),
         status: selected.error !== null || incompleteStatus !== null || state.status?.tone === "error"
           ? "error"
           : state.status?.tone === "success"
             ? "success"
-            : selected.loading ? "running" : "info"
+            : selected.kind === "loading" || (selected.kind === "ready" && selected.loading)
+              ? "running"
+              : "info"
       }],
       trailing: [{
         id: "position",
         kind: "text",
-        text: `${String(documentScrollRow(selected, terminalRender) + 1)}/${String(Math.max(1, terminalRender.cellBuffer.rows.length))}`
+        text: selected.kind === "ready"
+          ? `${String(committedDocumentScrollRow(selected) + 1)}/${String(Math.max(1, selected.rendering.summary?.documentRowCount ?? 1))}`
+          : "…"
       }]
     })
   ], {

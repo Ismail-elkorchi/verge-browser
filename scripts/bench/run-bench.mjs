@@ -32,8 +32,9 @@ import {
   resolveCollapsedBorderConflictSets,
   sizeTableRows
 } from "../../dist/presentation/layout/table/index.js";
-import { buildTextSearchIndex } from "../../dist/presentation/search/index.js";
-import { embeddedStylesheetSources, resolveStyles } from "../../dist/presentation/style/index.js";
+import { buildTextSearchIndex, projectTextSearchToLayout } from "../../dist/presentation/search/index.js";
+import { RenderArtifactStore } from "../../dist/presentation/renderer/index.js";
+import { compileStylesheetProgram, embeddedStylesheetSources, resolveStyles } from "../../dist/presentation/style/index.js";
 import {
   GRID_AUTO_LINE,
   parseGridLine,
@@ -41,10 +42,12 @@ import {
 } from "../../dist/presentation/style/grid/index.js";
 import { buildInlineItemStreamSet } from "../../dist/presentation/text/index.js";
 import {
-  buildTerminalDisplayList,
-  buildTerminalIndexes,
-  rasterizeTerminalCells,
-  rasterizeTerminalDisplayList
+  buildDisplayListSpatialIndex,
+  buildDocumentGeometryIndex,
+  buildDocumentDisplayList,
+  buildViewportDisplayList,
+  buildViewportTerminalResult,
+  rasterizeViewportDisplayList
 } from "../../dist/presentation/terminal/index.js";
 import {
   bidiClass,
@@ -343,6 +346,63 @@ async function sessionLifecycleMemory() {
   };
 }
 
+function retainArtifactGraphForRelease() {
+  const parsed = parse(`<style>p{margin:0}</style><main>${"<p>retained artifact graph</p>".repeat(500)}</main>`, {
+    scriptingMode: "disabled",
+    captureSpans: true,
+    sourceRetention: "text",
+    trace: "none",
+  });
+  const document = createIndexedWebDocumentSnapshot(parsed, {
+    requestUrl: "https://bench.example/artifact-release",
+    finalUrl: "https://bench.example/artifact-release",
+  });
+  const store = new RenderArtifactStore();
+  store.attach({
+    documentId: "artifact-release",
+    documentRevision: 1,
+    stateRevision: 1,
+    document,
+    state: createDocumentState(document),
+    resources: embeddedStylesheetSources(document),
+  });
+  const artifacts = store.analyze({
+    documentId: "artifact-release",
+    documentRevision: 1,
+    mediaEnvironment: {
+      viewportWidthCssPx: 640,
+      viewportHeightCssPx: 384,
+      mediaType: "screen",
+      prefersColorScheme: "dark",
+      reducedMotion: false,
+      hover: "hover",
+      pointer: "fine",
+    },
+    layoutContext: layoutContext(80),
+    terminalContext: terminalContext(80),
+  });
+  return { store, artifacts: new WeakRef(artifacts), retainedCost: artifacts.retainedCost };
+}
+
+async function artifactStoreLifecycleMemory() {
+  await collectGarbage();
+  const before = memory();
+  const retained = retainArtifactGraphForRelease();
+  await collectGarbage();
+  const live = memory();
+  retained.store.release("artifact-release");
+  retained.store.dispose();
+  await collectGarbage();
+  const released = memory();
+  return {
+    estimatedRetainedBytes: retained.retainedCost,
+    liveHeap: mebibytes(Math.max(0, live.heapUsed - before.heapUsed)),
+    releasedHeap: mebibytes(Math.max(0, released.heapUsed - before.heapUsed)),
+    released: retained.artifacts.deref() === undefined,
+    metricsAfterRelease: retained.store.metrics(),
+  };
+}
+
 async function layoutFragmentMemory(formatting) {
   await collectGarbage();
   const before = memory();
@@ -381,10 +441,10 @@ async function repeatedResizeMemory(formatting) {
 }
 
 function styles(document, state) {
+  const resources = embeddedStylesheetSources(document);
   return resolveStyles({
-    document,
+    program: compileStylesheetProgram({ document, resources }),
     state,
-    resources: embeddedStylesheetSources(document),
     environment: {
       viewportWidthCssPx: 640,
       viewportHeightCssPx: 384,
@@ -477,28 +537,48 @@ function layoutFragments(formatting, columns, streams = inlineItemStreams(format
 }
 
 function displayList(layout, columns) {
-  return buildTerminalDisplayList({ layout, context: terminalContext(columns) });
+  return buildDocumentDisplayList({ layout, context: terminalContext(columns) });
 }
 
-function cellBuffer(list) {
-  return rasterizeTerminalDisplayList({
-    displayList: list,
-    textSearchIndex: textSearchIndex(list.layout.formatting)
+function viewportDisplayList(list, scrollRow = 0) {
+  return buildViewportDisplayList({
+    documentDisplayList: list,
+    spatialIndex: buildDisplayListSpatialIndex(list),
+    context: list.context,
+    window: {
+      scrollRow,
+      viewportRows: list.context.rows,
+      overscanBefore: 0,
+      overscanAfter: 0
+    }
   });
 }
 
 function cellRasterization(list) {
-  return rasterizeTerminalCells({
-    displayList: list,
-    textSearchIndex: textSearchIndex(list.layout.formatting)
+  return rasterizeViewportDisplayList({ displayList: viewportDisplayList(list) });
+}
+
+function terminalIndexes(list, query = null) {
+  const viewport = viewportDisplayList(list);
+  const cells = rasterizeViewportDisplayList({ displayList: viewport });
+  return buildViewportTerminalResult({
+    displayList: viewport,
+    cellBuffer: cells.cellBuffer,
+    documentGeometry: buildDocumentGeometryIndex(list),
+    ...(query === null ? {} : {
+      searchProjection: projectTextSearchToLayout(
+        textSearchIndex(list.layout.formatting),
+        list.layout,
+        query,
+        10_000
+      )
+    }),
+    truncations: cells.truncations
   });
 }
 
-function terminalIndexes(list) {
-  return buildTerminalIndexes({
-    displayList: list,
-    textSearchIndex: textSearchIndex(list.layout.formatting)
-  });
+function cellBuffer(list, query = null) {
+  return terminalIndexes(list, query);
 }
 
 const timings = {
@@ -538,12 +618,12 @@ for (let index = 1; index <= SAMPLE_CASES; index += 1) {
   const list = time(timings.displayList, () => displayList(layout, 80));
   time(timings.cellRasterization, () => cellRasterization(list));
   time(timings.indexConstruction, () => terminalIndexes(list));
-  const terminal = cellBuffer(list);
+  const terminal = cellBuffer(list, "value");
   const resized = time(timings.resize, () => {
     const resizedLayout = layoutFragments(formatting, 120, streams);
     return cellBuffer(displayList(resizedLayout, 120));
   });
-  const matches = time(timings.search, () => terminal.search("value"));
+  const matches = time(timings.search, () => terminal.search);
   if (style.outcome.status === "rejected" || formatting.outcome.status === "rejected"
     || layout.outcome.status === "rejected" || resized.cellBuffer.outcome.status === "rejected"
     || layout.fragment(layout.root).kind !== "box" || matches.truncated) {
@@ -567,8 +647,8 @@ const nestedState = createDocumentState(nestedDocument);
 const nestedStyle = styles(nestedDocument, nestedState);
 const nestedFormatting = buildFormattingTree({ document: nestedDocument, state: nestedState, styles: nestedStyle });
 const nestedLayout = layoutFragments(nestedFormatting, 80);
-const nestedTerminal = cellBuffer(displayList(nestedLayout, 80));
-const nestedSearch = nestedTerminal.search("needle");
+const nestedTerminal = cellBuffer(displayList(nestedLayout, 80), "needle");
+const nestedSearch = nestedTerminal.search;
 const largeNestedTotal = durationMs(nestedStarted);
 if (nestedSearch.matches.length !== 1 || nestedSearch.ranges.length === 0) {
   throw new Error("large nested benchmark lost its logical search match or visible cell spans");
@@ -743,10 +823,12 @@ const compatibilityFormatting = async (fixture) => {
     const snapshot = await session.open(requestUrl);
     const state = createDocumentState(snapshot.document);
     const style = resolveStyles({
-      document: snapshot.document,
+      program: compileStylesheetProgram({
+        document: snapshot.document,
+        resources: snapshot.stylesheets,
+        initialDiagnostics: snapshot.styleDiagnostics
+      }),
       state,
-      resources: snapshot.stylesheets,
-      initialDiagnostics: snapshot.styleDiagnostics,
       environment: {
         viewportWidthCssPx: 960,
         viewportHeightCssPx: 384,
@@ -1571,6 +1653,7 @@ const largeSourceAttributes = await documentMemory(
   20_000
 );
 const lifecycle = await sessionLifecycleMemory();
+const artifactStoreLifecycle = await artifactStoreLifecycleMemory();
 const layoutFragmentsMemory = await layoutFragmentMemory(inlineFormatting);
 const repeatedResizeRetainedHeap = await repeatedResizeMemory(inlineFormatting);
 const gridLayoutFragmentsMemory = await layoutFragmentMemory(gridItemLayoutFormatting);
@@ -1661,7 +1744,9 @@ const memoryMetrics = {
   gridRepeatedResizeRetainedHeap,
   tableLayoutFragmentPeakHeapGrowth: tableLayoutFragmentsMemory.peakHeapGrowth,
   tableLayoutFragmentRetainedHeap: tableLayoutFragmentsMemory.retainedHeap,
-  tableRepeatedResizeRetainedHeap
+  tableRepeatedResizeRetainedHeap,
+  artifactGraphLiveHeap: artifactStoreLifecycle.liveHeap,
+  artifactGraphReleasedHeap: artifactStoreLifecycle.releasedHeap,
 };
 const failures = Object.entries(LIMITS_MS)
   .filter(([name, limit]) => metrics[name] > limit)
@@ -1670,6 +1755,9 @@ for (const [name, limit] of Object.entries(LIMITS_MEMORY_MIB)) {
   if (memoryMetrics[name] > limit) failures.push(`${name}=${memoryMetrics[name].toFixed(2)}MiB exceeds ${String(limit)}MiB`);
 }
 if (!lifecycle.closedSessionCollected) failures.push("closed BrowserSession retained its final document after forced GC");
+if (!artifactStoreLifecycle.released || artifactStoreLifecycle.metricsAfterRelease.attachedDocuments !== 0) {
+  failures.push("released render artifact graph remained reachable after forced GC");
+}
 if (!hundredThousandNodes.released || !largeSourceAttributes.released) {
   failures.push("a released large document remained reachable after forced GC");
 }
@@ -1695,6 +1783,8 @@ const report = {
   closedSessionCollected: lifecycle.closedSessionCollected,
   releasedLargeDocumentsCollected: hundredThousandNodes.released && largeSourceAttributes.released,
   releasedLayoutFragmentsCollected: layoutFragmentsMemory.released,
+  releasedRenderArtifactsCollected: artifactStoreLifecycle.released,
+  artifactStoreLifecycle,
   releasedGridLayoutFragmentsCollected: gridLayoutFragmentsMemory.released,
   releasedTableLayoutFragmentsCollected: tableLayoutFragmentsMemory.released,
   reviewedPr129BaselineMs: {

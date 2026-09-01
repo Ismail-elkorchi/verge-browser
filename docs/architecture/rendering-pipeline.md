@@ -1,15 +1,28 @@
 # Browser rendering pipeline
 
-Verge has one HTML rendering path:
+Verge has one retained HTML rendering path. Immutable document work is built in
+the rendering worker:
 
 ```text
 IndexedWebDocumentSnapshot
-→ StyleSnapshot
+→ StylesheetProgram
+→ ComputedStyleMap
 → FormattingTree
-→ InlineItemStreamSet
-→ LayoutFragmentTree
-→ TerminalDisplayList
-→ TerminalCellBuffer
+→ InlineItemStreamSet + TextSearchIndex
+→ scroll-independent LayoutFragmentTree
+→ DocumentDisplayList
+→ DisplayListSpatialIndex + DocumentGeometryIndex
+```
+
+Each visible frame then follows the shorter viewport path:
+
+```text
+ViewportWindow
+→ fixed/sticky attachment resolution
+→ spatial paint-command query
+→ ViewportDisplayList
+→ ViewportCellBuffer
+→ viewport-local hit, focus, accessibility, and search indexes
 ```
 
 The immutable indexed document tree is authoritative. Style resolution creates
@@ -17,11 +30,12 @@ a total computed style map for its retained elements and pseudo-elements. CSS
 box generation creates principal, anonymous, pseudo, table-internal, flex-item,
 and grid-item boxes. Layout then resolves used values and creates fixed-point
 CSS-pixel layout fragments and line boxes. Terminal painting creates ordered
-paint commands; the cell rasterizer alone snaps those commands to terminal
-rows and columns and materializes styled cells.
+document-space paint commands; the cell rasterizer alone snaps selected
+viewport commands to terminal rows and columns and materializes styled cells.
+Scroll position is absent from every immutable artifact dependency key.
 
-Interactive browsing and one-shot output consume the same terminal display list
-and cell buffer. There is no flat renderer, cell-native CSS layout engine,
+Interactive browsing and one-shot output use the same retained artifact engine,
+spatial query, and viewport rasterizer. There is no flat renderer, cell-native CSS layout engine,
 fallback geometry path, or conversion from layout fragments back into an older
 layout model.
 
@@ -49,16 +63,24 @@ layout model.
 - `src/presentation/search/` owns the viewport-independent `TextSearchIndex`.
   It consumes inline-item streams and owns no text input needed by layout.
   Logical match IDs map to layout text fragments before terminal rasterization.
-- `src/presentation/terminal/display-list.ts` derives ordered terminal paint
-  commands from layout fragments. It does not calculate CSS geometry.
-- `src/presentation/terminal/rasterizer.ts` snaps CSS-pixel paint geometry to
-  cells, resolves paint collisions, creates the `TerminalCellBuffer`, and builds
-  the hit-test index, focus map, scroll anchors, accessibility bounds, and cell
-  search spans.
+- `src/presentation/renderer/` owns artifact dependency keys, cost-bounded
+  retention, eviction, stage instrumentation, and viewport orchestration.
+- `src/presentation/terminal/display-list.ts` derives the retained
+  `DocumentDisplayList` from layout fragments. It does not calculate CSS
+  geometry.
+- `src/presentation/terminal/spatial-index.ts` indexes document-space commands;
+  `viewport-display-list.ts` queries a viewport plus bounded overscan and
+  resolves fixed and sticky attachments without rerunning layout.
+- `src/presentation/terminal/rasterizer.ts` snaps only viewport CSS-pixel paint
+  geometry to cells and resolves paint collisions. `document-geometry.ts`
+  retains document anchors and semantic geometry; `viewport-indexes.ts` builds
+  only visible hit-test, focus, accessibility, node, and search indexes.
 - `src/reader/` owns the deliberately flattened reader document. It is not a
   rendering fallback.
-- `src/ui/` owns browser chrome and adapts terminal text measurement to the
-  layout-owned CSS-pixel metrics interface.
+- `src/ui/render-worker/` owns the long-lived Node worker protocol and artifact
+  store. The worker has no network or filesystem capability. The main `src/ui/`
+  code owns browser chrome, placeholder tabs, render requests, and the last
+  committed viewport only.
 
 HTTP, redirects, cookies, local-resource policy, downloads, tabs, history,
 bookmarks, persistence, and browser chrome remain application concerns.
@@ -121,10 +143,12 @@ CSS-pixel text measurer, and layout budgets. Layout derives root font metrics
 (including ascent, descent, baseline, x-height, line gap, and `ch` advance)
 from the computed root-element font size after style resolution. The root
 element resolves `rem` in its own `font-size` against the initial font size;
-descendants resolve `rem` against that computed root size. One top-level
-cancellation signal is passed through style resolution, box generation,
+descendants resolve `rem` against that computed root size. One minimal
+cancellation contract is passed through style resolution, box generation,
 inline-item stream construction, text search indexing, layout, display-list
-construction, and cell rasterization.
+indexing, spatial queries, cell rasterization, and viewport-index construction.
+The worker observes replacement generations through shared atomics, so
+cancellation does not wait for its event loop to receive a message.
 Terminal rows, columns, color capability, and Unicode capability do not enter
 layout. Text metrics, advances, grapheme boundaries, and fixed-point inputs are
 validated at their subsystem boundaries; malformed values produce typed
@@ -137,9 +161,90 @@ Terminal Unicode, ambiguous-width, and color-depth capabilities remain confined
 to `TerminalRenderContext`.
 
 Terminal focus-target lifecycle events update the focused document node before
-the next rendering pipeline run. Dynamic pseudo-classes therefore consume the
-same document focus state as layout and paint. The terminal view does not add a
+the next applicable artifact revision. Selector programs are classified by
+dynamic state dependency, and unaffected structural match sets remain retained.
+A focus change with no applicable focus-dependent selector leaves the computed
+style map and later document artifacts intact. The terminal view does not add a
 second inverse-video focus style over authored cells.
+
+## Artifact lifetimes and worker protocol
+
+`RenderArtifactStore` retains one authoritative analysis for each explicit
+document, stylesheet-program, media, state, viewport-size, and text-metric
+dependency key. It reuses upstream artifacts when only a downstream key changes.
+Scroll, search query, active match, and terminal color depth are not document
+analysis keys. Retention is cost-bounded (512 MiB by default), uses
+least-recently-used analysis eviction, bounds search projections per document,
+and releases document-owned programs, selector sessions, substitution caches,
+analyses, and searches on navigation replacement, tab release, or worker
+disposal. It retains no scroll-keyed complete render result.
+
+The UI attaches decoded HTML source, verified stylesheet syntax, immutable
+resource metadata, and document state once per document revision. Subsequent
+messages carry document, state, and viewport revisions plus request IDs. The UI
+rejects stale completions; viewport generations are latest-request-wins. Heavy
+style, box, text, layout, display-list, geometry, and raster artifacts stay in
+the worker. Only compact document extent, focus, and anchor summaries plus the
+requested viewport rows and visible indexes cross back to the UI.
+
+terminal-ui continues to serialize state transitions and frame commits. Its
+effects send requests, await worker results, and dispatch typed completion
+messages; neither `updateBrowser()` nor `browserView()` invokes browser
+rendering. Worker failure keeps the last committed viewport, exposes an explicit
+failed rendering state with a retry action, and never falls back to synchronous
+UI-thread rendering. Ordinary scrolling does not implicitly restart a failed
+worker.
+
+Workspace restoration creates placeholder tabs before navigation, starts the
+TUI shell immediately, loads the active placeholder first, and restores
+background tabs with bounded concurrency. Background tabs are not rendered
+until selected. Each failure is isolated, and closing a placeholder cancels its
+pending navigation before a session can be retained.
+
+### Dependency invalidation
+
+Artifact keys record the document revision, admitted stylesheet fingerprints,
+media features actually consumed by the stylesheet program, dynamic selector
+state, CSS viewport dimensions actually consumed by style or layout, and the
+terminal text-metric profile. Scroll position, search query, active search
+match, and terminal color depth are viewport dependencies and never invalidate
+normal-flow layout. A width change reuses styles and text processing unless an
+inline-size media query changes them; a height change reuses document layout
+unless block-size media, viewport units, percentages, fixed geometry, or sticky
+constraints consume it. Ambiguous-width changes invalidate text measurement
+and layout, while color-depth changes begin at cell rasterization.
+
+Stylesheet resources retain verified parser syntax and dependency-graph
+metadata rather than transport bytes. `StylesheetProgram` compiles selectors,
+declarations, inline style attributes, layer position, and state dependencies
+once. Selector sessions retain structural indexes and unchanged match sets.
+Custom properties use persistent parent-linked environments; substituted
+component values are materialized as a syntax tree with fresh tree-local parser
+identities before validation. Validation is bounded by each program and uses
+the css-parser validation session rather than reconstructing declaration
+strings.
+
+## Performance qualification
+
+`npm run test:bench` writes `reports/incremental-rendering-bench.json`. Its
+independently authored MIT fixture combines a reference-article-sized document,
+common type/class/descendant selectors, custom properties, tables, links, and
+controls. It separately reports cold navigation and attachment, first viewport,
+warm spatial query and viewport rasterization, actual terminal-ui
+scroll-to-viewport latency, browser view construction, frame commit, search,
+resize, color-depth-only work, event-loop delay, worker heap, superseded work,
+and four- and fifty-tab placeholder restoration.
+
+Release controls require scroll-only requests to invoke none of stylesheet,
+computed-style, box-tree, inline-stream, logical-search, normal-flow-layout, or
+document-display-list construction. Retained rows may not exceed viewport plus
+overscan; one hundred replacement scroll requests may commit only their newest
+generation; released artifact graphs must be unreachable after forced garbage
+collection. Timing gates apply only to the deterministic fixture: warm worker
+viewport p95 is bounded at 100 ms, browser-view construction at 33 ms,
+input-to-state update at 50 ms, main event-loop delay at 50 ms, and shell
+creation at 500 ms. Full terminal frame-commit timing remains reported
+separately because terminal output cost depends on the terminal host.
 
 ## Layout fragment and line-box contracts
 
@@ -227,7 +332,7 @@ are shortened.
 
 ## Terminal contracts
 
-`TerminalDisplayList` contains ordered background-fill, border-side, and text
+`DocumentDisplayList` contains ordered background-fill, border-side, and text
 paint commands. A box's background and supported border sides precede its
 in-flow descendants; later siblings retain source order. Commands retain
 clipping, source ranges, styles, action and semantic identities, and
@@ -235,8 +340,11 @@ formatting/document/layout-fragment identities. Border sides keep their actual
 box-edge coordinates before clipping, so a saturated or far-offscreen side is
 never moved onto the retained cell-buffer boundary.
 
-`TerminalCellBuffer` contains final rows, grapheme-owning cells, style spans,
-and identity-bearing cell spans. Adjacent graphemes in one text command snap
+`ViewportCellBuffer` contains the requested viewport rows, bounded overscan,
+the complete document row count, its document-row origin, grapheme-owning
+cells, style spans, and identity-bearing cell spans. Its retained row count is
+bounded by viewport rows plus overscan regardless of document height. Adjacent
+graphemes in one text command snap
 monotonically and never overwrite one another. A grapheme occupies at least one
 actual terminal cell, wide graphemes remain atomic, and larger CSS advances may
 produce cell gaps because a terminal cannot resize glyphs. Later paint commands
@@ -249,13 +357,12 @@ not segment, line-break, or run the bidi algorithm. Terminal emulators remain
 responsible for glyph shaping; correct Arabic bidi order does not imply that
 Verge implements an Arabic shaping engine.
 
-The hit-test index comes from clipped action-bearing content, padding, and
-border geometry; every retained region has a stable routing identity. The
-focus map comes from document semantics and may retain a
-focusable target with no current rectangles. Accessibility bounds aggregate
-visible layout geometry once per semantic document node and may be empty for an
-intentionally clipped node. Scroll anchors use layout positions. Only search
-cell spans depend on surviving text paint. Logical search
+The viewport hit-test index uses row buckets and comes from clipped
+action-bearing content, padding, and border geometry; every retained region has
+a stable routing identity. Visible focus and accessibility rectangles come from
+the retained document geometry index without scanning all document entries.
+Scroll anchors and logical focus order remain document-wide worker-owned
+indexes. Only search cell spans depend on surviving text paint. Logical search
 matches are projected through layout text fragments and only then into cell
 spans, so match identity survives wrapping, resize, and cell-metric changes.
 
@@ -277,8 +384,10 @@ prefixes.
   ranges; no layer reconstructs semantics from rendered text.
 - Computed styles contain no terminal rows or columns.
 - Layout fragments contain no terminal cells, ANSI styles, or terminal-ui types.
-- Display-list construction consumes layout fragments.
-- Cell rasterization consumes terminal paint commands.
+- Document display-list construction consumes layout fragments; viewport
+  selection consumes only its spatial index.
+- Cell rasterization consumes viewport paint commands and never allocates rows
+  from zero through document height.
 - Search consumes logical text; line placement and painting consume visual
   runs. No reordered search string or row-based search path exists.
 - Physical and logical box properties compete in the cascade; horizontal

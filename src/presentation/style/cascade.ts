@@ -1,14 +1,10 @@
 import {
   createSelectorMatchSession,
-  parseBlockContents,
   parseComponentValues,
   parseDeclaration,
-  parseSelectorList,
-  parseStylesheet,
-  parseStylesheetBytes,
+  parseSelectorListFromComponentValues,
   resolveCssProperty,
   serializeCssComponentValues,
-  specificitiesOfSelectorList,
   SyntaxResourceError,
   validateCssPropertyValue,
   type ComplexSelector,
@@ -16,7 +12,6 @@ import {
   type CssDeclaration,
   type CssQualifiedRule,
   type CssRule,
-  type CssStylesheet,
   type SelectorEnvironment,
   type SelectorList,
   type SelectorMatchSession,
@@ -30,7 +25,6 @@ import {
   type IndexedWebDocumentSnapshot,
   type WebElementNode
 } from "../../document/index.js";
-import { USER_AGENT_STYLESHEET, USER_AGENT_STYLESHEET_SOURCE } from "./user-agent.js";
 import type {
   ComputedDisplay,
   ComputedStyle,
@@ -43,19 +37,22 @@ import type {
   CssLength,
   CssLengthPercentageExpression,
   CascadeLayerPath,
+  CompiledDeclarationProgram,
+  MediaEnvironment,
   PseudoElementIdentity,
   ResolveStylesInput,
+  SelectorStateDependency,
   StyleBudgets,
   StyleDiagnostic,
   StyleDiagnosticCode,
   StyleOutcome,
   StyleSnapshot,
-  StylesheetResource
+  StylesheetProgramSource
 } from "./types.js";
 import {
   parseCssFunctionalColor,
   parseCssLength,
-  resolveCssVariables,
+  resolveCssVariableValues,
   splitCssComponentValues
 } from "./css-values.js";
 import {
@@ -183,15 +180,7 @@ const NAMED_COLORS: Readonly<Record<string, CssColor>> = Object.freeze({
   yellow: { r: 255, g: 255, b: 0, a: 1 }
 });
 
-interface StylesheetSource {
-  readonly sourceUrl: string;
-  readonly origin: "user-agent" | "author";
-  readonly stylesheet: CssStylesheet;
-  readonly mediaConditions: readonly string[];
-  readonly supportsConditions: readonly string[];
-  readonly layer: CascadeLayerPath | null;
-  readonly predeclaredLayers: readonly CascadeLayerPath[];
-}
+type StylesheetSource = StylesheetProgramSource;
 
 interface CascadeLayerPosition {
   readonly identity: string;
@@ -200,6 +189,7 @@ interface CascadeLayerPosition {
 
 interface CascadeCandidate {
   readonly declaration: CssDeclaration;
+  readonly program: CompiledDeclarationProgram;
   readonly sourceUrl: string;
   readonly origin: "user-agent" | "author";
   readonly important: boolean;
@@ -211,28 +201,82 @@ interface CascadeCandidate {
 
 type CandidateMap = Map<string, Map<string, CascadeCandidate[]>>;
 
-class ImmutableStringMap implements ReadonlyMap<string, string> {
-  readonly #values: ReadonlyMap<string, string>;
+interface CandidateCollection {
+  readonly candidates: CandidateMap;
+  /** Null means no prior dynamic-state result can safely seed incremental computation. */
+  readonly affectedDynamicNodes: ReadonlySet<DocumentNodeRef> | null;
+}
 
-  public constructor(values: Iterable<readonly [string, string]>) {
-    this.#values = new Map(values);
+let nextCustomPropertyEnvironment = 1;
+
+class ImmutableCustomPropertyEnvironment implements ReadonlyMap<string, string> {
+  readonly identity = nextCustomPropertyEnvironment++;
+  readonly #parent: ImmutableCustomPropertyEnvironment | null;
+  readonly #changes: ReadonlyMap<string, readonly ComponentValue[] | null>;
+  #materialized: ReadonlyMap<string, string> | null = null;
+
+  public constructor(
+    parent: ImmutableCustomPropertyEnvironment | null,
+    changes: ReadonlyMap<string, readonly ComponentValue[] | null>
+  ) {
+    this.#parent = parent;
+    this.#changes = changes;
     Object.freeze(this);
   }
 
-  public get size(): number { return this.#values.size; }
-  public get(key: string): string | undefined { return this.#values.get(key); }
-  public has(key: string): boolean { return this.#values.has(key); }
-  public entries(): MapIterator<[string, string]> { return this.#values.entries(); }
-  public keys(): MapIterator<string> { return this.#values.keys(); }
-  public values(): MapIterator<string> { return this.#values.values(); }
+  #values(): ReadonlyMap<string, string> {
+    if (this.#materialized !== null) return this.#materialized;
+    const values = new Map<string, string>(this.#parent ?? []);
+    for (const [name, value] of this.#changes) {
+      if (value === null) values.delete(name);
+      else values.set(name, serializeCssComponentValues(value));
+    }
+    this.#materialized = values;
+    return values;
+  }
+
+  public get size(): number { return this.#values().size; }
+  public get(key: string): string | undefined {
+    if (this.#changes.has(key)) {
+      const value = this.#changes.get(key);
+      return value === null || value === undefined ? undefined : serializeCssComponentValues(value);
+    }
+    return this.#parent?.get(key);
+  }
+  public componentValues(key: string): readonly ComponentValue[] | undefined {
+    if (this.#changes.has(key)) return this.#changes.get(key) ?? undefined;
+    return this.#parent?.componentValues(key);
+  }
+  public componentValueMap(): ReadonlyMap<string, readonly ComponentValue[]> {
+    const values = new Map<string, readonly ComponentValue[]>();
+    for (const name of this.keys()) {
+      const value = this.componentValues(name);
+      if (value !== undefined) values.set(name, value);
+    }
+    return values;
+  }
+  public static fromSerialized(values: ReadonlyMap<string, string>): ImmutableCustomPropertyEnvironment {
+    const parsed = new Map<string, readonly ComponentValue[] | null>();
+    for (const [name, value] of values) {
+      const result = parseComponentValues(value);
+      if (result.ok) parsed.set(name, result.value);
+    }
+    return new ImmutableCustomPropertyEnvironment(null, parsed);
+  }
+  public has(key: string): boolean { return this.get(key) !== undefined; }
+  public entries(): MapIterator<[string, string]> { return this.#values().entries(); }
+  public keys(): MapIterator<string> { return this.#values().keys(); }
+  public values(): MapIterator<string> { return this.#values().values(); }
   public forEach(
     callbackfn: (value: string, key: string, map: ReadonlyMap<string, string>) => void,
     thisArg?: unknown
   ): void {
-    for (const [key, value] of this.#values) callbackfn.call(thisArg, value, key, this);
+    for (const [key, value] of this.#values()) callbackfn.call(thisArg, value, key, this);
   }
   public [Symbol.iterator](): MapIterator<[string, string]> { return this.entries(); }
 }
+
+const EMPTY_CUSTOM_PROPERTIES = new ImmutableCustomPropertyEnvironment(null, new Map());
 
 class DiagnosticCollector {
   readonly #values: StyleDiagnostic[] = [];
@@ -319,12 +363,17 @@ function canonicalProperty(name: string): string | null {
   return semantics?.name ?? null;
 }
 
-function selectorListFor(selector: ComplexSelector, list: SelectorList): SelectorList {
-  return { ...list, selectors: [selector] };
-}
-
 function selectorEnvironment(input: ResolveStylesInput): SelectorEnvironment<WebDocumentNode> {
-  const { document, state } = input;
+  const currentState = (): DocumentState => input.program.selectorRuntime.state ?? input.state;
+  const state: DocumentState = {
+    get controls() { return currentState().controls; },
+    get open() { return currentState().open; },
+    get focus() { return currentState().focus; },
+    get hover() { return currentState().hover; },
+    get active() { return currentState().active; },
+    get urlTarget() { return currentState().urlTarget; },
+  };
+  const document = input.program.document;
   const attributeCache = new Map<DocumentNodeRef, readonly {
     readonly namespace: string | null;
     readonly localName: string;
@@ -453,35 +502,31 @@ function selectorEnvironment(input: ResolveStylesInput): SelectorEnvironment<Web
         return state.focus === null ? Object.freeze([]) : candidateNodes([state.focus]);
       }
       if (name === "focus-within") {
-        return cachedCandidates("focus-within", () => {
-          const refs: DocumentNodeRef[] = [];
-          let current = state.focus;
-          while (current !== null) {
-            refs.push(current);
-            current = document.parent(current)?.ref ?? null;
-          }
-          return candidateNodes(refs);
-        });
+        const refs: DocumentNodeRef[] = [];
+        let current = state.focus;
+        while (current !== null) {
+          refs.push(current);
+          current = document.parent(current)?.ref ?? null;
+        }
+        return candidateNodes(refs);
       }
       if (name === "checked") {
-        return cachedCandidates("checked", () => {
-          const refs: DocumentNodeRef[] = [];
-          for (const control of document.controls) {
-            if (control.kind === "checkbox" || control.kind === "radio") {
-              if (state.controls.get(control.node)?.checked ?? control.defaultChecked) {
-                refs.push(control.node);
-              }
-            } else if (control.kind === "select") {
-              const selected = state.controls.get(control.node)?.selected ??
-                control.options.filter((option) => option.defaultSelected).map((option) => option.node);
-              refs.push(...selected);
+        const refs: DocumentNodeRef[] = [];
+        for (const control of document.controls) {
+          if (control.kind === "checkbox" || control.kind === "radio") {
+            if (state.controls.get(control.node)?.checked ?? control.defaultChecked) {
+              refs.push(control.node);
             }
+          } else if (control.kind === "select") {
+            const selected = state.controls.get(control.node)?.selected ??
+              control.options.filter((option) => option.defaultSelected).map((option) => option.node);
+            refs.push(...selected);
           }
-          return candidateNodes(refs);
-        });
+        }
+        return candidateNodes(refs);
       }
       if (name === "open") {
-        return cachedCandidates("open", () => candidateNodes(state.open));
+        return candidateNodes(state.open);
       }
       if (name === "disabled" || name === "enabled") {
         return cachedCandidates(name, () => candidateNodes(
@@ -632,80 +677,11 @@ export function terminalMediaMayApply(value: string | null): boolean {
   });
 }
 
-function stylesheetSources(
-  input: ResolveStylesInput,
-  limits: StyleBudgets,
-  diagnostics: DiagnosticCollector,
-  truncate: (budget: keyof StyleBudgets) => void
-): readonly StylesheetSource[] {
-  const sources: StylesheetSource[] = [];
-  const ua = parseStylesheet(USER_AGENT_STYLESHEET, {
-    ...(input.signal === undefined ? {} : { signal: input.signal })
-  });
-  if (!ua.ok) throw new Error("The built-in user-agent stylesheet is invalid.");
-  sources.push({
-    sourceUrl: USER_AGENT_STYLESHEET_SOURCE, origin: "user-agent", stylesheet: ua.value,
-    mediaConditions: Object.freeze([]), supportsConditions: Object.freeze([]), layer: null,
-    predeclaredLayers: Object.freeze([])
-  });
-  let authorSources = 0;
-  let authorBytes = 0;
-  const orderedResources = [...input.resources].sort((left, right) =>
-    left.rootOrder - right.rootOrder || left.dependencyOrder - right.dependencyOrder
-  );
-  for (const resource of orderedResources) {
-    input.signal?.throwIfAborted();
-    if (authorSources >= limits.maxStylesheetSources) {
-      truncate("maxStylesheetSources");
-      diagnostics.add("stylesheet-limit", resource.finalUrl, "Author stylesheet source budget exhausted.");
-      break;
-    }
-    const embedded = resource.sourceKind === "embedded";
-    if (embedded && resource.bytes.byteLength > limits.maxInlineStylesheetBytes) {
-      truncate("maxInlineStylesheetBytes");
-      diagnostics.add("stylesheet-limit", resource.finalUrl, "Embedded stylesheet byte budget exhausted.");
-      continue;
-    }
-    if (authorBytes + resource.bytes.byteLength > limits.maxStylesheetBytes) {
-      truncate("maxStylesheetBytes");
-      diagnostics.add("stylesheet-limit", resource.finalUrl, "Author stylesheet byte budget exhausted.");
-      break;
-    }
-    const parsed = parseStylesheetBytes(resource.bytes, {
-      ...(resource.transportEncodingLabel === null ? {} : { transportEncodingLabel: resource.transportEncodingLabel }),
-      limits: {
-        maxInputBytes: resource.bytes.byteLength,
-        maxTokens: 200_000,
-        maxNodes: 100_000,
-        maxDepth: 128,
-        maxSteps: 2_000_000
-      },
-      ...(input.signal === undefined ? {} : { signal: input.signal })
-    });
-    if (!parsed.ok) {
-      diagnostics.add("stylesheet-parse", resource.finalUrl, "Admitted stylesheet was rejected by the CSS parser.");
-      continue;
-    }
-    for (const error of parsed.errors) diagnostics.add("stylesheet-parse", resource.finalUrl, error.message);
-    sources.push({
-      sourceUrl: resource.finalUrl,
-      origin: "author",
-      stylesheet: parsed.value,
-      mediaConditions: resource.mediaConditions,
-      supportsConditions: resource.supportsConditions,
-      layer: resource.importLayer,
-      predeclaredLayers: resource.predeclaredLayers
-    });
-    authorSources += 1;
-    authorBytes += resource.bytes.byteLength;
-  }
-  return sources;
-}
-
 function recordCandidate(
   candidates: CandidateMap,
   key: string,
   declaration: CssDeclaration,
+  program: CompiledDeclarationProgram,
   source: StylesheetSource,
   specificity: SelectorSpecificity,
   sourceOrder: number,
@@ -716,6 +692,7 @@ function recordCandidate(
   const byProperty = candidates.get(key) ?? new Map<string, CascadeCandidate[]>();
   const next: CascadeCandidate = {
     declaration,
+    program,
     sourceUrl: source.sourceUrl,
     origin: source.origin,
     important: declaration.important,
@@ -752,70 +729,6 @@ function mergeCandidateMaps(target: CandidateMap, source: CandidateMap): void {
 
 function declarationsOf(rule: CssQualifiedRule): readonly CssDeclaration[] {
   return rule.block.items.filter((item): item is CssDeclaration => item.kind === "declaration");
-}
-
-function selectorPseudo(selectorText: string): { readonly text: string; readonly pseudo: PseudoElementIdentity | null } {
-  const match = /::(before|after|marker)\s*$/iu.exec(selectorText);
-  if (match?.[1] === undefined) return { text: selectorText, pseudo: null };
-  return {
-    text: selectorText.slice(0, match.index).trim() || "*",
-    pseudo: match[1].toLowerCase() as PseudoElementIdentity
-  };
-}
-
-function splitSelectorBranches(value: string): readonly string[] {
-  const branches: string[] = [];
-  let start = 0;
-  let depth = 0;
-  let quote: "\"" | "'" | null = null;
-  let escaped = false;
-  for (let index = 0; index < value.length; index += 1) {
-    const character = value[index];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (character === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (quote !== null) {
-      if (character === quote) quote = null;
-      continue;
-    }
-    if (character === "\"" || character === "'") quote = character;
-    else if (character === "(" || character === "[") depth += 1;
-    else if (character === ")" || character === "]") depth = Math.max(0, depth - 1);
-    else if (character === "," && depth === 0) {
-      branches.push(value.slice(start, index));
-      start = index + 1;
-    }
-  }
-  branches.push(value.slice(start));
-  return branches.map((branch) => branch.trim()).filter(Boolean);
-}
-
-function collectStyleNodes(input: ResolveStylesInput): {
-  readonly elements: readonly DocumentNodeRef[];
-  readonly totalNodes: number;
-} {
-  const nodes: DocumentNodeRef[] = [];
-  const pending = [input.document.root];
-  let totalNodes = 0;
-  while (pending.length > 0) {
-    input.signal?.throwIfAborted();
-    const ref = pending.pop();
-    if (ref === undefined) continue;
-    totalNodes += 1;
-    const node = input.document.node(ref);
-    for (let index = node.children.length - 1; index >= 0; index -= 1) {
-      const child = node.children[index];
-      if (child !== undefined) pending.push(child);
-    }
-    if (node.kind !== "element") continue;
-    nodes.push(ref);
-  }
-  return { elements: Object.freeze(nodes), totalNodes };
 }
 
 function implementationSupportsDeclaration(source: string): boolean {
@@ -1057,7 +970,7 @@ function supportsCondition(values: readonly ComponentValue[]): boolean {
       : supportsCondition(condition.value);
   }
   if (condition?.kind === "function-block" && condition.name.toLowerCase() === "selector") {
-    const selector = parseSelectorList(serializeCssComponentValues(condition.value));
+    const selector = parseSelectorListFromComponentValues(condition.value);
     return selector.ok && selectorImplementationSupported(selector.value);
   }
   return false;
@@ -1079,34 +992,62 @@ function collectCandidates(
   limits: StyleBudgets,
   diagnostics: DiagnosticCollector,
   truncate: (budget: keyof StyleBudgets) => void
-): CandidateMap {
+): CandidateCollection {
   const candidates: CandidateMap = new Map();
   const authorCandidates: CandidateMap = new Map();
   const eligible = new Set(styleNodes);
+  const selectorRuntime = input.program.selectorRuntime;
+  const previousState = selectorRuntime.state;
+  const changedDependencies = new Set<SelectorStateDependency>();
+  if (previousState !== null) {
+    if (previousState.focus !== input.state.focus) changedDependencies.add("focus");
+    if (previousState.hover !== input.state.hover) changedDependencies.add("hover");
+    if (previousState.active !== input.state.active) changedDependencies.add("active");
+    if (previousState.urlTarget !== input.state.urlTarget) changedDependencies.add("target");
+    if (previousState.controls !== input.state.controls) changedDependencies.add("checked-selected");
+    if (previousState.open !== input.state.open) changedDependencies.add("disclosure-open");
+  }
+  if (changedDependencies.has("checked-selected") || changedDependencies.has("disclosure-open")) {
+    selectorRuntime.authorSession = null;
+    selectorRuntime.userAgentSession = null;
+  }
+  const affectedDynamicNodes = previousState === null || changedDependencies.size === 0
+    ? null
+    : new Set<DocumentNodeRef>();
+  for (const [identity, retained] of selectorRuntime.matches) {
+    if ([...changedDependencies].some((dependency) => retained.dependencies.has(dependency))) {
+      for (const match of retained.result.matches) {
+        if (match.kind === "element") affectedDynamicNodes?.add(match.ref);
+      }
+      selectorRuntime.matches.delete(identity);
+    }
+  }
+  selectorRuntime.state = input.state;
+  if (selectorRuntime.sessionMaxSteps !== limits.maxSelectorSteps) {
+    selectorRuntime.authorSession = null;
+    selectorRuntime.userAgentSession = null;
+    selectorRuntime.sessionMaxSteps = limits.maxSelectorSteps;
+  }
   const environment = selectorEnvironment(input);
-  const root = input.document.node(input.document.root);
+  const root = input.program.document.node(input.program.document.root);
   let sourceOrder = 0;
   let stylesheetOrdinal = 0;
   let queryCount = 0;
   let exhausted = false;
-  const authorMatchCache = new Map<
-    string,
-    ReturnType<SelectorMatchSession<WebDocumentNode>["query"]>
-  >();
   const selectorExhaustion = new Set<"maxSelectorQueries" | "maxSelectorSteps">();
-  const userAgentMatcher = createSelectorMatchSession(root, environment, {
-    limits: {
-      maxNodes: Math.max(1, totalNodes),
-      maxDepth: Math.max(1, totalNodes),
-      maxSteps: Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, totalNodes * 128))
-    },
-    ...(input.signal === undefined ? {} : { signal: input.signal })
-  });
-  let authorMatcher: SelectorMatchSession<WebDocumentNode> | null | undefined;
+  const userAgentMatcher = selectorRuntime.userAgentSession ?? createSelectorMatchSession(root, environment, {
+      limits: {
+        maxNodes: Math.max(1, totalNodes),
+        maxDepth: Math.max(1, totalNodes),
+        maxSteps: Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, totalNodes * 128))
+      },
+      ...(input.signal === undefined ? {} : { signal: input.signal })
+    });
+  selectorRuntime.userAgentSession = userAgentMatcher;
   const authorSelectorMatcher = (): SelectorMatchSession<WebDocumentNode> | null => {
-    if (authorMatcher !== undefined) return authorMatcher;
+    if (selectorRuntime.authorSession !== null) return selectorRuntime.authorSession;
     try {
-      authorMatcher = createSelectorMatchSession(root, environment, {
+      selectorRuntime.authorSession = createSelectorMatchSession(root, environment, {
         limits: {
           maxNodes: Math.max(1, totalNodes),
           maxDepth: 2_048,
@@ -1120,9 +1061,9 @@ function collectCandidates(
       truncate("maxSelectorSteps");
       selectorExhaustion.add("maxSelectorSteps");
       exhausted = true;
-      authorMatcher = null;
+      selectorRuntime.authorSession = null;
     }
-    return authorMatcher;
+    return selectorRuntime.authorSession;
   };
   interface LayerNode {
     readonly name: string;
@@ -1216,30 +1157,11 @@ function collectCandidates(
           } else diagnostics.add("unsupported-at-rule", source.sourceUrl, `Unsupported @${rule.name} rule.`);
           continue;
         }
-        const rawSelector = serializeCssComponentValues(rule.prelude).trim();
         const matchingByPseudo = new Map<PseudoElementIdentity | null, Map<DocumentNodeRef, SelectorSpecificity>>();
-        for (const branch of splitSelectorBranches(rawSelector)) {
-          const pseudo = selectorPseudo(branch);
-          const parsed = parseSelectorList(pseudo.text, {
-            ...(input.signal === undefined ? {} : { signal: input.signal })
-          });
-          if (!parsed.ok) {
-            diagnostics.add("selector-parse", source.sourceUrl, `Invalid selector: ${branch}`);
-            continue;
-          }
-          for (const error of parsed.errors) diagnostics.add("selector-parse", source.sourceUrl, error.message);
-          const specificities = specificitiesOfSelectorList(parsed.value);
-          const matching = matchingByPseudo.get(pseudo.pseudo) ?? new Map<DocumentNodeRef, SelectorSpecificity>();
-          matchingByPseudo.set(pseudo.pseudo, matching);
-          for (const [index, selector] of parsed.value.selectors.entries()) {
+        for (const compiled of input.program.compiledSelectors.get(rule) ?? []) {
+          const matching = matchingByPseudo.get(compiled.pseudoElement) ?? new Map<DocumentNodeRef, SelectorSpecificity>();
+          matchingByPseudo.set(compiled.pseudoElement, matching);
             const authorRule = source.origin === "author";
-            if (authorRule && queryCount >= limits.maxSelectorQueries) {
-              truncate("maxSelectorQueries");
-              selectorExhaustion.add("maxSelectorQueries");
-              exhausted = true;
-              break;
-            }
-            if (authorRule) queryCount += 1;
             try {
               const matcher = authorRule ? authorSelectorMatcher() : userAgentMatcher;
               if (matcher === null) {
@@ -1248,19 +1170,40 @@ function collectCandidates(
                 exhausted = true;
                 break;
               }
-              let result = authorRule ? authorMatchCache.get(pseudo.text) : undefined;
+              let result = selectorRuntime.matches.get(compiled.fingerprint)?.result;
               if (result === undefined) {
-                result = matcher.query(selectorListFor(selector, parsed.value));
-                if (authorRule) authorMatchCache.set(pseudo.text, result);
+                if (authorRule && queryCount >= limits.maxSelectorQueries) {
+                  truncate("maxSelectorQueries");
+                  selectorExhaustion.add("maxSelectorQueries");
+                  exhausted = true;
+                  break;
+                }
+                if (authorRule) queryCount += 1;
+                const selectorStarted = input.instrumentation === undefined ? 0 : performance.now();
+                try {
+                  result = matcher.query(compiled.selector);
+                } finally {
+                  input.instrumentation?.record(
+                    "selector-matching",
+                    performance.now() - selectorStarted,
+                  );
+                }
+                selectorRuntime.matches.set(compiled.fingerprint, Object.freeze({
+                  dependencies: compiled.dependencies,
+                  result,
+                }));
               }
-              const parsedSpecificity = specificities[index] ?? { a: 0, b: 0, c: 0 };
-              const specificity = pseudo.pseudo === null
-                ? parsedSpecificity
-                : { ...parsedSpecificity, c: parsedSpecificity.c + 1 };
+              if ([...changedDependencies].some((dependency) => compiled.dependencies.has(dependency))) {
+                for (const match of result.matches) {
+                  if (match.kind === "element") affectedDynamicNodes?.add(match.ref);
+                }
+              }
               for (const match of result.matches) {
                 if (match.kind !== "element" || !eligible.has(match.ref)) continue;
                 const current = matching.get(match.ref);
-                if (current === undefined || compareSpecificity(specificity, current) > 0) matching.set(match.ref, specificity);
+                if (current === undefined || compareSpecificity(compiled.specificity, current) > 0) {
+                  matching.set(match.ref, compiled.specificity);
+                }
               }
               for (const unknown of result.unknown) {
                 for (const reason of unknown.reasons) {
@@ -1280,7 +1223,6 @@ function collectCandidates(
               });
               diagnostics.add("selector-unknown", source.sourceUrl, error instanceof Error ? error.name : "Selector evaluation failed.");
             }
-          }
           if (exhausted) break;
         }
         if (exhausted) return;
@@ -1299,7 +1241,10 @@ function collectCandidates(
             for (const [ref, specificity] of matching) {
               recordCandidate(
                 source.origin === "author" ? authorCandidates : candidates,
-                styleKey(ref, pseudo), declaration, source, specificity, sourceOrder, false,
+                styleKey(ref, pseudo), declaration,
+                input.program.compiledDeclarations.get(declaration)
+                  ?? (() => { throw new Error("Missing compiled stylesheet declaration."); })(),
+                source, specificity, sourceOrder, false,
                 inheritedLayer?.position ?? null
               );
             }
@@ -1320,18 +1265,7 @@ function collectCandidates(
     predeclaredLayers: Object.freeze([])
   };
   for (const ref of selectorExhaustion.size === 0 ? styleNodes : []) {
-    const value = input.document.attribute(ref, "style");
-    if (value === null) continue;
-    const parsed = parseBlockContents(value, {
-      ...(input.signal === undefined ? {} : { signal: input.signal })
-    });
-    if (!parsed.ok) {
-      diagnostics.add("stylesheet-parse", "inline-style", "Inline style was rejected by the CSS parser.");
-      continue;
-    }
-    for (const error of parsed.errors) diagnostics.add("stylesheet-parse", "inline-style", error.message);
-    for (const item of parsed.value) {
-      if (item.kind !== "declaration") continue;
+    for (const item of input.program.inlineDeclarations.get(ref) ?? []) {
       const property = canonicalProperty(item.name);
       if (property === null) {
         diagnostics.add("property-invalid", "inline-style", `Unknown property ${item.name.toLowerCase()}.`);
@@ -1343,17 +1277,24 @@ function collectCandidates(
       }
       sourceOrder += 1;
       recordCandidate(
-        authorCandidates, styleKey(ref), item, inlineSource, { a: 1, b: 0, c: 0 }, sourceOrder, true,
+        authorCandidates, styleKey(ref), item,
+        input.program.compiledDeclarations.get(item)
+          ?? (() => { throw new Error("Missing compiled inline declaration."); })(),
+        inlineSource, { a: 1, b: 0, c: 0 }, sourceOrder, true,
         null
       );
     }
   }
   if (selectorExhaustion.size === 0) mergeCandidateMaps(candidates, authorCandidates);
-  return candidates;
+  return Object.freeze({ candidates, affectedDynamicNodes });
 }
 
 function cssValue(declaration: CssDeclaration): string {
   return serializeCssComponentValues(declaration.value).trim();
+}
+
+function candidateValue(candidate: CascadeCandidate): string {
+  return candidate.program.serializedValue;
 }
 
 function cssWide(value: string): "initial" | "inherit" | "unset" | "revert" | "revert-layer" | null {
@@ -1383,7 +1324,7 @@ function cascadedCandidate(entries: readonly CascadeCandidate[]): CascadeCandida
   while (remaining.length > 0) {
     const candidate = bestCandidate(remaining);
     if (candidate === null) return null;
-    const wide = cssWide(cssValue(candidate.declaration));
+    const wide = cssWide(candidateValue(candidate));
     if (wide !== "revert" && wide !== "revert-layer") return candidate;
     remaining = wide === "revert"
       ? remaining.filter((entry) => entry.origin !== candidate.origin)
@@ -1394,63 +1335,103 @@ function cascadedCandidate(entries: readonly CascadeCandidate[]): CascadeCandida
 
 function customProperties(
   parent: ReadonlyMap<string, string>,
-  candidates: ReadonlyMap<string, readonly CascadeCandidate[]> | undefined
+  candidates: ReadonlyMap<string, readonly CascadeCandidate[]> | undefined,
+  instrumentation: ResolveStylesInput["instrumentation"],
 ): ReadonlyMap<string, string> {
-  const result = new Map(parent);
+  const inherited = parent instanceof ImmutableCustomPropertyEnvironment
+    ? parent
+    : ImmutableCustomPropertyEnvironment.fromSerialized(parent);
+  const changes = new Map<string, readonly ComponentValue[] | null>();
   for (const [name, entries] of candidates ?? []) {
     if (!name.startsWith("--")) continue;
     const candidate = cascadedCandidate(entries);
     if (candidate === null) continue;
-    const value = cssValue(candidate.declaration);
+    const value = candidateValue(candidate);
     const wide = cssWide(value);
-    if (wide === "initial") result.delete(name);
-    else if (wide === null) result.set(name, value);
+    if (wide === "initial") changes.set(name, null);
+    else if (wide === null) changes.set(name, candidate.program.value);
   }
-  for (const [name, value] of result) {
-    const resolved = resolveCssVariables(value, result);
-    if (resolved === null) result.delete(name);
-    else result.set(name, resolved);
+  if (changes.size === 0) return inherited;
+  const unresolved = new ImmutableCustomPropertyEnvironment(inherited, changes);
+  const resolvedChanges = new Map<string, readonly ComponentValue[] | null>();
+  for (const [name, value] of changes) {
+    if (value === null) {
+      resolvedChanges.set(name, null);
+      continue;
+    }
+    const started = instrumentation === undefined ? 0 : performance.now();
+    try {
+      resolvedChanges.set(name, resolveCssVariableValues(value, unresolved.componentValueMap()));
+    } finally {
+      instrumentation?.record("custom-property-substitution", performance.now() - started);
+    }
   }
-  return new ImmutableStringMap(result);
+  return new ImmutableCustomPropertyEnvironment(inherited, resolvedChanges);
 }
 
 function validatedValue(
   candidates: ReadonlyMap<string, readonly CascadeCandidate[]> | undefined,
   names: string | readonly string[],
   variables: ReadonlyMap<string, string>,
-  diagnostics: DiagnosticCollector
+  diagnostics: DiagnosticCollector,
+  validationSession: ResolveStylesInput["program"]["propertyValidation"],
+  substitutionCache: ResolveStylesInput["program"]["substitutedValues"],
+  instrumentation: ResolveStylesInput["instrumentation"],
 ): { readonly property: string; readonly value: string; readonly sourceUrl: string } | null {
   const properties = typeof names === "string" ? [names] : names;
   let entries = properties.flatMap((property) => candidates?.get(property) ?? []);
-  let selected: { readonly candidate: CascadeCandidate; readonly value: string } | null = null;
+  let selected: {
+    readonly candidate: CascadeCandidate;
+    readonly value: string;
+    readonly components: readonly ComponentValue[];
+  } | null = null;
   while (entries.length > 0) {
     const candidate = bestCandidate(entries);
     if (candidate === null) break;
-    const candidateValue = resolveCssVariables(cssValue(candidate.declaration), variables);
-    const selectedName = canonicalProperty(candidate.declaration.name) ?? candidate.declaration.name.toLowerCase();
-    if (candidateValue === null) {
+    const environmentIdentity = variables instanceof ImmutableCustomPropertyEnvironment
+      ? variables.identity
+      : 0;
+    const rawValue = candidateValue(candidate);
+    const selectedName = candidate.program.property ?? candidate.declaration.name.toLowerCase();
+    const substitutionKey = `${candidate.sourceUrl}\u0000${selectedName}\u0000${rawValue}\u0000${String(environmentIdentity)}`;
+    const retainedValue = candidate.program.containsVariableReference
+      ? substitutionCache.get(substitutionKey)
+      : Object.freeze({ components: candidate.program.value, serializedValue: rawValue });
+    let resolved = retainedValue;
+    if (resolved === undefined) {
+      const started = instrumentation === undefined ? 0 : performance.now();
+      try {
+        const environment = variables instanceof ImmutableCustomPropertyEnvironment
+          ? variables
+          : ImmutableCustomPropertyEnvironment.fromSerialized(variables);
+        const components = resolveCssVariableValues(candidate.program.value, environment.componentValueMap());
+        resolved = components === null ? null : Object.freeze({
+          components,
+          serializedValue: serializeCssComponentValues(components).trim(),
+        });
+      } finally {
+        instrumentation?.record("custom-property-substitution", performance.now() - started);
+      }
+    }
+    if (retainedValue === undefined) substitutionCache.set(substitutionKey, resolved);
+    if (resolved === null) {
       diagnostics.add("property-invalid", candidate.sourceUrl, `Unresolved custom property in ${selectedName}.`);
       break;
     }
-    const wide = cssWide(candidateValue);
+    const wide = cssWide(resolved.serializedValue);
     if (wide === "revert" || wide === "revert-layer") {
       entries = wide === "revert"
         ? entries.filter((entry) => entry.origin !== candidate.origin)
         : entries.filter((entry) => !sameCascadeBucket(entry, candidate));
       continue;
     }
-    selected = { candidate, value: candidateValue };
+    selected = { candidate, value: resolved.serializedValue, components: resolved.components };
     break;
   }
   if (selected === null) return null;
-  const { candidate, value } = selected;
-  const selectedName = canonicalProperty(candidate.declaration.name) ?? candidate.declaration.name.toLowerCase();
+  const { candidate, value, components } = selected;
+  const selectedName = candidate.program.property ?? candidate.declaration.name.toLowerCase();
   if (selectedName !== "content") {
-    const parsed = parseDeclaration(`${selectedName}:${value}`);
-    if (!parsed.ok) {
-      diagnostics.add("property-invalid", candidate.sourceUrl, `Invalid value for ${selectedName}.`);
-      return null;
-    }
     const gridOwned = (selectedName.startsWith("grid-") || selectedName === "justify-items"
       || selectedName === "justify-self" || selectedName.startsWith("place-"))
       && cssWide(value) === null;
@@ -1458,7 +1439,7 @@ function validatedValue(
       diagnostics.add("property-invalid", candidate.sourceUrl, `Invalid value for ${selectedName}.`);
       return null;
     }
-    const validation = gridOwned ? { status: "valid" as const } : validateCssPropertyValue(parsed.value);
+    const validation = gridOwned ? { status: "valid" as const } : validationSession.validate(selectedName, components);
     if (validation.status === "invalid") {
       diagnostics.add("property-invalid", candidate.sourceUrl, `Invalid value for ${selectedName}.`);
       return null;
@@ -1564,7 +1545,7 @@ function initialStyle(parent: ComputedStyle | null, replaced: boolean, htmlDirec
       overflowY: "visible"
     },
     generatedContent: null,
-    customProperties: parent?.customProperties ?? new Map()
+    customProperties: parent?.customProperties ?? EMPTY_CUSTOM_PROPERTIES
   };
 }
 
@@ -1827,9 +1808,9 @@ function immutableComputedStyle(style: ComputedStyle): ComputedStyle {
       gridAutoFlow: Object.freeze({ ...style.box.gridAutoFlow }),
       gridPlacement: Object.freeze({ ...style.box.gridPlacement })
     }),
-    customProperties: style.customProperties instanceof ImmutableStringMap
+    customProperties: style.customProperties instanceof ImmutableCustomPropertyEnvironment
       ? style.customProperties
-      : new ImmutableStringMap(style.customProperties)
+      : ImmutableCustomPropertyEnvironment.fromSerialized(style.customProperties)
   });
 }
 
@@ -2014,6 +1995,9 @@ function computeStyle(
   parent: ComputedStyle | null,
   candidates: ReadonlyMap<string, readonly CascadeCandidate[]> | undefined,
   diagnostics: DiagnosticCollector,
+  validationSession: ResolveStylesInput["program"]["propertyValidation"],
+  substitutionCache: ResolveStylesInput["program"]["substitutedValues"],
+  instrumentation: ResolveStylesInput["instrumentation"],
   pseudo: PseudoElementIdentity | null = null,
   rootFontSizePx = 16
 ): ComputedStyle {
@@ -2027,9 +2011,21 @@ function computeStyle(
     htmlDirection = document.directionForRenderedText(node, currentValue);
   }
   let style = initialStyle(parent, replaced, htmlDirection);
-  const variables = customProperties(parent?.customProperties ?? new Map(), candidates);
+  const variables = customProperties(
+    parent?.customProperties ?? EMPTY_CUSTOM_PROPERTIES,
+    candidates,
+    instrumentation,
+  );
   style = { ...style, customProperties: variables };
-  const value = (names: string | readonly string[]) => validatedValue(candidates, names, variables, diagnostics);
+  const value = (names: string | readonly string[]) => validatedValue(
+    candidates,
+    names,
+    variables,
+    diagnostics,
+    validationSession,
+    substitutionCache,
+    instrumentation,
+  );
   const unsupported = (entry: { readonly property: string; readonly value: string; readonly sourceUrl: string }): void => {
     diagnostics.add("value-unsupported", entry.sourceUrl, `Unsupported ${entry.property} value ${entry.value}.`);
   };
@@ -2829,7 +2825,7 @@ class ImmutableStyleSnapshot implements StyleSnapshot {
     stylesheetCount: number,
     outcome: StyleOutcome
   ) {
-    this.document = input.document;
+    this.document = input.program.document;
     this.environment = Object.freeze({ ...input.environment });
     this.#styles = styles;
     this.#pseudos = pseudos;
@@ -2848,6 +2844,22 @@ class ImmutableStyleSnapshot implements StyleSnapshot {
   public pseudo(node: DocumentNodeRef, identity: PseudoElementIdentity): ComputedStyle | null {
     return this.#pseudos.get(styleKey(node, identity)) ?? null;
   }
+
+  /** Style-owned retained maps used only for dynamic-selector incremental computation. */
+  public retainedStyles(): ReadonlyMap<DocumentNodeRef, ComputedStyle> { return this.#styles; }
+  public retainedPseudos(): ReadonlyMap<string, ComputedStyle> { return this.#pseudos; }
+}
+
+function styleEnvironmentIdentity(environment: MediaEnvironment): string {
+  return [
+    environment.viewportWidthCssPx,
+    environment.viewportHeightCssPx,
+    environment.mediaType,
+    environment.prefersColorScheme,
+    environment.reducedMotion ? 1 : 0,
+    environment.hover,
+    environment.pointer,
+  ].join(":");
 }
 
 export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
@@ -2868,14 +2880,17 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
     });
   }
   const limits = budgets(input.budgets);
-  const diagnostics = new DiagnosticCollector(limits.maxDiagnostics, input.initialDiagnostics ?? []);
-  const truncatedBudgets = new Set<keyof StyleBudgets>();
+  const diagnostics = new DiagnosticCollector(limits.maxDiagnostics, input.program.diagnostics);
+  const truncatedBudgets = new Set<keyof StyleBudgets>(input.program.truncatedBudgets);
   const truncate = (budget: keyof StyleBudgets): void => {
     truncatedBudgets.add(budget);
   };
-  const styleNodes = collectStyleNodes(input);
-  const sources = stylesheetSources(input, limits, diagnostics, truncate);
-  const candidates = collectCandidates(
+  const styleNodes = {
+    elements: input.program.elementNodes,
+    totalNodes: input.program.totalNodes,
+  };
+  const sources = input.program.sources;
+  const candidateCollection = collectCandidates(
     input,
     sources,
     styleNodes.elements,
@@ -2884,33 +2899,71 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
     diagnostics,
     truncate
   );
-  const styles = new Map<DocumentNodeRef, ComputedStyle>();
-  const pseudos = new Map<string, ComputedStyle>();
+  const candidates = candidateCollection.candidates;
+  const selectorRuntime = input.program.selectorRuntime;
+  const environmentIdentity = styleEnvironmentIdentity(input.environment);
+  const previous = selectorRuntime.computedSnapshot;
+  const incremental = candidateCollection.affectedDynamicNodes !== null
+    && previous instanceof ImmutableStyleSnapshot
+    && previous.outcome.status === "complete"
+    && selectorRuntime.computedEnvironment === environmentIdentity;
+  const affected = new Set<DocumentNodeRef>();
+  if (incremental) {
+    const pending = [...candidateCollection.affectedDynamicNodes];
+    while (pending.length > 0) {
+      input.signal?.throwIfAborted();
+      const ref = pending.pop();
+      if (ref === undefined || affected.has(ref)) continue;
+      const node = input.program.document.node(ref);
+      if (node.kind !== "element") continue;
+      affected.add(ref);
+      for (const childRef of node.children) {
+        const child = input.program.document.node(childRef);
+        if (child.kind === "element") pending.push(child.ref);
+      }
+    }
+  }
+  const styles = incremental
+    ? new Map(previous.retainedStyles())
+    : new Map<DocumentNodeRef, ComputedStyle>();
+  const pseudos = incremental
+    ? new Map(previous.retainedPseudos())
+    : new Map<string, ComputedStyle>();
   let computedNodes = 0;
-  let rootFontSizePx = 16;
+  const retainedRootStyle = input.program.document.documentElement === null
+    ? undefined
+    : styles.get(input.program.document.documentElement);
+  let rootFontSizePx = incremental && retainedRootStyle !== undefined
+    ? fontSizePixels(retainedRootStyle)
+    : 16;
   for (const ref of styleNodes.elements) {
     input.signal?.throwIfAborted();
-    const parentNode = input.document.parent(ref);
+    computedNodes += 1;
+    if (incremental && !affected.has(ref)) continue;
+    const parentNode = input.program.document.parent(ref);
     const parentStyle = parentNode?.kind === "element" ? styles.get(parentNode.ref) ?? null : null;
     let style = computeStyle(
-      input.document,
+      input.program.document,
       input.state,
       input.environment,
       ref,
       parentStyle,
       candidates.get(styleKey(ref)),
       diagnostics,
+      input.program.propertyValidation,
+      input.program.substitutedValues,
+      input.instrumentation,
       null,
-      ref === input.document.documentElement ? 16 : rootFontSizePx
+      ref === input.program.document.documentElement ? 16 : rootFontSizePx
     );
     if (style.box.float !== "none" || style.box.position === "absolute" || style.box.position === "fixed") {
       style = blockifiedStyle(style);
     }
-    let boxParent = input.document.parent(ref);
+    let boxParent = input.program.document.parent(ref);
     while (boxParent?.kind === "element") {
       const candidate = styles.get(boxParent.ref);
       if (candidate?.display.box === "contents") {
-        boxParent = input.document.parent(boxParent.ref);
+        boxParent = input.program.document.parent(boxParent.ref);
         continue;
       }
       if (candidate?.display.box === "principal"
@@ -2920,18 +2973,22 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
       break;
     }
     styles.set(ref, style);
-    if (ref === input.document.documentElement) rootFontSizePx = fontSizePixels(style);
+    if (ref === input.program.document.documentElement) rootFontSizePx = fontSizePixels(style);
     for (const pseudo of ["before", "after", "marker"] as const) {
+      pseudos.delete(styleKey(ref, pseudo));
       const pseudoCandidates = candidates.get(styleKey(ref, pseudo));
       if (pseudoCandidates === undefined) continue;
       let pseudoStyle = computeStyle(
-        input.document,
+        input.program.document,
         input.state,
         input.environment,
         ref,
         style,
         pseudoCandidates,
         diagnostics,
+        input.program.propertyValidation,
+        input.program.substitutedValues,
+        input.instrumentation,
         pseudo,
         rootFontSizePx
       );
@@ -2946,7 +3003,6 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
       }
       pseudos.set(styleKey(ref, pseudo), pseudoStyle);
     }
-    computedNodes += 1;
   }
   const truncatedBudget = truncatedBudgets.values().next().value;
   const outcome: StyleOutcome = truncatedBudget === undefined
@@ -2957,7 +3013,7 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
         budget: truncatedBudget,
         limit: limits[truncatedBudget]
       };
-  return new ImmutableStyleSnapshot(
+  const snapshot = new ImmutableStyleSnapshot(
     input,
     styles,
     pseudos,
@@ -2965,6 +3021,9 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
     Math.max(0, sources.length - 1),
     outcome
   );
+  selectorRuntime.computedSnapshot = snapshot;
+  selectorRuntime.computedEnvironment = environmentIdentity;
+  return snapshot;
 }
 
 export function transformComputedText(value: string, transform: ComputedStyle["text"]["textTransform"]): string {
@@ -2977,5 +3036,3 @@ export function transformComputedText(value: string, transform: ComputedStyle["t
   }
   return value;
 }
-
-export type { StylesheetResource };

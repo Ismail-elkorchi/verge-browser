@@ -60,12 +60,18 @@ function immutableControlState(state: DocumentControlState): DocumentControlStat
   });
 }
 
+function immutableControls(
+  controls: ReadonlyMap<DocumentNodeRef, DocumentControlState>
+): ReadonlyMap<DocumentNodeRef, DocumentControlState> {
+  return new ImmutableMap(
+    [...controls].map(([node, control]) => [node, immutableControlState(control)] as const)
+  );
+}
+
 /** @internal Captures dynamic state for an immutable render-pipeline snapshot. */
 export function snapshotDocumentState(state: DocumentState): DocumentState {
   return Object.freeze({
-    controls: new ImmutableMap(
-      [...state.controls].map(([node, control]) => [node, immutableControlState(control)] as const)
-    ),
+    controls: immutableControls(state.controls),
     open: new ImmutableSet(state.open),
     focus: state.focus,
     hover: state.hover,
@@ -186,28 +192,28 @@ export function applyDocumentAction(
 ): DocumentState {
   if (action.kind === "focus" || action.kind === "hover" || action.kind === "activate") {
     if (action.target !== null) document.node(action.target);
-    if (action.kind === "focus") return snapshotDocumentState({ ...state, focus: action.target });
-    if (action.kind === "hover") return snapshotDocumentState({ ...state, hover: action.target });
-    return snapshotDocumentState({ ...state, active: action.target });
+    if (action.kind === "focus") return Object.freeze({ ...state, focus: action.target });
+    if (action.kind === "hover") return Object.freeze({ ...state, hover: action.target });
+    return Object.freeze({ ...state, active: action.target });
   }
   if (action.kind === "follow-link") {
     const link = document.link(action.target);
     if (link === null) throw new RangeError("Link action requires a link target");
-    return snapshotDocumentState({ ...state, urlTarget: followedUrlTarget(document, link.destination) });
+    return Object.freeze({ ...state, urlTarget: followedUrlTarget(document, link.destination) });
   }
   if (action.kind === "reset-form") {
     const form = document.form(action.target);
     if (form === null) throw new RangeError("Reset action requires a form target");
     const controls = new Map(state.controls);
     for (const [node, controlState] of defaultControlStates(form.controls)) controls.set(node, controlState);
-    return snapshotDocumentState({ ...state, controls });
+    return Object.freeze({ ...state, controls: immutableControls(controls) });
   }
   if (action.kind === "set-open") {
     if (document.disclosure(action.target) === null) throw new RangeError("Open state requires a disclosure target");
     const open = new Set(state.open);
     if (action.open) open.add(action.target);
     else open.delete(action.target);
-    return snapshotDocumentState({ ...state, open });
+    return Object.freeze({ ...state, open: new ImmutableSet(open) });
   }
   const control = document.control(action.target);
   if (control === null) throw new RangeError("Document control action requires a control target");
@@ -246,5 +252,5 @@ export function applyDocumentAction(
     }
     controls.set(action.target, { ...current, values: [action.value] });
   }
-  return snapshotDocumentState({ ...state, controls });
+  return Object.freeze({ ...state, controls: immutableControls(controls) });
 }

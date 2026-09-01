@@ -15,10 +15,17 @@ import {
   normalizeGridPlacement,
   sizeGridTracks
 } from "../../dist/presentation/layout/grid/index.js";
-import { buildTextSearchIndex } from "../../dist/presentation/search/index.js";
-import { embeddedStylesheetSources, resolveStyles } from "../../dist/presentation/style/index.js";
+import { buildTextSearchIndex, projectTextSearchToLayout } from "../../dist/presentation/search/index.js";
+import { compileStylesheetProgram, embeddedStylesheetSources, resolveStyles } from "../../dist/presentation/style/index.js";
 import { buildInlineItemStreamSet } from "../../dist/presentation/text/index.js";
-import { buildTerminalDisplayList, rasterizeTerminalDisplayList } from "../../dist/presentation/terminal/index.js";
+import {
+  buildDisplayListSpatialIndex,
+  buildDocumentGeometryIndex,
+  buildDocumentDisplayList,
+  buildViewportDisplayList,
+  buildViewportTerminalResult,
+  rasterizeViewportDisplayList
+} from "../../dist/presentation/terminal/index.js";
 import { terminalCellMeasurer, terminalCssTextMeasurer } from "../../dist/ui/terminal-measure.js";
 
 const CELL_WIDTH = cssPx(8);
@@ -30,10 +37,10 @@ function render(html, columns = 80, rows = 40, layoutBudgets) {
     finalUrl: "https://grid.example/"
   });
   const state = createDocumentState(document);
+  const resources = embeddedStylesheetSources(document);
   const styles = resolveStyles({
-    document,
+    program: compileStylesheetProgram({ document, resources }),
     state,
-    resources: embeddedStylesheetSources(document),
     environment: {
       viewportWidthCssPx: columns * 8,
       viewportHeightCssPx: rows * 16,
@@ -46,7 +53,7 @@ function render(html, columns = 80, rows = 40, layoutBudgets) {
   });
   const formatting = buildFormattingTree({ document, state, styles });
   const inlineItemStreams = buildInlineItemStreamSet(formatting);
-  const textSearchIndex = buildTextSearchIndex(formatting, inlineItemStreams);
+  const searchIndex = buildTextSearchIndex(formatting, inlineItemStreams);
   const viewportWidth = cssLengthFromFixed(columns * CELL_WIDTH);
   const viewportHeight = cssLengthFromFixed(rows * ROW_HEIGHT);
   const viewport = cssRect(cssCoordinate(cssPx(0)), cssCoordinate(cssPx(0)), viewportWidth, viewportHeight);
@@ -71,9 +78,43 @@ function render(html, columns = 80, rows = 40, layoutBudgets) {
     colorDepth: 24,
     cellMeasurer: terminalCellMeasurer()
   };
-  const displayList = buildTerminalDisplayList({ layout, context: terminalContext });
-  const terminal = rasterizeTerminalDisplayList({ displayList, textSearchIndex });
-  return { document, styles, formatting, layout, displayList, terminal };
+  const displayList = buildDocumentDisplayList({ layout, context: terminalContext });
+  const viewportDisplayList = buildViewportDisplayList({
+    documentDisplayList: displayList,
+    spatialIndex: buildDisplayListSpatialIndex(displayList),
+    context: terminalContext,
+    window: { scrollRow: 0, viewportRows: rows, overscanBefore: 0, overscanAfter: 0 }
+  });
+  const cells = rasterizeViewportDisplayList({ displayList: viewportDisplayList });
+  const terminal = buildViewportTerminalResult({
+    displayList: viewportDisplayList,
+    cellBuffer: cells.cellBuffer,
+    documentGeometry: buildDocumentGeometryIndex(displayList),
+    truncations: cells.truncations
+  });
+  return { document, styles, formatting, inlineItemStreams, searchIndex, layout, displayList, terminal };
+}
+
+function search(result, query) {
+  const viewportDisplayList = buildViewportDisplayList({
+    documentDisplayList: result.displayList,
+    spatialIndex: buildDisplayListSpatialIndex(result.displayList),
+    context: result.displayList.context,
+    window: {
+      scrollRow: 0,
+      viewportRows: result.displayList.context.rows,
+      overscanBefore: 0,
+      overscanAfter: 0
+    }
+  });
+  const cells = rasterizeViewportDisplayList({ displayList: viewportDisplayList });
+  return buildViewportTerminalResult({
+    displayList: viewportDisplayList,
+    cellBuffer: cells.cellBuffer,
+    documentGeometry: buildDocumentGeometryIndex(result.displayList),
+    searchProjection: projectTextSearchToLayout(result.searchIndex, result.layout, query, 10_000),
+    truncations: cells.truncations
+  }).search;
 }
 
 function fragment(result, id) {
@@ -602,8 +643,8 @@ test("horizontal RTL Grid mirrors column geometry while preserving source and se
     <a id="second" href="/b">second</a></div>`);
   assert.deepEqual(rectangle(result, "first"), { x: 80, y: 0, width: 40, height: 16 });
   assert.deepEqual(rectangle(result, "second"), { x: 0, y: 0, width: 80, height: 16 });
-  assert.equal(result.terminal.search("first").matches.length, 1);
-  assert.equal(result.terminal.search("second").matches.length, 1);
+  assert.equal(search(result, "first").matches.length, 1);
+  assert.equal(search(result, "second").matches.length, 1);
 });
 
 test("Grid layout budgets reject an uncommittable Grid without clearing finalized page prefixes", () => {

@@ -4,7 +4,7 @@ import {
   parseWebDocumentBytes,
   parseWebDocumentStream
 } from "../../dist/document/index.js";
-import { renderDocument } from "../../dist/presentation/pipeline.js";
+import { renderDocumentViewport } from "../../dist/presentation/renderer/index.js";
 import { embeddedStylesheetSources } from "../../dist/presentation/style/index.js";
 import {
   cssCoordinate,
@@ -95,7 +95,7 @@ async function runSmoke(expectedRuntime) {
   const payloads = [fromText, fromBytes, fromStream].map(documentPayload);
   const viewportWidth = cssLengthFromFixed(40 * CELL_WIDTH);
   const viewportHeight = cssLengthFromFixed(12 * ROW_HEIGHT);
-  const renderPipeline = renderDocument({
+  const rendered = renderDocumentViewport({
     document: fromText,
     state: createDocumentState(fromText),
     resources: embeddedStylesheetSources(fromText),
@@ -127,25 +127,28 @@ async function runSmoke(expectedRuntime) {
       unicode: true,
       ambiguousWidth: 1,
       cellMeasurer: terminalCellMeasurer()
-    }
+    },
+    window: { scrollRow: 0, viewportRows: 12, overscanBefore: 0, overscanAfter: 0 }
   });
+  const artifacts = rendered.artifacts;
+  const terminal = rendered.viewport.terminal;
   const checks = {
     parseText: fromText.node(fromText.root).kind === "document",
     parseBytes: fromBytes.node(fromBytes.root).kind === "document",
     parseStream: fromStream.node(fromStream.root).kind === "document",
     determinism: JSON.stringify(payloads[0]) === JSON.stringify(payloads[1])
       && JSON.stringify(payloads[0]) === JSON.stringify(payloads[2]),
-    style: renderPipeline.styles.outcome.status === "complete",
-    formatting: renderPipeline.formatting.outcome.status === "complete",
-    layout: renderPipeline.layout.outcome.status === "complete",
-    displayList: renderPipeline.displayList.outcome.status === "complete",
-    cellBuffer: renderPipeline.terminal.cellBuffer.outcome.status === "complete",
-    render: renderPipeline.terminal.cellBuffer.rows.some((row) => row.text.includes("Smoke"))
+    style: artifacts.computedStyles.outcome.status === "complete",
+    formatting: artifacts.boxTree.outcome.status === "complete",
+    layout: artifacts.documentLayout.outcome.status === "complete",
+    displayList: artifacts.documentDisplayList.outcome.status === "complete",
+    cellBuffer: terminal.cellBuffer.outcome.status === "complete",
+    render: terminal.cellBuffer.rows.some((row) => row.text.includes("Smoke"))
   };
   const stablePayload = {
     document: payloads[0],
-    rows: renderPipeline.terminal.cellBuffer.rows.map((row) => row.text),
-    focus: renderPipeline.terminal.focusMap.targets.map((target) => target.action.kind)
+    rows: terminal.cellBuffer.rows.map((row) => row.text),
+    focus: terminal.focusMap.targets.map((target) => target.action.kind)
   };
   return {
     runtime,

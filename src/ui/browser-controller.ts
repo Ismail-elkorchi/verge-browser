@@ -38,9 +38,10 @@ import {
   resolveOmniboxInput
 } from "../app/url.js";
 import type { BrowserServices } from "./services.js";
-import { RenderPipelineCache } from "./document-layout.js";
+import { RenderWorkerClient, type ViewportRenderPayload, type ViewportRequestParameters } from "./render-worker/index.js";
 import type {
   BrowserDocumentState,
+  BrowserPlaceholderTabState,
   BrowserTuiState,
   DetailKind,
   PickerKind,
@@ -176,6 +177,13 @@ export class BrowserController {
   readonly #downloadDirectory: string;
   readonly #downloadMaxBytes: number;
   readonly #externalNetworkPolicy = new NetworkSafetyPolicy(EXTERNAL_NETWORK_POLICY);
+  #renderer = new RenderWorkerClient();
+  readonly #renderAttachments = new Map<string, {
+    readonly documentRevision: number;
+    readonly stateRevision: number;
+    readonly state: DocumentState;
+  }>();
+  readonly #renderPreparations = new Map<string, Promise<void>>();
   readonly #sessions = new Map<string, BrowserSession>();
   readonly #provisionalSessionIds = new Set<string>();
   #nextDocumentNumber = 1;
@@ -210,8 +218,10 @@ export class BrowserController {
     await this.#releaseDiscardedSessions(state);
     const workspace: BrowserWorkspace = {
       documents: state.documents.map((document) => ({
-        url: document.snapshot.finalUrl,
-        scrollAnchor: storedScrollAnchor(document)
+        url: document.kind === "ready" ? document.snapshot.finalUrl : document.requestedUrl,
+        scrollAnchor: document.kind === "ready"
+          ? storedScrollAnchor(document)
+          : document.storedScrollAnchor ?? { target: null, rowOffset: 0 },
       })),
       activeDocumentIndex: state.activeDocumentIndex,
       sidePanel: state.sidePanel satisfies StoredSidePanel
@@ -224,11 +234,13 @@ export class BrowserController {
     this.#externalNetworkPolicy.close(new Error("Browser controller closed."));
     const sessions = [...this.#sessions.values()];
     this.#sessions.clear();
+    this.#renderPreparations.clear();
     this.#provisionalSessionIds.clear();
     const errors: unknown[] = [];
     try {
       await settleBrowserCleanup([
         ...sessions.map((session) => () => session.close()),
+        () => this.#renderer.close(),
         () => this.#services.close()
       ], "Failed to close every browser session and host service.");
     } catch (error) {
@@ -254,6 +266,117 @@ export class BrowserController {
     scrollAnchor?: StoredBrowserDocument["scrollAnchor"]
   ): Promise<BrowserDocumentState> {
     return this.#openNewDocument(target, undefined, scrollAnchor, true);
+  }
+
+  /** Reserves a stable tab identity without allocating a session or loading a page. */
+  public placeholder(
+    target: string,
+    scrollAnchor?: StoredBrowserDocument["scrollAnchor"],
+  ): BrowserPlaceholderTabState {
+    const resolved = resolveInputUrl(target);
+    let label = resolved;
+    try {
+      const url = new URL(resolved);
+      label = url.protocol === "about:" ? url.pathname : url.hostname || resolved;
+    } catch {
+      // resolveInputUrl owns URL validation; the display label remains the resolved target.
+    }
+    return Object.freeze({
+      kind: "restoring",
+      id: this.#newDocumentId(),
+      requestedUrl: resolved,
+      label,
+      ...(scrollAnchor === undefined ? {} : { storedScrollAnchor: scrollAnchor }),
+      restoreRevision: 1,
+      retryCount: 0,
+      error: null,
+    });
+  }
+
+  /** Starts loading a placeholder. Session ownership begins at this boundary. */
+  public restorePlaceholder(
+    tab: BrowserPlaceholderTabState,
+    signal?: AbortSignal,
+  ): Promise<BrowserDocumentState> {
+    return this.#openDocument(
+      tab.id,
+      tab.requestedUrl,
+      signal,
+      tab.storedScrollAnchor,
+      false,
+    );
+  }
+
+  /** Attaches a document revision once and requests only a viewport result thereafter. */
+  public async renderViewport(
+    document: BrowserDocumentState,
+    viewportRevision: number,
+    parameters: ViewportRequestParameters,
+  ): Promise<ViewportRenderPayload> {
+    await this.#prepareRendering(document);
+    return this.#renderer.renderViewport(document, viewportRevision, parameters);
+  }
+
+  public cancelViewport(documentId: string): void { this.#renderer.cancelViewport(documentId); }
+
+  /** Internal interaction metrics used by deterministic browser qualification. */
+  public renderingMetrics(): ReturnType<RenderWorkerClient["metrics"]> {
+    return this.#renderer.metrics();
+  }
+
+  public async searchDocument(
+    document: BrowserDocumentState,
+    query: string,
+    parameters: ViewportRequestParameters,
+  ): ReturnType<RenderWorkerClient["search"]> {
+    await this.#prepareRendering(document);
+    return this.#renderer.search(document, query, parameters);
+  }
+
+  async #prepareRendering(document: BrowserDocumentState): Promise<void> {
+    const key = `${document.id}:${String(document.documentRevision)}:${String(document.stateRevision)}`;
+    const pending = this.#renderPreparations.get(key);
+    if (pending !== undefined) return pending;
+    const operation = this.#prepareRenderingNow(document).finally(() => {
+      if (this.#renderPreparations.get(key) === operation) this.#renderPreparations.delete(key);
+    });
+    this.#renderPreparations.set(key, operation);
+    return operation;
+  }
+
+  async #prepareRenderingNow(document: BrowserDocumentState): Promise<void> {
+    if (this.#renderer.failed) {
+      await this.#renderer.close();
+      this.#renderer = new RenderWorkerClient();
+      this.#renderAttachments.clear();
+    }
+    const attached = this.#renderAttachments.get(document.id);
+    if (attached === undefined || attached.documentRevision !== document.documentRevision) {
+      await this.#renderer.attach(document);
+    } else if (attached.stateRevision !== document.stateRevision) {
+      const changed: string[] = [];
+      if (attached.state.focus !== document.documentState.focus) changed.push("focus");
+      if (attached.state.hover !== document.documentState.hover) changed.push("hover");
+      if (attached.state.active !== document.documentState.active) changed.push("active");
+      if (attached.state.urlTarget !== document.documentState.urlTarget) changed.push("target");
+      if (attached.state.open !== document.documentState.open) changed.push("disclosure-open");
+      if (attached.state.controls !== document.documentState.controls) {
+        changed.push("control-content", "checked-selected");
+      }
+      await this.#renderer.updateState(document, changed);
+    } else {
+      return;
+    }
+    this.#renderAttachments.set(document.id, {
+      documentRevision: document.documentRevision,
+      stateRevision: document.stateRevision,
+      state: document.documentState,
+    });
+  }
+
+  public async releaseRendering(documentId: string): Promise<void> {
+    this.#renderAttachments.delete(documentId);
+    await this.#renderer.release(documentId);
   }
 
   public resolveOmnibox(value: string, currentUrl: string): string {
@@ -344,6 +467,23 @@ export class BrowserController {
       : document.scrollAnchor;
     return {
       ...document,
+      ...(snapshotChanged
+        ? {
+            documentRevision: document.documentRevision + 1,
+            stateRevision: document.stateRevision + 1,
+            rendering: {
+              status: "idle" as const,
+              requestedViewportRevision: 0,
+              committedViewportRevision: 0,
+              requestKey: null,
+              pendingSearchQuery: null,
+              pendingFocus: null,
+              viewport: null,
+              summary: null,
+              error: null,
+            },
+          }
+        : {}),
       snapshot,
       scrollAnchor,
       ...(snapshotChanged
@@ -613,6 +753,17 @@ export class BrowserController {
     sourceUrl?: string
   ): Promise<BrowserDocumentState> {
     const id = this.#newDocumentId();
+    return this.#openDocument(id, target, signal, scrollAnchor, persist, sourceUrl);
+  }
+
+  async #openDocument(
+    id: string,
+    target: string,
+    signal?: AbortSignal,
+    scrollAnchor?: StoredBrowserDocument["scrollAnchor"],
+    persist = false,
+    sourceUrl?: string,
+  ): Promise<BrowserDocumentState> {
     const session = this.#createSession(this.#store.httpSession);
     this.#sessions.set(id, session);
     this.#provisionalSessionIds.add(id);
@@ -671,11 +822,17 @@ export class BrowserController {
     ]);
     const discarded = [...this.#sessions.entries()]
       .filter(([id]) => !retainedIds.has(id) && !this.#provisionalSessionIds.has(id));
+    const discardedRendering = [...this.#renderAttachments.keys()]
+      .filter((id) => !retainedIds.has(id));
     for (const [id] of discarded) {
       this.#sessions.delete(id);
     }
+    for (const id of discardedRendering) this.#renderAttachments.delete(id);
     await settleBrowserCleanup(
-      discarded.map(([, session]) => () => session.close()),
+      [
+        ...discarded.map(([, session]) => () => session.close()),
+        ...discardedRendering.map((id) => () => this.#renderer.release(id)),
+      ],
       "Failed to close every discarded browser session."
     );
   }
@@ -693,14 +850,27 @@ export class BrowserController {
   ): BrowserDocumentState {
     const firstAnchor = {
       source: snapshot.document.body ?? snapshot.document.documentElement,
-      rowOffset: 0
+      rowOffset: 0,
     };
     return {
+      kind: "ready",
       id,
+      documentRevision: 1,
+      stateRevision: 1,
       snapshot,
       scrollAnchor: restoredScrollAnchor(snapshot, storedAnchor) ?? firstAnchor,
       documentState: createDocumentState(snapshot.document),
-      renderPipelineCache: new RenderPipelineCache(),
+      rendering: {
+        status: "idle",
+        requestedViewportRevision: 0,
+        committedViewportRevision: 0,
+        requestKey: null,
+        pendingSearchQuery: null,
+        pendingFocus: null,
+        viewport: null,
+        summary: null,
+        error: null
+      },
       search: null,
       formEditors: {},
       savedViews: {},

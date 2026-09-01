@@ -7,7 +7,9 @@ verge [initial-target] [--once]
 ```
 
 - An explicit target opens in a fresh browser workspace.
-- Without a target, Verge restores the saved workspace or opens `about:newtab`.
+- Without a target, Verge displays saved-tab placeholders immediately, restores
+  the active tab first, then restores background tabs independently; a new
+  profile opens `about:newtab`.
 - `about:help` opens the built-in help document.
 - `http:`, `https:`, `file:`, and supported `about:` targets are accepted.
 

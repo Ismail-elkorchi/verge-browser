@@ -343,7 +343,7 @@ test("aggregate stylesheet bytes are a per-request transport budget", async () =
   });
   const snapshot = await session.open("https://styles.example/");
   assert.deepEqual(requestedBudgets, [8, 4]);
-  assert.equal(snapshot.stylesheets.reduce((total, entry) => total + entry.bytes.byteLength, 0), 10);
+  assert.equal(snapshot.stylesheets.reduce((total, entry) => total + entry.byteSize, 0), 10);
 });
 
 test("stylesheet dependencies load recursively in cascade order with cycles and budgets bounded", async () => {

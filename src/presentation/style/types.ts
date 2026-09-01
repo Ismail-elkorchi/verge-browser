@@ -1,7 +1,20 @@
 import type {
+  ComponentValue,
+  CssDeclaration,
+  CssQualifiedRule,
+  CssStylesheet,
+  PropertyValidationSession,
+  SelectorList,
+  SelectorMatchSession,
+  SelectorQueryResult,
+  SelectorSpecificity,
+} from "@ismail-elkorchi/css-parser";
+
+import type {
   DocumentNodeRef,
   DocumentState,
-  IndexedWebDocumentSnapshot
+  IndexedWebDocumentSnapshot,
+  WebDocumentNode
 } from "../../document/index.js";
 import type {
   CssGridAutoFlow,
@@ -214,8 +227,13 @@ export interface StylesheetResource {
   readonly requestUrl: string;
   readonly finalUrl: string;
   readonly contentType: string | null;
-  readonly bytes: Uint8Array;
-  readonly transportEncodingLabel: string | null;
+  /** Verified, decoded CSS syntax retained from dependency admission. */
+  readonly syntax: CssStylesheet;
+  /** Transport size retained for resource and style budgets after raw bytes are released. */
+  readonly byteSize: number;
+  /** Stable identity of the admitted decoded source. */
+  readonly contentFingerprint: string;
+  readonly parserDiagnostics: readonly string[];
   /** Document stylesheet order shared by the root sheet and all recursive imports. */
   readonly rootOrder: number;
   /** Depth-first cascade order within one document stylesheet root. */
@@ -246,8 +264,16 @@ export type StylesheetDependencyInspection =
       readonly status: "complete";
       readonly imports: readonly StylesheetImportDependency[];
       readonly parsedRules: number;
+      readonly syntax: CssStylesheet;
+      readonly byteSize: number;
+      readonly contentFingerprint: string;
+      readonly parserDiagnostics: readonly string[];
     }
   | { readonly status: "rejected"; readonly reason: "parse" | "encoding" };
+
+export interface StylesheetSyntaxInstrumentation {
+  record(stage: "stylesheet-syntax-parsing", elapsedMilliseconds: number): void;
+}
 
 export type StyleDiagnosticCode =
   | "stylesheet-fetch"
@@ -301,11 +327,114 @@ export interface MediaEnvironment {
 }
 
 export interface ResolveStylesInput {
-  readonly document: IndexedWebDocumentSnapshot;
+  readonly instrumentation?: {
+    record(stage: "selector-matching" | "custom-property-substitution", elapsedMilliseconds: number): void;
+  };
+  readonly program: StylesheetProgram;
   readonly state: DocumentState;
+  readonly environment: MediaEnvironment;
+  readonly budgets?: Partial<StyleBudgets>;
+  readonly signal?: AbortSignal;
+}
+
+export type SelectorStateDependency =
+  | "document-structural"
+  | "target"
+  | "focus"
+  | "hover"
+  | "active"
+  | "checked-selected"
+  | "disclosure-open";
+
+export interface CompiledSelectorProgram {
+  readonly selector: SelectorList;
+  readonly fingerprint: string;
+  readonly pseudoElement: PseudoElementIdentity | null;
+  readonly specificity: SelectorSpecificity;
+  readonly dependencies: ReadonlySet<SelectorStateDependency>;
+}
+
+export interface CompiledDeclarationProgram {
+  readonly declaration: CssDeclaration;
+  readonly property: string | null;
+  readonly value: readonly ComponentValue[];
+  readonly serializedValue: string;
+  readonly containsVariableReference: boolean;
+}
+
+export interface StylesheetProgramSource {
+  readonly sourceUrl: string;
+  readonly origin: "user-agent" | "author";
+  readonly stylesheet: CssStylesheet;
+  readonly mediaConditions: readonly string[];
+  readonly supportsConditions: readonly string[];
+  readonly layer: CascadeLayerPath | null;
+  readonly predeclaredLayers: readonly CascadeLayerPath[];
+}
+
+export interface StylesheetProgram {
+  readonly document: IndexedWebDocumentSnapshot;
+  readonly sources: readonly StylesheetProgramSource[];
+  readonly compiledSelectors: ReadonlyMap<CssQualifiedRule, readonly CompiledSelectorProgram[]>;
+  readonly compiledDeclarations: ReadonlyMap<CssDeclaration, CompiledDeclarationProgram>;
+  readonly selectorRuntime: StylesheetSelectorRuntime;
+  readonly propertyValidation: PropertyValidationSession;
+  readonly substitutedValues: CustomPropertySubstitutionCache;
+  readonly inlineDeclarations: ReadonlyMap<DocumentNodeRef, readonly CssDeclaration[]>;
+  readonly elementNodes: readonly DocumentNodeRef[];
+  readonly totalNodes: number;
+  readonly stateDependencies: ReadonlySet<SelectorStateDependency>;
+  readonly authorStateDependencies: ReadonlySet<SelectorStateDependency>;
+  readonly dependencies: StylesheetProgramDependencies;
+  readonly diagnostics: readonly StyleDiagnostic[];
+  readonly authorStylesheetCount: number;
+  readonly retainedByteSize: number;
+  readonly fingerprint: string;
+  readonly truncatedBudgets: ReadonlySet<keyof StyleBudgets>;
+}
+
+export interface RetainedSelectorMatchSet {
+  readonly dependencies: ReadonlySet<SelectorStateDependency>;
+  readonly result: SelectorQueryResult<WebDocumentNode>;
+}
+
+export interface StylesheetSelectorRuntime {
+  state: DocumentState | null;
+  authorSession: SelectorMatchSession<WebDocumentNode> | null;
+  userAgentSession: SelectorMatchSession<WebDocumentNode> | null;
+  sessionMaxSteps: number;
+  readonly matches: Map<string, RetainedSelectorMatchSet>;
+  computedSnapshot: StyleSnapshot | null;
+  computedEnvironment: string | null;
+  clear(): void;
+}
+
+export interface StylesheetProgramDependencies {
+  readonly mediaInlineSize: boolean;
+  readonly mediaBlockSize: boolean;
+  readonly mediaColorScheme: boolean;
+  readonly mediaReducedMotion: boolean;
+  readonly mediaHover: boolean;
+  readonly mediaPointer: boolean;
+  readonly viewportBlockSize: boolean;
+}
+
+export interface CustomPropertySubstitutionCache {
+  readonly size: number;
+  get(key: string): SubstitutedCssValue | null | undefined;
+  set(key: string, value: SubstitutedCssValue | null): void;
+  clear(): void;
+}
+
+export interface SubstitutedCssValue {
+  readonly components: readonly ComponentValue[];
+  readonly serializedValue: string;
+}
+
+export interface CompileStylesheetProgramInput {
+  readonly document: IndexedWebDocumentSnapshot;
   readonly resources: readonly StylesheetResource[];
   readonly initialDiagnostics?: readonly StyleDiagnostic[];
-  readonly environment: MediaEnvironment;
   readonly budgets?: Partial<StyleBudgets>;
   readonly signal?: AbortSignal;
 }

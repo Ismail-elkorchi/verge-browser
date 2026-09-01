@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TextEncoder } from "node:util";
 
 import { applyDocumentAction, createDocumentState, parseWebDocument } from "../../dist/document/index.js";
 import {
   embeddedStylesheetSources,
+  compileStylesheetProgram,
   implementationSupportsCondition,
   inspectStylesheetText,
   resolveStyles
@@ -26,10 +26,10 @@ function setup(html, updateState = (state) => state, budgets, mediaEnvironment =
     finalUrl: "https://example.test/"
   });
   const state = updateState(createDocumentState(document), document);
+  const resources = embeddedStylesheetSources(document);
   const styles = resolveStyles({
-    document,
+    program: compileStylesheetProgram({ document, resources, ...(budgets ? { budgets } : {}) }),
     state,
-    resources: embeddedStylesheetSources(document),
     environment: mediaEnvironment,
     ...(budgets ? { budgets } : {})
   });
@@ -520,13 +520,12 @@ test("import media, supports, and nested layers participate in the author cascad
   });
   const owner = document.stylesheets[0].owner;
   const resource = (finalUrl, css, dependencyOrder, options = {}) => ({
+    ...inspectStylesheetText(css),
     sourceKind: dependencyOrder === 2 ? "linked" : "imported",
     owner,
     requestUrl: finalUrl,
     finalUrl,
     contentType: "text/css",
-    bytes: new TextEncoder().encode(css),
-    transportEncodingLabel: null,
     rootOrder: 0,
     dependencyOrder,
     importDepth: dependencyOrder === 2 ? 0 : 1,
@@ -535,20 +534,19 @@ test("import media, supports, and nested layers participate in the author cascad
     mediaConditions: options.media ?? [],
     supportsConditions: options.supports ?? [],
     predeclaredLayers: options.predeclaredLayers ?? [],
-    parsedRules: inspectStylesheetText(css).parsedRules
   });
+  const resources = [
+    resource("https://example.test/a.css", `#target{color:red}`, 0, { layer: ["outer", "inner"] }),
+    resource("https://example.test/b.css", `#target{padding-left:99px}`, 1, {
+      supports: ["writing-mode:vertical-rl"]
+    }),
+    resource("https://example.test/root.css", `@layer outer { @layer inner { #target{color:blue} } }
+      #target{background:rgb(1 2 3 / 50%)}`, 2)
+  ];
   const styles = resolveStyles({
-    document,
+    program: compileStylesheetProgram({ document, resources }),
     state: createDocumentState(document),
     environment,
-    resources: [
-      resource("https://example.test/a.css", `#target{color:red}`, 0, { layer: ["outer", "inner"] }),
-      resource("https://example.test/b.css", `#target{padding-left:99px}`, 1, {
-        supports: ["writing-mode:vertical-rl"]
-      }),
-      resource("https://example.test/root.css", `@layer outer { @layer inner { #target{color:blue} } }
-        #target{background:rgb(1 2 3 / 50%)}`, 2)
-    ]
   });
   const target = styles.style(document.elementById("target"));
   assert.deepEqual(target.text.color, { r: 0, g: 0, b: 255, a: 1 });
@@ -561,13 +559,12 @@ test("import media, supports, and nested layers participate in the author cascad
   });
   const orderedOwner = orderedDocument.stylesheets[0].owner;
   const encoded = (finalUrl, css, dependencyOrder, importDepth, importLayer, predeclaredLayers) => ({
+    ...inspectStylesheetText(css),
     sourceKind: importDepth === 0 ? "linked" : "imported",
     owner: orderedOwner,
     requestUrl: finalUrl,
     finalUrl,
     contentType: "text/css",
-    bytes: new TextEncoder().encode(css),
-    transportEncodingLabel: null,
     rootOrder: 0,
     dependencyOrder,
     importDepth,
@@ -576,17 +573,16 @@ test("import media, supports, and nested layers participate in the author cascad
     mediaConditions: [],
     supportsConditions: [],
     predeclaredLayers,
-    parsedRules: inspectStylesheetText(css).parsedRules
   });
+  const orderedResources = [
+    encoded("https://example.test/theme.css", `#ordered{color:blue!important}`, 0, 1, ["theme"], [["reset"], ["theme"]]),
+    encoded("https://example.test/ordered.css", `@layer reset,theme;
+      @layer reset{#ordered{color:red!important}}`, 1, 0, null, [])
+  ];
   const orderedStyles = resolveStyles({
-    document: orderedDocument,
+    program: compileStylesheetProgram({ document: orderedDocument, resources: orderedResources }),
     state: createDocumentState(orderedDocument),
     environment,
-    resources: [
-      encoded("https://example.test/theme.css", `#ordered{color:blue!important}`, 0, 1, ["theme"], [["reset"], ["theme"]]),
-      encoded("https://example.test/ordered.css", `@layer reset,theme;
-        @layer reset{#ordered{color:red!important}}`, 1, 0, null, [])
-    ]
   });
   assert.deepEqual(orderedStyles.style(orderedDocument.elementById("ordered")).text.color, {
     r: 255, g: 0, b: 0, a: 1
@@ -605,6 +601,21 @@ test("typed CSS values preserve math, nested custom-property fallback, and funct
   assert.equal(target.box.maxWidth.kind, "calculation");
   assert.deepEqual(target.text.color, { r: 0, g: 128, b: 0, a: 1 });
   assert.deepEqual(target.text.background, { r: 10, g: 20, b: 30, a: 0.5 });
+});
+
+test("custom-property substitution materializes repeated and nested expansions as one CSS syntax tree", () => {
+  const { document, styles } = setup(`<style>
+    #target {
+      --channel: 10;
+      --nested: var(--missing, var(--channel));
+      color: rgb(var(--nested) var(--nested) var(--nested));
+      background-color: rgb(var(--channel) var(--channel) var(--channel) / 50%);
+    }
+  </style><div id="target"></div>`);
+  const target = styles.style(document.elementById("target"));
+  assert.deepEqual(target.text.color, { r: 10, g: 10, b: 10, a: 1 });
+  assert.deepEqual(target.text.background, { r: 10, g: 10, b: 10, a: 0.5 });
+  assert.equal(styles.diagnostics.some((entry) => entry.code === "property-invalid"), false);
 });
 
 test("flex item and positioned-flow properties retain typed computed values", () => {
@@ -759,9 +770,8 @@ test("invalid runtime style environments produce a typed rejected outcome", () =
     finalUrl: "https://example.test/"
   });
   const styles = resolveStyles({
-    document,
+    program: compileStylesheetProgram({ document, resources: [] }),
     state: createDocumentState(document),
-    resources: [],
     environment: { ...environment, mediaType: "print" }
   });
   assert.deepEqual(styles.outcome, { status: "rejected", reason: "invalid-environment" });
@@ -810,14 +820,16 @@ test("dynamic pseudo-class state participates in selector matching", () => {
   assert.deepEqual(link.text.color, { r: 171, g: 205, b: 239, a: 1 });
 });
 
-test("the user-agent focus indicator is computed from document focus", () => {
-  const { document, styles } = setup(
+test("the user-agent stylesheet does not make focus a layout dependency", () => {
+  const unfocused = setup(`<a href="/next">Next</a>`);
+  const focused = setup(
     `<a href="/next">Next</a>`,
     (state, snapshot) => ({ ...state, focus: snapshot.links[0].node })
   );
-  const link = styles.style(document.links[0].node);
-  assert.equal(link.text.fontWeight, 700);
-  assert.equal(link.text.underline, true);
+  assert.deepEqual(
+    focused.styles.style(focused.document.links[0].node),
+    unfocused.styles.style(unfocused.document.links[0].node)
+  );
 });
 
 test("URL targets and selected options participate in dynamic selector matching", () => {
@@ -969,9 +981,8 @@ test("user-agent baseline styles remain total beyond the former selector depth b
     { requestUrl: "https://example.test/", finalUrl: "https://example.test/" }
   );
   const styles = resolveStyles({
-    document,
+    program: compileStylesheetProgram({ document, resources: [] }),
     state: createDocumentState(document),
-    resources: [],
     environment
   });
   const paragraph = named(document, "p");

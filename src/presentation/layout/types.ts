@@ -218,6 +218,22 @@ export interface LayoutStackingMetadata {
   readonly paintPhase: LayoutPaintPhase;
 }
 
+export type LayoutScrollAttachment = Readonly<{
+  readonly kind: "fixed";
+  readonly root: LayoutFragmentId;
+  /** Geometry is viewport-relative until translated into a document viewport window. */
+  readonly normalBorderRect: CssRect;
+}> | Readonly<{
+  readonly kind: "sticky";
+  readonly root: LayoutFragmentId;
+  readonly normalBorderRect: CssRect;
+  readonly containingBlock: CssRect;
+  readonly top: CssPixelLength | null;
+  readonly right: CssPixelLength | null;
+  readonly bottom: CssPixelLength | null;
+  readonly left: CssPixelLength | null;
+}>;
+
 export interface LineBox {
   readonly id: LineBoxId;
   readonly containingFragment: LayoutFragmentId;
@@ -284,6 +300,8 @@ export interface LayoutFragmentTree {
   parent(id: LayoutFragmentId): LayoutFragment | null;
   children(id: LayoutFragmentId): readonly LayoutFragment[];
   stacking(id: LayoutFragmentId): LayoutStackingMetadata;
+  /** Root attachment metadata; descendants inherit the nearest attached root. */
+  scrollAttachment(id: LayoutFragmentId): LayoutScrollAttachment | null;
   forFormattingNode(node: FormattingNodeId): readonly LayoutFragment[];
   forDocumentNode(node: DocumentNodeRef): readonly LayoutFragment[];
 }

@@ -6,9 +6,9 @@ import {
   type LayoutFragment
 } from "../layout/index.js";
 import type {
-  BuildTerminalDisplayListInput,
-  TerminalDisplayList,
-  TerminalDisplayListOutcome,
+  BuildDocumentDisplayListInput,
+  DocumentDisplayList,
+  DocumentDisplayListOutcome,
   TerminalPaintBudgets,
   TerminalPaintCommand
 } from "./types.js";
@@ -53,7 +53,7 @@ export function terminalPaintBudgets(value: Partial<TerminalPaintBudgets> | unde
   return Object.freeze(result as TerminalPaintBudgets);
 }
 
-export function validTerminalRenderContext(input: BuildTerminalDisplayListInput["context"]): boolean {
+export function validTerminalRenderContext(input: BuildDocumentDisplayListInput["context"]): boolean {
   const depth: unknown = input.colorDepth;
   const ambiguous: unknown = input.ambiguousWidth;
   return Number.isSafeInteger(input.columns) && input.columns > 0
@@ -164,7 +164,7 @@ function commandGroup(fragment: LayoutFragment): readonly Omit<TerminalPaintComm
   return commands;
 }
 
-export function buildTerminalDisplayList(input: BuildTerminalDisplayListInput): TerminalDisplayList {
+export function buildDocumentDisplayList(input: BuildDocumentDisplayListInput): DocumentDisplayList {
   const context = Object.freeze({ ...input.context });
   const budgets = terminalPaintBudgets(context.budgets);
   const rejection = !validTerminalRenderContext(context) ? "invalid-context" as const
@@ -246,7 +246,7 @@ export function buildTerminalDisplayList(input: BuildTerminalDisplayListInput): 
     return true;
   };
   const complete = paintStackingContext(input.layout.fragment(input.layout.root));
-  const outcome: TerminalDisplayListOutcome = !complete
+  const outcome: DocumentDisplayListOutcome = !complete
     ? {
         status: "truncated",
         commands: commands.length,
