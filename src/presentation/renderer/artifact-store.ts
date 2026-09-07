@@ -411,10 +411,6 @@ export class RenderArtifactStore {
         localMetrics.record(identity, elapsed);
         this.#instrumentation?.record(identity, elapsed);
       },
-      increment: (identity, count) => {
-        localMetrics.increment(identity, count);
-        this.#instrumentation?.increment(identity, count);
-      },
     } satisfies NonNullable<RenderArtifactStoreOptions["instrumentation"]>;
     const artifacts = this.#analyzeTransaction({
       ...request,

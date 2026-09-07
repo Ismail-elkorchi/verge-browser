@@ -16,8 +16,7 @@ export type RenderStage =
   | "viewport-display-list-construction"
   | "cell-rasterization"
   | "terminal-index-construction"
-  | "terminal-ui-element-tree-construction"
-  | "frame-commit";
+  | "terminal-ui-element-tree-construction";
 
 export interface RenderStageMeasurement {
   readonly stage: RenderStage;
@@ -27,7 +26,6 @@ export interface RenderStageMeasurement {
 
 export interface RenderInstrumentation {
   record(stage: RenderStage, elapsedMilliseconds: number): void;
-  increment(stage: RenderStage, count?: number): void;
 }
 
 export class RenderStageMetrics implements RenderInstrumentation {
@@ -40,18 +38,9 @@ export class RenderStageMetrics implements RenderInstrumentation {
     this.#values.set(stage, value);
   }
 
-  public increment(stage: RenderStage, count = 1): void {
-    const value = this.#values.get(stage) ?? { invocations: 0, elapsedMilliseconds: 0 };
-    value.invocations += Math.max(0, Math.floor(count));
-    this.#values.set(stage, value);
-  }
-
   public snapshot(): readonly RenderStageMeasurement[] {
     return Object.freeze([...this.#values].map(([stage, value]) => Object.freeze({ stage, ...value })));
   }
-
-  public count(stage: RenderStage): number { return this.#values.get(stage)?.invocations ?? 0; }
-  public reset(): void { this.#values.clear(); }
 }
 
 export function measured<T>(
@@ -63,20 +52,6 @@ export function measured<T>(
   const started = performance.now();
   try {
     return operation();
-  } finally {
-    instrumentation.record(stage, performance.now() - started);
-  }
-}
-
-export async function measuredAsync<T>(
-  instrumentation: RenderInstrumentation | undefined,
-  stage: RenderStage,
-  operation: () => Promise<T>,
-): Promise<T> {
-  if (instrumentation === undefined) return operation();
-  const started = performance.now();
-  try {
-    return await operation();
   } finally {
     instrumentation.record(stage, performance.now() - started);
   }

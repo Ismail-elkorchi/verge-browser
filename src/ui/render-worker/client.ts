@@ -245,6 +245,7 @@ export class RenderWorkerClient {
     const state = this.#cancellation.get(document.id);
     if (state === undefined) throw new Error(`Document ${document.id} is not attached to the rendering worker.`);
     const searchGeneration = Atomics.add(state.search, 0, 1) + 1;
+    const documentGeneration = Atomics.load(state.document, 0);
     const response = await this.#send({
       kind: "search-document",
       stateRevision: document.stateRevision,
@@ -252,7 +253,7 @@ export class RenderWorkerClient {
       requestId: this.#nextRequestId(),
       documentId: document.id,
       documentRevision: document.documentRevision,
-      documentGeneration: Atomics.load(state.document, 0),
+      documentGeneration,
       documentCancellation: state.document.buffer as SharedArrayBuffer,
       searchGeneration,
       searchCancellation: state.search.buffer as SharedArrayBuffer,
@@ -261,6 +262,13 @@ export class RenderWorkerClient {
       parameters,
     });
     if (response.kind !== "search-ready") throw new Error("The rendering worker returned an unexpected search response.");
+    if (this.#cancellation.get(document.id) !== state
+      || Atomics.load(state.document, 0) !== documentGeneration
+      || Atomics.load(state.search, 0) !== searchGeneration) {
+      const error = new Error("Search render job was superseded before delivery.");
+      error.name = "AbortError";
+      throw error;
+    }
     return response.result;
   }
 

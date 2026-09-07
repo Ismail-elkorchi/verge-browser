@@ -32,6 +32,12 @@ the same engine with new attachments, including full computed values, fragment
 geometry, cells, source ranges, actions, anchors, focus, and accessibility.
 No reference renderer or compatibility route is retained.
 
+A controlled transport also holds a completed search response until a newer
+query is requested. The client checks attachment and document/search generations
+at delivery, rejecting the obsolete result even when worker computation finished
+before cancellation. This reproduces the real-worker race caught during hosted
+qualification without depending on thread timing.
+
 ## Offline measurements
 
 Clean hosted measurement on 2026-09-07, Node 24, Linux, at

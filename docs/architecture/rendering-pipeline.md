@@ -221,8 +221,11 @@ minimum height. Release, reattachment, and worker replacement discard delivery
 state, so sending is never treated as acknowledgement.
 
 Logical search results carry document revision, relevant state revision, query,
-and search request generation. Logical match IDs contain no physical row. The
-bounded logical query cache has a separate dependency on computed text values
+and search request generation. The client rechecks document attachment and
+document/search generations after receiving a response: work completed before
+cancellation can still arrive after a replacement request. Logical match IDs
+contain no physical row. The bounded logical query cache has a separate
+dependency on computed text values
 and relevant control/disclosure state. It survives changes confined to fonts or
 layout geometry, including viewport-derived fonts and geometry-only focus; anchors are
 projected from those matches into the current layout revision. Resize and

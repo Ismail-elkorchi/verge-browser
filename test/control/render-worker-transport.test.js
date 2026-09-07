@@ -96,6 +96,28 @@ test("unexpected clean worker exit settles pending requests and records failure"
   } finally { await f.client.close(); }
 });
 
+test("a completed search arriving after its replacement request is rejected by generation", async () => {
+  const f = fixture();
+  try {
+    await attach(f);
+    const first = f.client.search(f.document, "earlier", parameters);
+    const requestA = f.worker.requests.at(-1);
+    // Work is complete, but its response is held at the transport boundary.
+    const responseA = { kind: "search-ready", requestId: requestA.requestId, result: { query: "earlier" } };
+    const latest = f.client.search(f.document, "latest", parameters);
+    const settled = Promise.allSettled([first, latest]);
+    f.worker.respond(responseA);
+    const requestB = f.worker.requests.at(-1);
+    f.worker.respond({ kind: "search-ready", requestId: requestB.requestId, result: { query: "latest" } });
+    const outcomes = await settled;
+    assert.equal(outcomes[0].status, "rejected");
+    assert.equal(outcomes[0].reason.name, "AbortError");
+    assert.equal(outcomes[1].status, "fulfilled");
+    assert.equal(outcomes[1].value.query, "latest");
+    assert.equal(f.client.pendingRequestCount, 0);
+  } finally { await f.client.close(); }
+});
+
 test("synchronous transport failure removes its pending request", async () => {
   const f = fixture();
   try {
