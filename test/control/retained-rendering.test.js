@@ -783,3 +783,71 @@ for (const [name, outer, inner, position, visible] of [
     } finally { retained.store.dispose(); }
   });
 }
+
+test("viewport paint admission preserves earlier cells when an overlapping wide glyph exceeds the cell budget", () => {
+  const fixture = attachedStore('<style>body{margin:0}span{position:absolute;left:16px;top:0}</style>abc<span>界</span>');
+  try {
+    const request = contexts(80, 24);
+    const rendered = fixture.store.renderViewport({
+      documentId: "document", documentRevision: 1, viewportRevision: 1, ...request,
+      terminalContext: { ...request.terminalContext, budgets: { maxRetainedPaintCells: 3 } },
+      window: { scrollRow: 0, viewportRows: 24, overscanBefore: 0, overscanAfter: 0 },
+    });
+    assert.equal(rendered.terminal.cellBuffer.outcome.status, "truncated");
+    assert.equal(rendered.terminal.cellBuffer.rows[0].text, "abc");
+    assert.equal(rendered.terminal.cellBuffer.outcome.cells, 3);
+    assert.equal(rendered.terminal.cellBuffer.rows[0].cells.reduce((cells, cell) => cells + cell.width, 0), 3);
+  } finally { fixture.store.dispose(); }
+});
+
+test("retained cost follows action, paint, semantic, and inline-analysis side caches through their owners", async () => {
+  const { estimatedRetainedCost } = await import("../../dist/memory/retained-cost.js");
+  const { buildFormattingTree, documentActionIdentity } = await import("../../dist/presentation/formatting/index.js");
+  const { compileStylesheetProgram, resolveStyles } = await import("../../dist/presentation/style/index.js");
+  const { buildInlineItemStreamSet } = await import("../../dist/presentation/text/index.js");
+  const { buildLayoutFragmentTree } = await import("../../dist/presentation/layout/index.js");
+  const fixture = attachedStore('<p><a id="cached" href="/cached">cached bidi אבג text</a></p>');
+  try {
+    const request = contexts(80, 24);
+    const program = compileStylesheetProgram({ document: fixture.document, resources: embeddedStylesheetSources(fixture.document) });
+    const styles = resolveStyles({ program, state: fixture.state, environment: request.mediaEnvironment });
+    const formatting = buildFormattingTree({ document: fixture.document, state: fixture.state, styles });
+    const initial = estimatedRetainedCost([formatting]);
+    documentActionIdentity(formatting, fixture.document.elementById("cached"));
+    assert.ok(estimatedRetainedCost([formatting]) > initial, "action-identity cache owner");
+    const streams = buildInlineItemStreamSet(formatting);
+    const formattingCost = estimatedRetainedCost([formatting]);
+    const streamCost = estimatedRetainedCost([streams.streams]);
+    buildLayoutFragmentTree({ formatting, inlineItemStreams: streams, context: request.layoutContext });
+    assert.ok(estimatedRetainedCost([formatting]) > formattingCost, "paint/semantic cache owners without a retained layout root");
+    assert.ok(estimatedRetainedCost([streams.streams]) > streamCost, "inline analysis cache owner without a retained layout root");
+    assert.equal(estimatedRetainedCost([formatting, formatting]), estimatedRetainedCost([formatting]), "shared owners counted once");
+  } finally { fixture.store.dispose(); }
+});
+
+test("semantic rectangle ownership survives zero-area fragments before fixed link content", () => {
+  const fixture = attachedStore('<style>body{margin:0}.fixed{position:fixed;left:80px;top:0}</style><a href="/fixed" style="display:block;width:0;height:0"><span class="fixed" style="width:16px;height:16px;background:red"></span></a><main style="height:1000px">flow</main>');
+  try {
+    render(fixture.store, 1);
+    const rendered = render(fixture.store, 2, { scrollRow: 10, overscanBefore: 0, overscanAfter: 0 });
+    assert.ok(rendered.terminal.cellBuffer.rows.some((row) => row.cells.some((cell) => cell.style.background?.r === 255)));
+    const fresh = attachedStore(fixture.document.sourceText);
+    try {
+      const expected = render(fresh.store, 1, { scrollRow: 10, overscanBefore: 0, overscanAfter: 0 });
+      assert.deepEqual(comparableRendering(fixture.store, rendered, 80, 24), comparableRendering(fresh.store, expected, 80, 24));
+    } finally { fresh.store.dispose(); }
+    assert.ok(rendered.terminal.hitTestIndex.regions.some((region) => region.action?.destination?.endsWith("/fixed")));
+    assert.ok(rendered.terminal.focusMap.targets.some((target) => target.action?.destination?.endsWith("/fixed")));
+  } finally { fixture.store.dispose(); }
+});
+
+test("wrapped link hit regions follow inline continuations rather than their bounding rectangle", () => {
+  const fixture = attachedStore('<style>body,p{margin:0}p{width:32px}a{background:red}</style><p><a href="/wrapped">abcd ef</a></p>');
+  try {
+    const rendered = render(fixture.store, 1, { overscanBefore: 0, overscanAfter: 0 });
+    assert.equal(rendered.terminal.cellBuffer.rows[0].text, "abcd");
+    assert.equal(rendered.terminal.cellBuffer.rows[1].text, "ef");
+    assert.ok(rendered.terminal.hitTestIndex.at(1, 1)?.action.destination.endsWith("/wrapped"));
+    assert.equal(rendered.terminal.hitTestIndex.at(1, 3), null);
+  } finally { fixture.store.dispose(); }
+});

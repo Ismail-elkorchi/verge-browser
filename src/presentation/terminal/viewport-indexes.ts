@@ -58,20 +58,20 @@ function cssRectsToCellRects(
   return Object.freeze(results);
 }
 
-function resolvedViewportRects(
+function resolvedViewportGeometry(
   rects: readonly CssRect[],
   fragments: readonly LayoutFragmentId[],
   displayList: ViewportDisplayList,
-): readonly TerminalCellRect[] {
-  const resolved = rects.map((rect, index) => {
-    const fragment = fragments[index] ?? fragments[0];
-    if (fragment === undefined) return rect;
+): readonly { readonly rect: TerminalCellRect; readonly fragment: LayoutFragmentId }[] {
+  return rects.flatMap((rect, index) => {
+    const fragment = fragments[index];
+    if (fragment === undefined) throw new Error("Semantic rectangle is missing its layout owner.");
     const attachment = inheritedScrollAttachment(displayList.documentDisplayList.layout, fragment);
     const [inline, block] = attachment === null ? [0, 0] : scrollAttachmentTranslation(attachment, displayList.viewportRect);
-    return cssIntersection(translatedScrollAttachedRect(rect, inline, block),
+    const resolved = cssIntersection(translatedScrollAttachedRect(rect, inline, block),
       scrollAttachedClipRect(displayList.documentDisplayList.layout, fragment, displayList.viewportRect));
+    return cssRectsToCellRects([resolved], displayList).map((cellRect) => ({ rect: cellRect, fragment }));
   });
-  return cssRectsToCellRects(resolved, displayList);
 }
 
 function retainTruncation(
@@ -255,37 +255,28 @@ export function buildViewportTerminalResult(input: BuildViewportTerminalResultIn
   const focusCandidates = new Map(input.documentGeometry
     .focusIntersecting(input.displayList.windowRect, input.signal)
     .map((target) => [target.node, target]));
-  const actionPaintOrder = new Map<DocumentNodeRef, {
-    readonly paintOrder: number;
-    readonly layoutFragment: LayoutFragmentId;
-  }>();
+  const actionPaintOrder = new Map<DocumentNodeRef, number>();
   for (const command of input.displayList.commands) {
     if (command.action === null) continue;
     const commandRects = rectsByCommand.get(command.id) ?? [];
     const actionRects = rectsByActionNode.get(command.action.node) ?? [];
     actionRects.push(...commandRects);
     rectsByActionNode.set(command.action.node, actionRects);
-    actionPaintOrder.set(command.action.node, {
-      paintOrder: command.paintOrder,
-      layoutFragment: command.layoutFragment,
-    });
+    actionPaintOrder.set(command.action.node, command.paintOrder);
     const target = input.documentGeometry.focusForNode(command.action.node);
     if (target !== null) focusCandidates.set(command.action.node, target);
   }
   const hitRegions: TerminalHitRegion[] = [];
   const hitCandidates = [...focusCandidates.values()].sort((left, right) =>
-    (actionPaintOrder.get(left.node)?.paintOrder ?? -1)
-      - (actionPaintOrder.get(right.node)?.paintOrder ?? -1));
+    (actionPaintOrder.get(left.node) ?? -1)
+      - (actionPaintOrder.get(right.node) ?? -1));
   for (const target of hitCandidates) {
-    const rects = resolvedViewportRects(target.rects, target.layoutFragments, input.displayList);
-    for (const [index, rect] of rects.entries()) {
+    const geometry = resolvedViewportGeometry(target.rects, target.rectFragments, input.displayList);
+    for (const [index, { rect, fragment: layoutFragment }] of geometry.entries()) {
       if (hitRegions.length >= budgets.maxRetainedHitTestRegions) {
         retainTruncation(truncations, "maxRetainedHitTestRegions", budgets.maxRetainedHitTestRegions);
         break;
       }
-      const layoutFragment = target.layoutFragments[index] ?? target.layoutFragments[0]
-        ?? actionPaintOrder.get(target.node)?.layoutFragment;
-      if (layoutFragment === undefined) continue;
       hitRegions.push(Object.freeze({
         id: `viewport-hit-region:${target.node}:${String(index)}`,
         action: target.action,
@@ -297,7 +288,7 @@ export function buildViewportTerminalResult(input: BuildViewportTerminalResultIn
   const focusTargets: TerminalFocusTarget[] = [];
   let focusRectangles = 0;
   for (const target of focusCandidates.values()) {
-    const rects = resolvedViewportRects(target.rects, target.layoutFragments, input.displayList);
+    const rects = resolvedViewportGeometry(target.rects, target.rectFragments, input.displayList).map((entry) => entry.rect);
     if (rects.length === 0) continue;
     if (focusRectangles + rects.length > budgets.maxRetainedFocusRectangles) {
       retainTruncation(truncations, "maxRetainedFocusRectangles", budgets.maxRetainedFocusRectangles);
@@ -346,17 +337,17 @@ export function buildViewportTerminalResult(input: BuildViewportTerminalResultIn
       );
       break;
     }
-    const semanticRects = resolvedViewportRects(entry.rects, entry.rectFragments, input.displayList);
+    const semanticRects = resolvedViewportGeometry(entry.rects, entry.rectFragments, input.displayList).map((value) => value.rect);
     const candidateRects = [...semanticRects];
     const visibleAccessibilityRect = visibleAccessibilityRects.get(entry.documentNode);
     if (visibleAccessibilityRect !== undefined) candidateRects.push(visibleAccessibilityRect);
     const semanticFocus = input.documentGeometry.focusForNode(entry.documentNode);
     if (semanticFocus !== null) {
-      candidateRects.push(...resolvedViewportRects(
+      candidateRects.push(...resolvedViewportGeometry(
         semanticFocus.rects,
-        semanticFocus.layoutFragments,
+        semanticFocus.rectFragments,
         input.displayList,
-      ));
+      ).map((value) => value.rect));
     }
     candidateRects.push(...rectsByActionNode.get(entry.documentNode) ?? []);
     candidateRects.push(...rectsByNode.get(entry.documentNode) ?? []);

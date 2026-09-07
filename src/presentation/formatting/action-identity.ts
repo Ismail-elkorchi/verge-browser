@@ -1,3 +1,4 @@
+import { registerRetainedOwner } from "../../memory/retained-cost.js";
 import type { DocumentNodeRef } from "../../document/index.js";
 import type { DocumentActionIdentity, FormattingTree } from "./types.js";
 
@@ -19,6 +20,7 @@ export function documentActionIdentity(
   if (cache === undefined) {
     cache = new Map<DocumentNodeRef, DocumentActionIdentity | null>();
     ACTION_IDENTITY_CACHE.set(tree, cache);
+    registerRetainedOwner(tree, [cache]);
   }
   if (cache.has(source)) return cache.get(source) ?? null;
   const visited: DocumentNodeRef[] = [];

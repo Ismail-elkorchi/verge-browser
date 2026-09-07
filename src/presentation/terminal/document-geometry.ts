@@ -146,10 +146,10 @@ class GeometrySpatialIndex<T> {
   }
 }
 
-function visibleBorderRect(fragment: LayoutFragment): CssRect | null {
-  if (!fragment.style.visible) return null;
-  const rect = fragment.borderRect;
-  return rect.width > 0 && rect.height > 0 ? rect : null;
+function fragmentBorderRects(fragment: LayoutFragment): readonly CssRect[] {
+  return fragment.kind !== "text" && fragment.inlineContinuations !== undefined
+    ? fragment.inlineContinuations.map((continuation) => continuation.borderRect)
+    : [fragment.borderRect];
 }
 
 class ImmutableDocumentGeometryIndex implements DocumentGeometryIndex {
@@ -301,8 +301,8 @@ function attachedGeometry<T>(
     const valueFragments = fragments(value);
     const envelopes: CssRect[] = [];
     for (const [index, rect] of rects(value).entries()) {
-      const fragment = valueFragments[index] ?? valueFragments[0];
-      if (fragment === undefined) continue;
+      const fragment = valueFragments[index];
+      if (fragment === undefined) throw new Error("Semantic rectangle is missing its layout owner.");
       const attachment = inheritedAttachment(layout, fragment);
       if (attachment !== null) envelopes.push(attachmentEnvelope(rect, attachment, documentExtent));
     }
@@ -333,6 +333,7 @@ export function buildDocumentGeometryIndex(
     fragments: LayoutFragmentId[];
     fragmentSet: Set<LayoutFragmentId>;
     rects: CssRect[];
+    rectFragments: LayoutFragmentId[];
   }>();
   const ensure = (node: DocumentNodeRef): MutableGeometry => {
     const value = geometry.get(node) ?? { fragments: [], fragmentSet: new Set(), rects: [] };
@@ -365,15 +366,16 @@ export function buildDocumentGeometryIndex(
   for (const [index, id] of layoutFragments.entries()) {
     if ((index & 255) === 0) signal?.throwIfAborted();
     const fragment = list.layout.fragment(id);
-    const actionRect = visibleBorderRect(fragment);
-    const geometryRect = fragment.style.visible ? fragment.borderRect : null;
+    const rectangles = fragment.style.visible ? fragmentBorderRects(fragment) : [];
     if (fragment.documentNode !== null) {
       const value = ensure(fragment.documentNode);
       retainFragment(value, fragment.id);
-      if (geometryRect !== null && retainedRectangles < budgets.maxRetainedDocumentRectangles) {
-        value.rects.push(geometryRect);
-        retainedRectangles += 1;
-      } else if (geometryRect !== null) truncated("maxRetainedDocumentRectangles", budgets.maxRetainedDocumentRectangles);
+      for (const rect of rectangles) {
+        if (retainedRectangles < budgets.maxRetainedDocumentRectangles) {
+          value.rects.push(rect);
+          retainedRectangles += 1;
+        } else truncated("maxRetainedDocumentRectangles", budgets.maxRetainedDocumentRectangles);
+      }
     }
     if (fragment.action === null) continue;
     const control = document.control(fragment.action.node);
@@ -383,16 +385,19 @@ export function buildDocumentGeometryIndex(
       fragments: [],
       fragmentSet: new Set(),
       rects: [],
+      rectFragments: [],
     };
     if (!value.fragmentSet.has(fragment.id)) {
       value.fragmentSet.add(fragment.id);
       value.fragments.push(fragment.id);
     }
-    if (actionRect !== null && retainedFocusRectangles < budgets.maxRetainedFocusRectangles) {
-      value.rects.push(actionRect);
-      retainedFocusRectangles += 1;
-    } else if (actionRect !== null) {
-      truncated("maxRetainedFocusRectangles", budgets.maxRetainedFocusRectangles);
+    for (const rect of rectangles) {
+      if (rect.width <= 0 || rect.height <= 0) continue;
+      if (retainedFocusRectangles < budgets.maxRetainedFocusRectangles) {
+        value.rects.push(rect);
+        value.rectFragments.push(fragment.id);
+        retainedFocusRectangles += 1;
+      } else truncated("maxRetainedFocusRectangles", budgets.maxRetainedFocusRectangles);
     }
     focus.set(fragment.action.node, value);
   }
@@ -470,6 +475,7 @@ export function buildDocumentGeometryIndex(
         action: focusValue.action,
         layoutFragments: Object.freeze(focusValue.fragments),
         rects: Object.freeze(focusValue.rects),
+        rectFragments: Object.freeze(focusValue.rectFragments),
         label: document.semantic(node)?.accessibleName || "Action",
       }));
     }
@@ -485,9 +491,10 @@ export function buildDocumentGeometryIndex(
     for (const fragmentId of value.fragments) {
       const fragment = list.layout.fragment(fragmentId);
       if (!fragment.style.visible) continue;
-      const candidate = fragment.borderRect;
-      semanticRects.push(candidate);
-      semanticRectFragments.push(fragmentId);
+      for (const rect of fragmentBorderRects(fragment)) {
+        semanticRects.push(rect);
+        semanticRectFragments.push(fragmentId);
+      }
     }
     if (rect === null) {
       const fragment = value.fragments[0] === undefined ? null : list.layout.fragment(value.fragments[0]);
@@ -520,7 +527,7 @@ export function buildDocumentGeometryIndex(
     focusOrder,
     attachedGeometry(
       focusOrder,
-      (entry) => entry.layoutFragments,
+      (entry) => entry.rectFragments,
       (entry) => entry.rects,
       list.layout,
       extent,

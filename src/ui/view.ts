@@ -1371,13 +1371,10 @@ function findBar(state: BrowserTuiState): Element<BrowserTuiMessage> | null {
   });
 }
 
-function baseView(state: BrowserTuiState, columns: number, rows: number): Element<BrowserTuiMessage> {
+function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMessage> {
   const selected = state.documents[state.activeDocumentIndex] ?? state.documents[0];
   if (!selected) throw new Error("The browser view requires an open document.");
   const selectedUrl = selected.kind === "ready" ? selected.snapshot.finalUrl : selected.requestedUrl;
-  const pageColumns = state.sidePanel !== null && columns >= 100 ? columns - 41 : columns;
-  void pageColumns;
-  void rows;
   const ready = selected.kind === "ready" ? selected : null;
   const terminalRender = ready === null ? null : committedBrowserViewport(ready);
   const incompleteRendering = terminalRender?.cellBuffer.outcome.status === "rejected"
@@ -1622,7 +1619,7 @@ export function browserView(
   state: BrowserTuiState,
   context: Pick<TuiContext, "terminalSize"> = { terminalSize: { columns: 80, rows: 24 } }
 ): Element<BrowserTuiMessage> {
-  const base = baseView(state, context.terminalSize.columns, context.terminalSize.rows);
+  const base = baseView(state, context.terminalSize.columns);
   if (state.overlay === null || state.overlay.kind === "browserMenu") return base;
   const transient = state.overlay.kind === "actionPalette"
     ? actionPaletteView(state.overlay)

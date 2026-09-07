@@ -306,6 +306,7 @@ export interface DocumentGeometryEntry {
 }
 
 export interface DocumentFocusGeometry {
+  readonly rectFragments: readonly LayoutFragmentId[];
   readonly node: DocumentNodeRef;
   readonly action: DocumentActionIdentity;
   readonly layoutFragments: readonly LayoutFragmentId[];

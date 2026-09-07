@@ -19,7 +19,9 @@ syntax-tree regressions remain required.
 | Logical matches retain physical rows | Matches carry document/state/query/request identities; layout anchors are separate. Resize and geometry-only state changes retain logical indexes through an independent computed-text dependency; anchors are reprojected. Control edits, same-query reopen, obsolete completion, navigation, and inactive-tab controls reject stale anchors. |
 | Unordered attachment preparation and obsolete cold work | Serialized document lifecycles validate revisions and worker epochs before and after acknowledgements. A bounded worker queue prioritizes cleanup then the active document. Controlled transport barriers cover release, repeated navigation, cold/warm switches, clean exits, crashes, clone failures, and concurrent close. |
 | Disposal queued behind cold work | Close first rejects new work, cancels all generations and queued jobs, then gives graceful cleanup 250 ms before termination. Real pipeline checkpoints cover active compilation, layout, and rasterization; controller transport controls prove settlement and the benchmark measures full disposal. |
-| Uncharged owners and oversized active exemption | Weak ownership metadata charges private roots, shared allocations once, opaque parser estimates, partial prefixes, attachments, private immutable control/disclosure state, queries, and client transfers/viewports. Admission rejects oversize results and preserves the committed viewport. Release, reanalysis, resize sharing, many attachments/queries, and forced-GC reachability are controlled. |
+| Uncharged owners and oversized active exemption | Weak ownership metadata charges private roots, shared allocations once, opaque parser estimates, partial prefixes, attachments, private immutable control/disclosure state, weak action/paint/semantic/inline-analysis side caches, queries, and client transfers/viewports. Admission rejects oversize results and preserves the committed viewport. Release, reanalysis, resize sharing, many attachments/queries, and forced-GC reachability are controlled. |
+| Semantic rectangles lose fragment ownership when zero-area boxes are omitted | Each focus rectangle retains its exact layout fragment through clipping and cell conversion. Wrapped inline rectangles follow their continuations. Fixed empty-link and wrapped-link gap regressions verify painted actions. |
+| Paint admission mutates cells before accepting an overlapping glyph | Reserve the complete replacement cost before changing ownership. A rejected wide glyph retains the earlier cells and accurate retained-cell count. |
 | Accidental rectangle containment determines sticky clipping | Layout owns persistent clip chains. Paint and semantic geometry translate each clip by its owner's attachment. Ancestor/descendant sticky clips, fixed viewport clips, absolute containing-block overflow, explicit ancestor clips, nested positioning, bidi, inline backgrounds, tables, and Grid have retained-versus-new-attachment comparisons. |
 
 The original checkout failed 13 of 14 selected dependency, admission, clipping,
@@ -36,7 +38,13 @@ not claims about all terminals or hardware. `npm run test:bench` regenerates
 `reports/incremental-rendering-bench.json` during clean release qualification.
 The independently authored MIT fixture has 2,000 sections; timing distributions
 use 21 samples. It supplies a separate small offline new-tab page. Existing
-timing thresholds are unchanged; this run passed every timing gate.
+timing thresholds are unchanged; that development run passed every timing gate.
+A later local diagnostic after side-cache accounting measured a 72,757.81 ms
+first usable frame and 184.29 ms complete shutdown. It exceeded the 30-second
+first-frame wait, so it does not qualify the release. Qualification of the exact final HEAD runs on the clean hosted runner using
+the unchanged gates. Its downloadable reports and the results recorded in
+[PR #136](https://github.com/Ismail-elkorchi/verge-browser/pull/136) are authoritative
+for final timing and retained-cost estimates.
 
 | Interaction | p50 or single measurement (ms) | p95 (ms) |
 | --- | ---: | ---: |
@@ -78,11 +86,13 @@ bytes retained after GC, a sampled 1,013,362,784-byte heap peak, and a
 under the default 512 MiB budget. Default admission rejection is independently
 tested; the fixture's content and CSS support are unchanged.
 
-The full latency run retained two resize layouts sharing upstream artifacts:
+The earlier development latency run retained two resize layouts sharing upstream
+artifacts. Its cost estimate predates the weak side-cache audit; use the final
+hosted report for the complete owner estimate:
 
 | Memory measure | Bytes |
 | --- | ---: |
-| Retained allocation estimate | 958,699,068 |
+| Earlier retained allocation estimate (before side-cache audit) | 958,699,068 |
 | Worker heap after forced GC | 803,940,792 |
 | Sampled allocation peak heap | 1,402,659,672 |
 | Client retained viewport/summary estimate | 8,331,902 |
@@ -102,9 +112,10 @@ exact reviewed HEAD. It includes lint, strict TypeScript, Unicode and all
 unit/control/CSS conformance tests, CLI/interactive tests, compatibility corpus,
 528 deterministic release-fuzz cases, Node/Deno/Bun parity, docs/JSR, examples,
 benchmarks, audit, packed-consumer worker verification, and npm/JSR dry-runs.
-Hosted CI additionally runs Node 24/26 on Linux/macOS/Windows, dependency review,
-and both CodeQL suites. The PR records the exact qualified commit and hosted
-results; earlier successful checks do not qualify a later commit.
+Hosted CI checks out the exact PR HEAD and runs Node 24/26 on
+Linux/macOS/Windows, dependency review, and both CodeQL suites. Release
+qualification uploads its HEAD/tree record and benchmark reports. The PR records
+the exact qualified commit and hosted results; earlier successful checks do not qualify a later commit.
 
 Cold selector resolution, full resize layout, graph-cost traversal at admission,
 and logical match projection remain measurable costs owned by style, layout,

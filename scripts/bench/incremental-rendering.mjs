@@ -262,7 +262,12 @@ async function tuiMeasurements(html) {
   const firstFrameStarted = performance.now();
   try {
     await waitUntil(
-      () => runtime.state().documents[0]?.rendering?.status === "ready",
+      () => {
+        const tab = runtime.state().documents[0];
+        if (tab?.kind === "failed") throw new Error(`Active page navigation failed: ${tab.error}`);
+        if (tab?.rendering?.status === "failed") throw new Error(`Active page rendering failed: ${tab.rendering.error}`);
+        return tab?.rendering?.status === "ready";
+      },
       "active page first frame",
     );
     const firstFrameMs = performance.now() - firstFrameStarted;

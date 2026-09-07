@@ -1,17 +1,19 @@
 interface RetainedOwner {
-  readonly roots: () => readonly unknown[];
+  readonly roots: readonly unknown[] | (() => readonly unknown[]);
   readonly opaqueBytes: () => number;
 }
 
-const retainedOwners = new WeakMap<object, RetainedOwner>();
+const retainedOwners = new WeakMap<object, RetainedOwner[]>();
 
-/** Registers private allocation roots without keeping their owner alive. */
+/** Registers independent private or side-cache roots without keeping their owner alive. */
 export function registerRetainedOwner(
   owner: object,
-  roots: () => readonly unknown[],
+  roots: readonly unknown[] | (() => readonly unknown[]),
   opaqueBytes: () => number = () => 0,
 ): void {
-  retainedOwners.set(owner, { roots, opaqueBytes });
+  const registrations = retainedOwners.get(owner) ?? [];
+  registrations.push({ roots, opaqueBytes });
+  retainedOwners.set(owner, registrations);
 }
 
 /** Estimated allocation cost, not exact heap usage; shared objects are visited once. */
@@ -35,9 +37,8 @@ export function estimatedRetainedCost(roots: readonly unknown[], signal?: Pick<A
     if ((checkpoints++ & 1023) === 0) signal?.throwIfAborted();
     const value = pending.pop();
     if (value === undefined) continue;
-    const owner = retainedOwners.get(value);
-    if (owner !== undefined) {
-      for (const root of owner.roots()) charge(root);
+    for (const owner of retainedOwners.get(value) ?? []) {
+      for (const root of typeof owner.roots === "function" ? owner.roots() : owner.roots) charge(root);
       bytes += owner.opaqueBytes();
     }
     if (value instanceof Map) {

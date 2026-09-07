@@ -514,22 +514,17 @@ export function rasterizeViewportDisplayList(
           if (previous !== undefined && !collided.includes(previous)) collided.push(previous);
         }
         let removed = 0;
-        for (const previous of collided) {
-          for (let column = previous.column; column < safeAdd(previous.column, previous.width); column += 1) {
-            if (row[column] === previous) {
-              row[column] = undefined;
-              removed += 1;
-            }
-          }
-        }
-        let added = 0;
-        for (let column = unit.column; column < safeAdd(unit.column, unit.width); column += 1) {
-          if (row[column] === undefined) added += 1;
-        }
-        if (retainedCells - removed + added > budgets.maxRetainedPaintCells) {
+        for (const previous of collided) removed += previous.width;
+        const projectedCells = retainedCells - removed + unit.width;
+        if (projectedCells > budgets.maxRetainedPaintCells) {
           addTruncation(truncations, "maxRetainedPaintCells", budgets.maxRetainedPaintCells);
           paintStopped = true;
           break;
+        }
+        for (const previous of collided) {
+          for (let column = previous.column; column < safeAdd(previous.column, previous.width); column += 1) {
+            row[column] = undefined;
+          }
         }
         const under = collided[0];
         const painted: PaintedUnit = {
@@ -537,7 +532,7 @@ export function rasterizeViewportDisplayList(
           actualStyle: styleFor(command, under)
         };
         for (let column = unit.column; column < safeAdd(unit.column, unit.width); column += 1) row[column] = painted;
-        retainedCells = retainedCells - removed + added;
+        retainedCells = projectedCells;
       }
       generatedUnits += generation.generated;
       if (!paintStopped && generation.truncated) {

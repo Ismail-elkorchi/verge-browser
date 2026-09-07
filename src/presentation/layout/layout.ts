@@ -462,6 +462,7 @@ function formattingCache<K, V>(
   if (cached !== undefined) return cached;
   const created = new Map<K, V>();
   caches.set(formatting, created);
+  registerRetainedOwner(formatting, [created]);
   return created;
 }
 
@@ -929,6 +930,7 @@ class LayoutBuilder {
     if (cache === undefined) {
       cache = new Map<string, InlineTextAnalysis>();
       INLINE_TEXT_ANALYSIS_CACHE.set(stream, cache);
+      registerRetainedOwner(stream, [cache]);
     }
     const cacheKey = [
       direction,

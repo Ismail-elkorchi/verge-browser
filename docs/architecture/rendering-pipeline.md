@@ -446,10 +446,19 @@ not segment, line-break, or run the bidi algorithm. Terminal emulators remain
 responsible for glyph shaping; correct Arabic bidi order does not imply that
 Verge implements an Arabic shaping engine.
 
+Viewport paint admission checks replacement cost before removing earlier cell
+owners, preserving the painted prefix when a new unit exceeds its budget.
+
+Weak action-identity, paint-style, semantic-ancestor, and inline-analysis caches
+register independent retained roots on their formatting tree or inline stream.
+Multiple registrations preserve each owner; shared allocations are visited once.
+
 Layout retains linked clip-owner chains. Clip translation follows the owning
 fragment's attachment rather than rectangle containment; ancestor clips remain
 independent of sticky descendants. Paint, focus, hit testing, and accessibility
-resolve the same clip ownership against the current viewport. Overflow clips
+resolve the same clip ownership against the current viewport. Each semantic
+rectangle keeps its own layout fragment, including after other rectangles are
+clipped out. Wrapped inline rectangles follow the individual continuations. Overflow clips
 follow the positioned containing block; fixed boxes own a viewport clip. Explicit
 CSS clips retain their ancestor ownership across these attachment boundaries.
 This follows the [CSS overflow containing-block rule](https://www.w3.org/TR/CSS2/visufx.html#overflow).
