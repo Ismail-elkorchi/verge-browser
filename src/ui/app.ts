@@ -483,8 +483,7 @@ function focusedControlActionId(
   return control === null ? null : `control:${control.node}`;
 }
 
-function pageText(document: BrowserDocumentState, columns: number): string {
-  void columns;
+function pageText(document: BrowserDocumentState): string {
   return document.snapshot.document.text(document.snapshot.document.root);
 }
 
@@ -756,7 +755,6 @@ function runCommand(
   command: BrowserCommand,
   context: Pick<TuiContext, "terminalSize">,
 ): TuiUpdateResult<BrowserTuiState, BrowserTuiMessage> {
-  const columns = contentColumns(state, context.terminalSize.columns);
   if (command.kind === "invalid") {
     return result({
       ...state,
@@ -840,7 +838,7 @@ function runCommand(
     case "save-text":
       return result({ ...state, overlay: null }, { effects: [effect("save-text", async () => ({
         kind: "operationComplete",
-        status: await controller.saveText(command.path, pageText(document, columns))
+        status: await controller.saveText(command.path, pageText(document))
       }))] });
     case "open-external":
       return updateBrowser(controller, state, { kind: "openExternal" }, context);

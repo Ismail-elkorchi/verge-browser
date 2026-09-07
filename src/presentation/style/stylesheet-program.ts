@@ -334,7 +334,7 @@ export function compileStylesheetProgram(input: CompileStylesheetProgramInput): 
     predeclaredLayers: Object.freeze([]),
   })];
   const truncatedBudgets = new Set<keyof StyleBudgets>();
-  let retainedByteSize = 0;
+  let stylesheetByteSize = 0;
   const ordered = [...input.resources].sort((left, right) =>
     left.rootOrder - right.rootOrder || left.dependencyOrder - right.dependencyOrder
   );
@@ -348,7 +348,7 @@ export function compileStylesheetProgram(input: CompileStylesheetProgramInput): 
       truncatedBudgets.add("maxInlineStylesheetBytes");
       continue;
     }
-    if (retainedByteSize + resource.byteSize > limits.maxStylesheetBytes) {
+    if (stylesheetByteSize + resource.byteSize > limits.maxStylesheetBytes) {
       truncatedBudgets.add("maxStylesheetBytes");
       break;
     }
@@ -367,7 +367,7 @@ export function compileStylesheetProgram(input: CompileStylesheetProgramInput): 
       layer: resource.importLayer,
       predeclaredLayers: resource.predeclaredLayers,
     }));
-    retainedByteSize += resource.byteSize;
+    stylesheetByteSize += resource.byteSize;
   }
   const compiledSelectors = new Map<CssQualifiedRule, readonly CompiledSelectorProgram[]>();
   const compiledDeclarations = new Map<CssDeclaration, CompiledDeclarationProgram>();
@@ -444,15 +444,13 @@ export function compileStylesheetProgram(input: CompileStylesheetProgramInput): 
     authorStateDependencies,
     dependencies,
     diagnostics: Object.freeze(diagnostics),
-    authorStylesheetCount: sources.length - 1,
-    retainedByteSize,
     fingerprint,
     truncatedBudgets,
   });
   // External sessions expose counts, not their private allocations. Charge explicit estimates.
   registerRetainedOwner(program.selectorRuntime, () => [], () =>
     (Number(program.selectorRuntime.authorSession !== null) + Number(program.selectorRuntime.userAgentSession !== null))
-      * (nodes.totalNodes * 640 + retainedByteSize * 4));
+      * (nodes.totalNodes * 640 + stylesheetByteSize * 4));
   registerRetainedOwner(program.propertyValidation, () => [], () => {
     return program.propertyValidation.statistics().entries * (512 + (validationValueSizes.get(program.propertyValidation) ?? 0) * 8);
   });

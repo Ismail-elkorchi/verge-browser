@@ -387,8 +387,6 @@ export interface StylesheetProgram {
   readonly authorStateDependencies: ReadonlySet<SelectorStateDependency>;
   readonly dependencies: StylesheetProgramDependencies;
   readonly diagnostics: readonly StyleDiagnostic[];
-  readonly authorStylesheetCount: number;
-  readonly retainedByteSize: number;
   readonly fingerprint: string;
   readonly truncatedBudgets: ReadonlySet<keyof StyleBudgets>;
 }
@@ -445,6 +443,8 @@ export interface StyleValueDependencies {
 }
 
 export interface StyleSnapshot {
+  /** Exact identity of computed values that affect formatting participation or logical text. */
+  readonly logicalTextDependency: string;
   readonly valueDependencies: StyleValueDependencies;
   readonly document: IndexedWebDocumentSnapshot;
   readonly environment: MediaEnvironment;

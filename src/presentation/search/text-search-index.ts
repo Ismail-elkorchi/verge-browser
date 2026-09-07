@@ -290,17 +290,6 @@ export function buildTextSearchIndex(
   return new ImmutableTextSearchIndex(parts.join(""), segments);
 }
 
-/** Maps logical search matches to the visual text fragments created by layout. */
-export function mapTextSearchMatchesToLayout(
-  index: TextSearchIndex,
-  layout: LayoutFragmentTree,
-  query: string,
-  limit: number,
-  signal?: AbortSignal,
-): readonly TextSearchLayoutSpan[] {
-  return projectTextSearchToLayout(index, layout, query, limit, signal).spans;
-}
-
 /** Retains one logical query and its fragment mapping for viewport projection. */
 export function projectTextSearchToLayout(
   index: TextSearchIndex,

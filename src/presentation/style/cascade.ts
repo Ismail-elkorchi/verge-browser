@@ -183,8 +183,6 @@ const NAMED_COLORS: Readonly<Record<string, CssColor>> = Object.freeze({
   yellow: { r: 255, g: 255, b: 0, a: 1 }
 });
 
-type StylesheetSource = StylesheetProgramSource;
-
 interface CascadeLayerPosition {
   readonly identity: string;
   readonly orderPath: readonly number[];
@@ -686,7 +684,7 @@ function recordCandidate(
   key: string,
   declaration: CssDeclaration,
   program: CompiledDeclarationProgram,
-  source: StylesheetSource,
+  source: StylesheetProgramSource,
   specificity: SelectorSpecificity,
   sourceOrder: number,
   elementAttached: boolean,
@@ -990,7 +988,7 @@ export function implementationSupportsCondition(value: string): boolean {
 
 function collectCandidates(
   input: ResolveStylesInput,
-  sources: readonly StylesheetSource[],
+  sources: readonly StylesheetProgramSource[],
   styleNodes: readonly DocumentNodeRef[],
   totalNodes: number,
   limits: StyleBudgets,
@@ -1259,7 +1257,7 @@ function collectCandidates(
     visitRules(source.stylesheet.rules, sourceLayer);
   }
 
-  const inlineSource: StylesheetSource = {
+  const inlineSource: StylesheetProgramSource = {
     sourceUrl: "inline-style",
     origin: "author",
     stylesheet: sources[0]?.stylesheet ?? (() => { throw new Error("Missing UA stylesheet"); })(),
@@ -2818,6 +2816,7 @@ function computeStyle(
 }
 
 class ImmutableStyleSnapshot implements StyleSnapshot {
+  readonly logicalTextDependency: string;
   readonly valueDependencies: StyleSnapshot["valueDependencies"];
   readonly document: IndexedWebDocumentSnapshot;
   readonly environment: ResolveStylesInput["environment"];
@@ -2838,6 +2837,13 @@ class ImmutableStyleSnapshot implements StyleSnapshot {
       computedViewportInlineSize: true, computedViewportBlockSize: true, usedViewportBlockSize: true,
     }
   ) {
+    const textDependency = ([identity, style]: readonly [string, ComputedStyle]): readonly unknown[] => [
+      identity, style.display, style.visibility, style.listStyleType, style.generatedContent,
+      style.text.whiteSpace, style.text.textTransform, style.box.position, style.box.float,
+    ];
+    this.logicalTextDependency = JSON.stringify([
+      [...styles].map(textDependency), [...pseudos].map(textDependency),
+    ]);
     this.valueDependencies = Object.freeze({ ...valueDependencies });
     this.document = input.program.document;
     this.environment = Object.freeze({ ...input.environment });

@@ -46,6 +46,9 @@ interface AttachedDocument {
   state: AttachDocumentArtifactsInput["state"];
   stateRevision: number;
   analysisStateRevision: number;
+  textStateRevision: number;
+  logicalText: { readonly key: string; readonly stateRevision: number; readonly dependency: string;
+    readonly index: DocumentRenderArtifacts["textSearchIndex"] } | null;
   readonly analyses: Map<string, RetainedAnalysis>;
   readonly searches: Map<string, RetainedSearchProjection>;
 }
@@ -105,7 +108,9 @@ function dependencyKey(document: AttachedDocument, request: DocumentAnalysisRequ
   ].join(":");
   const boxTree = [computedStyleMap, document.analysisStateRevision].join(":");
   const inlineItemStreams = boxTree;
-  const logicalTextIndex = inlineItemStreams;
+  const logicalTextIndex = document.logicalText?.stateRevision === document.textStateRevision
+    && document.logicalText.dependency === styles.logicalTextDependency
+    ? document.logicalText.key : `${computedStyleMap}:text:${String(document.textStateRevision)}`;
   const documentLayout = [inlineItemStreams, layoutViewport, textMetrics].join(":");
   const documentDisplayList = documentLayout;
   return Object.freeze({
@@ -186,6 +191,8 @@ export class RenderArtifactStore {
       state: input.state,
       stateRevision: input.stateRevision,
       analysisStateRevision: input.stateRevision,
+      textStateRevision: input.stateRevision,
+      logicalText: null,
       analyses: new Map(),
       searches: new Map(),
     };
@@ -203,10 +210,12 @@ export class RenderArtifactStore {
   public updateState(input: UpdateDocumentArtifactsStateInput): void {
     const document = this.#document(input.documentId, input.documentRevision);
     if (input.stateRevision < document.stateRevision) throw new RangeError("Document state revision cannot regress.");
-    const previous = { state: document.state, stateRevision: document.stateRevision, analysisStateRevision: document.analysisStateRevision };
+    const previous = { state: document.state, stateRevision: document.stateRevision, analysisStateRevision: document.analysisStateRevision, textStateRevision: document.textStateRevision };
     document.state = input.state;
     document.stateRevision = input.stateRevision;
-    const invalidates = input.changed.has("control-content") || [...input.changed].some((change) => {
+    const changesTextState = input.changed.has("control-content") || input.changed.has("checked-selected") || input.changed.has("disclosure-open");
+    if (changesTextState) document.textStateRevision = input.stateRevision;
+    const invalidates = changesTextState || [...input.changed].some((change) => {
       const selectorDependency = changedSelectorDependency(change);
       if (selectorDependency === null || !document.program.stateDependencies.has(selectorDependency)) return false;
       return true;
@@ -301,6 +310,7 @@ export class RenderArtifactStore {
     const retained = document.analyses.get(identity);
     if (retained !== undefined) {
       retained.lastUsed = ++this.#clock;
+      this.#retainLogicalText(document, retained.artifacts);
       return retained.artifacts;
     }
     const retainedBoxTree = this.#reusable(document, "boxTree", key.boxTree);
@@ -316,7 +326,7 @@ export class RenderArtifactStore {
       buildInlineItemStreamSet(boxTree, request.signal)
     );
     const retainedSearchIndex = this.#reusable(document, "logicalTextIndex", key.logicalTextIndex);
-    const textSearchIndex = retainedSearchIndex?.textSearchIndex ?? measured(instrumentation, "logical-search-index-construction", () =>
+    const textSearchIndex = (document.logicalText?.key === key.logicalTextIndex ? document.logicalText.index : retainedSearchIndex?.textSearchIndex) ?? measured(instrumentation, "logical-search-index-construction", () =>
       buildTextSearchIndex(boxTree, inlineItemStreams, request.signal)
     );
     const initial = request.layoutContext.initialContainingBlock;
@@ -376,13 +386,22 @@ export class RenderArtifactStore {
       retainedCost: estimatedRetainedCost([incomplete], request.signal),
     });
     request.signal?.throwIfAborted();
+    const previousLogicalText = document.logicalText;
+    this.#retainLogicalText(document, artifacts);
     document.analyses.set(identity, { artifacts, lastUsed: ++this.#clock });
     try { this.#admit(request.signal); }
-    catch (error) { document.analyses.delete(identity); throw error; }
+    catch (error) { document.analyses.delete(identity); document.logicalText = previousLogicalText; throw error; }
     if (!document.analyses.has(identity)) {
       throw new RenderBudgetExceededError("retained-cost", artifacts.retainedCost, this.#maximumCost);
     }
     return artifacts;
+  }
+
+  #retainLogicalText(document: AttachedDocument, artifacts: DocumentRenderArtifacts): void {
+    if (document.logicalText?.key === artifacts.key.logicalTextIndex
+      && document.logicalText.stateRevision === document.textStateRevision) return;
+    document.logicalText = { key: artifacts.key.logicalTextIndex, stateRevision: document.textStateRevision,
+      dependency: artifacts.computedStyles.logicalTextDependency, index: artifacts.textSearchIndex };
   }
 
   public renderViewport(request: ViewportRenderRequest): RetainedViewportRenderResult {
@@ -521,6 +540,7 @@ export class RenderArtifactStore {
     document.program.selectorRuntime.clear();
     document.analyses.clear();
     document.searches.clear();
+    document.logicalText = null;
     this.#documents.delete(documentId);
     this.#measureRetainedCost();
   }
@@ -599,6 +619,8 @@ export class RenderArtifactStore {
         }
       }
       if (oldest === null) throw new RenderBudgetExceededError("retained-cost", this.#retainedCost, this.#maximumCost);
+      const evicted = oldest.document.analyses.get(oldest.identity);
+      if (oldest.document.logicalText?.index === evicted?.artifacts.textSearchIndex) oldest.document.logicalText = null;
       oldest.document.analyses.delete(oldest.identity);
       for (const identity of oldest.document.searches.keys()) {
         if (identity.startsWith(`${oldest.identity}\u0000`)) oldest.document.searches.delete(identity);

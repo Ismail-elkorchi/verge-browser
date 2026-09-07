@@ -1863,10 +1863,9 @@ class LayoutBuilder {
     return immutable;
   }
 
-  #clip(
+  #overflowClip(
     node: FormattingNode,
     paddingRect: CssRect,
-    borderRect: CssRect,
     inherited: CssRect,
   ): CssRect {
     const style = this.#boxComputed(node);
@@ -1899,6 +1898,13 @@ class LayoutBuilder {
         cssRect(xRect.x, yRect.y, xRect.width, yRect.height),
       );
     }
+    return result;
+  }
+
+  #explicitClip(node: FormattingNode, borderRect: CssRect, inherited: CssRect): CssRect {
+    const style = this.#boxComputed(node);
+    if (style === null) return inherited;
+    let result = inherited;
     if (
       (style.box.position === "absolute" || style.box.position === "fixed") &&
       style.box.legacyClip.kind === "rect"
@@ -1973,6 +1979,10 @@ class LayoutBuilder {
       );
     }
     return result;
+  }
+
+  #clip(node: FormattingNode, paddingRect: CssRect, borderRect: CssRect, inherited: CssRect): CssRect {
+    return this.#explicitClip(node, borderRect, this.#overflowClip(node, paddingRect, inherited));
   }
 
   #visuallyClipped(
@@ -7057,12 +7067,7 @@ class LayoutBuilder {
     }
   }
 
-  #refreshInlineContinuationGeometry(root: LayoutFragmentId): void {
-    const sameRect = (left: CssRect, right: CssRect): boolean =>
-      left.x === right.x &&
-      left.y === right.y &&
-      left.width === right.width &&
-      left.height === right.height;
+  #refreshInlineContinuationGeometry(): void {
     // Inline decorations are registered after their descendants, so insertion
     // order is already the required bottom-up continuation-finalization order.
     for (const [id, decoration] of this.#inlineDecorations) {
@@ -7118,45 +7123,14 @@ class LayoutBuilder {
         inlineContinuations: Object.freeze(continuations),
       });
     }
-    // Recompute every inherited clip after final block sizes, relative/sticky
-    // offsets, and deferred out-of-flow descendants are known.
-    const clipped: {
-      readonly id: LayoutFragmentId;
-      readonly inherited: CssRect;
-    }[] = [
-      {
-        id: root,
-        inherited: this.#documentCanvasClip(),
-      },
-    ];
-    while (clipped.length > 0) {
-      const entry = clipped.pop();
-      if (entry === undefined) continue;
-      const fragment = this.#fragments.get(entry.id);
-      if (fragment === undefined) continue;
-      let clipRect = entry.inherited;
-      if (fragment.kind !== "text") {
-        const node = this.#formatting.node(fragment.formattingNode);
-        if (node.appliesBoxStyle) {
-          clipRect = this.#clip(
-            node,
-            fragment.paddingRect,
-            fragment.borderRect,
-            entry.inherited,
-          );
-        }
-      }
-      if (!sameRect(fragment.clipRect, clipRect)) {
-        this.#fragments.set(entry.id, { ...fragment, clipRect });
-      }
-      for (const child of fragment.children)
-        clipped.push({ id: child, inherited: clipRect });
-    }
   }
 
   #buildClipChains(root: LayoutFragmentId): void {
-    const canvas: LayoutClipChain = Object.freeze({ owner: null, rect: this.#documentCanvasClip(), parent: null });
-    const pending = [{ id: root, inherited: canvas }];
+    const sameRect = (left: CssRect, right: CssRect): boolean =>
+      left.x === right.x && left.y === right.y &&
+      left.width === right.width && left.height === right.height;
+    const canvas: LayoutClipChain = Object.freeze({ kind: "canvas", owner: null, rect: this.#documentCanvasClip(), parent: null });
+    const pending = [{ id: root, inherited: canvas, clipRect: canvas.rect }];
     while (pending.length > 0) {
       this.#input.signal?.throwIfAborted();
       const entry = pending.pop();
@@ -7164,15 +7138,51 @@ class LayoutBuilder {
       const fragment = this.#fragments.get(entry.id);
       if (fragment === undefined) continue;
       let chain = entry.inherited;
-      if (fragment.kind !== "text") {
-        const node = this.#formatting.node(fragment.formattingNode);
-        if (node.appliesBoxStyle) {
-          const own = this.#clip(node, fragment.paddingRect, fragment.borderRect, canvas.rect);
-          if (own.x !== canvas.rect.x || own.y !== canvas.rect.y || own.width !== canvas.rect.width || own.height !== canvas.rect.height) chain = Object.freeze({ owner: fragment.id, rect: own, parent: chain });
+      let clipRect = entry.clipRect;
+      const node = this.#formatting.node(fragment.formattingNode);
+      const position = fragment.kind !== "text" && node.appliesBoxStyle ? this.#boxComputed(node)?.box.position : undefined;
+      if (position === "absolute" || position === "fixed") {
+        // Overflow follows the containing block; explicit clips still follow ancestry.
+        const containingAncestors = new Set<FormattingNodeId>();
+        if (position === "absolute") {
+          let parent = this.#formatting.parent(node.id);
+          while (parent !== null && !this.#positionedContainingBlocks.has(parent.id)) parent = this.#formatting.parent(parent.id);
+          while (parent !== null) {
+            containingAncestors.add(parent.id);
+            parent = this.#formatting.parent(parent.id);
+          }
+        }
+        const retained: LayoutClipChain[] = [];
+        for (let current: LayoutClipChain | null = chain; current !== null; current = current.parent) {
+          const owner = current.owner === null ? undefined : this.#fragments.get(current.owner);
+          if (current.kind === "clip" || (position === "absolute" &&
+            (current.kind !== "overflow" || (owner !== undefined && containingAncestors.has(owner.formattingNode))))) retained.push(current);
+        }
+        let filtered: LayoutClipChain | null = position === "fixed"
+          ? Object.freeze({ kind: "viewport", owner: fragment.id, rect: this.#input.context.scrollport, parent: null }) : null;
+        clipRect = position === "fixed" ? this.#input.context.scrollport : canvas.rect;
+        for (let index = retained.length - 1; index >= 0; index -= 1) {
+          const current = retained[index];
+          if (current === undefined) continue;
+          clipRect = cssIntersection(clipRect, current.rect);
+          filtered = current.parent === filtered ? current : Object.freeze({ ...current, parent: filtered });
+        }
+        chain = filtered ?? canvas;
+      }
+      if (fragment.kind !== "text" && node.appliesBoxStyle) {
+        for (const [kind, own] of [
+          ["overflow", this.#overflowClip(node, fragment.paddingRect, canvas.rect)],
+          ["clip", this.#explicitClip(node, fragment.borderRect, canvas.rect)],
+        ] as const) {
+          if (!sameRect(own, canvas.rect)) {
+            chain = Object.freeze({ kind, owner: fragment.id, rect: own, parent: chain });
+            clipRect = cssIntersection(clipRect, own);
+          }
         }
       }
       this.#clipChains.set(fragment.id, chain);
-      for (const child of fragment.children) pending.push({ id: child, inherited: chain });
+      if (!sameRect(fragment.clipRect, clipRect)) this.#fragments.set(entry.id, { ...fragment, clipRect });
+      for (const child of fragment.children) pending.push({ id: child, inherited: chain, clipRect });
     }
   }
 
@@ -7233,10 +7243,10 @@ class LayoutBuilder {
         this.#input,
         "invalid-context",
       );
-    this.#refreshInlineContinuationGeometry(root.fragment);
+    this.#refreshInlineContinuationGeometry();
     if (this.#hasInFlowPositioning) {
       this.#applyFinalInFlowPositions(root.fragment);
-      this.#refreshInlineContinuationGeometry(root.fragment);
+      this.#refreshInlineContinuationGeometry();
     }
     this.#buildClipChains(root.fragment);
     this.#buildStackingMetadata(root.fragment);

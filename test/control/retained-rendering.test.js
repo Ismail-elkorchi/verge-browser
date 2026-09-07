@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { clearInterval, setInterval } from "node:timers";
 
-import { createDocumentState, parseWebDocument } from "../../dist/document/index.js";
+import { applyDocumentAction, createDocumentState, parseWebDocument } from "../../dist/document/index.js";
 import {
   cssCoordinate,
   cssLengthFromFixed,
@@ -643,7 +643,7 @@ test("state admission rolls back oversized control text and keeps the previous d
     store.attach({ documentId: "document", documentRevision: 1, stateRevision: 1, document: fixture.document,
       state: fixture.state, resources: embeddedStylesheetSources(fixture.document) });
     assert.throws(() => store.updateState({ documentId: "document", documentRevision: 1, stateRevision: 2,
-      state: { ...fixture.state, controls: new Map([[fixture.document.controls[0].node, { value: "x".repeat(limit) }]]) },
+      state: applyDocumentAction(fixture.document, fixture.state, { kind: "set-control-value", target: fixture.document.controls[0].node, value: "x".repeat(limit) }),
       changed: new Set(["control-content"]) }), { name: "RenderBudgetExceededError" });
     assert.ok(store.metrics().retainedCost <= limit);
     store.updateState({ documentId: "document", documentRevision: 1, stateRevision: 1,
@@ -704,5 +704,82 @@ for (const phase of ["compilation", "layout", "admission", "rasterization"]) {
       assert.equal(checkpoints, 20);
       assert.equal(store.metrics().retainedAnalyses, phase === "rasterization" ? 1 : 0);
     } finally { store.dispose(); }
+  });
+}
+
+test("viewport fonts and geometry-only focus retain logical matches while refreshing their layout anchors", () => {
+  const html = '<style>html{font-size:5vw}html:focus{font-size:40px}p{margin:0}</style>' + '<p>logical match</p>'.repeat(30);
+  const fixture = attachedStore(html);
+  try {
+    render(fixture.store, 1);
+    const before = analysis(fixture.store);
+    const matches = before.textSearchIndex.search("logical", 2000);
+    const resized = render(fixture.store, 2, { columns: 40 });
+    assert.equal(invocation(resized, "computed-style-resolution"), 1);
+    assert.equal(invocation(resized, "logical-search-index-construction"), 0);
+    const after = analysis(fixture.store, 40);
+    assert.equal(after.textSearchIndex, before.textSearchIndex);
+    assert.equal(after.textSearchIndex.search("logical", 2000), matches);
+    fixture.store.updateState({ documentId: "document", documentRevision: 1, stateRevision: 2,
+      state: { ...fixture.state, focus: fixture.document.documentElement }, changed: new Set(["focus"]) });
+    const focused = render(fixture.store, 3, { columns: 40 });
+    assert.equal(invocation(focused, "logical-search-index-construction"), 0);
+    assert.equal(analysis(fixture.store, 40).textSearchIndex, before.textSearchIndex);
+  } finally { fixture.store.dispose(); }
+});
+
+
+test("computed text changes invalidate logical search independently of geometry reuse", () => {
+  const html = '<style>@media(max-width:400px){p{text-transform:uppercase}.omit{display:none}p:before{content:"new "}}</style><p>alpha</p><div class="omit">omitted</div>';
+  const retained = attachedStore(html);
+  const fresh = attachedStore(html);
+  try {
+    render(retained.store, 1);
+    const before = analysis(retained.store).textSearchIndex;
+    const changed = render(retained.store, 2, { columns: 40 });
+    const expected = render(fresh.store, 1, { columns: 40 });
+    assert.equal(invocation(changed, "logical-search-index-construction"), 1);
+    const after = analysis(retained.store, 40).textSearchIndex;
+    assert.notEqual(after, before);
+    assert.match(after.text, /NEW ALPHA/u);
+    assert.doesNotMatch(after.text, /omitted/u);
+    assert.deepEqual(comparableRendering(retained.store, changed, 40, 24), comparableRendering(fresh.store, expected, 40, 24));
+  } finally { retained.store.dispose(); fresh.store.dispose(); }
+});
+
+test("fixed descendants own a viewport clip independent of ancestor overflow", () => {
+  const fixture = attachedStore('<style>body{margin:0}.clip{width:8px;height:8px;overflow:hidden}.fixed{position:fixed;left:80px;top:0}</style><div class="clip"><a class="fixed" href="/fixed">fixed escape</a></div><main style="height:1000px">flow</main>');
+  try {
+    for (const scrollRow of [0, 10]) {
+      const rendered = render(fixture.store, scrollRow + 1, { scrollRow, overscanBefore: 0, overscanAfter: 0 });
+      assert.ok(rendered.displayList.commands.some((command) => command.kind === "text" && command.text.includes("fixed")));
+      assert.ok(rendered.terminal.hitTestIndex.regions.some((region) => region.action?.destination?.endsWith("/fixed")));
+      assert.ok(rendered.terminal.focusMap.targets.some((target) => target.action?.destination?.endsWith("/fixed")));
+    }
+  } finally { fixture.store.dispose(); }
+});
+
+for (const [name, outer, inner, position, visible] of [
+  ["absolute escapes intervening overflow", "position:relative", "overflow:hidden;width:8px;height:8px", "absolute", true],
+  ["absolute respects containing-block overflow", "position:relative;overflow:hidden;width:8px;height:8px", "", "absolute", false],
+  ["absolute initial containing block escapes overflow", "", "overflow:hidden;width:8px;height:8px", "absolute", true],
+  ["fixed retains explicit ancestor clip", "position:absolute;clip:rect(0,8px,8px,0);width:160px;height:160px", "", "fixed", false],
+]) {
+  test(`positioned clip ownership: ${name}`, () => {
+    const html = `<style>body{margin:0}.outer{${outer}}.inner{${inner}}a{position:${position};left:80px;top:0}</style><div class="outer"><div class="inner"><a href="/positioned">positioned</a></div></div><main style="height:1000px">flow</main>`;
+    const retained = attachedStore(html);
+    try {
+      render(retained.store, 1);
+      for (const scrollRow of [0, 1]) {
+        const fresh = attachedStore(html);
+        try {
+          const actual = render(retained.store, scrollRow + 2, { scrollRow, overscanBefore: 0, overscanAfter: 0 });
+          const expected = render(fresh.store, 1, { scrollRow, overscanBefore: 0, overscanAfter: 0 });
+          assert.equal(actual.terminal.hitTestIndex.regions.some((region) => region.action?.destination?.endsWith("/positioned")), visible && scrollRow === 0);
+          assert.deepEqual(comparableRendering(retained.store, actual, 80, 24), comparableRendering(fresh.store, expected, 80, 24));
+          assert.equal(invocation(actual, "normal-flow-layout"), 0);
+        } finally { fresh.store.dispose(); }
+      }
+    } finally { retained.store.dispose(); }
   });
 }

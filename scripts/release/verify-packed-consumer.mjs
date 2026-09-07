@@ -239,10 +239,12 @@ await session.close();
   ));
 
   run(process.execPath, ["smoke.mjs"], { cwd: consumerRoot });
+  const fixture = join(temporaryRoot, "worker.html");
+  await writeFile(fixture, "<title>Packed worker</title><p>packed-worker-verified</p>", "utf8");
   const viewport = run(process.execPath, [
-    "node_modules/@ismail-elkorchi/verge-browser/dist/cli.js", "--once", "about:help",
+    "node_modules/@ismail-elkorchi/verge-browser/dist/cli.js", "--once", pathToFileURL(fixture).href,
   ], { cwd: consumerRoot, capture: true, env: { ...process.env, XDG_STATE_HOME: join(temporaryRoot, "state") } });
-  if (!viewport.includes("Verge") || viewport.includes("Rendering failed")) {
+  if (!viewport.includes("packed-worker-verified") || viewport.includes("Rendering failed")) {
     throw new Error("packed consumer did not render through its worker entrypoint");
   }
   run("npx", ["--no-install", "tsc", "-p", "tsconfig.json"], { cwd: consumerRoot });

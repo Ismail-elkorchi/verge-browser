@@ -7,7 +7,7 @@ interface RestorationJob<T> {
   readonly detach: () => void;
 }
 
-/** One foreground reservation and two background slots; cancelled live loads keep their slot until cleanup. */
+/** Three live slots; selection has priority, background starts require fewer than two inactive loads. */
 export class TabRestorationScheduler<T> {
   readonly #queued: RestorationJob<T>[] = [];
   readonly #live = new Set<RestorationJob<T>>();

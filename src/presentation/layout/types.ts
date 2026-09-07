@@ -290,6 +290,7 @@ export interface BuildLayoutFragmentTreeInput {
 }
 
 export interface LayoutClipChain {
+  readonly kind: "canvas" | "viewport" | "overflow" | "clip";
   readonly owner: LayoutFragmentId | null;
   readonly rect: CssRect;
   readonly parent: LayoutClipChain | null;

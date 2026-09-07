@@ -1,3 +1,4 @@
+import { registerRetainedOwner } from "../memory/retained-cost.js";
 import type {
   DocumentAction,
   DocumentControlState,
@@ -12,6 +13,7 @@ class ImmutableMap<Key, Value> implements ReadonlyMap<Key, Value> {
 
   public constructor(values: Iterable<readonly [Key, Value]>) {
     this.#values = new Map(values);
+    registerRetainedOwner(this, () => [this.#values]);
     Object.freeze(this);
   }
 
@@ -35,6 +37,7 @@ class ImmutableSet<Value> implements ReadonlySet<Value> {
 
   public constructor(values: Iterable<Value>) {
     this.#values = new Set(values);
+    registerRetainedOwner(this, () => [this.#values]);
     Object.freeze(this);
   }
 

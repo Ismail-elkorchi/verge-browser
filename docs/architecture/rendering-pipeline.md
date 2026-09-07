@@ -222,7 +222,9 @@ state, so sending is never treated as acknowledgement.
 
 Logical search results carry document revision, relevant state revision, query,
 and search request generation. Logical match IDs contain no physical row. The
-bounded logical query cache survives width-only layout changes; anchors are
+bounded logical query cache has a separate dependency on computed text values
+and relevant control/disclosure state. It survives changes confined to fonts or
+layout geometry, including viewport-derived fonts and geometry-only focus; anchors are
 projected from those matches into the current layout revision. Resize and
 geometry-affecting state changes invalidate physical anchors. Next/previous
 navigation waits for current anchors. Find closure, query replacement, tab
@@ -255,9 +257,11 @@ disposal never waits indefinitely behind cold rendering.
 
 Workspace restoration creates placeholder tabs before navigation, starts the
 TUI shell immediately, loads the active placeholder first, and restores
-background tabs through one scheduler. Its total live capacity is three: one
-foreground reservation and two background slots. The queue is bounded at 256.
-Selection promotes queued work without adding capacity. Cancelled live loads
+background tabs through one scheduler. Total live capacity is three; a selected
+load takes the next available slot. New background loads start only when fewer
+than two unselected loads are live. Previously selected loads retain their slots
+after a switch, so another selection may wait for cleanup or completion. The
+queue is bounded at 256. Selection promotes queued work without adding capacity. Cancelled live loads
 remain accounted for until cleanup settles; queued cancellation prevents session
 allocation. Background restoration starts after the selected page's first frame
 or failure, including rendering failure. Background tabs are not rendered until
@@ -445,7 +449,10 @@ Verge implements an Arabic shaping engine.
 Layout retains linked clip-owner chains. Clip translation follows the owning
 fragment's attachment rather than rectangle containment; ancestor clips remain
 independent of sticky descendants. Paint, focus, hit testing, and accessibility
-resolve the same clip ownership against the current viewport.
+resolve the same clip ownership against the current viewport. Overflow clips
+follow the positioned containing block; fixed boxes own a viewport clip. Explicit
+CSS clips retain their ancestor ownership across these attachment boundaries.
+This follows the [CSS overflow containing-block rule](https://www.w3.org/TR/CSS2/visufx.html#overflow).
 
 The viewport hit-test index uses row buckets and comes from clipped
 action-bearing content, padding, and border geometry; every retained region has
