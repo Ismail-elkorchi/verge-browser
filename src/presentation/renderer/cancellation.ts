@@ -7,8 +7,11 @@ export class AtomicCancellationSignal implements AbortSignal, CancellationSignal
   public onabort: ((this: AbortSignal, ev: Event) => unknown) | null = null;
   readonly #generation: Int32Array;
   readonly #expected: number;
+  readonly #checkpoint: (() => void) | undefined;
+  #checks = 0;
 
-  public constructor(storage: SharedArrayBuffer, expectedGeneration: number) {
+  public constructor(storage: SharedArrayBuffer, expectedGeneration: number, checkpoint?: () => void) {
+    this.#checkpoint = checkpoint;
     this.#generation = new Int32Array(storage);
     this.#expected = expectedGeneration;
   }
@@ -23,6 +26,7 @@ export class AtomicCancellationSignal implements AbortSignal, CancellationSignal
 
   public throwIfAborted(): void {
     if (this.aborted) throw this.reason;
+    if ((this.#checks++ & 1023) === 0) this.#checkpoint?.();
   }
 
   public addEventListener(): void {}

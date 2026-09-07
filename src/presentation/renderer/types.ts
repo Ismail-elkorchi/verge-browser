@@ -130,6 +130,9 @@ export interface DocumentSearchMatchGeometry {
 }
 
 export interface DocumentSearchGeometryResult {
+  readonly documentRevision: number;
+  readonly stateRevision: number;
+  readonly layoutRevision: string;
   readonly query: string;
   readonly matches: readonly DocumentSearchMatchGeometry[];
   readonly truncated: boolean;

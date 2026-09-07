@@ -1,3 +1,4 @@
+import { registerRetainedOwner } from "../../memory/retained-cost.js";
 import {
   parseBlockContents,
   createPropertyValidationSession,
@@ -12,6 +13,7 @@ import {
   type CssQualifiedRule,
   type CssRule,
   type SelectorList,
+  type PropertyValidationSession,
 } from "@ismail-elkorchi/css-parser";
 
 import type { DocumentNodeRef } from "../../document/index.js";
@@ -32,6 +34,13 @@ import type {
   SubstitutedCssValue,
 } from "./types.js";
 
+const validationValueSizes = new WeakMap<PropertyValidationSession, number>();
+
+/** Values may grow during substitution; charge the values actually submitted to validation. */
+export function recordPropertyValidationValue(session: PropertyValidationSession, codeUnits: number): void {
+  validationValueSizes.set(session, Math.max(validationValueSizes.get(session) ?? 0, codeUnits));
+}
+
 const DEFAULT_STYLE_BUDGETS: StyleBudgets = Object.freeze({
   maxStylesheetSources: 64,
   maxStylesheetBytes: 2 * 1024 * 1024,
@@ -51,7 +60,10 @@ class BoundedSubstitutionCache implements CustomPropertySubstitutionCache {
   readonly #limit: number;
   readonly #values = new Map<string, SubstitutedCssValue | null>();
 
-  public constructor(limit: number) { this.#limit = limit; }
+  public constructor(limit: number) {
+    this.#limit = limit;
+    registerRetainedOwner(this, () => [this.#values]);
+  }
   public get size(): number { return this.#values.size; }
   public get(key: string): SubstitutedCssValue | null | undefined {
     const value = this.#values.get(key);
@@ -261,7 +273,6 @@ function styleNodes(input: CompileStylesheetProgramInput): {
 
 function stylesheetDependencies(
   sources: readonly StylesheetProgramSource[],
-  inlineDeclarations: ReadonlyMap<DocumentNodeRef, readonly CssDeclaration[]>,
 ): StylesheetProgramDependencies {
   const dependency = {
     mediaInlineSize: false,
@@ -270,7 +281,6 @@ function stylesheetDependencies(
     mediaReducedMotion: false,
     mediaHover: false,
     mediaPointer: false,
-    viewportBlockSize: false,
   };
   const inspectMedia = (condition: string): void => {
     const value = condition.toLowerCase();
@@ -281,34 +291,10 @@ function stylesheetDependencies(
     if (/\bhover\b/u.test(value)) dependency.mediaHover = true;
     if (/\bpointer\b/u.test(value)) dependency.mediaPointer = true;
   };
-  const containsValue = (
-    values: readonly ComponentValue[],
-    predicate: (value: ComponentValue) => boolean,
-  ): boolean => values.some((value) => predicate(value)
-    || ((value.kind === "function-block" || value.kind === "simple-block")
-      && containsValue(value.value, predicate)));
-  const inspectDeclaration = (declaration: CssDeclaration): void => {
-    const property = declaration.name.toLowerCase();
-    const percentageDependent = containsValue(declaration.value, (value) => value.kind === "percentage");
-    const blockViewportUnit = containsValue(declaration.value, (value) =>
-      value.kind === "dimension" && value.unit.toLowerCase() === "vh"
-    );
-    const viewportPosition = containsValue(declaration.value, (value) => value.kind === "ident"
-      && (value.value.toLowerCase() === "fixed" || value.value.toLowerCase() === "sticky"));
-    if (blockViewportUnit) dependency.viewportBlockSize = true;
-    if ((property === "height" || property === "min-height" || property === "max-height"
-      || property === "top" || property === "bottom" || property === "inset"
-      || property === "inset-block" || property === "inset-block-start" || property === "inset-block-end")
-      && percentageDependent) dependency.viewportBlockSize = true;
-    if (property === "position" && viewportPosition) dependency.viewportBlockSize = true;
-  };
   const visit = (rules: readonly CssRule[]): void => {
     for (const rule of rules) {
       if (rule.kind === "at-rule" && rule.name.toLowerCase() === "media") {
         inspectMedia(serializeCssComponentValues(rule.prelude));
-      }
-      if (rule.kind === "qualified-rule") {
-        for (const item of rule.block.items) if (item.kind === "declaration") inspectDeclaration(item);
       }
       if (rule.block !== null) visit(rule.block.items.filter((item): item is CssRule => item.kind !== "declaration"));
     }
@@ -317,13 +303,7 @@ function stylesheetDependencies(
     for (const condition of source.mediaConditions) inspectMedia(condition);
     visit(source.stylesheet.rules);
   }
-  for (const declarations of inlineDeclarations.values()) {
-    for (const declaration of declarations) inspectDeclaration(declaration);
-  }
-  return Object.freeze({
-    ...dependency,
-    viewportBlockSize: dependency.viewportBlockSize || dependency.mediaBlockSize,
-  });
+  return Object.freeze(dependency);
 }
 
 /** Compiles immutable stylesheet selectors and inline declarations once per document snapshot. */
@@ -448,8 +428,8 @@ export function compileStylesheetProgram(input: CompileStylesheetProgramInput): 
     ...ordered.map((resource) => `${String(resource.rootOrder)}:${String(resource.dependencyOrder)}:${resource.contentFingerprint}`),
     `inline:${String(inlineBytes)}:${inlineFingerprint.toString(16).padStart(8, "0")}`,
   ].join("|");
-  const dependencies = stylesheetDependencies(sources, inlineDeclarations);
-  return Object.freeze({
+  const dependencies = stylesheetDependencies(sources);
+  const program: StylesheetProgram = Object.freeze({
     document: input.document,
     sources: Object.freeze(sources),
     compiledSelectors,
@@ -469,4 +449,12 @@ export function compileStylesheetProgram(input: CompileStylesheetProgramInput): 
     fingerprint,
     truncatedBudgets,
   });
+  // External sessions expose counts, not their private allocations. Charge explicit estimates.
+  registerRetainedOwner(program.selectorRuntime, () => [], () =>
+    (Number(program.selectorRuntime.authorSession !== null) + Number(program.selectorRuntime.userAgentSession !== null))
+      * (nodes.totalNodes * 640 + retainedByteSize * 4));
+  registerRetainedOwner(program.propertyValidation, () => [], () => {
+    return program.propertyValidation.statistics().entries * (512 + (validationValueSizes.get(program.propertyValidation) ?? 0) * 8);
+  });
+  return program;
 }

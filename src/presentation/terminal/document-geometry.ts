@@ -1,8 +1,8 @@
+import { registerRetainedOwner } from "../../memory/retained-cost.js";
 import type { DocumentNodeRef } from "../../document/index.js";
 import {
   cssCoordinate,
   cssCoordinateFromFixed,
-  cssIntersection,
   cssLengthFromFixed,
   cssPx,
   cssRect,
@@ -100,6 +100,7 @@ class GeometrySpatialIndex<T> {
       }
     }
     this.#root = geometryIntervalTree(intervals);
+    registerRetainedOwner(this, () => [this.#root, this.#includeEmpty]);
   }
 
   public query(rect: CssRect, signal?: AbortSignal): readonly T[] {
@@ -145,9 +146,9 @@ class GeometrySpatialIndex<T> {
   }
 }
 
-function visibleRect(fragment: LayoutFragment): CssRect | null {
+function visibleBorderRect(fragment: LayoutFragment): CssRect | null {
   if (!fragment.style.visible) return null;
-  const rect = cssIntersection(fragment.borderRect, fragment.clipRect);
+  const rect = fragment.borderRect;
   return rect.width > 0 && rect.height > 0 ? rect : null;
 }
 
@@ -207,6 +208,7 @@ class ImmutableDocumentGeometryIndex implements DocumentGeometryIndex {
     this.retainedRectangles = retainedRectangles;
     this.truncations = Object.freeze([...truncations]);
     Object.freeze(this);
+    registerRetainedOwner(this, () => [this.#geometry, this.#anchors, this.#focus, this.#accessibility, this.#focusSpatial, this.#attachedFocusSpatial, this.#accessibilitySpatial, this.#attachedAccessibilitySpatial, this.#focusOrdinal, this.#accessibilityOrdinal]);
   }
 
   public forDocumentNode(node: DocumentNodeRef): DocumentGeometryEntry | null {
@@ -363,7 +365,7 @@ export function buildDocumentGeometryIndex(
   for (const [index, id] of layoutFragments.entries()) {
     if ((index & 255) === 0) signal?.throwIfAborted();
     const fragment = list.layout.fragment(id);
-    const actionRect = visibleRect(fragment);
+    const actionRect = visibleBorderRect(fragment);
     const geometryRect = fragment.style.visible ? fragment.borderRect : null;
     if (fragment.documentNode !== null) {
       const value = ensure(fragment.documentNode);
@@ -483,7 +485,7 @@ export function buildDocumentGeometryIndex(
     for (const fragmentId of value.fragments) {
       const fragment = list.layout.fragment(fragmentId);
       if (!fragment.style.visible) continue;
-      const candidate = cssIntersection(fragment.borderRect, fragment.clipRect);
+      const candidate = fragment.borderRect;
       semanticRects.push(candidate);
       semanticRectFragments.push(fragmentId);
     }
@@ -511,10 +513,7 @@ export function buildDocumentGeometryIndex(
     }));
   }
   const root = list.layout.fragment(list.layout.root);
-  const extent = cssUnion(
-    [list.layout.context.initialContainingBlock, root.overflowRect],
-    list.layout.context.initialContainingBlock,
-  );
+  const extent = root.overflowRect;
   return new ImmutableDocumentGeometryIndex(
     extent,
     immutable,

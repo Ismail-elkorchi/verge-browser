@@ -1,4 +1,5 @@
-import { parentPort } from "node:worker_threads";
+import { RenderBudgetExceededError } from "../../memory/retained-cost.js";
+import { parentPort, workerData } from "node:worker_threads";
 
 import {
   AtomicCancellationSignal,
@@ -27,8 +28,19 @@ import {
 const CELL_WIDTH = cssPx(8);
 const ROW_HEIGHT = cssPx(16);
 const workerMetrics = new RenderStageMetrics();
-const store = new RenderArtifactStore({ instrumentation: workerMetrics });
-const summarizedArtifactKeys = new Map<string, string>();
+const budgets = workerData as { readonly maxRetainedArtifactBytes?: number; readonly maxWorkingSetBytes: number };
+const store = new RenderArtifactStore({ instrumentation: workerMetrics,
+  ...(budgets.maxRetainedArtifactBytes === undefined ? {} : { maxRetainedArtifactBytes: budgets.maxRetainedArtifactBytes }),
+});
+let peakHeapUsedBytes = 0;
+let peakWorkingSetBytes = 0;
+function workingSetCheckpoint(): void {
+  const memory = process.memoryUsage();
+  const bytes = memory.heapUsed + memory.external;
+  peakHeapUsedBytes = Math.max(peakHeapUsedBytes, memory.heapUsed);
+  peakWorkingSetBytes = Math.max(peakWorkingSetBytes, bytes);
+  if (bytes > budgets.maxWorkingSetBytes) throw new RenderBudgetExceededError("working-set", bytes, budgets.maxWorkingSetBytes);
+}
 let viewportRequests = 0;
 let completedViewportRequests = 0;
 let supersededViewportRequests = 0;
@@ -38,10 +50,6 @@ function boundedInteger(name: string, value: number, maximum: number): number {
     throw new RangeError(`${name} is outside the rendering-worker allocation boundary.`);
   }
   return value;
-}
-
-function artifactKeyIdentity(key: Readonly<Record<string, unknown>>): string {
-  return Object.keys(key).sort().map((name) => `${name}=${String(key[name])}`).join("\u0000");
 }
 
 function incompleteRenderingLabels(artifacts: ReturnType<RenderArtifactStore["analyze"]>): readonly string[] {
@@ -130,6 +138,7 @@ function receive(message: RenderWorkerRequest): void {
       const documentSignal = new AtomicCancellationSignal(
         message.documentCancellation,
         message.documentGeneration,
+        workingSetCheckpoint,
       );
       cancellationSignals.push(documentSignal);
       store.attach({
@@ -142,7 +151,6 @@ function receive(message: RenderWorkerRequest): void {
         styleDiagnostics: message.attachment.styleDiagnostics,
         signal: documentSignal,
       });
-      summarizedArtifactKeys.delete(message.attachment.documentId);
       post({ kind: "acknowledged", requestId: message.requestId });
       return;
     }
@@ -159,11 +167,14 @@ function receive(message: RenderWorkerRequest): void {
     }
     if (message.kind === "release-document") {
       store.release(message.documentId);
-      summarizedArtifactKeys.delete(message.documentId);
       post({ kind: "acknowledged", requestId: message.requestId });
       return;
     }
     if (message.kind === "metrics") {
+      if (message.collectGarbage) {
+        if (globalThis.gc === undefined) throw new Error("Retained heap qualification requires --expose-gc.");
+        globalThis.gc();
+      }
       post({
         kind: "artifact-metrics",
         requestId: message.requestId,
@@ -173,6 +184,9 @@ function receive(message: RenderWorkerRequest): void {
           completedViewportRequests,
           supersededViewportRequests,
           heapUsedBytes: process.memoryUsage().heapUsed,
+          peakHeapUsedBytes,
+          peakWorkingSetBytes,
+          workingSetBudget: budgets.maxWorkingSetBytes,
           stages: workerMetrics.snapshot(),
         }),
       });
@@ -188,12 +202,14 @@ function receive(message: RenderWorkerRequest): void {
     const documentSignal = new AtomicCancellationSignal(
       message.documentCancellation,
       message.documentGeneration,
+      workingSetCheckpoint,
     );
     cancellationSignals.push(documentSignal);
     if (message.kind === "search-document") {
       const searchSignal = new AtomicCancellationSignal(
         message.searchCancellation,
         message.searchGeneration,
+        workingSetCheckpoint,
       );
       cancellationSignals.push(searchSignal);
       const result = store.search({
@@ -202,17 +218,19 @@ function receive(message: RenderWorkerRequest): void {
         ...renderContext,
         signal: documentSignal,
       }, message.query, message.limit, searchSignal);
+      if (result.stateRevision !== message.stateRevision) throw new Error("Search state revision was superseded.");
       post({
         kind: "search-ready",
         requestId: message.requestId,
         result: Object.freeze({
           ...result,
+          requestGeneration: message.requestGeneration,
+          anchors: Object.freeze(result.matches.map((match) => Object.freeze([
+            match.id, Math.max(0, Math.floor(match.blockOffsetCssPx / renderContext.terminalContext.rowHeightCssPx)),
+          ] as const))),
           matches: Object.freeze(result.matches.map((match) => Object.freeze({
             id: match.id,
             sources: match.sources,
-            anchorRow: Math.max(0, Math.floor(
-              match.blockOffsetCssPx / renderContext.terminalContext.rowHeightCssPx,
-            )),
           }))),
         }),
       });
@@ -221,6 +239,7 @@ function receive(message: RenderWorkerRequest): void {
     const viewportSignal = new AtomicCancellationSignal(
       message.viewportCancellation,
       message.viewportGeneration,
+      workingSetCheckpoint,
     );
     cancellationSignals.push(viewportSignal);
     viewportRequests += 1;
@@ -240,11 +259,8 @@ function receive(message: RenderWorkerRequest): void {
       signal: viewportSignal,
     });
     completedViewportRequests += 1;
-    const summaryKey = artifactKeyIdentity(
-      result.artifactKey as unknown as Readonly<Record<string, unknown>>,
-    );
-    const includeSummary = summarizedArtifactKeys.get(message.documentId) !== summaryKey;
-    if (includeSummary) summarizedArtifactKeys.set(message.documentId, summaryKey);
+    const summaryKey = [message.documentId, message.documentRevision, result.artifactKey.documentLayout].join("\u0000");
+    const includeSummary = message.heldSummaryIdentity !== summaryKey;
     const artifacts = store.analyze({
       documentId: message.documentId,
       documentRevision: message.documentRevision,
@@ -252,6 +268,8 @@ function receive(message: RenderWorkerRequest): void {
       signal: documentSignal,
     });
     const payload: TransferredViewportRenderPayload = Object.freeze({
+      summaryIdentity: summaryKey,
+      layoutRevision: result.artifactKey.documentLayout,
       documentId: result.documentId,
       documentRevision: result.documentRevision,
       stateRevision: result.stateRevision,
@@ -264,6 +282,7 @@ function receive(message: RenderWorkerRequest): void {
       search: result.terminal.search,
       cellRectsByDocumentNode: Object.freeze([...result.terminal.cellRectsByDocumentNode]),
       summary: includeSummary ? Object.freeze({
+        identity: summaryKey,
         documentRowCount: result.documentExtentRows,
         incomplete: incompleteRenderingLabels(artifacts),
         scrollAnchors: Object.freeze(result.scrollAnchors.map((anchor) => Object.freeze({
@@ -302,8 +321,14 @@ function receive(message: RenderWorkerRequest): void {
       }) : null,
       stageMetrics: result.stageMetrics,
     });
+    workingSetCheckpoint();
     post({ kind: "viewport-ready", requestId: message.requestId, payload });
   } catch (error) {
+    if (error instanceof RenderBudgetExceededError) {
+      post({ kind: "budget-exceeded", requestId: message.requestId, budget: error.budget,
+        estimatedBytes: error.estimatedBytes, limit: error.limit });
+      return;
+    }
     const cancelled = cancellationSignals.some((signal) => signal.aborted);
     const name = cancelled ? "AbortError" : error instanceof Error ? error.name : "Error";
     if (name === "AbortError" && message.kind === "request-viewport") {

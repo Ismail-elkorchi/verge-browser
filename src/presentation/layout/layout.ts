@@ -1,3 +1,4 @@
+import { registerRetainedOwner } from "../../memory/retained-cost.js";
 import type {
   DocumentNodeRef,
   DocumentSourceRange,
@@ -62,6 +63,7 @@ import {
 import type {
   BuildLayoutFragmentTreeInput,
   LayoutBoxFragment,
+  LayoutClipChain,
   LayoutBudgets,
   LayoutFragment,
   LayoutFragmentId,
@@ -758,6 +760,7 @@ class LayoutBuilder {
   readonly #fontMetricsCache = new Map<CssPixelLength, UsedFontMetrics>();
   readonly #textAdvanceCache = new Map<string, CssNonNegativeLength>();
   readonly #fragments = new Map<LayoutFragmentId, LayoutFragment>();
+  readonly #clipChains = new Map<LayoutFragmentId, LayoutClipChain>();
   readonly #parentIndex = new Map<LayoutFragmentId, LayoutFragmentId>();
   readonly #formattingIndex = new Map<FormattingNodeId, LayoutFragmentId[]>();
   readonly #documentIndex = new Map<DocumentNodeRef, LayoutFragmentId[]>();
@@ -7151,6 +7154,28 @@ class LayoutBuilder {
     }
   }
 
+  #buildClipChains(root: LayoutFragmentId): void {
+    const canvas: LayoutClipChain = Object.freeze({ owner: null, rect: this.#documentCanvasClip(), parent: null });
+    const pending = [{ id: root, inherited: canvas }];
+    while (pending.length > 0) {
+      this.#input.signal?.throwIfAborted();
+      const entry = pending.pop();
+      if (entry === undefined) continue;
+      const fragment = this.#fragments.get(entry.id);
+      if (fragment === undefined) continue;
+      let chain = entry.inherited;
+      if (fragment.kind !== "text") {
+        const node = this.#formatting.node(fragment.formattingNode);
+        if (node.appliesBoxStyle) {
+          const own = this.#clip(node, fragment.paddingRect, fragment.borderRect, canvas.rect);
+          if (own.x !== canvas.rect.x || own.y !== canvas.rect.y || own.width !== canvas.rect.width || own.height !== canvas.rect.height) chain = Object.freeze({ owner: fragment.id, rect: own, parent: chain });
+        }
+      }
+      this.#clipChains.set(fragment.id, chain);
+      for (const child of fragment.children) pending.push({ id: child, inherited: chain });
+    }
+  }
+
   #documentCanvasClip(): CssRect {
     const initial = this.#input.context.initialContainingBlock;
     return cssRect(
@@ -7213,6 +7238,7 @@ class LayoutBuilder {
       this.#applyFinalInFlowPositions(root.fragment);
       this.#refreshInlineContinuationGeometry(root.fragment);
     }
+    this.#buildClipChains(root.fragment);
     this.#buildStackingMetadata(root.fragment);
     const outcome: LayoutOutcome =
       this.#truncated === null
@@ -7238,6 +7264,7 @@ class LayoutBuilder {
       this.#lineBoxes,
       this.#stackingMetadata,
       this.#scrollAttachments,
+      this.#clipChains,
       outcome,
       this.#rootFontMetrics,
     );
@@ -7245,6 +7272,7 @@ class LayoutBuilder {
 }
 
 class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
+  readonly #clipChains: ReadonlyMap<LayoutFragmentId, LayoutClipChain>;
   readonly formatting: FormattingTree;
   readonly context: BuildLayoutFragmentTreeInput["context"];
   readonly rootFontMetrics: UsedFontMetrics;
@@ -7280,9 +7308,11 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
     lineBoxes: readonly LineBox[],
     stackingMetadata: ReadonlyMap<LayoutFragmentId, LayoutStackingMetadata>,
     scrollAttachments: ReadonlyMap<LayoutFragmentId, LayoutScrollAttachment>,
+    clipChains: ReadonlyMap<LayoutFragmentId, LayoutClipChain>,
     outcome: LayoutOutcome,
     rootMetrics: UsedFontMetrics,
   ) {
+    this.#clipChains = clipChains;
     this.formatting = input.formatting;
     this.context = Object.freeze({
       ...input.context,
@@ -7379,6 +7409,7 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
           ),
         );
     Object.freeze(this);
+    registerRetainedOwner(this, () => [this.#clipChains, this.#fragments, this.#parents, this.#formattingIndex, this.#documentIndex, this.#stackingMetadata, this.#scrollAttachments]);
   }
 
   public static rejected(
@@ -7446,10 +7477,13 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
         ],
       ]),
       new Map(),
+      new Map(),
       { status: "rejected", reason },
       REJECTED_FONT_METRICS,
     );
   }
+
+  public clipChain(id: LayoutFragmentId): LayoutClipChain | null { return this.#clipChains.get(id) ?? null; }
 
   public fragment(id: LayoutFragmentId): LayoutFragment {
     const fragment = this.#fragments.get(id);

@@ -676,3 +676,244 @@ test("one-shot output and the interactive view consume the same cell-buffer rows
     await prepared.controller.close();
   }
 });
+
+test("browser-global actions and completions are independent of selected placeholder readiness", async () => {
+  const { runtime, prepared } = await preparedFixture();
+  try {
+    const ready = runtime.state().documents[0];
+    for (const kind of ["restoring", "loading", "failed"]) {
+      const placeholder = { ...prepared.controller.placeholder("https://example.test/pending"), kind };
+      const state = { ...runtime.state(), documents: [ready, placeholder], activeDocumentIndex: 1 };
+      const focus = updateBrowser(prepared.controller, state, { kind: "focusOmnibox" });
+      assert.equal(focus.focus?.elementId, "browser-omnibox", kind);
+      const edited = updateBrowser(prepared.controller, focus.state, {
+        kind: "omniboxTransition", transition: { kind: "setValue", value: "https://example.test/next" },
+      });
+      assert.equal(edited.state.omnibox.editor.input.text, "https://example.test/next", kind);
+      const submitted = updateBrowser(prepared.controller, edited.state, {
+        kind: "omniboxSubmit", value: "https://example.test/next",
+      });
+      assert.equal(submitted.state.documents[1].requestedUrl, "https://example.test/next", kind);
+      const opened = updateBrowser(prepared.controller, state, { kind: "newDocument" });
+      assert.equal(opened.state.documents.length, 3, kind);
+      assert.equal(updateBrowser(prepared.controller, state, { kind: "quit" }).exit.reason, "quit");
+      const payload = { ...ready.rendering.viewport, viewportRevision: ready.rendering.requestedViewportRevision + 1 };
+      const rendering = { ...ready, rendering: { ...ready.rendering, status: "rendering", requestedViewportRevision: payload.viewportRevision } };
+      const completed = updateBrowser(prepared.controller, { ...state, documents: [rendering, placeholder] }, { kind: "viewportReady", payload });
+      assert.equal(completed.state.documents[0].rendering.status, "ready", kind);
+      assert.equal(completed.state.documents[0].rendering.viewport, payload);
+      const library = updateBrowser(prepared.controller, state, { kind: "downloadsChanged", downloads: [], status: "done" });
+      assert.equal(library.state.status.text, "done", kind);
+    }
+  } finally {
+    await runtime.dispose();
+    await prepared.controller.close();
+  }
+});
+
+test("rapid placeholder selection keeps a total bound on restoration loads", async () => {
+  const { runtime, prepared } = await preparedFixture();
+  try {
+    let state = { ...runtime.state(), documents: Array.from({ length: 50 }, (_, index) =>
+      prepared.controller.placeholder(`https://example.test/${index}`)), activeDocumentIndex: 0 };
+    for (let index = 0; index < 50; index += 1) {
+      state = updateBrowser(prepared.controller, state, { kind: "selectDocument", index }).state;
+      assert.ok(prepared.controller.restorationMetrics().live <= 3, `selection ${index}`);
+    }
+  } finally {
+    await runtime.dispose();
+    await prepared.controller.close();
+  }
+});
+
+async function settleViewportEffects(controller, state, context) {
+  let update = updateBrowser(controller, state, { kind: "requestActiveViewport" }, context);
+  for (let iteration = 0; iteration < 12; iteration += 1) {
+    const effects = (update.effects ?? []).filter((effect) => /^(render|search):/u.test(effect.id));
+    if (effects.length === 0) return update.state;
+    let next;
+    for (const effect of effects) {
+      const completion = await effect.run({ signal: new globalThis.AbortController().signal });
+      assert.equal(completion.kind, "message");
+      next = updateBrowser(controller, update.state, completion.message, context);
+      update = next;
+    }
+  }
+  assert.fail("viewport effects did not converge");
+}
+
+test("late logical search matches refresh anchors on resize before next-match navigation", async () => {
+  const { runtime, prepared } = await preparedFixture();
+  try {
+    const wide = { terminalSize: { columns: 100, rows: 28 } };
+    let state = { ...runtime.state(), findBar: { input: { text: "Paragraph", cursor: 9 } } };
+    state = await settleViewportEffects(prepared.controller, state, wide);
+    const document = state.documents[0];
+    assert.ok(document.search.matches.length >= 29);
+    const previous = document.search;
+    const late = { ...document, search: { ...previous, activeMatchIndex: 27 } };
+    const narrow = { terminalSize: { columns: 18, rows: 28 } };
+    const resized = updateBrowser(prepared.controller, { ...state, documents: [late] }, { kind: "terminalResized" }, narrow);
+    assert.equal(resized.state.documents[0].search.anchors.size, 0);
+    const next = updateBrowser(prepared.controller, resized.state, { kind: "moveSearch", direction: "next" }, narrow);
+    assert.equal(next.state.documents[0].search.activeMatchIndex, 28);
+    state = await settleViewportEffects(prepared.controller, { ...next.state, documents: next.state.documents.map((tab) => ({
+      ...tab, rendering: { ...tab.rendering, requestKey: null },
+    })) }, narrow);
+    const updated = state.documents[0].search;
+    assert.deepEqual(updated.matches.map((match) => match.id), previous.matches.map((match) => match.id));
+    assert.equal(updated.layoutRevision, state.documents[0].rendering.viewport.layoutRevision);
+    assert.notEqual(updated.anchors.get(updated.matches[28].id), previous.anchors.get(previous.matches[28].id));
+    assert.equal(updated.activeMatchIndex, 28);
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});
+
+test("search completion requires document, state, query, generation, and layout identities", async () => {
+  const { runtime, prepared } = await preparedFixture();
+  try {
+    const original = runtime.state().documents[0];
+    const document = { ...original, stateRevision: 2, rendering: { ...original.rendering,
+      searchRequestGeneration: 2, pendingSearch: { query: "alpha", requestGeneration: 2, stateRevision: 2 } } };
+    const state = { ...runtime.state(), findBar: { input: { text: "alpha", cursor: 5 } }, documents: [document] };
+    const completion = { kind: "searchReady", documentId: document.id, documentRevision: document.documentRevision,
+      stateRevision: 2, requestGeneration: 2, layoutRevision: document.rendering.viewport.layoutRevision,
+      query: "alpha", matches: [{ id: "logical", sources: [] }], anchors: [["logical", 3]], truncated: false };
+    for (const invalid of [{ stateRevision: 1 }, { requestGeneration: 1 }, { query: "older" }, { documentRevision: 0 }, { layoutRevision: "older" }]) {
+      const ignored = updateBrowser(prepared.controller, state, { ...completion, ...invalid });
+      assert.equal(ignored.state.documents[0].search, null);
+    }
+    const closed = updateBrowser(prepared.controller, state, { kind: "closeFind" });
+    assert.equal(closed.state.documents[0].rendering.pendingSearch, null);
+    assert.ok(closed.state.documents[0].rendering.searchRequestGeneration > completion.requestGeneration);
+    const obsolete = updateBrowser(prepared.controller, closed.state, completion);
+    assert.equal(obsolete.state.documents[0].search, null);
+    const placeholder = prepared.controller.placeholder("https://example.test/pending");
+    const routed = updateBrowser(prepared.controller, { ...state, documents: [document, placeholder], activeDocumentIndex: 1 }, completion);
+    assert.equal(routed.state.documents[0].search.matches[0].id, "logical");
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});
+
+test("unresolved initial navigation can be replaced through the omnibox", async () => {
+  const initial = deferred();
+  const started = deferred();
+  const { runtime, prepared } = await preparedFixture({ waitForRender: false,
+    loader: (url) => {
+      if (url.endsWith("/next")) return Promise.resolve(response(url, "<title>Replacement</title><p>replacement page</p>"));
+      started.resolve();
+      return initial.promise;
+    } });
+  try {
+    await started.promise;
+    await runtime.dispatch({ kind: "focusOmnibox" });
+    await runtime.dispatch({ kind: "omniboxTransition", transition: { kind: "setValue", value: "https://example.test/next" } });
+    await runtime.dispatch({ kind: "omniboxSubmit", value: "https://example.test/next" });
+    await waitUntil(runtime, () => runtime.state().documents[0]?.rendering?.status === "ready");
+    assert.equal(runtime.state().documents[0].snapshot.finalUrl, "https://example.test/next");
+    initial.resolve(response("https://example.test/", "<p>obsolete initial page</p>"));
+  } finally { initial.resolve(response("https://example.test/", "<p>cleanup</p>")); await runtime.dispose(); await prepared.controller.close(); }
+});
+
+test("failed initial navigation permits help, retry, and a new navigable tab", async () => {
+  let attempts = 0;
+  const { runtime, prepared } = await preparedFixture({ waitForRender: false, loader: (url) => {
+    attempts += 1;
+    return attempts === 1 ? Promise.reject(new Error("initial failure")) : Promise.resolve(response(url, "<p>recovered</p>"));
+  } });
+  try {
+    await waitUntil(runtime, () => runtime.state().documents[0].kind === "failed");
+    await runtime.dispatch({ kind: "openActionPalette" });
+    await runtime.dispatch({ kind: "actionPaletteSubmit", value: "help" });
+    assert.equal(runtime.state().overlay?.detailKind, "help");
+    await runtime.dispatch({ kind: "dismiss" });
+    await runtime.dispatch({ kind: "navigate", operation: "reload" });
+    await waitUntil(runtime, () => runtime.state().documents[0]?.rendering?.status === "ready");
+    await runtime.dispatch({ kind: "newDocument", target: "https://example.test/new" });
+    await waitUntil(runtime, () => runtime.state().documents[1]?.rendering?.status === "ready");
+    assert.equal(runtime.state().documents[1].snapshot.finalUrl, "https://example.test/new");
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});
+
+test("navigation completion routes to ready A while placeholder B owns selection", async () => {
+  const navigation = deferred();
+  const background = deferred();
+  const { runtime, prepared } = await preparedFixture({ loader: (url) => url.endsWith("/next") ? navigation.promise
+    : url.endsWith("/pending") ? background.promise : loader(url) });
+  try {
+    await runtime.dispatch({ kind: "omniboxSubmit", value: "https://example.test/next" });
+    await runtime.dispatch({ kind: "newDocument", target: "https://example.test/pending" });
+    assert.equal(runtime.state().activeDocumentIndex, 1);
+    navigation.resolve(response("https://example.test/next", "<p>completed in inactive A</p>"));
+    await waitUntil(runtime, () => runtime.state().documents[0].snapshot.finalUrl.endsWith("/next"));
+    assert.equal(runtime.state().documents[1].kind, "loading");
+    await runtime.dispatch({ kind: "selectDocument", index: 0 });
+    await waitUntil(runtime, () => runtime.state().documents[0]?.rendering?.status === "ready");
+  } finally {
+    navigation.resolve(response("https://example.test/next", "<p>cleanup</p>"));
+    background.resolve(response("https://example.test/pending", "<p>cleanup</p>"));
+    await runtime.dispose(); await prepared.controller.close();
+  }
+});
+
+
+test("obsolete navigation failures cannot stop a replacement navigation", async () => {
+  const failed = deferred();
+  const { runtime, prepared } = await preparedFixture({ loader: (url) => url.endsWith("/failed") ? failed.promise : loader(url) });
+  try {
+    const first = updateBrowser(prepared.controller, runtime.state(), { kind: "omniboxSubmit", value: "https://example.test/failed" });
+    const effect = first.effects.find((entry) => entry.id.startsWith("navigation:"));
+    const pending = effect.run({ signal: new globalThis.AbortController().signal });
+    const second = updateBrowser(prepared.controller, first.state, { kind: "omniboxSubmit", value: "https://example.test/next" });
+    failed.reject(new Error("obsolete failure"));
+    const completion = await pending;
+    assert.equal(completion.message.kind, "navigationFailed");
+    const ignored = updateBrowser(prepared.controller, second.state, completion.message);
+    assert.equal(ignored.state.documents[0].loading, true);
+    assert.equal(ignored.state.documents[0].pendingUrl, "https://example.test/next");
+    assert.equal(ignored.state.documents[0].error, null);
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});
+
+
+test("control text changes and closing then reopening the same query reject pending logical search", async () => {
+  const { runtime, prepared } = await preparedFixture();
+  const pending = deferred();
+  const update = (state, message) => updateBrowser(prepared.controller, state, message, { terminalSize: { columns: 100, rows: 29 } });
+  try {
+    const document = runtime.state().documents[0];
+    const control = document.snapshot.document.controls.find((entry) => entry.name === "q");
+    prepared.controller.searchDocument = () => pending.promise;
+    const opened = update({ ...runtime.state(), findBar: { input: { text: "alpha", cursor: 5 } } }, { kind: "requestActiveViewport" });
+    const searchEffect = opened.effects.find((entry) => entry.id.startsWith("search:"));
+    const completion = searchEffect.run({ signal: new globalThis.AbortController().signal });
+    const changed = update(opened.state, { kind: "formText", controlId: control.node,
+      transition: { kind: "edit", operation: { kind: "insert", text: "replacement" } } });
+    assert.ok(changed.state.documents[0].stateRevision > document.stateRevision);
+    pending.resolve({ documentRevision: document.documentRevision, stateRevision: document.stateRevision,
+      requestGeneration: opened.state.documents[0].rendering.searchRequestGeneration,
+      layoutRevision: document.rendering.viewport.layoutRevision, query: "alpha", matches: [{ id: "old", sources: [] }], anchors: [["old", 0]], truncated: false });
+    const delivered = await completion;
+    assert.equal(update(changed.state, delivered.message).state.documents[0].search, null);
+    const closed = update(opened.state, { kind: "closeFind" });
+    const reopened = update({ ...closed.state, findBar: { input: { text: "alpha", cursor: 5 } } }, { kind: "requestActiveViewport" });
+    assert.ok(reopened.state.documents[0].rendering.searchRequestGeneration > opened.state.documents[0].rendering.searchRequestGeneration);
+    assert.equal(update(reopened.state, delivered.message).state.documents[0].search, null);
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});
+
+
+test("restoration completion preserves an omnibox edit made during loading", async () => {
+  const navigation = deferred();
+  const started = deferred();
+  const { runtime, prepared } = await preparedFixture({ waitForRender: false, loader: () => {
+    started.resolve(); return navigation.promise;
+  } });
+  try {
+    await started.promise;
+    await runtime.dispatch({ kind: "focusOmnibox" });
+    await runtime.dispatch({ kind: "omniboxTransition", transition: { kind: "setValue", value: "unfinished replacement" } });
+    navigation.resolve(response("https://example.test/", "<p>initial completion</p>"));
+    await waitUntil(runtime, () => runtime.state().documents[0]?.rendering?.status === "ready");
+    assert.equal(runtime.state().omnibox.editor.input.text, "unfinished replacement");
+    assert.equal(runtime.state().omniboxDirty, true);
+  } finally { navigation.resolve(response("https://example.test/", "<p>cleanup</p>")); await runtime.dispose(); await prepared.controller.close(); }
+});

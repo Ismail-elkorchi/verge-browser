@@ -1,3 +1,4 @@
+import { registerRetainedOwner } from "../../memory/retained-cost.js";
 import type {
   DocumentNodeRef,
   DocumentSemanticEntry,
@@ -170,6 +171,7 @@ class ImmutableInlineItemStreamSet implements InlineItemStreamSet {
     this.#byKey = new Map(byKey);
     this.#text = new Map(text);
     Object.freeze(this);
+    registerRetainedOwner(this, () => [this.#byKey, this.#text]);
   }
 
   public stream(containingFormattingBox: FormattingNodeId, roots: readonly FormattingNodeId[]): InlineItemStream {

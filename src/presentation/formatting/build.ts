@@ -1,3 +1,4 @@
+import { registerRetainedOwner } from "../../memory/retained-cost.js";
 import {
   snapshotDocumentState,
   type DocumentNodeRef,
@@ -777,6 +778,7 @@ class ImmutableFormattingTree implements FormattingTree {
     }
     this.#parents = parents;
     Object.freeze(this);
+    registerRetainedOwner(this, () => [this.#nodes, this.#parents, this.#sourceIndex]);
   }
 
   public node(id: FormattingNodeId): FormattingNode {

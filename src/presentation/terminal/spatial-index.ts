@@ -1,3 +1,4 @@
+import { registerRetainedOwner } from "../../memory/retained-cost.js";
 import type { LayoutFragmentId } from "../layout/index.js";
 import type {
   DisplayListAttachmentGroup,
@@ -184,6 +185,7 @@ class ImmutableDisplayListSpatialIndex implements DisplayListSpatialIndex {
       .filter((group) => group.attachment.kind === "sticky")
       .map(stickyInterval));
     Object.freeze(this);
+    registerRetainedOwner(this, () => [this.#root, this.#stickyRoot]);
   }
 
   public query(rect: Parameters<DisplayListSpatialIndex["query"]>[0], signal?: AbortSignal): DisplayListSpatialQuery {

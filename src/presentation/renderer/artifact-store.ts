@@ -1,3 +1,4 @@
+import { estimatedRetainedCost, RenderBudgetExceededError } from "../../memory/retained-cost.js";
 import { buildFormattingTree } from "../formatting/index.js";
 import {
   buildLayoutFragmentTree,
@@ -74,9 +75,9 @@ function mediaKey(document: AttachedDocument, request: DocumentAnalysisRequest):
   ].join(":");
 }
 
-function layoutKey(document: AttachedDocument, request: DocumentAnalysisRequest): string {
+function layoutKey(styles: DocumentRenderArtifacts["computedStyles"], request: DocumentAnalysisRequest): string {
   const context = request.layoutContext;
-  return `${String(context.viewport.width)}x${document.program.dependencies.viewportBlockSize
+  return `${String(context.viewport.width)}x${styles.valueDependencies.usedViewportBlockSize
     ? String(context.viewport.height) : "independent"}`;
 }
 
@@ -94,11 +95,14 @@ function textMetricsKey(request: DocumentAnalysisRequest): string {
   ].join(":");
 }
 
-function dependencyKey(document: AttachedDocument, request: DocumentAnalysisRequest): ArtifactDependencyKey {
+function dependencyKey(document: AttachedDocument, request: DocumentAnalysisRequest, styles: DocumentRenderArtifacts["computedStyles"]): ArtifactDependencyKey {
   const media = mediaKey(document, request);
-  const layoutViewport = layoutKey(document, request);
+  const layoutViewport = layoutKey(styles, request);
   const textMetrics = textMetricsKey(request);
-  const computedStyleMap = [document.program.fingerprint, document.analysisStateRevision, media].join(":");
+  const computedStyleMap = [document.program.fingerprint, document.analysisStateRevision, media,
+    styles.valueDependencies.computedViewportInlineSize ? request.mediaEnvironment.viewportWidthCssPx : "-",
+    styles.valueDependencies.computedViewportBlockSize ? request.mediaEnvironment.viewportHeightCssPx : "-",
+  ].join(":");
   const boxTree = [computedStyleMap, document.analysisStateRevision].join(":");
   const inlineItemStreams = boxTree;
   const logicalTextIndex = inlineItemStreams;
@@ -139,20 +143,6 @@ function keyIdentity(key: ArtifactDependencyKey): string {
   ].join("\u0000");
 }
 
-function estimatedArtifactCost(artifacts: Omit<DocumentRenderArtifacts, "retainedCost">): number {
-  const styles = artifacts.computedStyles.outcome.status === "complete"
-    ? artifacts.computedStyles.outcome.computedNodes : 0;
-  const boxes = artifacts.boxTree.outcome.status === "complete" ? artifacts.boxTree.outcome.nodes : 0;
-  const fragments = artifacts.documentLayout.outcome.status === "complete"
-    ? artifacts.documentLayout.outcome.fragments : 0;
-  return artifacts.stylesheetProgram.retainedByteSize
-    + styles * 512
-    + boxes * 320
-    + fragments * 640
-    + artifacts.documentDisplayList.commands.length * 384
-    + artifacts.documentGeometry.retainedRectangles * 64;
-}
-
 function changedSelectorDependency(change: DocumentStateDependencyChange): SelectorStateDependency | null {
   if (change === "focus" || change === "hover" || change === "active" || change === "target") return change;
   if (change === "checked-selected") return "checked-selected";
@@ -167,6 +157,7 @@ export class RenderArtifactStore {
   readonly #instrumentation: RenderArtifactStoreOptions["instrumentation"];
   #clock = 0;
   #evictions = 0;
+  #retainedCost = 0;
 
   public constructor(options: RenderArtifactStoreOptions = {}) {
     this.#maximumCost = options.maxRetainedArtifactBytes ?? DEFAULT_MAX_RETAINED_ARTIFACT_BYTES;
@@ -178,7 +169,6 @@ export class RenderArtifactStore {
 
   public attach(input: AttachDocumentArtifactsInput): void {
     input.signal?.throwIfAborted();
-    this.release(input.documentId);
     const program = measured(this.#instrumentation, "stylesheet-program-compilation", () =>
       compileStylesheetProgram({
         document: input.document,
@@ -188,7 +178,7 @@ export class RenderArtifactStore {
         ...(input.signal === undefined ? {} : { signal: input.signal }),
       })
     );
-    this.#documents.set(input.documentId, {
+    const attachment: AttachedDocument = {
       documentId: input.documentId,
       documentRevision: input.documentRevision,
       program,
@@ -198,11 +188,22 @@ export class RenderArtifactStore {
       analysisStateRevision: input.stateRevision,
       analyses: new Map(),
       searches: new Map(),
-    });
+    };
+    const previous = this.#documents.get(input.documentId);
+    this.#documents.set(input.documentId, attachment);
+    try { this.#admit(input.signal); }
+    catch (error) {
+      this.release(input.documentId);
+      if (previous !== undefined) this.#documents.set(input.documentId, previous);
+      this.#measureRetainedCost();
+      throw error;
+    }
   }
 
   public updateState(input: UpdateDocumentArtifactsStateInput): void {
     const document = this.#document(input.documentId, input.documentRevision);
+    if (input.stateRevision < document.stateRevision) throw new RangeError("Document state revision cannot regress.");
+    const previous = { state: document.state, stateRevision: document.stateRevision, analysisStateRevision: document.analysisStateRevision };
     document.state = input.state;
     document.stateRevision = input.stateRevision;
     const invalidates = input.changed.has("control-content") || [...input.changed].some((change) => {
@@ -215,10 +216,16 @@ export class RenderArtifactStore {
       document.analyses.clear();
       document.searches.clear();
     }
+    try { this.#admit(); }
+    catch (error) {
+      Object.assign(document, previous);
+      this.#measureRetainedCost();
+      throw error;
+    }
   }
 
   public analyze(request: DocumentAnalysisRequest): DocumentRenderArtifacts {
-    return this.#analyze(request, this.#instrumentation);
+    return this.#analyzeTransaction(request, this.#instrumentation);
   }
 
   #reusable(
@@ -237,20 +244,44 @@ export class RenderArtifactStore {
     return retained?.artifacts ?? null;
   }
 
+  #analyzeTransaction(
+    request: DocumentAnalysisRequest,
+    instrumentation: RenderArtifactStoreOptions["instrumentation"],
+  ): DocumentRenderArtifacts {
+    const previousCost = this.#retainedCost;
+    try { return this.#analyze(request, instrumentation); }
+    catch (error) {
+      const document = this.#documents.get(request.documentId);
+      if (document !== undefined) this.#clearProgramCaches(document);
+      // Cancellation removed the unadmitted analysis and program caches. The previous
+      // admitted cost is a conservative bound until metrics or admission recounts roots.
+      if (request.signal?.aborted) this.#retainedCost = previousCost;
+      else this.#measureRetainedCost();
+      throw error;
+    }
+  }
+
+  #clearProgramCaches(document: AttachedDocument): void {
+    document.program.selectorRuntime.clear();
+    document.program.substitutedValues.clear();
+    document.program.propertyValidation.clear();
+  }
+
   #analyze(
     request: DocumentAnalysisRequest,
     instrumentation: RenderArtifactStoreOptions["instrumentation"],
   ): DocumentRenderArtifacts {
     const document = this.#document(request.documentId, request.documentRevision);
-    const key = dependencyKey(document, request);
-    const identity = keyIdentity(key);
-    const retained = document.analyses.get(identity);
-    if (retained !== undefined) {
-      retained.lastUsed = ++this.#clock;
-      return retained.artifacts;
-    }
     request.signal?.throwIfAborted();
-    const retainedStyles = this.#reusable(document, "computedStyleMap", key.computedStyleMap);
+    const retainedStyles = [...document.analyses.values()].find(({ artifacts }) => {
+      const styles = artifacts.computedStyles;
+      return artifacts.key.stateRevision === document.analysisStateRevision
+        && artifacts.key.media === mediaKey(document, request)
+        && (!styles.valueDependencies.computedViewportInlineSize
+          || styles.environment.viewportWidthCssPx === request.mediaEnvironment.viewportWidthCssPx)
+        && (!styles.valueDependencies.computedViewportBlockSize
+          || styles.environment.viewportHeightCssPx === request.mediaEnvironment.viewportHeightCssPx);
+    })?.artifacts;
     const computedStyles = retainedStyles?.computedStyles ?? measured(instrumentation, "computed-style-resolution", () => resolveStyles({
       program: document.program,
       state: document.state,
@@ -265,6 +296,13 @@ export class RenderArtifactStore {
       ...(document.budgets?.style === undefined ? {} : { budgets: document.budgets.style }),
       ...(request.signal === undefined ? {} : { signal: request.signal }),
     }));
+    const key = dependencyKey(document, request, computedStyles);
+    const identity = keyIdentity(key);
+    const retained = document.analyses.get(identity);
+    if (retained !== undefined) {
+      retained.lastUsed = ++this.#clock;
+      return retained.artifacts;
+    }
     const retainedBoxTree = this.#reusable(document, "boxTree", key.boxTree);
     const boxTree = retainedBoxTree?.boxTree ?? measured(instrumentation, "box-tree-construction", () => buildFormattingTree({
       document: document.program.document,
@@ -335,10 +373,15 @@ export class RenderArtifactStore {
     };
     const artifacts: DocumentRenderArtifacts = Object.freeze({
       ...incomplete,
-      retainedCost: estimatedArtifactCost(incomplete),
+      retainedCost: estimatedRetainedCost([incomplete], request.signal),
     });
+    request.signal?.throwIfAborted();
     document.analyses.set(identity, { artifacts, lastUsed: ++this.#clock });
-    this.#evict(identity, document.documentId);
+    try { this.#admit(request.signal); }
+    catch (error) { document.analyses.delete(identity); throw error; }
+    if (!document.analyses.has(identity)) {
+      throw new RenderBudgetExceededError("retained-cost", artifacts.retainedCost, this.#maximumCost);
+    }
     return artifacts;
   }
 
@@ -354,7 +397,7 @@ export class RenderArtifactStore {
         this.#instrumentation?.increment(identity, count);
       },
     } satisfies NonNullable<RenderArtifactStoreOptions["instrumentation"]>;
-    const artifacts = this.#analyze({
+    const artifacts = this.#analyzeTransaction({
       ...request,
       ...(request.analysisSignal === undefined ? {} : { signal: request.analysisSignal }),
     }, instrumentation);
@@ -447,6 +490,9 @@ export class RenderArtifactStore {
       byMatch.set(span.match, values);
     }
     return Object.freeze({
+      documentRevision: request.documentRevision,
+      stateRevision: this.#document(request.documentId, request.documentRevision).stateRevision,
+      layoutRevision: artifacts.key.documentLayout,
       query: bounded,
       matches: Object.freeze(logical.matches.map((match) => {
         const visual = byMatch.get(match.id) ?? [];
@@ -476,6 +522,7 @@ export class RenderArtifactStore {
     document.analyses.clear();
     document.searches.clear();
     this.#documents.delete(documentId);
+    this.#measureRetainedCost();
   }
 
   public dispose(): void {
@@ -483,16 +530,13 @@ export class RenderArtifactStore {
   }
 
   public metrics(): RenderArtifactStoreMetrics {
+    this.#measureRetainedCost();
     let retainedAnalyses = 0;
-    let retainedCost = 0;
-    for (const document of this.#documents.values()) {
-      retainedAnalyses += document.analyses.size;
-      for (const analysis of document.analyses.values()) retainedCost += analysis.artifacts.retainedCost;
-    }
+    for (const document of this.#documents.values()) retainedAnalyses += document.analyses.size;
     return Object.freeze({
       attachedDocuments: this.#documents.size,
       retainedAnalyses,
-      retainedCost,
+      retainedCost: this.#retainedCost,
       evictions: this.#evictions,
     });
   }
@@ -537,26 +581,31 @@ export class RenderArtifactStore {
       if (oldest === null) break;
       document.searches.delete(oldest.identity);
     }
+    this.#admit();
     return projection;
   }
 
-  #evict(protectedIdentity: string, protectedDocument: string): void {
-    while (this.metrics().retainedCost > this.#maximumCost) {
+  #measureRetainedCost(signal?: AbortSignal): void {
+    this.#retainedCost = estimatedRetainedCost([...this.#documents.values()], signal);
+  }
+
+  #admit(signal?: AbortSignal): void {
+    this.#measureRetainedCost(signal);
+    while (this.#retainedCost > this.#maximumCost) {
       let oldest: { document: AttachedDocument; identity: string; lastUsed: number } | null = null;
       for (const document of this.#documents.values()) {
         for (const [identity, analysis] of document.analyses) {
-          if (document.documentId === protectedDocument && identity === protectedIdentity) continue;
-          if (oldest === null || analysis.lastUsed < oldest.lastUsed) {
-            oldest = { document, identity, lastUsed: analysis.lastUsed };
-          }
+          if (oldest === null || analysis.lastUsed < oldest.lastUsed) oldest = { document, identity, lastUsed: analysis.lastUsed };
         }
       }
-      if (oldest === null) break;
+      if (oldest === null) throw new RenderBudgetExceededError("retained-cost", this.#retainedCost, this.#maximumCost);
       oldest.document.analyses.delete(oldest.identity);
       for (const identity of oldest.document.searches.keys()) {
         if (identity.startsWith(`${oldest.identity}\u0000`)) oldest.document.searches.delete(identity);
       }
+      this.#clearProgramCaches(oldest.document);
       this.#evictions += 1;
+      this.#measureRetainedCost(signal);
     }
   }
 }

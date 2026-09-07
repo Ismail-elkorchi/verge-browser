@@ -7,6 +7,7 @@ import type { BrowserSession } from "../app/session.js";
 import type { BrowserStore } from "../app/storage.js";
 import type { RenderInstrumentation } from "../presentation/renderer/index.js";
 import type { TerminalSize } from "@ismail-elkorchi/terminal-ui/host";
+import type { RenderWorkerClient } from "./render-worker/client.js";
 import type { BrowserServices } from "./services.js";
 import { createBrowserApp, createBrowserInitialState } from "./app.js";
 import { BrowserController } from "./browser-controller.js";
@@ -22,6 +23,7 @@ export interface BrowserTuiOptions {
   readonly downloadMaxBytes?: number;
   readonly restoreWorkspace?: boolean;
   readonly instrumentation?: RenderInstrumentation;
+  readonly renderWorkerFactory?: () => RenderWorkerClient;
 }
 
 export async function prepareBrowserTui(initialTarget: string, options: BrowserTuiOptions) {
@@ -115,6 +117,7 @@ export async function renderBrowserOnce(
   try {
     const selectedTab = prepared.state.documents[prepared.state.activeDocumentIndex] ?? prepared.state.documents[0];
     if (selectedTab === undefined) throw new Error("One-shot rendering requires an open document.");
+    prepared.controller.configureRestoration(selectedTab);
     const selected = selectedTab.kind === "ready"
       ? selectedTab
       : await prepared.controller.restorePlaceholder(selectedTab);

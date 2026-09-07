@@ -17,6 +17,12 @@ import { updateBrowser } from "../../dist/ui/app.js";
 import { browserView } from "../../dist/ui/view.js";
 
 const SAMPLE_COUNT = 21;
+// The full fixture retains ~569 MB after GC. Its former 93 MB estimate omitted owners.
+// Default 512 MiB admission rejection is covered by the resource controls; timings use explicit bounds.
+const QUALIFICATION_RENDER_BUDGETS = Object.freeze({
+  maxRetainedArtifactBytes: 1024 * 1024 * 1024,
+  maxWorkingSetBytes: 2 * 1024 * 1024 * 1024,
+});
 const LIMITS_MS = Object.freeze({
   warmScrollP95: 100,
   noChangeViewportP95: 100,
@@ -123,14 +129,15 @@ function parameters(scrollRow = 0, overrides = {}) {
 async function workerMeasurements(html) {
   const syntaxMetrics = new RenderStageMetrics();
   const session = new BrowserSession({
-    loader: async (requestUrl) => fetchResult(requestUrl, html),
+    loader: async (requestUrl) => fetchResult(requestUrl, requestUrl === "about:newtab"
+        ? "<title>New tab</title><main><h1>New tab</h1></main>" : html),
     stylesheetLoader: async () => { throw new Error("unexpected external stylesheet"); },
     defaultParseMode: "text",
     instrumentation: syntaxMetrics,
   });
   const navigation = await elapsed(() => session.open("https://incremental.test/article"));
   const document = browserDocument(navigation.value);
-  const client = new RenderWorkerClient();
+  const client = new RenderWorkerClient(QUALIFICATION_RENDER_BUDGETS);
   let maximumDelay = 0;
   const eventLoopDelays = [];
   let eventLoopPhase = "idle";
@@ -186,9 +193,9 @@ async function workerMeasurements(html) {
     );
     const burstResults = await Promise.allSettled(burst);
     eventLoopPhase = "metrics-release";
-    const metrics = await client.metrics();
+    const metrics = await client.metrics(true);
     await client.release(document.id);
-    const released = await client.metrics();
+    const released = await client.metrics(true);
     return {
       navigationMs: navigation.milliseconds,
       navigationDiagnostics: navigation.value.diagnostics,
@@ -228,6 +235,7 @@ async function tuiMeasurements(html) {
   const uiMetrics = new RenderStageMetrics();
   const preparedAt = performance.now();
   const prepared = await prepareBrowserTui("https://incremental.test/article", {
+    renderWorkerFactory: () => new RenderWorkerClient(QUALIFICATION_RENDER_BUDGETS),
     store,
     instrumentation: uiMetrics,
     services: {
@@ -235,7 +243,8 @@ async function tuiMeasurements(html) {
       async openExternal() {}, async openPath() {}, async close() {},
     },
     createSession: () => new BrowserSession({
-      loader: async (requestUrl) => fetchResult(requestUrl, html),
+      loader: async (requestUrl) => fetchResult(requestUrl, requestUrl === "about:newtab"
+        ? "<title>New tab</title><main><h1>New tab</h1></main>" : html),
       stylesheetLoader: async () => { throw new Error("unexpected external stylesheet"); },
       defaultParseMode: "text",
     }),
@@ -319,6 +328,27 @@ async function tuiMeasurements(html) {
       }))).milliseconds);
     }
     await rendering;
+    await waitUntil(() => runtime.state().documents[0]?.rendering?.status === "ready", "resize usable frame");
+    await runtime.dispatch({ kind: "newDocument" });
+    await waitUntil(() => runtime.state().documents[1]?.rendering?.status === "ready", "new tab usable frame");
+    const tabSwitch = [];
+    for (let index = 0; index < SAMPLE_COUNT; index += 1) {
+      const selected = index % 2;
+      const started = performance.now();
+      await runtime.dispatch({ kind: "selectDocument", index: selected });
+      await waitUntil(() => runtime.state().activeDocumentIndex === selected
+        && runtime.state().documents[selected]?.rendering?.status === "ready", "tab switch usable frame");
+      tabSwitch.push(performance.now() - started);
+    }
+    const frameCommits = runtime.metrics().frameCommits;
+    const renderingMetrics = await prepared.controller.renderingMetrics();
+    // Force a new layout request, then measure through complete runtime and controller disposal.
+    await runtime.resize({ columns: 65, rows: 35 });
+    const quitStarted = performance.now();
+    await runtime.dispatch({ kind: "quit" });
+    await runtime.dispose();
+    await prepared.controller.close();
+    const quitToDisposal = performance.now() - quitStarted;
     return {
       preparationMs: preparedMs,
       firstShell: shell.milliseconds,
@@ -341,8 +371,12 @@ async function tuiMeasurements(html) {
       inputStateUpdateWhileRenderingP95: percentile(inputUpdates, 0.95),
       inputToFrameCommitP50: percentile(committedInput, 0.5),
       inputToFrameCommitP95: percentile(committedInput, 0.95),
-      frameCommits: runtime.metrics().frameCommits,
-      renderingMetrics: await prepared.controller.renderingMetrics(),
+      tabSwitchToUsableFrameP50: percentile(tabSwitch, 0.5),
+      tabSwitchToUsableFrameP95: percentile(tabSwitch, 0.95),
+      tabSwitchToUsableFrameSamples: tabSwitch,
+      quitToCompleteDisposal: quitToDisposal,
+      frameCommits,
+      renderingMetrics,
       uiStages: uiMetrics.snapshot(),
     };
   } finally {
@@ -424,6 +458,9 @@ const metricsMs = {
 const failures = Object.entries(LIMITS_MS)
   .filter(([name, limit]) => metricsMs[name] > limit)
   .map(([name, limit]) => `${name}=${metricsMs[name].toFixed(2)}ms exceeds ${String(limit)}ms`);
+if (tui.quitToCompleteDisposal > 1000) failures.push("quit-to-complete-disposal exceeded 1000ms");
+if (worker.workerMetrics.retainedCost > QUALIFICATION_RENDER_BUDGETS.maxRetainedArtifactBytes) failures.push("retained-cost admission exceeded its budget");
+if (worker.workerMetrics.peakWorkingSetBytes > worker.workerMetrics.workingSetBudget) failures.push("worker exceeded its working-set budget");
 if (worker.maximumRetainedRows > worker.viewportRowBound) failures.push("viewport cell rows exceeded viewport plus overscan");
 if (worker.burstFulfilled !== 1) failures.push("100 replaceable viewport requests committed more than the latest generation");
 if (worker.releasedWorkerMetrics.attachedDocuments !== 0) failures.push("released worker document remained attached");
@@ -448,6 +485,7 @@ const report = {
   tui,
   restoration,
   limitsMs: LIMITS_MS,
+  renderingBudgets: QUALIFICATION_RENDER_BUDGETS,
   ok: failures.length === 0,
   failures,
 };

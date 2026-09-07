@@ -78,7 +78,9 @@ layout model.
 - `src/reader/` owns the deliberately flattened reader document. It is not a
   rendering fallback.
 - `src/ui/render-worker/` owns the long-lived Node worker protocol and artifact
-  store. The worker has no network or filesystem capability. The main `src/ui/`
+  store. Rendering performs no application network or filesystem operations, and
+  the protocol supplies no session, cookie, or file capability. A Node worker is
+  not an operating-system sandbox. The main `src/ui/`
   code owns browser chrome, placeholder tabs, render requests, and the last
   committed viewport only.
 
@@ -174,10 +176,30 @@ document, stylesheet-program, media, state, viewport-size, and text-metric
 dependency key. It reuses upstream artifacts when only a downstream key changes.
 Scroll, search query, active match, and terminal color depth are not document
 analysis keys. Retention is cost-bounded (512 MiB by default), uses
-least-recently-used analysis eviction, bounds search projections per document,
+least-recently-used analysis eviction, bounds logical query caches and search
+projections per document,
 and releases document-owned programs, selector sessions, substitution caches,
 analyses, and searches on navigation replacement, tab release, or worker
-disposal. It retains no scroll-keyed complete render result.
+disposal. It retains no scroll-keyed complete render result. Attachments are
+charged before analysis. Private allocation roots are registered by their owning
+subsystem through weak ownership metadata. Shared objects are visited once;
+truncated styles, formatting trees, and layout prefixes are charged for their
+actual retained roots. Estimates include documents, syntax, programs, selector
+indexes and match sets, computed snapshots, validation and substitution caches,
+inline streams, logical queries, fragments, commands, and spatial/semantic
+indexes. External parser sessions expose counts rather than private allocations;
+their index and validation costs are explicit estimates, not exact heap sizes.
+
+Admission has no exemption for the newest analysis. If eviction cannot satisfy
+the retention budget, it returns a typed `RenderBudgetExceededError`. Eviction
+clears the associated program caches so they cannot keep an evicted computed
+snapshot alive. Cleanup has reserved queue and transfer capacity ahead of ordinary work.
+The client separately bounds pending transfer allocations,
+delivered viewports, committed viewports, and summaries to 64 MiB. The default
+worker working-set budget is 1 GiB, observed as heap plus external allocations at cancellation checkpoints with a
+Node worker heap limit as an additional termination boundary. Allocation peaks
+and retained heap after forced GC are reported separately. A rejected analysis
+preserves the last committed viewport; it does not reduce HTML/CSS support.
 
 The UI attaches decoded HTML source, verified stylesheet syntax, immutable
 resource metadata, and document state once per document revision. Subsequent
@@ -187,19 +209,66 @@ style, box, text, layout, display-list, geometry, and raster artifacts stay in
 the worker. Only compact document extent, focus, and anchor summaries plus the
 requested viewport rows and visible indexes cross back to the UI.
 
+Every viewport names its required summary identity and layout revision. A
+summary contains document extent, scroll anchors, and logical focus order. The
+client caches a summary on receipt, even when the UI subsequently rejects that
+viewport. Each request acknowledges the summary identity actually held by the
+client. The worker sends a summary whenever that identity differs, including a
+return to an earlier retained layout. The UI commits only a viewport accompanied
+by its matching summary. Height-only changes with independent values reuse the
+same layout and summary; document extent does not include an old viewport's
+minimum height. Release, reattachment, and worker replacement discard delivery
+state, so sending is never treated as acknowledgement.
+
+Logical search results carry document revision, relevant state revision, query,
+and search request generation. Logical match IDs contain no physical row. The
+bounded logical query cache survives width-only layout changes; anchors are
+projected from those matches into the current layout revision. Resize and
+geometry-affecting state changes invalidate physical anchors. Next/previous
+navigation waits for current anchors. Find closure, query replacement, tab
+switching, navigation, and shutdown invalidate pending search generations.
+Search failures have their own revision-scoped completion path.
+
 terminal-ui continues to serialize state transitions and frame commits. Its
 effects send requests, await worker results, and dispatch typed completion
 messages; neither `updateBrowser()` nor `browserView()` invokes browser
 rendering. Worker failure keeps the last committed viewport, exposes an explicit
 failed rendering state with a retry action, and never falls back to synchronous
 UI-thread rendering. Ordinary scrolling does not implicitly restart a failed
-worker.
+worker. One bounded client queue admits at most 128 pending requests, coalesces
+queued viewport/search requests, prioritizes cleanup and the selected document,
+and posts one job at a time. Scroll replaces viewport work while useful cold
+document analysis continues. A tab switch cancels the previous document's
+uncommitted job at shared-atomic cancellation checkpoints. Completed artifacts
+remain reusable; cancelled partial artifacts cannot enter the retained store.
+
+Attachment and state preparation serialize within each document lifecycle.
+Monotonic document/state revisions, lifecycle identity, and a worker epoch are
+checked before and after every acknowledgement. A released lifecycle cannot be
+resurrected by an older preparation. A request captures its prepared worker, so
+an old epoch cannot address a replacement worker. Unexpected exits, including
+code zero, settle all pending requests. Synchronous transport failures remove
+the pending entry. Close is idempotent under concurrent callers: it first stops
+admission, cancels all document/viewport/search generations and queued work,
+then requests disposal. A 250 ms graceful deadline is followed by termination;
+disposal never waits indefinitely behind cold rendering.
 
 Workspace restoration creates placeholder tabs before navigation, starts the
 TUI shell immediately, loads the active placeholder first, and restores
-background tabs with bounded concurrency. Background tabs are not rendered
-until selected. Each failure is isolated, and closing a placeholder cancels its
-pending navigation before a session can be retained.
+background tabs through one scheduler. Its total live capacity is three: one
+foreground reservation and two background slots. The queue is bounded at 256.
+Selection promotes queued work without adding capacity. Cancelled live loads
+remain accounted for until cleanup settles; queued cancellation prevents session
+allocation. Background restoration starts after the selected page's first frame
+or failure, including rendering failure. Background tabs are not rendered until
+selected.
+
+Browser-global actions and asynchronous completion routing precede the
+selected-tab readiness gate. Omnibox editing/submission, tab management, quit,
+applicable chrome, help, stop, and retry work in restoring/loading/failed states.
+Viewport, search, navigation, and restoration completions route by their owning
+tab and revisions. Browser-global library/download completions do not require a
+document snapshot. Only document-specific operations consult readiness.
 
 ### Dependency invalidation
 
@@ -208,10 +277,18 @@ media features actually consumed by the stylesheet program, dynamic selector
 state, CSS viewport dimensions actually consumed by style or layout, and the
 terminal text-metric profile. Scroll position, search query, active search
 match, and terminal color depth are viewport dependencies and never invalidate
-normal-flow layout. A width change reuses styles and text processing unless an
-inline-size media query changes them; a height change reuses document layout
-unless block-size media, viewport units, percentages, fixed geometry, or sticky
-constraints consume it. Ambiguous-width changes invalidate text measurement
+normal-flow layout. Media-query dependencies belong to the stylesheet program.
+Computed-value dependencies are recorded from evaluated typed values, after
+nested `var()` substitution and fallback resolution. Viewport-derived font sizes,
+inherited computed values, and root-relative fonts therefore invalidate computed
+snapshots in the consumed dimension. A width change still reuses CSS syntax,
+selector compilation, and inline-style programs.
+
+Used-value dependencies are separate: containing sizes, viewport units, fixed
+positioning, and sticky constraints belong to layout. Unresolved containing-block
+percentage dependence is conservative. A height change reuses immutable layout
+when neither computed nor used values depend on it. Dynamic selectors that change
+custom properties invalidate the affected computed values and downstream geometry. Ambiguous-width changes invalidate text measurement
 and layout, while color-depth changes begin at cell rasterization.
 
 Stylesheet resources retain verified parser syntax and dependency-graph
@@ -226,7 +303,10 @@ strings.
 
 ## Performance qualification
 
-`npm run test:bench` writes `reports/incremental-rendering-bench.json`. Its
+`npm run test:bench` writes `reports/incremental-rendering-bench.json`.
+The [qualification report](./incremental-rendering-qualification.md) records the
+corrected contracts, regression coverage, budget rationale, and separate visible
+interaction and retained-memory measurements. Its
 independently authored MIT fixture combines a reference-article-sized document,
 common type/class/descendant selectors, custom properties, tables, links, and
 controls. It separately reports cold navigation and attachment, first viewport,
@@ -242,8 +322,13 @@ overscan; one hundred replacement scroll requests may commit only their newest
 generation; released artifact graphs must be unreachable after forced garbage
 collection. Timing gates apply only to the deterministic fixture: warm worker
 viewport p95 is bounded at 100 ms, browser-view construction at 33 ms,
-input-to-state update at 50 ms, main event-loop delay at 50 ms, and shell
-creation at 500 ms. Full terminal frame-commit timing remains reported
+input-to-state update at 50 ms, main event-loop delay p95 at 16 ms, and shell
+creation at 500 ms. The full 2,000-section latency fixture uses explicit 1 GiB retention and 2 GiB
+working-set bounds: measurement found about 569 MB retained after GC, exceeding
+the default 512 MiB admission budget. The default rejection is tested separately;
+no timing threshold or content limit is relaxed. Qualification also reports
+input-to-visible-frame, tab-switch-to-usable-frame, and quit-to-complete-disposal
+(the latter has a 1,000 ms gate). Full terminal frame-commit timing remains reported
 separately because terminal output cost depends on the terminal host.
 
 ## Layout fragment and line-box contracts
@@ -356,6 +441,11 @@ their logical content range and document source range. The cell rasterizer does
 not segment, line-break, or run the bidi algorithm. Terminal emulators remain
 responsible for glyph shaping; correct Arabic bidi order does not imply that
 Verge implements an Arabic shaping engine.
+
+Layout retains linked clip-owner chains. Clip translation follows the owning
+fragment's attachment rather than rectangle containment; ancestor clips remain
+independent of sticky descendants. Paint, focus, hit testing, and accessibility
+resolve the same clip ownership against the current viewport.
 
 The viewport hit-test index uses row buckets and comes from clipped
 action-bearing content, padding, and border geometry; every retained region has

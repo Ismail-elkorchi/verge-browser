@@ -1,5 +1,6 @@
 import {
   cssCoordinate,
+  cssIntersection,
   cssCoordinateFromFixed,
   cssLengthFromFixed,
   cssRect,
@@ -66,27 +67,32 @@ export function inheritedScrollAttachment(
   return null;
 }
 
-function clipMovesWithStickyRoot(command: TerminalPaintCommand, attachment: LayoutScrollAttachment): boolean {
-  if (attachment.kind === "fixed") return true;
-  const root = attachment.normalBorderRect;
-  const clip = command.clipRect;
-  return clip.x >= root.x && clip.y >= root.y
-    && clip.x + clip.width <= root.x + root.width
-    && clip.y + clip.height <= root.y + root.height;
+/** Clip translation follows its layout owner, independently of the painted descendant. */
+export function scrollAttachedClipRect(layout: LayoutFragmentTree, fragment: LayoutFragmentId, viewport: CssRect): CssRect {
+  let chain = layout.clipChain(fragment);
+  if (chain === null) return layout.fragment(fragment).clipRect;
+  let resolved: CssRect | null = null;
+  while (chain !== null) {
+    const attachment = chain.owner === null ? null : inheritedScrollAttachment(layout, chain.owner);
+    const offset = attachment === null ? [0, 0] as const : scrollAttachmentTranslation(attachment, viewport);
+    const rect = translatedScrollAttachedRect(chain.rect, offset[0], offset[1]);
+    resolved = resolved === null ? rect : cssIntersection(resolved, rect);
+    chain = chain.parent;
+  }
+  return resolved ?? layout.fragment(fragment).clipRect;
 }
 
 function translatedCommand(
   command: TerminalPaintCommand,
-  attachment: LayoutScrollAttachment,
+  layout: LayoutFragmentTree,
+  viewport: CssRect,
   inline: number,
   block: number,
 ): TerminalPaintCommand {
   const common = {
     ...command,
     rect: translatedScrollAttachedRect(command.rect, inline, block),
-    clipRect: clipMovesWithStickyRoot(command, attachment)
-      ? translatedScrollAttachedRect(command.clipRect, inline, block)
-      : command.clipRect,
+    clipRect: scrollAttachedClipRect(layout, command.layoutFragment, viewport),
   };
   return command.kind === "border-side"
     ? Object.freeze({ ...common, borderRect: translatedScrollAttachedRect(command.borderRect, inline, block) })
@@ -171,7 +177,7 @@ export function buildViewportDisplayList(input: BuildViewportDisplayListInput): 
     for (const command of group.commands) {
       visitedAttachments += 1;
       if ((visitedAttachments & 255) === 0) input.signal?.throwIfAborted();
-      const resolved = translatedCommand(command, group.attachment, inline, block);
+      const resolved = translatedCommand(command, input.documentDisplayList.layout, viewport, inline, block);
       if (intersects(resolved, windowRect)) commands.push(resolved);
     }
   }

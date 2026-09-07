@@ -416,7 +416,6 @@ export interface StylesheetProgramDependencies {
   readonly mediaReducedMotion: boolean;
   readonly mediaHover: boolean;
   readonly mediaPointer: boolean;
-  readonly viewportBlockSize: boolean;
 }
 
 export interface CustomPropertySubstitutionCache {
@@ -439,7 +438,14 @@ export interface CompileStylesheetProgramInput {
   readonly signal?: AbortSignal;
 }
 
+export interface StyleValueDependencies {
+  readonly computedViewportInlineSize: boolean;
+  readonly computedViewportBlockSize: boolean;
+  readonly usedViewportBlockSize: boolean;
+}
+
 export interface StyleSnapshot {
+  readonly valueDependencies: StyleValueDependencies;
   readonly document: IndexedWebDocumentSnapshot;
   readonly environment: MediaEnvironment;
   readonly diagnostics: readonly StyleDiagnostic[];

@@ -1,3 +1,4 @@
+import { registerRetainedOwner } from "../../memory/retained-cost.js";
 import type { DocumentNodeRef, DocumentSourceRange } from "../../document/index.js";
 import type {
   FormattingNode,
@@ -83,6 +84,7 @@ function foldText(value: string): {
 }
 
 class ImmutableTextSearchIndex implements TextSearchIndex {
+  readonly #queries = new Map<string, TextSearchResult>();
   readonly text: string;
   readonly #segments: readonly TextSearchSegment[];
   readonly #foldedText: string;
@@ -98,9 +100,18 @@ class ImmutableTextSearchIndex implements TextSearchIndex {
     this.#foldedText = folded.text;
     this.#originalBoundaryByFoldedOffset = folded.originalBoundaryByFoldedOffset;
     Object.freeze(this);
+    registerRetainedOwner(this, () => [this.#queries, this.#segments, this.#foldedText, this.#originalBoundaryByFoldedOffset]);
   }
 
   public search(query: string, limit: number, signal?: AbortSignal): TextSearchResult {
+    const identity = `${String(limit)}\u0000${query}`;
+    const retained = this.#queries.get(identity);
+    if (retained !== undefined) {
+      signal?.throwIfAborted();
+      this.#queries.delete(identity);
+      this.#queries.set(identity, retained);
+      return retained;
+    }
     const needle = query.toLowerCase().replace(/\s+/gu, " ").trim().slice(0, 1_024);
     if (needle.length === 0) return Object.freeze({ matches: Object.freeze([]), truncated: false });
     const foldedMatches: { readonly start: number; readonly end: number }[] = [];
@@ -167,7 +178,15 @@ class ImmutableTextSearchIndex implements TextSearchIndex {
         slices: Object.freeze(slices)
       });
     });
-    return Object.freeze({ matches: Object.freeze(matches), truncated });
+    const result = Object.freeze({ matches: Object.freeze(matches), truncated });
+    signal?.throwIfAborted();
+    this.#queries.set(identity, result);
+    while (this.#queries.size > 32) {
+      const oldest = this.#queries.keys().next().value;
+      if (oldest === undefined) break;
+      this.#queries.delete(oldest);
+    }
+    return result;
   }
 }
 

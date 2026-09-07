@@ -1,3 +1,6 @@
+import { recordPropertyValidationValue } from "./stylesheet-program.js";
+import { registerRetainedOwner } from "../../memory/retained-cost.js";
+import { recordUsedValueDependencies, usesLengthUnit, type EvaluatedValueDependencies } from "./value-dependencies.js";
 import {
   createSelectorMatchSession,
   parseComponentValues,
@@ -221,6 +224,7 @@ class ImmutableCustomPropertyEnvironment implements ReadonlyMap<string, string> 
   ) {
     this.#parent = parent;
     this.#changes = changes;
+    registerRetainedOwner(this, () => [this.#parent, this.#changes, this.#materialized]);
     Object.freeze(this);
   }
 
@@ -1439,6 +1443,7 @@ function validatedValue(
       diagnostics.add("property-invalid", candidate.sourceUrl, `Invalid value for ${selectedName}.`);
       return null;
     }
+    if (!gridOwned) recordPropertyValidationValue(validationSession, value.length);
     const validation = gridOwned ? { status: "valid" as const } : validationSession.validate(selectedName, components);
     if (validation.status === "invalid") {
       diagnostics.add("property-invalid", candidate.sourceUrl, `Invalid value for ${selectedName}.`);
@@ -1998,6 +2003,7 @@ function computeStyle(
   validationSession: ResolveStylesInput["program"]["propertyValidation"],
   substitutionCache: ResolveStylesInput["program"]["substitutedValues"],
   instrumentation: ResolveStylesInput["instrumentation"],
+  valueDependencies: EvaluatedValueDependencies,
   pseudo: PseudoElementIdentity | null = null,
   rootFontSizePx = 16
 ): ComputedStyle {
@@ -2189,6 +2195,8 @@ function computeStyle(
         : keywords[normalized] === undefined
           ? parseLength(normalized, false)
           : Object.freeze({ kind: "length", value: keywords[normalized], unit: "px" } as const);
+    valueDependencies.computedViewportInlineSize ||= usesLengthUnit(specified, "vw");
+    valueDependencies.computedViewportBlockSize ||= usesLengthUnit(specified, "vh");
     const computed = specified === null ? null : absoluteFontSize(specified, parentPx, rootFontSizePx, environment);
     if (computed === null) unsupported(fontSize);
     else style = { ...style, text: { ...style.text, fontSize: computed } };
@@ -2805,10 +2813,12 @@ function computeStyle(
       })
     };
   }
+  recordUsedValueDependencies(style, valueDependencies);
   return immutableComputedStyle(style);
 }
 
 class ImmutableStyleSnapshot implements StyleSnapshot {
+  readonly valueDependencies: StyleSnapshot["valueDependencies"];
   readonly document: IndexedWebDocumentSnapshot;
   readonly environment: ResolveStylesInput["environment"];
   readonly diagnostics: readonly StyleDiagnostic[];
@@ -2823,8 +2833,12 @@ class ImmutableStyleSnapshot implements StyleSnapshot {
     pseudos: ReadonlyMap<string, ComputedStyle>,
     diagnostics: readonly StyleDiagnostic[],
     stylesheetCount: number,
-    outcome: StyleOutcome
+    outcome: StyleOutcome,
+    valueDependencies: StyleSnapshot["valueDependencies"] = {
+      computedViewportInlineSize: true, computedViewportBlockSize: true, usedViewportBlockSize: true,
+    }
   ) {
+    this.valueDependencies = Object.freeze({ ...valueDependencies });
     this.document = input.program.document;
     this.environment = Object.freeze({ ...input.environment });
     this.#styles = styles;
@@ -2833,6 +2847,7 @@ class ImmutableStyleSnapshot implements StyleSnapshot {
     this.stylesheetCount = stylesheetCount;
     this.outcome = Object.freeze(outcome);
     Object.freeze(this);
+    registerRetainedOwner(this, () => [this.#styles, this.#pseudos]);
   }
 
   public style(node: DocumentNodeRef): ComputedStyle {
@@ -2907,6 +2922,9 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
     && previous instanceof ImmutableStyleSnapshot
     && previous.outcome.status === "complete"
     && selectorRuntime.computedEnvironment === environmentIdentity;
+  const valueDependencies: EvaluatedValueDependencies = incremental ? { ...previous.valueDependencies } : {
+    computedViewportInlineSize: false, computedViewportBlockSize: false, usedViewportBlockSize: false,
+  };
   const affected = new Set<DocumentNodeRef>();
   if (incremental) {
     const pending = [...candidateCollection.affectedDynamicNodes];
@@ -2953,6 +2971,7 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
       input.program.propertyValidation,
       input.program.substitutedValues,
       input.instrumentation,
+      valueDependencies,
       null,
       ref === input.program.document.documentElement ? 16 : rootFontSizePx
     );
@@ -2989,6 +3008,7 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
         input.program.propertyValidation,
         input.program.substitutedValues,
         input.instrumentation,
+        valueDependencies,
         pseudo,
         rootFontSizePx
       );
@@ -3019,7 +3039,8 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
     pseudos,
     diagnostics.result(),
     Math.max(0, sources.length - 1),
-    outcome
+    outcome,
+    valueDependencies
   );
   selectorRuntime.computedSnapshot = snapshot;
   selectorRuntime.computedEnvironment = environmentIdentity;

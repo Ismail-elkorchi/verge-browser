@@ -388,6 +388,7 @@ async function artifactStoreLifecycleMemory() {
   await collectGarbage();
   const before = memory();
   const retained = retainArtifactGraphForRelease();
+  const allocationPeak = memory();
   await collectGarbage();
   const live = memory();
   retained.store.release("artifact-release");
@@ -396,7 +397,8 @@ async function artifactStoreLifecycleMemory() {
   const released = memory();
   return {
     estimatedRetainedBytes: retained.retainedCost,
-    liveHeap: mebibytes(Math.max(0, live.heapUsed - before.heapUsed)),
+    sampledAllocationPeakHeap: mebibytes(Math.max(0, allocationPeak.heapUsed - before.heapUsed)),
+    retainedAfterGcHeap: mebibytes(Math.max(0, live.heapUsed - before.heapUsed)),
     releasedHeap: mebibytes(Math.max(0, released.heapUsed - before.heapUsed)),
     released: retained.artifacts.deref() === undefined,
     metricsAfterRelease: retained.store.metrics(),
@@ -1745,7 +1747,7 @@ const memoryMetrics = {
   tableLayoutFragmentPeakHeapGrowth: tableLayoutFragmentsMemory.peakHeapGrowth,
   tableLayoutFragmentRetainedHeap: tableLayoutFragmentsMemory.retainedHeap,
   tableRepeatedResizeRetainedHeap,
-  artifactGraphLiveHeap: artifactStoreLifecycle.liveHeap,
+  artifactGraphRetainedAfterGcHeap: artifactStoreLifecycle.retainedAfterGcHeap,
   artifactGraphReleasedHeap: artifactStoreLifecycle.releasedHeap,
 };
 const failures = Object.entries(LIMITS_MS)

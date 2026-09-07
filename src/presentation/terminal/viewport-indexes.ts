@@ -4,9 +4,11 @@ import type {
   TextSearchLayoutProjection,
   TextSearchMatchId,
 } from "../search/index.js";
+import { cssIntersection } from "../layout/index.js";
 import { terminalPaintBudgets } from "./display-list.js";
 import {
   inheritedScrollAttachment,
+  scrollAttachedClipRect,
   scrollAttachmentTranslation,
   translatedScrollAttachedRect,
 } from "./viewport-display-list.js";
@@ -65,9 +67,9 @@ function resolvedViewportRects(
     const fragment = fragments[index] ?? fragments[0];
     if (fragment === undefined) return rect;
     const attachment = inheritedScrollAttachment(displayList.documentDisplayList.layout, fragment);
-    if (attachment === null) return rect;
-    const [inline, block] = scrollAttachmentTranslation(attachment, displayList.viewportRect);
-    return translatedScrollAttachedRect(rect, inline, block);
+    const [inline, block] = attachment === null ? [0, 0] : scrollAttachmentTranslation(attachment, displayList.viewportRect);
+    return cssIntersection(translatedScrollAttachedRect(rect, inline, block),
+      scrollAttachedClipRect(displayList.documentDisplayList.layout, fragment, displayList.viewportRect));
   });
   return cssRectsToCellRects(resolved, displayList);
 }

@@ -289,7 +289,14 @@ export interface BuildLayoutFragmentTreeInput {
   readonly signal?: AbortSignal;
 }
 
+export interface LayoutClipChain {
+  readonly owner: LayoutFragmentId | null;
+  readonly rect: CssRect;
+  readonly parent: LayoutClipChain | null;
+}
+
 export interface LayoutFragmentTree {
+  clipChain(id: LayoutFragmentId): LayoutClipChain | null;
   readonly formatting: FormattingTree;
   readonly context: LayoutContext;
   readonly rootFontMetrics: UsedFontMetrics;

@@ -1,3 +1,7 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
+import { setImmediate } from "node:timers/promises";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { clearInterval, setInterval } from "node:timers";
@@ -394,3 +398,311 @@ test("document attachment observes tab-lifetime cancellation before retaining ar
     await client.close();
   }
 });
+
+function analysis(store, columns = 80, rows = 24) {
+  return store.analyze({ documentId: "document", documentRevision: 1, ...contexts(columns, rows) });
+}
+
+function layoutFragments(layout) {
+  const pending = [layout.root];
+  const fragments = [];
+  while (pending.length > 0) {
+    const fragment = layout.fragment(pending.pop());
+    fragments.push(fragment);
+    pending.push(...fragment.children);
+  }
+  return fragments;
+}
+
+function comparableRendering(store, result, columns, rows) {
+  const artifacts = analysis(store, columns, rows);
+  return {
+    styles: artifacts.stylesheetProgram.elementNodes.map((node) => {
+      const style = artifacts.computedStyles.style(node);
+      return { node, ...style, customProperties: [...style.customProperties] };
+    }),
+    geometry: layoutFragments(artifacts.documentLayout),
+    commands: artifacts.documentDisplayList.commands,
+    cells: result.terminal.cellBuffer,
+    actions: result.terminal.hitTestIndex.regions,
+    focus: result.terminal.focusMap.targets,
+    accessibility: result.terminal.accessibilityBounds,
+    sourceRects: [...result.terminal.cellRectsByDocumentNode],
+    anchors: result.scrollAnchors,
+    focusOrder: result.focusOrder,
+    extent: result.documentExtentRows,
+  };
+}
+
+for (const [name, css, columns, rows, computed, layout] of [
+  ["computed vw font", "html{font-size:5vw}", 40, 24, 1, 1],
+  ["computed vh font", "html{font-size:5vh}", 80, 40, 1, 1],
+  ["substituted clamp font", "html{--size:clamp(12px,3vw,40px);font-size:var(--size)}", 40, 24, 1, 1],
+  ["substituted percentage height", "html{--page-height:50%;height:var(--page-height)}", 80, 40, 0, 1],
+  ["substituted fixed position", ".fixed{--placement:fixed;position:var(--placement);bottom:0}", 80, 40, 0, 1],
+  ["nested variables", "html{--a:var(--b);--b:5vh;font-size:var(--a)}", 80, 40, 1, 1],
+  ["variable fallback", "html{font-size:var(--missing,var(--also-missing,5vh))}", 80, 40, 1, 1],
+  ["root font rem", "html{font-size:5vh}p{font-size:2rem;width:10rem}", 80, 40, 1, 1],
+  ["independent height", "html{font-size:5vw}p{width:50%}", 80, 40, 0, 0],
+  ["independent width", "html{font-size:5vh}", 40, 24, 0, 1],
+]) {
+  test(`retained and fresh agree after resize: ${name}`, () => {
+    const html = `<style>${css}</style><p id="text"><a href="/target">alpha beta gamma delta</a></p><button class="fixed">action</button>`;
+    const retained = attachedStore(html);
+    const fresh = attachedStore(html);
+    try {
+      render(retained.store, 1);
+      const resized = render(retained.store, 2, { columns, rows });
+      const initial = render(fresh.store, 2, { columns, rows });
+      assert.deepEqual(comparableRendering(retained.store, resized, columns, rows),
+        comparableRendering(fresh.store, initial, columns, rows));
+      assert.equal(invocation(resized, "computed-style-resolution"), computed);
+      assert.equal(invocation(resized, "normal-flow-layout"), layout);
+      assert.equal(retained.instrumentation.snapshot().find((entry) => entry.stage === "stylesheet-program-compilation").invocations, 1);
+    } finally {
+      retained.store.dispose();
+      fresh.store.dispose();
+    }
+  });
+}
+
+test("attachment admission charges documents before any analysis", () => {
+  const store = new RenderArtifactStore({ maxRetainedArtifactBytes: 1 });
+  const document = parseWebDocument("<p>attachment</p>", { requestUrl: "https://budget.test/", finalUrl: "https://budget.test/" });
+  try {
+    assert.throws(() => store.attach({ documentId: "budget", documentRevision: 1, stateRevision: 1,
+      document, state: createDocumentState(document), resources: embeddedStylesheetSources(document),
+    }), { name: "RenderBudgetExceededError" });
+    assert.equal(store.metrics().attachedDocuments, 0);
+    assert.equal(store.metrics().retainedCost, 0);
+  } finally { store.dispose(); }
+});
+
+test("an oversized analysis cannot be permanently exempt from retention admission", () => {
+  const html = "<style>p{margin:0}</style>" + "<p>oversized analysis with words</p>".repeat(100);
+  const measured = attachedStore(html);
+  const attachmentCost = measured.store.metrics().retainedCost;
+  assert.ok(attachmentCost > 0);
+  render(measured.store, 1);
+  const analysisCost = measured.store.metrics().retainedCost;
+  assert.ok(analysisCost > attachmentCost);
+  measured.store.dispose();
+  const store = new RenderArtifactStore({ maxRetainedArtifactBytes: attachmentCost + 1 });
+  const document = measured.document;
+  store.attach({ documentId: "document", documentRevision: 1, stateRevision: 1, document,
+    state: measured.state, resources: embeddedStylesheetSources(document) });
+  try {
+    assert.throws(() => render(store, 1), { name: "RenderBudgetExceededError" });
+    assert.ok(store.metrics().retainedCost <= attachmentCost + 1);
+    assert.equal(store.metrics().retainedAnalyses, 0);
+  } finally { store.dispose(); }
+});
+
+test("sticky paint preserves the owner of an ancestor clip contained inside its normal rectangle", () => {
+  const { store } = attachedStore(`<style>
+    html,body,main,p{margin:0} .outside{height:32px;overflow:hidden}
+    .container{height:400px}.sticky{position:sticky;top:0;height:64px}
+    main{height:1000px}
+  </style><div class="outside"><div class="container"><div class="sticky"><a href="/sticky">sticky clipped action</a></div></div></div><main>normal content</main>`);
+  try {
+    render(store, 1);
+    const scrolled = render(store, 2, { scrollRow: 3, overscanBefore: 0, overscanAfter: 0 });
+    assert.ok(!scrolled.displayList.commands.some((command) => command.kind === "text" && command.text.includes("sticky")));
+    assert.ok(!scrolled.terminal.hitTestIndex.regions.some((region) => region.action?.destination?.includes("sticky")));
+  } finally { store.dispose(); }
+});
+
+test("focus-dependent custom properties rebuild geometry and agree with a fresh attachment", () => {
+  const html = `<style>html{--size:16px}html:focus{--size:32px}p{font-size:var(--size);width:10rem}</style><p id="text">alpha beta gamma</p>`;
+  const retained = attachedStore(html);
+  const fresh = attachedStore(html);
+  try {
+    render(retained.store, 1);
+    for (const fixture of [retained, fresh]) fixture.store.updateState({ documentId: "document", documentRevision: 1,
+      stateRevision: 2, state: { ...fixture.state, focus: fixture.document.documentElement }, changed: new Set(["focus"]) });
+    const changed = render(retained.store, 2);
+    const initial = render(fresh.store, 2);
+    assert.deepEqual(comparableRendering(retained.store, changed, 80, 24), comparableRendering(fresh.store, initial, 80, 24));
+    assert.equal(invocation(changed, "computed-style-resolution"), 1);
+    assert.equal(invocation(changed, "normal-flow-layout"), 1);
+    assert.equal(retained.instrumentation.snapshot().find((entry) => entry.stage === "stylesheet-program-compilation").invocations, 1);
+  } finally { retained.store.dispose(); fresh.store.dispose(); }
+});
+
+for (const [name, content] of [
+  ["fixed header", '<header style="position:fixed;top:0;background:red"><a href="/fixed">fixed header</a></header>'],
+  ["sticky containing limit", '<div style="height:100px"><div style="position:sticky;top:0">sticky</div></div>'],
+  ["nested positioned", '<div style="position:relative;height:200px"><div style="position:absolute;top:40px"><span style="position:relative;left:10px">positioned</span></div></div>'],
+  ["inner and outer sticky clips", '<div style="height:90px;overflow:hidden"><div style="height:300px"><div style="position:sticky;top:0;height:32px;overflow:hidden">sticky<br>clipped<br>hidden</div></div></div>'],
+  ["RTL bidi", '<p dir="rtl">العربية abc עברית 123</p>'],
+  ["inline backgrounds", '<p><span style="background:red">wrapped inline background text '.repeat(3) + '</span></p>'.repeat(3)],
+  ["collapsed tables", '<table style="border-collapse:collapse"><tr><td style="border:1px solid red">A</td><td style="border:2px solid blue">B</td></tr></table>'],
+  ["grid overlap", '<div style="display:grid;grid-template-columns:80px"><a href="/first" style="grid-area:1/1">first</a><span style="grid-area:1/1;background:blue">second</span></div>'],
+]) {
+  test(`retained and fresh viewport paint agree: ${name}`, () => {
+    const html = `<style>body{margin:0}p{margin:0}</style>${content}<button id="control">focus</button>${'<p>document content</p>'.repeat(80)}`;
+    const retained = attachedStore(html);
+    const fresh = attachedStore(html);
+    try {
+      render(retained.store, 1, { columns: 80, rows: 20 });
+      for (const scrollRow of [0, 3, 10, 35]) {
+        const final = { columns: 40, rows: 16, scrollRow, colorDepth: 4 };
+        const changed = render(retained.store, scrollRow + 2, final);
+        fresh.store.dispose();
+        fresh.store.attach({ documentId: "document", documentRevision: 1, stateRevision: 1, document: fresh.document, state: fresh.state, resources: embeddedStylesheetSources(fresh.document) });
+        const initial = render(fresh.store, scrollRow + 2, final);
+        assert.deepEqual(comparableRendering(retained.store, changed, 40, 16), comparableRendering(fresh.store, initial, 40, 16));
+        if (scrollRow > 0) for (const stage of immutableStages) assert.equal(invocation(changed, stage), 0, stage);
+        assert.ok(changed.terminal.cellBuffer.rows.length <= 21);
+      }
+    } finally { retained.store.dispose(); fresh.store.dispose(); }
+  });
+}
+
+test("many unattached analyses cannot hide attachment costs beyond the retention budget", () => {
+  const sample = attachedStore("<p>small attachment</p>");
+  const limit = sample.store.metrics().retainedCost * 2;
+  sample.store.dispose();
+  const store = new RenderArtifactStore({ maxRetainedArtifactBytes: limit });
+  let admitted = 0;
+  try {
+    for (let index = 0; index < 100; index += 1) {
+      const document = parseWebDocument(`<p>small attachment ${index}</p>`, { requestUrl: `https://budget.test/${index}`, finalUrl: `https://budget.test/${index}` });
+      try {
+        store.attach({ documentId: `${index}`, documentRevision: 1, stateRevision: 1,
+          document, state: createDocumentState(document), resources: embeddedStylesheetSources(document) });
+        admitted += 1;
+      } catch (error) { assert.equal(error.name, "RenderBudgetExceededError"); break; }
+    }
+    assert.ok(admitted > 0 && admitted < 100);
+    assert.ok(store.metrics().retainedCost <= limit);
+  } finally { store.dispose(); }
+});
+
+test("resize variants share upstream allocations and bounded logical query caches are charged", () => {
+  const fixture = attachedStore("<p>alpha beta gamma</p>".repeat(80));
+  try {
+    const variants = [80, 60, 40].map((columns) => analysis(fixture.store, columns));
+    assert.equal(variants[0].computedStyles, variants[2].computedStyles);
+    assert.equal(variants[0].textSearchIndex, variants[2].textSearchIndex);
+    assert.ok(fixture.store.metrics().retainedCost < variants.reduce((sum, variant) => sum + variant.retainedCost, 0));
+    const before = fixture.store.metrics().retainedCost;
+    for (let index = 0; index < 100; index += 1) fixture.store.search({ documentId: "document", documentRevision: 1, ...contexts(40, 24) }, `query ${index}`);
+    assert.ok(fixture.store.metrics().retainedCost > before);
+    const logical = variants[0].textSearchIndex.search("alpha", 2000);
+    assert.equal(variants[2].textSearchIndex.search("alpha", 2000), logical);
+  } finally { fixture.store.dispose(); }
+});
+
+test("truncated style, box, and layout prefixes retain a nonzero allocation cost", () => {
+  const html = "<style>p{color:red}</style>" + "<p>prefix retained words</p>".repeat(200);
+  const document = parseWebDocument(html, { requestUrl: "https://prefix.test/", finalUrl: "https://prefix.test/" });
+  const store = new RenderArtifactStore();
+  try {
+    store.attach({ documentId: "document", documentRevision: 1, stateRevision: 1, document,
+      state: createDocumentState(document), resources: embeddedStylesheetSources(document),
+      budgets: { style: { maxStylesheetBytes: 1 }, formatting: { maxFormattingNodes: 100 }, layout: { maxFragments: 60 } } });
+    const before = store.metrics().retainedCost;
+    const artifacts = analysis(store);
+    assert.equal(artifacts.computedStyles.outcome.status, "truncated");
+    assert.equal(artifacts.boxTree.outcome.status, "truncated");
+    assert.equal(artifacts.documentLayout.outcome.status, "truncated");
+    assert.ok(artifacts.retainedCost > before);
+    assert.ok(store.metrics().retainedCost > before);
+  } finally { store.dispose(); }
+});
+
+test("forced GC graph reachability after release", async () => {
+  if (globalThis.gc === undefined) {
+    await promisify(execFile)(process.execPath, ["--expose-gc", "--test", "--test-name-pattern=forced GC graph reachability", fileURLToPath(import.meta.url)]);
+    return;
+  }
+  function released() {
+    const { store } = attachedStore("<style>p{--x:20px;height:var(--x)}</style>" + "<p>released</p>".repeat(200));
+    const artifacts = analysis(store);
+    const weak = [artifacts.stylesheetProgram, artifacts.computedStyles, artifacts.boxTree, artifacts.documentLayout, artifacts.textSearchIndex]
+      .map((owner) => new globalThis.WeakRef(owner));
+    store.release("document");
+    assert.equal(store.metrics().retainedCost, 0);
+    return weak;
+  }
+  const weak = released();
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    await setImmediate();
+    globalThis.gc();
+  }
+  assert.ok(weak.every((reference) => reference.deref() === undefined));
+});
+
+
+test("state admission rolls back oversized control text and keeps the previous document revision usable", () => {
+  const fixture = attachedStore('<input value="before">');
+  const limit = fixture.store.metrics().retainedCost + 1000;
+  const store = new RenderArtifactStore({ maxRetainedArtifactBytes: limit });
+  try {
+    store.attach({ documentId: "document", documentRevision: 1, stateRevision: 1, document: fixture.document,
+      state: fixture.state, resources: embeddedStylesheetSources(fixture.document) });
+    assert.throws(() => store.updateState({ documentId: "document", documentRevision: 1, stateRevision: 2,
+      state: { ...fixture.state, controls: new Map([[fixture.document.controls[0].node, { value: "x".repeat(limit) }]]) },
+      changed: new Set(["control-content"]) }), { name: "RenderBudgetExceededError" });
+    assert.ok(store.metrics().retainedCost <= limit);
+    store.updateState({ documentId: "document", documentRevision: 1, stateRevision: 1,
+      state: fixture.state, changed: new Set() });
+  } finally { store.dispose(); fixture.store.dispose(); }
+});
+
+test("eviction releases program caches and reanalysis matches a new attachment", () => {
+  const fixture = attachedStore('<p>evicted text</p>'.repeat(20));
+  const first = analysis(fixture.store, 80);
+  const limit = fixture.store.metrics().retainedCost + 1000;
+  const store = new RenderArtifactStore({ maxRetainedArtifactBytes: limit });
+  const attach = () => store.attach({ documentId: "document", documentRevision: 1, stateRevision: 1,
+    document: fixture.document, state: fixture.state, resources: embeddedStylesheetSources(fixture.document) });
+  try {
+    attach();
+    analysis(store, 80);
+    try { analysis(store, 20); } catch (error) { assert.equal(error.name, "RenderBudgetExceededError"); }
+    assert.ok(store.metrics().evictions > 0);
+    assert.ok(store.metrics().retainedCost <= limit);
+    const rebuilt = analysis(store, 80);
+    assert.deepEqual(layoutFragments(rebuilt.documentLayout), layoutFragments(first.documentLayout));
+    store.release("document");
+    assert.equal(store.metrics().retainedCost, 0);
+    attach();
+    assert.deepEqual(layoutFragments(analysis(store, 80).documentLayout), layoutFragments(first.documentLayout));
+  } finally { store.dispose(); fixture.store.dispose(); }
+});
+
+
+for (const phase of ["compilation", "layout", "admission", "rasterization"]) {
+  test(`active ${phase} observes a cancellation checkpoint without retaining partial artifacts`, () => {
+    const document = parseWebDocument('<style>p{color:red}</style>' + '<p>checkpoint words</p>'.repeat(100),
+      { requestUrl: "https://checkpoint.test/", finalUrl: "https://checkpoint.test/" });
+    let activePhase = "compilation";
+    let checkpoints = 0;
+    const cancellation = new globalThis.AbortController();
+    const signal = {
+      get aborted() { return cancellation.signal.aborted; },
+      throwIfAborted() {
+        if (activePhase === phase && ++checkpoints === 20) cancellation.abort();
+        cancellation.signal.throwIfAborted();
+      },
+    };
+    const store = new RenderArtifactStore({ instrumentation: { record(stage) {
+      if (stage === "stylesheet-program-compilation") activePhase = "analysis";
+      if (stage === "logical-search-index-construction") activePhase = "layout";
+      if (stage === "document-geometry-index-construction") activePhase = "admission";
+      if (stage === "viewport-display-list-construction") activePhase = "rasterization";
+    } } });
+    try {
+      assert.throws(() => {
+        store.attach({ documentId: "document", documentRevision: 1, stateRevision: 1, document,
+          state: createDocumentState(document), resources: embeddedStylesheetSources(document), signal });
+        store.renderViewport({ documentId: "document", documentRevision: 1, viewportRevision: 1, ...contexts(80, 24),
+          window: { scrollRow: 0, viewportRows: 24, overscanBefore: 2, overscanAfter: 3 }, signal, analysisSignal: signal });
+      }, { name: "AbortError" });
+      assert.equal(checkpoints, 20);
+      assert.equal(store.metrics().retainedAnalyses, phase === "rasterization" ? 1 : 0);
+    } finally { store.dispose(); }
+  });
+}

@@ -76,16 +76,21 @@ export interface ViewportRequestParameters {
 }
 
 export interface ViewportSearchGeometryResult {
+  readonly documentRevision: number;
+  readonly stateRevision: number;
+  readonly requestGeneration: number;
+  readonly layoutRevision: string;
+  readonly anchors: readonly (readonly [string, number])[];
   readonly query: string;
   readonly matches: readonly {
     readonly id: DocumentSearchGeometryResult["matches"][number]["id"];
     readonly sources: DocumentSearchGeometryResult["matches"][number]["sources"];
-    readonly anchorRow: number;
   }[];
   readonly truncated: boolean;
 }
 
 export interface RenderDocumentSummary {
+  readonly identity: string;
   readonly documentRowCount: number;
   readonly incomplete: readonly string[];
   readonly scrollAnchors: readonly RenderScrollAnchorEntry[];
@@ -108,6 +113,8 @@ export interface RenderFocusOrderEntry {
 }
 
 export interface ViewportRenderPayload {
+  readonly summaryIdentity: string;
+  readonly layoutRevision: string;
   readonly documentId: string;
   readonly documentRevision: number;
   readonly stateRevision: number;
@@ -119,7 +126,7 @@ export interface ViewportRenderPayload {
   readonly accessibilityBounds: readonly TerminalAccessibilityBound[];
   readonly search: TerminalSearchResult | null;
   readonly cellRectsByDocumentNode: readonly (readonly [DocumentNodeRef, readonly TerminalCellRect[]])[];
-  readonly summary: RenderDocumentSummary | null;
+  readonly summary: RenderDocumentSummary;
   readonly stageMetrics: readonly RenderStageMeasurement[];
 }
 
@@ -135,6 +142,8 @@ export type RenderWorkerRequest = {
   readonly documentCancellation: SharedArrayBuffer;
 } | {
   readonly kind: "search-document";
+  readonly stateRevision: number;
+  readonly requestGeneration: number;
   readonly requestId: number;
   readonly documentId: string;
   readonly documentRevision: number;
@@ -155,6 +164,7 @@ export type RenderWorkerRequest = {
   readonly changed: readonly string[];
 } | {
   readonly kind: "request-viewport";
+  readonly heldSummaryIdentity: string | null;
   readonly requestId: number;
   readonly documentId: string;
   readonly documentRevision: number;
@@ -171,6 +181,7 @@ export type RenderWorkerRequest = {
   readonly documentId: string;
 } | {
   readonly kind: "metrics";
+  readonly collectGarbage: boolean;
   readonly requestId: number;
 } | {
   readonly kind: "dispose";
@@ -178,6 +189,12 @@ export type RenderWorkerRequest = {
 };
 
 export type RenderWorkerResponse = {
+  readonly kind: "budget-exceeded";
+  readonly requestId: number;
+  readonly budget: "retained-cost" | "working-set";
+  readonly estimatedBytes: number;
+  readonly limit: number;
+} | {
   readonly kind: "acknowledged";
   readonly requestId: number;
 } | {
@@ -200,6 +217,13 @@ export type RenderWorkerResponse = {
     readonly completedViewportRequests: number;
     readonly supersededViewportRequests: number;
     readonly heapUsedBytes: number;
+    readonly peakHeapUsedBytes: number;
+    readonly peakWorkingSetBytes: number;
+    readonly workingSetBudget: number;
+    readonly clientRetainedCost?: number;
+    readonly pendingTransferCost?: number;
+    readonly pendingRequests?: number;
+    readonly queuedRequests?: number;
     readonly stages: readonly RenderStageMeasurement[];
   };
 } | {

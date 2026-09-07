@@ -15,9 +15,10 @@ const SHARED_RUNTIME_DEPENDENCIES = Object.freeze([
   "@ismail-elkorchi/terminal-ui"
 ]);
 
-function run(command, args, { cwd, capture = false } = {}) {
+function run(command, args, { cwd, capture = false, env = process.env } = {}) {
   const result = spawnSync(command, args, {
     cwd,
+    env,
     encoding: "utf8",
     stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit"
   });
@@ -47,6 +48,9 @@ function verifyPackedFiles(packEntry) {
     "LICENSE",
     "README.md",
     "dist/cli.js",
+    "dist/ui/render-worker/worker-entry.js",
+    "dist/ui/render-worker/client.js",
+    "dist/ui/render-worker/protocol.js",
     "dist/mod.d.ts",
     "dist/mod.js",
     "package.json"
@@ -235,6 +239,12 @@ await session.close();
   ));
 
   run(process.execPath, ["smoke.mjs"], { cwd: consumerRoot });
+  const viewport = run(process.execPath, [
+    "node_modules/@ismail-elkorchi/verge-browser/dist/cli.js", "--once", "about:help",
+  ], { cwd: consumerRoot, capture: true, env: { ...process.env, XDG_STATE_HOME: join(temporaryRoot, "state") } });
+  if (!viewport.includes("Verge") || viewport.includes("Rendering failed")) {
+    throw new Error("packed consumer did not render through its worker entrypoint");
+  }
   run("npx", ["--no-install", "tsc", "-p", "tsconfig.json"], { cwd: consumerRoot });
   process.stdout.write(
     `packed consumer verified: ${workspaceManifest.name}@${workspaceManifest.version} (${String(packedFileCount)} files) -> ` +

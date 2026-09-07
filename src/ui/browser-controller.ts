@@ -1,3 +1,4 @@
+import { TabRestorationScheduler } from "./tab-restoration.js";
 import { dirname } from "node:path";
 
 import {
@@ -43,6 +44,7 @@ import type {
   BrowserDocumentState,
   BrowserPlaceholderTabState,
   BrowserTuiState,
+  BrowserTabState,
   DetailKind,
   PickerKind,
   PickerValue
@@ -160,6 +162,7 @@ export interface BrowserControllerOptions {
   readonly searchUrlTemplate?: string;
   readonly downloadDirectory?: string;
   readonly downloadMaxBytes?: number;
+  readonly renderWorkerFactory?: () => RenderWorkerClient;
 }
 
 export interface BrowserPickerEntry {
@@ -177,19 +180,28 @@ export class BrowserController {
   readonly #downloadDirectory: string;
   readonly #downloadMaxBytes: number;
   readonly #externalNetworkPolicy = new NetworkSafetyPolicy(EXTERNAL_NETWORK_POLICY);
-  #renderer = new RenderWorkerClient();
-  readonly #renderAttachments = new Map<string, {
-    readonly documentRevision: number;
-    readonly stateRevision: number;
-    readonly state: DocumentState;
+  readonly #renderWorkerFactory: () => RenderWorkerClient;
+  #renderer: RenderWorkerClient;
+  #workerEpoch = 1;
+  #restart: Promise<void> | null = null;
+  #closed = false;
+  #closePromise: Promise<void> | null = null;
+  readonly #documentAttachments = new Map<string, {
+    readonly epoch: number;
+    desired: { readonly documentRevision: number; readonly stateRevision: number };
+    attached: { readonly documentRevision: number; readonly stateRevision: number; readonly state: DocumentState } | null;
+    preparation: Promise<RenderWorkerClient> | null;
+    tail: Promise<unknown>;
   }>();
-  readonly #renderPreparations = new Map<string, Promise<void>>();
+  readonly #restorations = new TabRestorationScheduler<BrowserDocumentState>();
   readonly #sessions = new Map<string, BrowserSession>();
   readonly #provisionalSessionIds = new Set<string>();
   #nextDocumentNumber = 1;
   #workspaceSaveRevision = 0;
 
   public constructor(options: BrowserControllerOptions) {
+    this.#renderWorkerFactory = options.renderWorkerFactory ?? (() => new RenderWorkerClient());
+    this.#renderer = this.#renderWorkerFactory();
     this.#store = options.store;
     this.#services = options.services;
     this.#createSession = options.createSession;
@@ -230,11 +242,20 @@ export class BrowserController {
     await this.#store.saveWorkspace(workspace);
   }
 
-  public async close(): Promise<void> {
+  public close(): Promise<void> {
+    this.#closePromise ??= this.#close();
+    return this.#closePromise;
+  }
+
+  async #close(): Promise<void> {
+    this.#closed = true;
+    this.#restorations.close();
+    this.#workerEpoch += 1;
+    for (const id of this.#documentAttachments.keys()) this.#renderer.cancelDocument(id);
+    this.#documentAttachments.clear();
     this.#externalNetworkPolicy.close(new Error("Browser controller closed."));
     const sessions = [...this.#sessions.values()];
     this.#sessions.clear();
-    this.#renderPreparations.clear();
     this.#provisionalSessionIds.clear();
     const errors: unknown[] = [];
     try {
@@ -298,13 +319,17 @@ export class BrowserController {
     tab: BrowserPlaceholderTabState,
     signal?: AbortSignal,
   ): Promise<BrowserDocumentState> {
-    return this.#openDocument(
-      tab.id,
-      tab.requestedUrl,
-      signal,
-      tab.storedScrollAnchor,
-      false,
-    );
+    return this.#restorations.schedule(tab.id, (loadSignal) =>
+      this.#openDocument(tab.id, tab.requestedUrl, loadSignal, tab.storedScrollAnchor, false), signal);
+  }
+
+  public configureRestoration(tab: BrowserTabState): void {
+    this.#restorations.configure(tab.id, tab.kind === "failed"
+      || (tab.kind === "ready" && (tab.rendering.status === "ready" || tab.rendering.status === "failed")));
+  }
+
+  public restorationMetrics(): ReturnType<TabRestorationScheduler<BrowserDocumentState>["metrics"]> {
+    return this.#restorations.metrics();
   }
 
   /** Attaches a document revision once and requests only a viewport result thereafter. */
@@ -313,8 +338,8 @@ export class BrowserController {
     viewportRevision: number,
     parameters: ViewportRequestParameters,
   ): Promise<ViewportRenderPayload> {
-    await this.#prepareRendering(document);
-    return this.#renderer.renderViewport(document, viewportRevision, parameters);
+    const renderer = await this.#prepareRendering(document);
+    return renderer.renderViewport(document, viewportRevision, parameters);
   }
 
   public cancelViewport(documentId: string): void { this.#renderer.cancelViewport(documentId); }
@@ -328,54 +353,91 @@ export class BrowserController {
     document: BrowserDocumentState,
     query: string,
     parameters: ViewportRequestParameters,
+    requestGeneration: number,
   ): ReturnType<RenderWorkerClient["search"]> {
-    await this.#prepareRendering(document);
-    return this.#renderer.search(document, query, parameters);
+    const renderer = await this.#prepareRendering(document);
+    return renderer.search(document, query, parameters, 2_000, requestGeneration);
   }
 
-  async #prepareRendering(document: BrowserDocumentState): Promise<void> {
-    const key = `${document.id}:${String(document.documentRevision)}:${String(document.stateRevision)}`;
-    const pending = this.#renderPreparations.get(key);
-    if (pending !== undefined) return pending;
-    const operation = this.#prepareRenderingNow(document).finally(() => {
-      if (this.#renderPreparations.get(key) === operation) this.#renderPreparations.delete(key);
+  public cancelDocumentRendering(documentId: string): void { this.#renderer.cancelDocument(documentId); }
+
+  public cancelSearch(documentId: string): void { this.#renderer.cancelSearch(documentId); }
+
+  public acknowledgeViewport(payload: ViewportRenderPayload): void { this.#renderer.acknowledgeViewport(payload); }
+
+  public prioritizeRendering(documentId: string | null): void { this.#renderer.prioritize(documentId); }
+
+  async #prepareRendering(document: BrowserDocumentState): Promise<RenderWorkerClient> {
+    if (this.#closed) throw new Error("Browser controller is closed.");
+    if (this.#renderer.failed) {
+      this.#restart ??= (async () => {
+        await this.#renderer.close();
+        if (this.#closed) throw new Error("Browser controller is closed.");
+        this.#workerEpoch += 1;
+        this.#renderer = this.#renderWorkerFactory();
+        this.#documentAttachments.clear();
+      })().finally(() => { this.#restart = null; });
+      await this.#restart;
+    }
+    const renderer = this.#renderer;
+    let attachment = this.#documentAttachments.get(document.id);
+    if (attachment === undefined) {
+      attachment = { epoch: this.#workerEpoch, desired: { documentRevision: document.documentRevision, stateRevision: document.stateRevision }, attached: null, preparation: null, tail: Promise.resolve() };
+      this.#documentAttachments.set(document.id, attachment);
+    }
+    const lifecycle = attachment;
+    const desired = lifecycle.desired;
+    if (document.documentRevision < desired.documentRevision
+      || (document.documentRevision === desired.documentRevision && document.stateRevision < desired.stateRevision)) {
+      throw this.#obsoletePreparation();
+    }
+    const sameRevision = document.documentRevision === desired.documentRevision && document.stateRevision === desired.stateRevision;
+    if (sameRevision && lifecycle.preparation !== null) return lifecycle.preparation;
+    if (!sameRevision) renderer.cancelDocument(document.id);
+    lifecycle.desired = { documentRevision: document.documentRevision, stateRevision: document.stateRevision };
+    const validate = (): void => {
+      if (this.#closed || this.#workerEpoch !== lifecycle.epoch
+        || this.#documentAttachments.get(document.id) !== lifecycle
+        || lifecycle.desired.documentRevision !== document.documentRevision
+        || lifecycle.desired.stateRevision !== document.stateRevision) throw this.#obsoletePreparation();
+    };
+    const operation = lifecycle.tail.catch(() => undefined).then(async () => {
+      validate();
+      const attached = lifecycle.attached;
+      if (attached === null || attached.documentRevision !== document.documentRevision) {
+        await renderer.attach(document);
+      } else if (attached.stateRevision !== document.stateRevision) {
+        const changed: string[] = [];
+        const previous = attached.state;
+        if (previous.focus !== document.documentState.focus) changed.push("focus");
+        if (previous.hover !== document.documentState.hover) changed.push("hover");
+        if (previous.active !== document.documentState.active) changed.push("active");
+        if (previous.urlTarget !== document.documentState.urlTarget) changed.push("target");
+        if (previous.open !== document.documentState.open) changed.push("disclosure-open");
+        if (previous.controls !== document.documentState.controls) changed.push("control-content", "checked-selected");
+        await renderer.updateState(document, changed);
+      }
+      validate();
+      lifecycle.attached = { documentRevision: document.documentRevision, stateRevision: document.stateRevision, state: document.documentState };
+      return renderer;
     });
-    this.#renderPreparations.set(key, operation);
+    lifecycle.preparation = operation;
+    lifecycle.tail = operation.finally(() => {
+      if (lifecycle.preparation === operation) lifecycle.preparation = null;
+    });
+    // tail participates in lifecycle serialization even when its caller is cancelled.
+    void lifecycle.tail.catch(() => undefined);
     return operation;
   }
 
-  async #prepareRenderingNow(document: BrowserDocumentState): Promise<void> {
-    if (this.#renderer.failed) {
-      await this.#renderer.close();
-      this.#renderer = new RenderWorkerClient();
-      this.#renderAttachments.clear();
-    }
-    const attached = this.#renderAttachments.get(document.id);
-    if (attached === undefined || attached.documentRevision !== document.documentRevision) {
-      await this.#renderer.attach(document);
-    } else if (attached.stateRevision !== document.stateRevision) {
-      const changed: string[] = [];
-      if (attached.state.focus !== document.documentState.focus) changed.push("focus");
-      if (attached.state.hover !== document.documentState.hover) changed.push("hover");
-      if (attached.state.active !== document.documentState.active) changed.push("active");
-      if (attached.state.urlTarget !== document.documentState.urlTarget) changed.push("target");
-      if (attached.state.open !== document.documentState.open) changed.push("disclosure-open");
-      if (attached.state.controls !== document.documentState.controls) {
-        changed.push("control-content", "checked-selected");
-      }
-      await this.#renderer.updateState(document, changed);
-    } else {
-      return;
-    }
-    this.#renderAttachments.set(document.id, {
-      documentRevision: document.documentRevision,
-      stateRevision: document.stateRevision,
-      state: document.documentState,
-    });
+  #obsoletePreparation(): Error {
+    const error = new Error("Document attachment was superseded.");
+    error.name = "AbortError";
+    return error;
   }
 
   public async releaseRendering(documentId: string): Promise<void> {
-    this.#renderAttachments.delete(documentId);
+    this.#documentAttachments.delete(documentId);
     await this.#renderer.release(documentId);
   }
 
@@ -385,7 +447,7 @@ export class BrowserController {
 
   public omniboxSuggestions(
     value: string,
-    document: BrowserDocumentState,
+    document: BrowserTabState,
     limit = 8
   ): readonly {
     readonly id: string;
@@ -427,7 +489,7 @@ export class BrowserController {
       return false;
     };
 
-    if (addUntilFull(document.snapshot.document.links, (link) => ({
+    if (addUntilFull(document.kind === "ready" ? document.snapshot.document.links : [], (link) => ({
       value: link.destination,
       label: link.label,
       description: "Current page"
@@ -476,7 +538,7 @@ export class BrowserController {
               requestedViewportRevision: 0,
               committedViewportRevision: 0,
               requestKey: null,
-              pendingSearchQuery: null,
+              pendingSearch: null, searchRequestGeneration: 0,
               pendingFocus: null,
               viewport: null,
               summary: null,
@@ -530,13 +592,6 @@ export class BrowserController {
       : operation === "forward"
         ? await session.forward(signal)
         : await session.reload(signal));
-  }
-
-  public openNew(
-    target = "about:newtab",
-    signal?: AbortSignal
-  ): Promise<BrowserDocumentState> {
-    return this.#openNewDocument(target, signal);
   }
 
   public openNewFromDocument(
@@ -764,16 +819,22 @@ export class BrowserController {
     persist = false,
     sourceUrl?: string,
   ): Promise<BrowserDocumentState> {
+    signal?.throwIfAborted();
+    if (this.#closed) throw new Error("Browser controller is closed.");
     const session = this.#createSession(this.#store.httpSession);
     this.#sessions.set(id, session);
     this.#provisionalSessionIds.add(id);
     try {
       const snapshot = await this.#open(session, target, signal, sourceUrl);
+      signal?.throwIfAborted();
+      if (this.#sessions.get(id) !== session) throw this.#obsoletePreparation();
       if (persist) await this.#persist(snapshot);
       return this.#document(id, snapshot, scrollAnchor);
     } catch (error) {
-      this.#sessions.delete(id);
-      this.#provisionalSessionIds.delete(id);
+      if (this.#sessions.get(id) === session) {
+        this.#sessions.delete(id);
+        this.#provisionalSessionIds.delete(id);
+      }
       await session.destroy(error instanceof Error ? error : new Error(String(error)));
       throw error;
     }
@@ -822,16 +883,16 @@ export class BrowserController {
     ]);
     const discarded = [...this.#sessions.entries()]
       .filter(([id]) => !retainedIds.has(id) && !this.#provisionalSessionIds.has(id));
-    const discardedRendering = [...this.#renderAttachments.keys()]
+    const discardedRendering = [...this.#documentAttachments.keys()]
       .filter((id) => !retainedIds.has(id));
     for (const [id] of discarded) {
       this.#sessions.delete(id);
     }
-    for (const id of discardedRendering) this.#renderAttachments.delete(id);
+    for (const id of discardedRendering) this.#documentAttachments.delete(id);
     await settleBrowserCleanup(
       [
         ...discarded.map(([, session]) => () => session.close()),
-        ...discardedRendering.map((id) => () => this.#renderer.release(id)),
+        ...discardedRendering.map((id) => () => this.releaseRendering(id)),
       ],
       "Failed to close every discarded browser session."
     );
@@ -854,6 +915,7 @@ export class BrowserController {
     };
     return {
       kind: "ready",
+      navigationGeneration: 0,
       id,
       documentRevision: 1,
       stateRevision: 1,
@@ -865,7 +927,7 @@ export class BrowserController {
         requestedViewportRevision: 0,
         committedViewportRevision: 0,
         requestKey: null,
-        pendingSearchQuery: null,
+        pendingSearch: null, searchRequestGeneration: 0,
         pendingFocus: null,
         viewport: null,
         summary: null,

@@ -77,10 +77,14 @@ export interface StatusMessage {
 export interface DocumentSearchMatch {
   readonly id: string;
   readonly sources: readonly (DocumentNodeRef | null)[];
-  readonly anchorRow: number;
 }
 
 export interface BrowserDocumentSearch {
+  readonly documentRevision: number;
+  readonly stateRevision: number;
+  readonly requestGeneration: number;
+  readonly layoutRevision: string | null;
+  readonly anchors: ReadonlyMap<string, number>;
   readonly query: string;
   readonly matches: readonly DocumentSearchMatch[];
   readonly activeMatchIndex: number;
@@ -89,6 +93,7 @@ export interface BrowserDocumentSearch {
 
 export interface BrowserDocumentState {
   readonly kind: "ready";
+  readonly navigationGeneration: number;
   readonly id: string;
   readonly documentRevision: number;
   readonly stateRevision: number;
@@ -99,7 +104,8 @@ export interface BrowserDocumentState {
     readonly requestedViewportRevision: number;
     readonly committedViewportRevision: number;
     readonly requestKey: string | null;
-    readonly pendingSearchQuery: string | null;
+    readonly searchRequestGeneration: number;
+    readonly pendingSearch: { readonly query: string; readonly requestGeneration: number; readonly stateRevision: number } | null;
     readonly pendingFocus: {
       readonly node: DocumentNodeRef;
       readonly actionId: string;
@@ -128,7 +134,6 @@ export interface BrowserDocumentState {
   readonly savedViews: Readonly<Record<string, {
     readonly document: IndexedPageSnapshot["document"];
     readonly scrollAnchor: BrowserDocumentState["scrollAnchor"];
-    readonly search: BrowserDocumentSearch | null;
   }>>;
   readonly loading: boolean;
   readonly pendingUrl: string | null;
@@ -248,12 +253,18 @@ export type BrowserTuiMessage =
     }
   | {
       readonly kind: "searchReady";
+      readonly stateRevision: number;
+      readonly requestGeneration: number;
+      readonly layoutRevision: string;
+      readonly anchors: readonly (readonly [string, number])[];
       readonly documentId: string;
       readonly documentRevision: number;
       readonly query: string;
       readonly matches: readonly DocumentSearchMatch[];
       readonly truncated: boolean;
     }
+  | { readonly kind: "searchFailed"; readonly documentId: string; readonly documentRevision: number;
+      readonly stateRevision: number; readonly requestGeneration: number; readonly message: string }
   | { readonly kind: "dismiss" }
   | { readonly kind: "scroll"; readonly rows: number }
   | { readonly kind: "scrollTo"; readonly row: number }
@@ -320,6 +331,8 @@ export type BrowserTuiMessage =
   | { readonly kind: "submitForm"; readonly formId: string; readonly submitterId?: string }
   | {
       readonly kind: "pageLoaded";
+      readonly navigationGeneration: number;
+      readonly documentRevision: number;
       readonly documentId: string;
       readonly snapshot: IndexedPageSnapshot;
       readonly status: string;
@@ -330,7 +343,6 @@ export type BrowserTuiMessage =
       readonly kind: "documentOpened";
       readonly document: BrowserDocumentState;
       readonly background: boolean;
-      readonly replaceCurrent?: boolean;
     }
   | { readonly kind: "download"; readonly target?: string }
   | { readonly kind: "downloadComplete"; readonly download: DownloadRecord }
@@ -345,6 +357,13 @@ export type BrowserTuiMessage =
   | {
       readonly kind: "operationFailed";
       readonly message: string;
-      readonly documentId?: string;
+      readonly downloadTarget?: string;
+    }
+  | {
+      readonly kind: "navigationFailed";
+      readonly message: string;
+      readonly documentId: string;
+      readonly documentRevision: number;
+      readonly navigationGeneration: number;
       readonly downloadTarget?: string;
     };
