@@ -615,17 +615,27 @@ for (let index = 1; index <= SAMPLE_CASES; index += 1) {
   const style = time(timings.style, () => styles(document, state));
   const formatting = time(timings.formatting, () => buildFormattingTree({ document, state, styles: style }));
   const streams = inlineItemStreams(formatting);
-  textSearchIndex(formatting);
+  const logicalIndex = textSearchIndex(formatting);
+  let measuredSearchCalls = 0;
+  const measuredIndex = {
+    text: logicalIndex.text,
+    search(query, limit, signal) {
+      measuredSearchCalls += 1;
+      return logicalIndex.search(query, limit, signal);
+    }
+  };
   const layout = time(timings.completeCssLayout, () => layoutFragments(formatting, 80, streams));
   const list = time(timings.displayList, () => displayList(layout, 80));
   time(timings.cellRasterization, () => cellRasterization(list));
   time(timings.indexConstruction, () => terminalIndexes(list));
-  const terminal = cellBuffer(list, "value");
   const resized = time(timings.resize, () => {
     const resizedLayout = layoutFragments(formatting, 120, streams);
     return cellBuffer(displayList(resizedLayout, 120));
   });
-  const matches = time(timings.search, () => terminal.search);
+  const matches = time(timings.search, () => projectTextSearchToLayout(measuredIndex, layout, "value", 10_000));
+  if (measuredSearchCalls !== 1 || matches.matches.length === 0 || matches.spans.length === 0) {
+    throw new Error("search timing must execute a logical query and project its matches");
+  }
   if (style.outcome.status === "rejected" || formatting.outcome.status === "rejected"
     || layout.outcome.status === "rejected" || resized.cellBuffer.outcome.status === "rejected"
     || layout.fragment(layout.root).kind !== "box" || matches.truncated) {

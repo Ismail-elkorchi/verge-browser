@@ -22,6 +22,7 @@ syntax-tree regressions remain required.
 | Uncharged owners and oversized active exemption | Weak ownership metadata charges private roots, shared allocations once, opaque parser estimates, partial prefixes, attachments, private immutable control/disclosure state, weak action/paint/semantic/inline-analysis side caches, queries, and client transfers/viewports. Admission rejects oversize results and preserves the committed viewport. Release, reanalysis, resize sharing, many attachments/queries, and forced-GC reachability are controlled. |
 | Semantic rectangles lose fragment ownership when zero-area boxes are omitted | Each focus rectangle retains its exact layout fragment through clipping and cell conversion. Wrapped inline rectangles follow their continuations. Fixed empty-link and wrapped-link gap regressions verify painted actions. |
 | Paint admission mutates cells before accepting an overlapping glyph | Reserve the complete replacement cost before changing ownership. A rejected wide glyph retains the earlier cells and accurate retained-cell count. |
+| Search benchmark times an already computed result | The timed operation executes the logical query and layout projection. An invocation control and nonempty logical/geometry assertions reject a result-read measurement; the 25 ms p95 threshold is unchanged. |
 | Accidental rectangle containment determines sticky clipping | Layout owns persistent clip chains. Paint and semantic geometry translate each clip by its owner's attachment. Ancestor/descendant sticky clips, fixed viewport clips, absolute containing-block overflow, explicit ancestor clips, nested positioning, bidi, inline backgrounds, tables, and Grid have retained-versus-new-attachment comparisons. |
 
 The original checkout failed 13 of 14 selected dependency, admission, clipping,
@@ -33,34 +34,36 @@ No reference renderer or compatibility route is retained.
 
 ## Offline measurements
 
-Development measurement on 2026-09-07, Node 24, Linux. These are local samples,
-not claims about all terminals or hardware. `npm run test:bench` regenerates
-`reports/incremental-rendering-bench.json` during clean release qualification.
-The independently authored MIT fixture has 2,000 sections; timing distributions
-use 21 samples. It supplies a separate small offline new-tab page. Existing
-timing thresholds are unchanged; that development run passed every timing gate.
-A later local diagnostic after side-cache accounting measured a 72,757.81 ms
-first usable frame and 184.29 ms complete shutdown. It exceeded the 30-second
-first-frame wait, so it does not qualify the release. Qualification of the exact final HEAD runs on the clean hosted runner using
-the unchanged gates. Its downloadable reports and the results recorded in
-[PR #136](https://github.com/Ismail-elkorchi/verge-browser/pull/136) are authoritative
-for final timing and retained-cost estimates.
+Clean hosted measurement on 2026-09-07, Node 24, Linux, at
+`2a66a64c5184ff126384a5d4606eb2fd1187971e`:
+[CI and downloadable reports](https://github.com/Ismail-elkorchi/verge-browser/actions/runs/34120657341).
+These samples include the final runtime owner audit. The subsequent correction
+changes the legacy search benchmark's measurement boundary, not rendering.
+`npm run test:bench` regenerates the reports during clean release qualification.
+The independently authored MIT fixture has 2,000 sections; distributions use
+21 samples and a separate small offline new-tab page. Existing timing thresholds
+are unchanged; every incremental-rendering gate passed on this runner.
+A local diagnostic measured a 72,757.81 ms first usable frame and 184.29 ms
+shutdown, exceeding the unchanged 30-second first-frame wait. That local run
+did not qualify. Final qualification runs on the clean hosted runner; the exact
+reviewed HEAD, downloadable reports, and final measurements are recorded in
+[PR #136](https://github.com/Ismail-elkorchi/verge-browser/pull/136).
 
 | Interaction | p50 or single measurement (ms) | p95 (ms) |
 | --- | ---: | ---: |
-| Worker first viewport | 18040.46 | — |
-| Warm worker scroll | 83.39 | 91.95 |
-| Unchanged worker viewport | 84.47 | 97.33 |
-| Color-depth viewport | 10.22 | 91.41 |
-| First shell | 98.29 | — |
-| First usable page after shell | 19600.90 | — |
-| Input to visible scroll frame | 235.32 | 415.00 |
-| Input to state during rendering | 0.01 | 0.11 |
-| Chrome input to committed frame | 63.11 | 131.34 |
-| Tab switch to usable frame | 66.23 | 154.04 |
-| Quit to runtime/controller disposal | 317.48 | — |
-| Search with layout anchors | 3850.38 | — |
-| Resize | 13752.80 | — |
+| Worker first viewport | 14472.29 | — |
+| Warm worker scroll | 55.77 | 69.35 |
+| Unchanged worker viewport | 55.59 | 61.40 |
+| Color-depth viewport | 10.17 | 58.05 |
+| First shell | 92.74 | — |
+| First usable page after shell | 15470.10 | — |
+| Input to visible scroll frame | 136.50 | 164.98 |
+| Input to state during rendering | 0.01 | 0.10 |
+| Chrome input to committed frame | 54.38 | 92.63 |
+| Tab switch to usable frame | 26.89 | 34.99 |
+| Quit to runtime/controller disposal | 21.19 | — |
+| Search with layout anchors | 4134.42 | — |
+| Resize | 16410.81 | — |
 
 Input-to-state, request-to-result, and input-to-committed-frame measure different
 completion boundaries. The UI benchmark waits for the requested viewport to be
@@ -86,17 +89,18 @@ bytes retained after GC, a sampled 1,013,362,784-byte heap peak, and a
 under the default 512 MiB budget. Default admission rejection is independently
 tested; the fixture's content and CSS support are unchanged.
 
-The earlier development latency run retained two resize layouts sharing upstream
-artifacts. Its cost estimate predates the weak side-cache audit; use the final
-hosted report for the complete owner estimate:
+The hosted worker run admits one resize layout after evicting two variants,
+while retaining shared upstream artifacts. The retained-cost estimate includes
+the weak side-cache owners:
 
 | Memory measure | Bytes |
 | --- | ---: |
-| Earlier retained allocation estimate (before side-cache audit) | 958,699,068 |
-| Worker heap after forced GC | 803,940,792 |
-| Sampled allocation peak heap | 1,402,659,672 |
+| Retained allocation estimate | 885,763,164 |
+| Worker heap after forced GC | 774,623,136 |
+| Sampled allocation peak heap | 1,559,517,040 |
+| Sampled peak working set (heap plus external) | 1,563,779,100 |
 | Client retained viewport/summary estimate | 8,331,902 |
-| Worker heap after release and forced GC | 19,546,936 |
+| Worker heap after release and forced GC | 18,736,344 |
 | Retained artifact estimate after release | 0 |
 
 Release controls separately test weak reachability, truncated prefixes, many small
