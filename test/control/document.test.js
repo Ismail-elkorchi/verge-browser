@@ -141,6 +141,23 @@ test("following a same-document link updates target state to the destination ele
   assert.equal(state.urlTarget, document.elementById("chapter"));
 });
 
+test("dynamic state transitions retain unchanged immutable state collections", () => {
+  const document = parseWebDocument("<a href='#chapter'>Jump</a><h2 id='chapter'>Chapter</h2>", context);
+  const initial = createDocumentState(document);
+  const focused = applyDocumentAction(document, initial, {
+    kind: "focus",
+    target: document.links[0].node
+  });
+  assert.strictEqual(focused.controls, initial.controls);
+  assert.strictEqual(focused.open, initial.open);
+  const targeted = applyDocumentAction(document, focused, {
+    kind: "follow-link",
+    target: document.links[0].node
+  });
+  assert.strictEqual(targeted.controls, focused.controls);
+  assert.strictEqual(targeted.open, focused.open);
+});
+
 test("standalone controls have immutable state and indexed radio groups without a synthetic form", () => {
   const document = parseWebDocument(`<label for="query">Query</label><input id="query" value="term">
     <label><input type="radio" name="scope" value="one" checked> One</label>

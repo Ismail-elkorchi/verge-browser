@@ -1,4 +1,5 @@
 import {
+  cloneCssComponentValues,
   parseComponentValues,
   serializeCssComponentValues,
   type ComponentValue,
@@ -292,51 +293,48 @@ function variableNameAndFallback(value: CssFunction): {
   return { name, fallback: comma < 0 ? null : value.value.slice(comma + 1) };
 }
 
-function substituteVariables(
+function substituteVariableValues(
   values: readonly ComponentValue[],
-  properties: ReadonlyMap<string, string>,
+  properties: ReadonlyMap<string, readonly ComponentValue[]>,
   stack: ReadonlySet<string>
-): string | null {
-  const pieces: string[] = [];
+): readonly ComponentValue[] | null {
+  const result: ComponentValue[] = [];
   for (const value of values) {
     if (value.kind === "function-block" && value.name.toLowerCase() === "var") {
       const reference = variableNameAndFallback(value);
       if (reference === null || stack.has(reference.name)) return null;
       const raw = properties.get(reference.name);
-      const replacement = raw === undefined
-        ? reference.fallback
-        : parseComponentValues(raw).ok
-          ? (parseComponentValues(raw) as Extract<ReturnType<typeof parseComponentValues>, { readonly ok: true }>).value
-          : null;
+      const replacement = raw ?? reference.fallback;
       if (replacement === null) return null;
-      const nested = substituteVariables(replacement, properties, new Set([...stack, reference.name]));
+      const nested = substituteVariableValues(replacement, properties, new Set([...stack, reference.name]));
       if (nested === null) return null;
-      pieces.push(nested);
+      result.push(...nested);
       continue;
     }
     if (value.kind === "function-block") {
-      const nested = substituteVariables(value.value, properties, stack);
+      const nested = substituteVariableValues(value.value, properties, stack);
       if (nested === null) return null;
-      pieces.push(`${value.name}(${nested})`);
+      result.push(Object.freeze({ ...value, value: Object.freeze(nested) }));
       continue;
     }
     if (value.kind === "simple-block") {
-      const nested = substituteVariables(value.value, properties, stack);
+      const nested = substituteVariableValues(value.value, properties, stack);
       if (nested === null) return null;
-      const delimiters: readonly [string, string] = value.associatedToken === "open-paren" ? ["(", ")"]
-        : value.associatedToken === "open-square" ? ["[", "]"] : ["{", "}"];
-      pieces.push(`${delimiters[0]}${nested}${delimiters[1]}`);
+      result.push(Object.freeze({ ...value, value: Object.freeze(nested) }));
       continue;
     }
-    pieces.push(serializeCssComponentValues([value]));
+    result.push(value);
   }
-  return pieces.join("");
+  return Object.freeze(result);
 }
 
-/** Substitutes custom properties structurally, including nested fallbacks and cycle detection. */
-export function resolveCssVariables(source: string, properties: ReadonlyMap<string, string>): string | null {
-  const parsed = parseComponentValues(source);
-  return parsed.ok ? substituteVariables(parsed.value, properties, new Set()) : null;
+/** Substitutes custom properties as component values, including nested fallbacks and cycle detection. */
+export function resolveCssVariableValues(
+  values: readonly ComponentValue[],
+  properties: ReadonlyMap<string, readonly ComponentValue[]>
+): readonly ComponentValue[] | null {
+  const substituted = substituteVariableValues(values, properties, new Set());
+  return substituted === null ? null : cloneCssComponentValues(substituted);
 }
 
 function channel(value: ComponentValue | undefined): number | null {

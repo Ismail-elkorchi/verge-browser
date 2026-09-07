@@ -1,3 +1,4 @@
+import { registerRetainedOwner } from "../memory/retained-cost.js";
 import {
   HTML_NAMESPACE_URI,
   type Attribute,
@@ -1255,6 +1256,7 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
     });
     this.indexOutcome = Object.freeze(mutableOutcome.outcome);
     Object.freeze(this);
+    registerRetainedOwner(this, () => [this.#nodes, this.#semantics, this.#elementsById, this.#forms, this.#formOwners, this.#controls, this.#radioGroups, this.#options, this.#labelsByNode, this.#links, this.#headings, this.#replaced, this.#disclosures, this.#directionalities, this.#htmlTables, this.#htmlTableCells, this.#htmlTableColumns, this.#htmlTableColumnGroups, this.#textRanges, this.#directTextSourceMappings, this.#documentText]);
   }
 
   public node(ref: DocumentNodeRef): WebDocumentNode {

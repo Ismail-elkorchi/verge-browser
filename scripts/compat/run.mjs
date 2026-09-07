@@ -7,7 +7,8 @@ import { HttpFields } from "@ismail-elkorchi/http-client";
 
 import { BrowserSession } from "../../dist/app/session.js";
 import { createDocumentState } from "../../dist/document/index.js";
-import { renderDocument } from "../../dist/presentation/pipeline.js";
+import { RenderArtifactStore } from "../../dist/presentation/renderer/index.js";
+import { projectTextSearchToLayout } from "../../dist/presentation/search/index.js";
 import {
   cssCoordinate,
   cssLengthFromFixed,
@@ -16,6 +17,7 @@ import {
   cssRect
 } from "../../dist/presentation/layout/index.js";
 import { terminalCellMeasurer, terminalCssTextMeasurer } from "../../dist/ui/terminal-measure.js";
+import { buildViewportTerminalResult } from "../../dist/presentation/terminal/index.js";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const corpusPath = resolve(scriptDirectory, "corpus.json");
@@ -120,15 +122,24 @@ async function openFixture(fixture, html, requests) {
   }
 }
 
-function renderSnapshot(snapshot, variant) {
+function renderSnapshot(snapshot, variant, expectedText) {
   const viewportWidth = cssLengthFromFixed(variant.columns * CELL_WIDTH);
   const viewportHeight = cssLengthFromFixed(variant.rows * ROW_HEIGHT);
   const scrollY = cssLengthFromFixed(variant.scrollRow * ROW_HEIGHT);
-  return renderDocument({
+  const state = createDocumentState(snapshot.document);
+  const store = new RenderArtifactStore();
+  store.attach({
+    documentId: "compatibility-document",
+    documentRevision: 1,
+    stateRevision: 1,
     document: snapshot.document,
-    state: createDocumentState(snapshot.document),
+    state,
     resources: snapshot.stylesheets,
-    styleDiagnostics: snapshot.styleDiagnostics,
+    styleDiagnostics: snapshot.styleDiagnostics
+  });
+  const request = {
+    documentId: "compatibility-document",
+    documentRevision: 1,
     mediaEnvironment: {
       viewportWidthCssPx: cssPixels(viewportWidth),
       viewportHeightCssPx: cssPixels(viewportHeight),
@@ -157,8 +168,53 @@ function renderSnapshot(snapshot, variant) {
       ambiguousWidth: 1,
       colorDepth: 24,
       cellMeasurer: terminalCellMeasurer()
+    },
+  };
+  try {
+    const artifacts = store.analyze(request);
+    let viewportRevision = 0;
+    const viewportAt = (scrollRow) => store.renderViewport({
+      ...request,
+      viewportRevision: ++viewportRevision,
+      window: {
+        scrollRow,
+        viewportRows: variant.rows,
+        overscanBefore: 0,
+        overscanAfter: 0
+      }
+    });
+    const primary = viewportAt(variant.scrollRow);
+    const windows = [];
+    for (let scrollRow = 0; scrollRow < primary.documentExtentRows; scrollRow += variant.rows) {
+      windows.push(scrollRow === variant.scrollRow ? primary : viewportAt(scrollRow));
     }
-  });
+    const paintedPhrases = Object.freeze(expectedText.filter((phrase) => {
+      const projection = projectTextSearchToLayout(
+        artifacts.textSearchIndex,
+        artifacts.documentLayout,
+        phrase,
+        10_000
+      );
+      return windows.some((entry) => buildViewportTerminalResult({
+        displayList: entry.displayList,
+        cellBuffer: entry.terminal.cellBuffer,
+        documentGeometry: artifacts.documentGeometry,
+        searchProjection: projection,
+        truncations: entry.terminal.truncations
+      }).search?.ranges.length > 0);
+    }));
+    const evidence = Object.freeze({
+      rows: Object.freeze(windows.flatMap((entry) => entry.terminal.cellBuffer.rows)),
+      accessibilityBounds: Object.freeze(windows.flatMap((entry) => entry.terminal.accessibilityBounds)),
+      focusTargets: Object.freeze(windows.flatMap((entry) => entry.terminal.focusMap.targets)),
+      cellBufferOutcomes: Object.freeze(windows.map((entry) => entry.terminal.cellBuffer.outcome)),
+      terminalTruncations: Object.freeze(windows.flatMap((entry) => entry.terminal.truncations)),
+      paintedPhrases
+    });
+    return Object.freeze({ artifacts, viewport: primary, evidence });
+  } finally {
+    store.dispose();
+  }
 }
 
 function allowedDiagnostic(fixture, diagnostic) {
@@ -186,20 +242,21 @@ function stablePayload(snapshot, pipeline, requests) {
       importDepth: entry.importDepth,
       importedFrom: entry.importedFrom
     })),
-    logicalText: normalized(pipeline.textSearchIndex.text),
-    rows: pipeline.terminal.cellBuffer.rows.map((row) => row.text),
-    style: pipeline.styles.outcome,
-    layout: pipeline.layout.outcome,
-    displayList: pipeline.displayList.outcome,
-    cellBuffer: pipeline.terminal.cellBuffer.outcome,
-    truncations: pipeline.terminal.truncations
+    logicalText: normalized(pipeline.artifacts.textSearchIndex.text),
+    rows: pipeline.evidence.rows.map((row) => row.text),
+    paintedPhrases: pipeline.evidence.paintedPhrases,
+    style: pipeline.artifacts.computedStyles.outcome,
+    layout: pipeline.artifacts.documentLayout.outcome,
+    displayList: pipeline.artifacts.documentDisplayList.outcome,
+    cellBuffers: pipeline.evidence.cellBufferOutcomes,
+    truncations: pipeline.evidence.terminalTruncations
   });
 }
 
 function principalRectangle(snapshot, pipeline, elementId) {
   const documentNode = snapshot.document.elementById(elementId);
   if (documentNode === undefined || documentNode === null) return null;
-  const fragment = pipeline.layout.forDocumentNode(documentNode)
+  const fragment = pipeline.artifacts.documentLayout.forDocumentNode(documentNode)
     .find((candidate) => candidate.kind === "box" && candidate.borderRect.width > 0 && candidate.borderRect.height > 0);
   if (fragment === undefined) return null;
   return {
@@ -272,13 +329,13 @@ function tableHeaderRelationshipFailures(fixture, snapshot) {
 
 function collapsedBorderSegmentMetrics(fixture, pipeline) {
   const segments = [];
-  const pending = [pipeline.layout.root];
+  const pending = [pipeline.artifacts.documentLayout.root];
   const visited = new Set();
   while (pending.length > 0) {
     const id = pending.pop();
     if (id === undefined || visited.has(id)) continue;
     visited.add(id);
-    const fragment = pipeline.layout.fragment(id);
+    const fragment = pipeline.artifacts.documentLayout.fragment(id);
     pending.push(...fragment.children);
     if (fragment.kind === "box") segments.push(...(fragment.tableCollapsedBorderSegments ?? []));
   }
@@ -307,22 +364,22 @@ function collapsedBorderSegmentMetrics(fixture, pipeline) {
 }
 
 function caseResult(fixture, variant, hash, snapshot, pipeline, deterministic, requests) {
-  const logicalText = normalized(pipeline.textSearchIndex.text);
-  const paintedText = normalized(pipeline.terminal.cellBuffer.rows.map((row) => row.text).join("\n"));
-  const accessibleNodes = new Set(pipeline.terminal.accessibilityBounds.map((entry) => entry.documentNode));
-  const headings = pipeline.terminal.accessibilityBounds
+  const logicalText = normalized(pipeline.artifacts.textSearchIndex.text);
+  const paintedText = normalized(pipeline.evidence.rows.map((row) => row.text).join("\n"));
+  const accessibleNodes = new Set(pipeline.evidence.accessibilityBounds.map((entry) => entry.documentNode));
+  const headings = pipeline.evidence.accessibilityBounds
     .filter((entry) => entry.role === "heading").map((entry) => entry.name);
   const landmarks = snapshot.document.landmarks
     .filter((entry) => accessibleNodes.has(entry.node) && entry.landmark !== null).map((entry) => entry.landmark);
-  const linkNodes = new Set(pipeline.terminal.focusMap.targets
+  const linkNodes = new Set(pipeline.evidence.focusTargets
     .filter((entry) => entry.action.kind === "link").map((entry) => entry.node));
   const links = snapshot.document.links.filter((entry) => linkNodes.has(entry.node)).map((entry) => entry.label);
-  const controlNodes = new Set(pipeline.terminal.focusMap.targets
+  const controlNodes = new Set(pipeline.evidence.focusTargets
     .filter((entry) => entry.action.kind === "form-control").map((entry) => entry.node));
   const controls = snapshot.document.controls.filter((entry) => controlNodes.has(entry.node)).map((entry) => entry.label);
   const expectedText = fixture.expected.text;
   const logicalTextRecall = recall(expectedText, [logicalText]);
-  const paintedPhrases = expectedText.filter((phrase) => pipeline.terminal.search(phrase).ranges.length > 0);
+  const paintedPhrases = pipeline.evidence.paintedPhrases;
   const paintedTextRecall = recall(expectedText, paintedPhrases, (expected, actual) => expected === actual);
   const heading = recall(fixture.expected.headings, headings);
   const landmark = recall(fixture.expected.landmarks, landmarks, (expected, actual) => expected === actual);
@@ -338,7 +395,7 @@ function caseResult(fixture, variant, hash, snapshot, pipeline, deterministic, r
     readingMatches += 1;
     readingCursor = index + normalizedPhrase.length;
   }
-  const diagnostics = [...snapshot.styleDiagnostics, ...pipeline.styles.diagnostics];
+  const diagnostics = [...snapshot.styleDiagnostics, ...pipeline.artifacts.computedStyles.diagnostics];
   const uniqueDiagnostics = diagnostics.filter((entry, index) => diagnostics.findIndex((candidate) =>
     candidate.code === entry.code && candidate.sourceUrl === entry.sourceUrl && candidate.detail === entry.detail
   ) === index);
@@ -365,7 +422,7 @@ function caseResult(fixture, variant, hash, snapshot, pipeline, deterministic, r
       blankPage: logicalText.length === 0 && paintedText.length === 0,
       clippedLogicalText: expectedText.filter((phrase) => !includesText(logicalText, phrase)),
       clippedPaintedText: expectedText.filter((phrase) =>
-        includesText(logicalText, phrase) && pipeline.terminal.search(phrase).ranges.length === 0),
+        includesText(logicalText, phrase) && !paintedPhrases.includes(phrase)),
       stylesheetRequestContract: {
         missing: (fixture.expected.requiredStylesheetRequests ?? []).filter((url) => !requests.includes(url)),
         incorrectlyRequested: (fixture.expected.avoidedStylesheetRequests ?? []).filter((url) => requests.includes(url))
@@ -377,11 +434,10 @@ function caseResult(fixture, variant, hash, snapshot, pipeline, deterministic, r
       stylesheetFailures: unexpected.filter((entry) => entry.code.startsWith("stylesheet-")),
       resourceFailures: unexpected.filter((entry) => entry.code === "resource-failure"),
       unexpectedDiagnostics: unexpected,
-      layoutTruncation: pipeline.layout.outcome.status === "truncated" ? pipeline.layout.outcome : null,
-      displayListTruncation: pipeline.displayList.outcome.status === "truncated" ? pipeline.displayList.outcome : null,
-      cellBufferTruncation: pipeline.terminal.cellBuffer.outcome.status === "truncated"
-        ? pipeline.terminal.cellBuffer.outcome : null,
-      terminalTruncations: pipeline.terminal.truncations,
+      layoutTruncation: pipeline.artifacts.documentLayout.outcome.status === "truncated" ? pipeline.artifacts.documentLayout.outcome : null,
+      displayListTruncation: pipeline.artifacts.documentDisplayList.outcome.status === "truncated" ? pipeline.artifacts.documentDisplayList.outcome : null,
+      cellBufferTruncation: pipeline.evidence.cellBufferOutcomes.find((outcome) => outcome.status === "truncated") ?? null,
+      terminalTruncations: pipeline.evidence.terminalTruncations,
       boxRelationshipFailures: boxRelationshipFailures(fixture, variant, snapshot, pipeline),
       tableHeaderRelationshipFailures: tableHeaderRelationshipFailures(fixture, snapshot),
       collapsedBorderSegmentCount: collapsedBorders.count,
@@ -465,8 +521,8 @@ for (const fixture of corpus.fixtures) {
     const secondRequests = [];
     const firstSnapshot = await openFixture(fixture, html, firstRequests);
     const secondSnapshot = await openFixture(fixture, html, secondRequests);
-    const first = renderSnapshot(firstSnapshot, variant);
-    const second = renderSnapshot(secondSnapshot, variant);
+    const first = renderSnapshot(firstSnapshot, variant, fixture.expected.text);
+    const second = renderSnapshot(secondSnapshot, variant, fixture.expected.text);
     const deterministic = stablePayload(firstSnapshot, first, firstRequests)
       === stablePayload(secondSnapshot, second, secondRequests);
     results.push(caseResult(fixture, variant, hash, firstSnapshot, first, deterministic, firstRequests));

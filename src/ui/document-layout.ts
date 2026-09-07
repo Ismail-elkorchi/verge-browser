@@ -1,22 +1,10 @@
 import type { Rect } from "@ismail-elkorchi/terminal-ui/renderer";
 
 import type { DocumentForm, DocumentFormControl, DocumentLink, DocumentNodeRef } from "../document/index.js";
-import type { DocumentState } from "../document/index.js";
-import type { IndexedPageSnapshot } from "../app/types.js";
-import type { DocumentActionIdentity } from "../presentation/formatting/index.js";
-import { renderDocument, type RenderPipelineResult } from "../presentation/pipeline.js";
-import {
-  cssCoordinate, cssLengthFromFixed, cssNonNegativeLength, cssPixels, cssPx, cssRect
-} from "../presentation/layout/index.js";
-import type { MediaEnvironment } from "../presentation/style/index.js";
-import type { TerminalRenderResult } from "../presentation/terminal/index.js";
 import type { BrowserDocumentState } from "./model.js";
-import { terminalCellMeasurer, terminalCssTextMeasurer } from "./terminal-measure.js";
+import type { ViewportRenderPayload } from "./render-worker/index.js";
 
 const MAX_DOCUMENT_COLUMNS = 120;
-const MAX_RENDER_PIPELINE_CACHE_ENTRIES = 4;
-const CELL_WIDTH = cssPx(8);
-const ROW_HEIGHT = cssPx(16);
 
 export interface BrowserRenderPreferences {
   readonly colorScheme: "light" | "dark";
@@ -54,18 +42,11 @@ export function browserRenderPreferences(
 }
 
 const SHARED_RENDER_PREFERENCES = browserRenderPreferences();
-const TERMINAL_CELL_MEASURER = terminalCellMeasurer(SHARED_RENDER_PREFERENCES.ambiguousWidth);
-const CSS_TEXT_MEASURER = terminalCssTextMeasurer(
-  CELL_WIDTH,
-  ROW_HEIGHT,
-  SHARED_RENDER_PREFERENCES.ambiguousWidth
-);
-
 export function browserMediaEnvironment(
   widthCssPx: number,
   heightCssPx: number,
   preferences: BrowserRenderPreferences = SHARED_RENDER_PREFERENCES
-): MediaEnvironment {
+) {
   return Object.freeze({
     viewportWidthCssPx: widthCssPx,
     viewportHeightCssPx: heightCssPx,
@@ -75,117 +56,6 @@ export function browserMediaEnvironment(
     hover: preferences.hover,
     pointer: preferences.pointer
   });
-}
-
-interface CachedRenderPipeline {
-  readonly key: string;
-  readonly snapshot: IndexedPageSnapshot;
-  readonly state: DocumentState;
-  readonly result: RenderPipelineResult;
-}
-
-/** Explicit, bounded UI-owned cache for viewport-derived render-pipeline work. */
-export class RenderPipelineCache {
-  readonly #entries: CachedRenderPipeline[] = [];
-
-  public get(
-    snapshot: IndexedPageSnapshot,
-    state: DocumentState,
-    columns: number,
-    rows: number,
-    scrollRow: number
-  ): RenderPipelineResult {
-    const viewportColumns = documentContentColumns(columns);
-    const viewportRows = Math.max(1, Math.floor(rows));
-    const viewportScrollRow = Math.max(0, Math.floor(scrollRow));
-    const key = `${String(viewportColumns)}x${String(viewportRows)}@${String(viewportScrollRow)}`;
-    const existingIndex = this.#entries.findIndex((entry) =>
-      entry.key === key && entry.snapshot === snapshot && entry.state === state
-    );
-    if (existingIndex >= 0) {
-      const existing = this.#entries.splice(existingIndex, 1)[0];
-      if (existing !== undefined) {
-        this.#entries.push(existing);
-        return existing.result;
-      }
-    }
-    const result = renderDocument({
-      document: snapshot.document,
-      state,
-      resources: snapshot.stylesheets,
-      styleDiagnostics: snapshot.styleDiagnostics,
-      mediaEnvironment: browserMediaEnvironment(
-        cssPixels(cssLengthFromFixed(viewportColumns * CELL_WIDTH)),
-        cssPixels(cssLengthFromFixed(viewportRows * ROW_HEIGHT))
-      ),
-      layoutContext: {
-        viewport: {
-          width: cssNonNegativeLength(cssLengthFromFixed(viewportColumns * CELL_WIDTH)),
-          height: cssNonNegativeLength(cssLengthFromFixed(viewportRows * ROW_HEIGHT))
-        },
-        textMeasurer: CSS_TEXT_MEASURER,
-        initialContainingBlock: cssRect(
-          cssCoordinate(cssPx(0)),
-          cssCoordinate(cssPx(0)),
-          cssLengthFromFixed(viewportColumns * CELL_WIDTH),
-          cssLengthFromFixed(viewportRows * ROW_HEIGHT)
-        ),
-        scrollport: cssRect(
-          cssCoordinate(cssPx(0)),
-          cssCoordinate(cssLengthFromFixed(viewportScrollRow * ROW_HEIGHT)),
-          cssLengthFromFixed(viewportColumns * CELL_WIDTH),
-          cssLengthFromFixed(viewportRows * ROW_HEIGHT)
-        )
-      },
-      terminalContext: {
-        columns: viewportColumns,
-        rows: viewportRows,
-        cellWidthCssPx: CELL_WIDTH,
-        rowHeightCssPx: ROW_HEIGHT,
-        colorDepth: SHARED_RENDER_PREFERENCES.colorDepth,
-        unicode: SHARED_RENDER_PREFERENCES.unicode,
-        ambiguousWidth: SHARED_RENDER_PREFERENCES.ambiguousWidth,
-        cellMeasurer: TERMINAL_CELL_MEASURER
-      }
-    });
-    this.#entries.push({ key, snapshot, state, result });
-    if (this.#entries.length > MAX_RENDER_PIPELINE_CACHE_ENTRIES) this.#entries.shift();
-    return result;
-  }
-}
-
-/** Exact typed causes when a rendering stage did not produce a complete result. */
-export function renderPipelineIncompleteCauses(result: RenderPipelineResult): readonly string[] {
-  const causes: string[] = [];
-  const stage = (
-    name: string,
-    outcome: { readonly status: string; readonly budget?: string; readonly limit?: number;
-      readonly reason?: string; readonly feature?: string }
-  ): void => {
-    if (outcome.status === "complete") return;
-    if (outcome.status === "truncated" && outcome.budget !== undefined && outcome.limit !== undefined) {
-      causes.push(`${name}.${outcome.budget}=${String(outcome.limit)}`);
-      return;
-    }
-    if (outcome.status === "rejected" && outcome.reason !== undefined) {
-      causes.push(`${name}.${outcome.reason}`);
-      return;
-    }
-    if (outcome.status === "unsupported" && outcome.feature !== undefined) {
-      causes.push(`${name}.unsupported:${outcome.feature}`);
-    }
-  };
-  stage("style", result.styles.outcome);
-  stage("box-tree", result.formatting.outcome);
-  stage("layout", result.layout.outcome);
-  if (result.displayList.outcome.status === "rejected") stage("display-list", result.displayList.outcome);
-  if (result.terminal.cellBuffer.outcome.status === "rejected") {
-    stage("cell-buffer", result.terminal.cellBuffer.outcome);
-  }
-  for (const truncation of result.terminal.truncations) {
-    causes.push(`terminal.${truncation.budget}=${String(truncation.limit)}`);
-  }
-  return Object.freeze(causes);
 }
 
 export type BrowserDocumentAction = {
@@ -212,30 +82,6 @@ export function documentContentColumns(columns: number): number {
   return Math.max(1, Math.min(MAX_DOCUMENT_COLUMNS, Math.floor(columns)));
 }
 
-export function renderDocumentForViewport(
-  document: BrowserDocumentState,
-  columns: number,
-  viewportRows = 24
-): RenderPipelineResult {
-  const initial = document.renderPipelineCache.get(
-    document.snapshot,
-    document.documentState,
-    columns,
-    viewportRows,
-    0
-  );
-  const scrollRow = documentScrollRow(document, initial.terminal);
-  return scrollRow === 0
-    ? initial
-    : document.renderPipelineCache.get(
-      document.snapshot,
-      document.documentState,
-      columns,
-      viewportRows,
-      scrollRow
-    );
-}
-
 export function documentContentBounds(bounds: Rect): Rect {
   const width = documentContentColumns(bounds.width);
   return {
@@ -246,73 +92,56 @@ export function documentContentBounds(bounds: Rect): Rect {
   };
 }
 
-function rowsForSource(render: TerminalRenderResult, source: DocumentNodeRef | null): readonly number[] {
-  if (source === null) return [];
-  const rows = new Set<number>();
-  for (const rect of render.cellRectsForDocumentNode(source)) {
-    const end = Math.min(render.cellBuffer.rows.length, rect.row + rect.height);
-    for (let row = rect.row; row < end; row += 1) rows.add(row);
+export function documentScrollRow(document: BrowserDocumentState): number {
+  const extent = document.rendering.summary?.documentRowCount ?? 1;
+  if (document.scrollAnchor.source === null) {
+    return Math.max(0, Math.min(extent - 1, document.scrollAnchor.rowOffset));
   }
-  if (rows.size === 0) {
-    const anchor = render.scrollAnchors.find((entry) => entry.documentNode === source);
-    if (anchor !== undefined) rows.add(anchor.row);
-  }
-  return [...rows].sort((left, right) => left - right);
+  const anchor = document.rendering.summary?.scrollAnchorByDocumentNode.get(document.scrollAnchor.source);
+  if (anchor === undefined) return 0;
+  return Math.max(0, Math.min(extent - 1, anchor.row + document.scrollAnchor.rowOffset));
 }
 
-export function documentScrollRow(document: BrowserDocumentState, render: TerminalRenderResult): number {
-  if (document.scrollAnchor.source === null) {
-    return Math.max(
-      0,
-      Math.min(Math.max(0, render.cellBuffer.rows.length - 1), document.scrollAnchor.rowOffset)
-    );
-  }
-  const rows = rowsForSource(render, document.scrollAnchor.source);
-  if (rows.length === 0) return 0;
-  return rows[Math.min(document.scrollAnchor.rowOffset, rows.length - 1)] ?? 0;
+/** Row represented by the last committed viewport; pending requests keep that frame stationary. */
+export function committedDocumentScrollRow(document: BrowserDocumentState): number {
+  const buffer = document.rendering.viewport?.cellBuffer;
+  return buffer === undefined
+    ? documentScrollRow(document)
+    : buffer.windowStartRow + buffer.overscanBefore;
 }
 
 export function documentWithScrollRow(
   document: BrowserDocumentState,
-  render: TerminalRenderResult,
   requestedRow: number,
   viewportRows = 1
 ): BrowserDocumentState {
-  if (render.cellBuffer.rows.length === 0) return document;
+  const documentRows = document.rendering.summary?.documentRowCount ?? 1;
   const normalizedViewportRows = Math.max(1, Math.floor(viewportRows));
   const rowIndex = Math.max(
     0,
-    Math.min(Math.max(0, render.cellBuffer.rows.length - normalizedViewportRows), Math.floor(requestedRow))
+    Math.min(Math.max(0, documentRows - normalizedViewportRows), Math.floor(requestedRow))
   );
-  const row = render.cellBuffer.rows[rowIndex];
-  const source = row?.spans.find((span) => {
-    if (span.documentNode === null) return false;
-    let formattingNode = render.layout.formatting.node(
-      render.layout.fragment(span.layoutFragment).formattingNode
-    );
-    for (;;) {
-      const node = formattingNode.source;
-      if (node !== null && render.layout.formatting.document.node(node).kind === "element") {
-        const style = formattingNode.pseudo === null
-          ? render.layout.formatting.styles.style(node)
-          : render.layout.formatting.styles.pseudo(node, formattingNode.pseudo);
-        if (style !== null) return style.box.position !== "absolute"
-          && style.box.position !== "fixed" && style.box.position !== "sticky";
-      }
-      const parent = render.layout.formatting.parent(formattingNode.id);
-      if (parent === null) return true;
-      formattingNode = parent;
-    }
-  })?.documentNode ?? null;
-  if (source === null) return { ...document, scrollAnchor: { source: null, rowOffset: rowIndex } };
-  const matchingRows = rowsForSource(render, source);
+  const anchors = document.rendering.summary?.scrollAnchors ?? [];
+  let lower = 0;
+  let upper = anchors.length;
+  while (lower < upper) {
+    const middle = lower + Math.floor((upper - lower) / 2);
+    const anchor = anchors[middle];
+    if (anchor !== undefined && anchor.row <= rowIndex) lower = middle + 1;
+    else upper = middle;
+  }
+  const anchor = lower === 0 ? undefined : anchors[lower - 1];
+  if (anchor === undefined) {
+    return { ...document, scrollAnchor: { source: null, rowOffset: rowIndex } };
+  }
   return {
     ...document,
-    scrollAnchor: {
-      source,
-      rowOffset: Math.max(0, matchingRows.indexOf(rowIndex))
-    }
+    scrollAnchor: { source: anchor.documentNode, rowOffset: rowIndex - anchor.row },
   };
+}
+
+export function committedViewport(document: BrowserDocumentState): ViewportRenderPayload | null {
+  return document.rendering.viewport;
 }
 
 function linkAction(link: DocumentLink): BrowserDocumentAction {
@@ -351,12 +180,6 @@ export function actionById(
       : { id: actionId, kind: "disclosure", node, open: document.documentState.open.has(node) };
   }
   return undefined;
-}
-
-export function actionId(action: DocumentActionIdentity): string {
-  if (action.kind === "link") return `link:${action.node}`;
-  if (action.kind === "form-control") return `control:${action.node}`;
-  return `disclosure:${action.node}`;
 }
 
 export function formByRef(document: BrowserDocumentState, ref: DocumentNodeRef): DocumentForm | null {

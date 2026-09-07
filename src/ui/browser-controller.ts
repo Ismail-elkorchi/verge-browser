@@ -1,3 +1,4 @@
+import { TabRestorationScheduler } from "./tab-restoration.js";
 import { dirname } from "node:path";
 
 import {
@@ -38,10 +39,12 @@ import {
   resolveOmniboxInput
 } from "../app/url.js";
 import type { BrowserServices } from "./services.js";
-import { RenderPipelineCache } from "./document-layout.js";
+import { RenderWorkerClient, type ViewportRenderPayload, type ViewportRequestParameters } from "./render-worker/index.js";
 import type {
   BrowserDocumentState,
+  BrowserPlaceholderTabState,
   BrowserTuiState,
+  BrowserTabState,
   DetailKind,
   PickerKind,
   PickerValue
@@ -159,6 +162,7 @@ export interface BrowserControllerOptions {
   readonly searchUrlTemplate?: string;
   readonly downloadDirectory?: string;
   readonly downloadMaxBytes?: number;
+  readonly renderWorkerFactory?: () => RenderWorkerClient;
 }
 
 export interface BrowserPickerEntry {
@@ -176,12 +180,28 @@ export class BrowserController {
   readonly #downloadDirectory: string;
   readonly #downloadMaxBytes: number;
   readonly #externalNetworkPolicy = new NetworkSafetyPolicy(EXTERNAL_NETWORK_POLICY);
+  readonly #renderWorkerFactory: () => RenderWorkerClient;
+  #renderer: RenderWorkerClient;
+  #workerEpoch = 1;
+  #restart: Promise<void> | null = null;
+  #closed = false;
+  #closePromise: Promise<void> | null = null;
+  readonly #documentAttachments = new Map<string, {
+    readonly epoch: number;
+    desired: { readonly documentRevision: number; readonly stateRevision: number };
+    attached: { readonly documentRevision: number; readonly stateRevision: number; readonly state: DocumentState } | null;
+    preparation: Promise<RenderWorkerClient> | null;
+    tail: Promise<unknown>;
+  }>();
+  readonly #restorations = new TabRestorationScheduler<BrowserDocumentState>();
   readonly #sessions = new Map<string, BrowserSession>();
   readonly #provisionalSessionIds = new Set<string>();
   #nextDocumentNumber = 1;
   #workspaceSaveRevision = 0;
 
   public constructor(options: BrowserControllerOptions) {
+    this.#renderWorkerFactory = options.renderWorkerFactory ?? (() => new RenderWorkerClient());
+    this.#renderer = this.#renderWorkerFactory();
     this.#store = options.store;
     this.#services = options.services;
     this.#createSession = options.createSession;
@@ -210,8 +230,10 @@ export class BrowserController {
     await this.#releaseDiscardedSessions(state);
     const workspace: BrowserWorkspace = {
       documents: state.documents.map((document) => ({
-        url: document.snapshot.finalUrl,
-        scrollAnchor: storedScrollAnchor(document)
+        url: document.kind === "ready" ? document.snapshot.finalUrl : document.requestedUrl,
+        scrollAnchor: document.kind === "ready"
+          ? storedScrollAnchor(document)
+          : document.storedScrollAnchor ?? { target: null, rowOffset: 0 },
       })),
       activeDocumentIndex: state.activeDocumentIndex,
       sidePanel: state.sidePanel satisfies StoredSidePanel
@@ -220,7 +242,17 @@ export class BrowserController {
     await this.#store.saveWorkspace(workspace);
   }
 
-  public async close(): Promise<void> {
+  public close(): Promise<void> {
+    this.#closePromise ??= this.#close();
+    return this.#closePromise;
+  }
+
+  async #close(): Promise<void> {
+    this.#closed = true;
+    this.#restorations.close();
+    this.#workerEpoch += 1;
+    for (const id of this.#documentAttachments.keys()) this.#renderer.cancelDocument(id);
+    this.#documentAttachments.clear();
     this.#externalNetworkPolicy.close(new Error("Browser controller closed."));
     const sessions = [...this.#sessions.values()];
     this.#sessions.clear();
@@ -229,6 +261,7 @@ export class BrowserController {
     try {
       await settleBrowserCleanup([
         ...sessions.map((session) => () => session.close()),
+        () => this.#renderer.close(),
         () => this.#services.close()
       ], "Failed to close every browser session and host service.");
     } catch (error) {
@@ -256,13 +289,165 @@ export class BrowserController {
     return this.#openNewDocument(target, undefined, scrollAnchor, true);
   }
 
+  /** Reserves a stable tab identity without allocating a session or loading a page. */
+  public placeholder(
+    target: string,
+    scrollAnchor?: StoredBrowserDocument["scrollAnchor"],
+  ): BrowserPlaceholderTabState {
+    const resolved = resolveInputUrl(target);
+    let label = resolved;
+    try {
+      const url = new URL(resolved);
+      label = url.protocol === "about:" ? url.pathname : url.hostname || resolved;
+    } catch {
+      // resolveInputUrl owns URL validation; the display label remains the resolved target.
+    }
+    return Object.freeze({
+      kind: "restoring",
+      id: this.#newDocumentId(),
+      requestedUrl: resolved,
+      label,
+      ...(scrollAnchor === undefined ? {} : { storedScrollAnchor: scrollAnchor }),
+      restoreRevision: 1,
+      retryCount: 0,
+      error: null,
+    });
+  }
+
+  /** Starts loading a placeholder. Session ownership begins at this boundary. */
+  public restorePlaceholder(
+    tab: BrowserPlaceholderTabState,
+    signal?: AbortSignal,
+  ): Promise<BrowserDocumentState> {
+    return this.#restorations.schedule(tab.id, (loadSignal) =>
+      this.#openDocument(tab.id, tab.requestedUrl, loadSignal, tab.storedScrollAnchor, false), signal);
+  }
+
+  public configureRestoration(tab: BrowserTabState): void {
+    this.#restorations.configure(tab.id, tab.kind === "failed"
+      || (tab.kind === "ready" && (tab.rendering.status === "ready" || tab.rendering.status === "failed")));
+  }
+
+  public restorationMetrics(): ReturnType<TabRestorationScheduler<BrowserDocumentState>["metrics"]> {
+    return this.#restorations.metrics();
+  }
+
+  /** Attaches a document revision once and requests only a viewport result thereafter. */
+  public async renderViewport(
+    document: BrowserDocumentState,
+    viewportRevision: number,
+    parameters: ViewportRequestParameters,
+  ): Promise<ViewportRenderPayload> {
+    const renderer = await this.#prepareRendering(document);
+    return renderer.renderViewport(document, viewportRevision, parameters);
+  }
+
+  public cancelViewport(documentId: string): void { this.#renderer.cancelViewport(documentId); }
+
+  /** Internal interaction metrics used by deterministic browser qualification. */
+  public renderingMetrics(): ReturnType<RenderWorkerClient["metrics"]> {
+    return this.#renderer.metrics();
+  }
+
+  public async searchDocument(
+    document: BrowserDocumentState,
+    query: string,
+    parameters: ViewportRequestParameters,
+    requestGeneration: number,
+  ): ReturnType<RenderWorkerClient["search"]> {
+    const renderer = await this.#prepareRendering(document);
+    return renderer.search(document, query, parameters, 2_000, requestGeneration);
+  }
+
+  public cancelDocumentRendering(documentId: string): void { this.#renderer.cancelDocument(documentId); }
+
+  public cancelSearch(documentId: string): void { this.#renderer.cancelSearch(documentId); }
+
+  public acknowledgeViewport(payload: ViewportRenderPayload): void { this.#renderer.acknowledgeViewport(payload); }
+
+  public prioritizeRendering(documentId: string | null): void { this.#renderer.prioritize(documentId); }
+
+  async #prepareRendering(document: BrowserDocumentState): Promise<RenderWorkerClient> {
+    if (this.#closed) throw new Error("Browser controller is closed.");
+    if (this.#renderer.failed) {
+      this.#restart ??= (async () => {
+        await this.#renderer.close();
+        if (this.#closed) throw new Error("Browser controller is closed.");
+        this.#workerEpoch += 1;
+        this.#renderer = this.#renderWorkerFactory();
+        this.#documentAttachments.clear();
+      })().finally(() => { this.#restart = null; });
+      await this.#restart;
+    }
+    const renderer = this.#renderer;
+    let attachment = this.#documentAttachments.get(document.id);
+    if (attachment === undefined) {
+      attachment = { epoch: this.#workerEpoch, desired: { documentRevision: document.documentRevision, stateRevision: document.stateRevision }, attached: null, preparation: null, tail: Promise.resolve() };
+      this.#documentAttachments.set(document.id, attachment);
+    }
+    const lifecycle = attachment;
+    const desired = lifecycle.desired;
+    if (document.documentRevision < desired.documentRevision
+      || (document.documentRevision === desired.documentRevision && document.stateRevision < desired.stateRevision)) {
+      throw this.#obsoletePreparation();
+    }
+    const sameRevision = document.documentRevision === desired.documentRevision && document.stateRevision === desired.stateRevision;
+    if (sameRevision && lifecycle.preparation !== null) return lifecycle.preparation;
+    if (!sameRevision) renderer.cancelDocument(document.id);
+    lifecycle.desired = { documentRevision: document.documentRevision, stateRevision: document.stateRevision };
+    const validate = (): void => {
+      if (this.#closed || this.#workerEpoch !== lifecycle.epoch
+        || this.#documentAttachments.get(document.id) !== lifecycle
+        || lifecycle.desired.documentRevision !== document.documentRevision
+        || lifecycle.desired.stateRevision !== document.stateRevision) throw this.#obsoletePreparation();
+    };
+    const operation = lifecycle.tail.catch(() => undefined).then(async () => {
+      validate();
+      const attached = lifecycle.attached;
+      if (attached === null || attached.documentRevision !== document.documentRevision) {
+        await renderer.attach(document);
+      } else if (attached.stateRevision !== document.stateRevision) {
+        const changed: string[] = [];
+        const previous = attached.state;
+        if (previous.focus !== document.documentState.focus) changed.push("focus");
+        if (previous.hover !== document.documentState.hover) changed.push("hover");
+        if (previous.active !== document.documentState.active) changed.push("active");
+        if (previous.urlTarget !== document.documentState.urlTarget) changed.push("target");
+        if (previous.open !== document.documentState.open) changed.push("disclosure-open");
+        if (previous.controls !== document.documentState.controls) changed.push("control-content", "checked-selected");
+        await renderer.updateState(document, changed);
+      }
+      validate();
+      lifecycle.attached = { documentRevision: document.documentRevision, stateRevision: document.stateRevision, state: document.documentState };
+      return renderer;
+    });
+    lifecycle.preparation = operation;
+    lifecycle.tail = operation.finally(() => {
+      if (lifecycle.preparation === operation) lifecycle.preparation = null;
+    });
+    // tail participates in lifecycle serialization even when its caller is cancelled.
+    void lifecycle.tail.catch(() => undefined);
+    return operation;
+  }
+
+  #obsoletePreparation(): Error {
+    const error = new Error("Document attachment was superseded.");
+    error.name = "AbortError";
+    return error;
+  }
+
+  public async releaseRendering(documentId: string): Promise<void> {
+    this.#documentAttachments.delete(documentId);
+    await this.#renderer.release(documentId);
+  }
+
   public resolveOmnibox(value: string, currentUrl: string): string {
     return resolveOmniboxInput(value, currentUrl, this.#searchUrlTemplate);
   }
 
   public omniboxSuggestions(
     value: string,
-    document: BrowserDocumentState,
+    document: BrowserTabState,
     limit = 8
   ): readonly {
     readonly id: string;
@@ -304,7 +489,7 @@ export class BrowserController {
       return false;
     };
 
-    if (addUntilFull(document.snapshot.document.links, (link) => ({
+    if (addUntilFull(document.kind === "ready" ? document.snapshot.document.links : [], (link) => ({
       value: link.destination,
       label: link.label,
       description: "Current page"
@@ -344,6 +529,23 @@ export class BrowserController {
       : document.scrollAnchor;
     return {
       ...document,
+      ...(snapshotChanged
+        ? {
+            documentRevision: document.documentRevision + 1,
+            stateRevision: document.stateRevision + 1,
+            rendering: {
+              status: "idle" as const,
+              requestedViewportRevision: 0,
+              committedViewportRevision: 0,
+              requestKey: null,
+              pendingSearch: null, searchRequestGeneration: 0,
+              pendingFocus: null,
+              viewport: null,
+              summary: null,
+              error: null,
+            },
+          }
+        : {}),
       snapshot,
       scrollAnchor,
       ...(snapshotChanged
@@ -390,13 +592,6 @@ export class BrowserController {
       : operation === "forward"
         ? await session.forward(signal)
         : await session.reload(signal));
-  }
-
-  public openNew(
-    target = "about:newtab",
-    signal?: AbortSignal
-  ): Promise<BrowserDocumentState> {
-    return this.#openNewDocument(target, signal);
   }
 
   public openNewFromDocument(
@@ -613,16 +808,33 @@ export class BrowserController {
     sourceUrl?: string
   ): Promise<BrowserDocumentState> {
     const id = this.#newDocumentId();
+    return this.#openDocument(id, target, signal, scrollAnchor, persist, sourceUrl);
+  }
+
+  async #openDocument(
+    id: string,
+    target: string,
+    signal?: AbortSignal,
+    scrollAnchor?: StoredBrowserDocument["scrollAnchor"],
+    persist = false,
+    sourceUrl?: string,
+  ): Promise<BrowserDocumentState> {
+    signal?.throwIfAborted();
+    if (this.#closed) throw new Error("Browser controller is closed.");
     const session = this.#createSession(this.#store.httpSession);
     this.#sessions.set(id, session);
     this.#provisionalSessionIds.add(id);
     try {
       const snapshot = await this.#open(session, target, signal, sourceUrl);
+      signal?.throwIfAborted();
+      if (this.#sessions.get(id) !== session) throw this.#obsoletePreparation();
       if (persist) await this.#persist(snapshot);
       return this.#document(id, snapshot, scrollAnchor);
     } catch (error) {
-      this.#sessions.delete(id);
-      this.#provisionalSessionIds.delete(id);
+      if (this.#sessions.get(id) === session) {
+        this.#sessions.delete(id);
+        this.#provisionalSessionIds.delete(id);
+      }
       await session.destroy(error instanceof Error ? error : new Error(String(error)));
       throw error;
     }
@@ -671,11 +883,17 @@ export class BrowserController {
     ]);
     const discarded = [...this.#sessions.entries()]
       .filter(([id]) => !retainedIds.has(id) && !this.#provisionalSessionIds.has(id));
+    const discardedRendering = [...this.#documentAttachments.keys()]
+      .filter((id) => !retainedIds.has(id));
     for (const [id] of discarded) {
       this.#sessions.delete(id);
     }
+    for (const id of discardedRendering) this.#documentAttachments.delete(id);
     await settleBrowserCleanup(
-      discarded.map(([, session]) => () => session.close()),
+      [
+        ...discarded.map(([, session]) => () => session.close()),
+        ...discardedRendering.map((id) => () => this.releaseRendering(id)),
+      ],
       "Failed to close every discarded browser session."
     );
   }
@@ -693,14 +911,28 @@ export class BrowserController {
   ): BrowserDocumentState {
     const firstAnchor = {
       source: snapshot.document.body ?? snapshot.document.documentElement,
-      rowOffset: 0
+      rowOffset: 0,
     };
     return {
+      kind: "ready",
+      navigationGeneration: 0,
       id,
+      documentRevision: 1,
+      stateRevision: 1,
       snapshot,
       scrollAnchor: restoredScrollAnchor(snapshot, storedAnchor) ?? firstAnchor,
       documentState: createDocumentState(snapshot.document),
-      renderPipelineCache: new RenderPipelineCache(),
+      rendering: {
+        status: "idle",
+        requestedViewportRevision: 0,
+        committedViewportRevision: 0,
+        requestKey: null,
+        pendingSearch: null, searchRequestGeneration: 0,
+        pendingFocus: null,
+        viewport: null,
+        summary: null,
+        error: null
+      },
       search: null,
       formEditors: {},
       savedViews: {},

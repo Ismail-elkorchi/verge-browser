@@ -1,3 +1,4 @@
+import { registerRetainedOwner } from "../../memory/retained-cost.js";
 import type {
   DocumentNodeRef,
   DocumentSourceRange,
@@ -62,6 +63,7 @@ import {
 import type {
   BuildLayoutFragmentTreeInput,
   LayoutBoxFragment,
+  LayoutClipChain,
   LayoutBudgets,
   LayoutFragment,
   LayoutFragmentId,
@@ -69,6 +71,7 @@ import type {
   InlineContinuationGeometry,
   LayoutOutcome,
   LayoutPaintStyle,
+  LayoutScrollAttachment,
   LayoutStackingMetadata,
   LayoutTableCollapsedBorderSegment,
   LayoutTextCluster,
@@ -459,6 +462,7 @@ function formattingCache<K, V>(
   if (cached !== undefined) return cached;
   const created = new Map<K, V>();
   caches.set(formatting, created);
+  registerRetainedOwner(formatting, [created]);
   return created;
 }
 
@@ -757,6 +761,7 @@ class LayoutBuilder {
   readonly #fontMetricsCache = new Map<CssPixelLength, UsedFontMetrics>();
   readonly #textAdvanceCache = new Map<string, CssNonNegativeLength>();
   readonly #fragments = new Map<LayoutFragmentId, LayoutFragment>();
+  readonly #clipChains = new Map<LayoutFragmentId, LayoutClipChain>();
   readonly #parentIndex = new Map<LayoutFragmentId, LayoutFragmentId>();
   readonly #formattingIndex = new Map<FormattingNodeId, LayoutFragmentId[]>();
   readonly #documentIndex = new Map<DocumentNodeRef, LayoutFragmentId[]>();
@@ -788,6 +793,10 @@ class LayoutBuilder {
   readonly #stackingMetadata = new Map<
     LayoutFragmentId,
     LayoutStackingMetadata
+  >();
+  readonly #scrollAttachments = new Map<
+    LayoutFragmentId,
+    LayoutScrollAttachment
   >();
   readonly #floatManagers: FloatExclusionManager[] = [];
   readonly #tableWork = new Map<TableBudgetName, number>();
@@ -921,6 +930,7 @@ class LayoutBuilder {
     if (cache === undefined) {
       cache = new Map<string, InlineTextAnalysis>();
       INLINE_TEXT_ANALYSIS_CACHE.set(stream, cache);
+      registerRetainedOwner(stream, [cache]);
     }
     const cacheKey = [
       direction,
@@ -1855,10 +1865,9 @@ class LayoutBuilder {
     return immutable;
   }
 
-  #clip(
+  #overflowClip(
     node: FormattingNode,
     paddingRect: CssRect,
-    borderRect: CssRect,
     inherited: CssRect,
   ): CssRect {
     const style = this.#boxComputed(node);
@@ -1891,6 +1900,13 @@ class LayoutBuilder {
         cssRect(xRect.x, yRect.y, xRect.width, yRect.height),
       );
     }
+    return result;
+  }
+
+  #explicitClip(node: FormattingNode, borderRect: CssRect, inherited: CssRect): CssRect {
+    const style = this.#boxComputed(node);
+    if (style === null) return inherited;
+    let result = inherited;
     if (
       (style.box.position === "absolute" || style.box.position === "fixed") &&
       style.box.legacyClip.kind === "rect"
@@ -1965,6 +1981,10 @@ class LayoutBuilder {
       );
     }
     return result;
+  }
+
+  #clip(node: FormattingNode, paddingRect: CssRect, borderRect: CssRect, inherited: CssRect): CssRect {
+    return this.#explicitClip(node, borderRect, this.#overflowClip(node, paddingRect, inherited));
   }
 
   #visuallyClipped(
@@ -5299,7 +5319,7 @@ class LayoutBuilder {
               ),
             )
           : borderY;
-    return this.#translate(
+    const positioned = this.#translate(
       result,
       ZERO,
       cssCoordinateDifference(targetBorderY, result.borderRect.y),
@@ -5307,6 +5327,17 @@ class LayoutBuilder {
         ? this.#input.context.scrollport
         : inheritedClip,
     );
+    if (style?.box.position === "fixed") {
+      const fragment = this.#fragments.get(positioned.fragment);
+      if (fragment !== undefined) {
+        this.#scrollAttachments.set(positioned.fragment, Object.freeze({
+          kind: "fixed",
+          root: positioned.fragment,
+          normalBorderRect: fragment.borderRect,
+        }));
+      }
+    }
+    return positioned;
   }
 
   #applyInFlowPosition(
@@ -5324,76 +5355,32 @@ class LayoutBuilder {
     )
       return result;
     const containingBlock = this.#inFlowContainingBlock(node);
+    if (style.box.position === "sticky") {
+      this.#scrollAttachments.set(result.fragment, Object.freeze({
+        kind: "sticky",
+        root: result.fragment,
+        normalBorderRect: result.borderRect,
+        containingBlock,
+        top: this.#usedInset(style, "top", this.#input.context.viewport.height),
+        right: this.#usedInset(style, "right", this.#input.context.viewport.width),
+        bottom: this.#usedInset(style, "bottom", this.#input.context.viewport.height),
+        left: this.#usedInset(style, "left", this.#input.context.viewport.width),
+      }));
+      return result;
+    }
     const insetBasis =
-      style.box.position === "sticky"
-        ? this.#input.context.scrollport
-        : containingBlock;
+      containingBlock;
     const left = this.#usedInset(style, "left", insetBasis.width);
     const right = this.#usedInset(style, "right", insetBasis.width);
     const top = this.#usedInset(style, "top", insetBasis.height);
     const bottom = this.#usedInset(style, "bottom", insetBasis.height);
-    let inlineOffset =
+    const inlineOffset =
       left !== null && right !== null
         ? style.text.direction === "rtl"
           ? negate(right)
           : left
         : (left ?? (right === null ? ZERO : negate(right)));
-    let blockOffset = top ?? (bottom === null ? ZERO : negate(bottom));
-    if (style.box.position === "sticky") {
-      const scrollport = this.#input.context.scrollport;
-      const movedX = point(result.borderRect.x, inlineOffset);
-      const movedY = point(result.borderRect.y, blockOffset);
-      if (left !== null && movedX < point(scrollport.x, left)) {
-        inlineOffset = cssCoordinateDifference(
-          point(scrollport.x, left),
-          result.borderRect.x,
-        );
-      } else if (right !== null) {
-        const maximum = point(
-          cssCoordinateAdd(scrollport.x, scrollport.width),
-          sum(negate(right), negate(result.borderRect.width)),
-        );
-        if (movedX > maximum)
-          inlineOffset = cssCoordinateDifference(maximum, result.borderRect.x);
-      }
-      if (top !== null && movedY < point(scrollport.y, top)) {
-        blockOffset = cssCoordinateDifference(
-          point(scrollport.y, top),
-          result.borderRect.y,
-        );
-      } else if (bottom !== null) {
-        const maximum = point(
-          cssCoordinateAdd(scrollport.y, scrollport.height),
-          sum(negate(bottom), negate(result.borderRect.height)),
-        );
-        if (movedY > maximum)
-          blockOffset = cssCoordinateDifference(maximum, result.borderRect.y);
-      }
-      const minimumX = containingBlock.x;
-      const maximumX = point(
-        cssCoordinateAdd(containingBlock.x, containingBlock.width),
-        negate(result.borderRect.width),
-      );
-      const minimumY = containingBlock.y;
-      const maximumY = point(
-        cssCoordinateAdd(containingBlock.y, containingBlock.height),
-        negate(result.borderRect.height),
-      );
-      const constrainedX = cssCoordinateFromFixed(
-        Math.max(
-          minimumX,
-          Math.min(maximumX, point(result.borderRect.x, inlineOffset)),
-        ),
-      );
-      const constrainedY = cssCoordinateFromFixed(
-        Math.max(
-          minimumY,
-          Math.min(maximumY, point(result.borderRect.y, blockOffset)),
-        ),
-      );
-      inlineOffset = cssCoordinateDifference(constrainedX, result.borderRect.x);
-      blockOffset = cssCoordinateDifference(constrainedY, result.borderRect.y);
-    }
+    const blockOffset = top ?? (bottom === null ? ZERO : negate(bottom));
     this.#translate(result, inlineOffset, blockOffset, containingClip);
     // Relative and sticky positioning move the painted box without changing
     // the position it occupies in normal flow.
@@ -7082,12 +7069,7 @@ class LayoutBuilder {
     }
   }
 
-  #refreshInlineContinuationGeometry(root: LayoutFragmentId): void {
-    const sameRect = (left: CssRect, right: CssRect): boolean =>
-      left.x === right.x &&
-      left.y === right.y &&
-      left.width === right.width &&
-      left.height === right.height;
+  #refreshInlineContinuationGeometry(): void {
     // Inline decorations are registered after their descendants, so insertion
     // order is already the required bottom-up continuation-finalization order.
     for (const [id, decoration] of this.#inlineDecorations) {
@@ -7143,39 +7125,66 @@ class LayoutBuilder {
         inlineContinuations: Object.freeze(continuations),
       });
     }
-    // Recompute every inherited clip after final block sizes, relative/sticky
-    // offsets, and deferred out-of-flow descendants are known.
-    const clipped: {
-      readonly id: LayoutFragmentId;
-      readonly inherited: CssRect;
-    }[] = [
-      {
-        id: root,
-        inherited: this.#documentCanvasClip(),
-      },
-    ];
-    while (clipped.length > 0) {
-      const entry = clipped.pop();
+  }
+
+  #buildClipChains(root: LayoutFragmentId): void {
+    const sameRect = (left: CssRect, right: CssRect): boolean =>
+      left.x === right.x && left.y === right.y &&
+      left.width === right.width && left.height === right.height;
+    const canvas: LayoutClipChain = Object.freeze({ kind: "canvas", owner: null, rect: this.#documentCanvasClip(), parent: null });
+    const pending = [{ id: root, inherited: canvas, clipRect: canvas.rect }];
+    while (pending.length > 0) {
+      this.#input.signal?.throwIfAborted();
+      const entry = pending.pop();
       if (entry === undefined) continue;
       const fragment = this.#fragments.get(entry.id);
       if (fragment === undefined) continue;
-      let clipRect = entry.inherited;
-      if (fragment.kind !== "text") {
-        const node = this.#formatting.node(fragment.formattingNode);
-        if (node.appliesBoxStyle) {
-          clipRect = this.#clip(
-            node,
-            fragment.paddingRect,
-            fragment.borderRect,
-            entry.inherited,
-          );
+      let chain = entry.inherited;
+      let clipRect = entry.clipRect;
+      const node = this.#formatting.node(fragment.formattingNode);
+      const position = fragment.kind !== "text" && node.appliesBoxStyle ? this.#boxComputed(node)?.box.position : undefined;
+      if (position === "absolute" || position === "fixed") {
+        // Overflow follows the containing block; explicit clips still follow ancestry.
+        const containingAncestors = new Set<FormattingNodeId>();
+        if (position === "absolute") {
+          let parent = this.#formatting.parent(node.id);
+          while (parent !== null && !this.#positionedContainingBlocks.has(parent.id)) parent = this.#formatting.parent(parent.id);
+          while (parent !== null) {
+            containingAncestors.add(parent.id);
+            parent = this.#formatting.parent(parent.id);
+          }
+        }
+        const retained: LayoutClipChain[] = [];
+        for (let current: LayoutClipChain | null = chain; current !== null; current = current.parent) {
+          const owner = current.owner === null ? undefined : this.#fragments.get(current.owner);
+          if (current.kind === "clip" || (position === "absolute" &&
+            (current.kind !== "overflow" || (owner !== undefined && containingAncestors.has(owner.formattingNode))))) retained.push(current);
+        }
+        let filtered: LayoutClipChain | null = position === "fixed"
+          ? Object.freeze({ kind: "viewport", owner: fragment.id, rect: this.#input.context.scrollport, parent: null }) : null;
+        clipRect = position === "fixed" ? this.#input.context.scrollport : canvas.rect;
+        for (let index = retained.length - 1; index >= 0; index -= 1) {
+          const current = retained[index];
+          if (current === undefined) continue;
+          clipRect = cssIntersection(clipRect, current.rect);
+          filtered = current.parent === filtered ? current : Object.freeze({ ...current, parent: filtered });
+        }
+        chain = filtered ?? canvas;
+      }
+      if (fragment.kind !== "text" && node.appliesBoxStyle) {
+        for (const [kind, own] of [
+          ["overflow", this.#overflowClip(node, fragment.paddingRect, canvas.rect)],
+          ["clip", this.#explicitClip(node, fragment.borderRect, canvas.rect)],
+        ] as const) {
+          if (!sameRect(own, canvas.rect)) {
+            chain = Object.freeze({ kind, owner: fragment.id, rect: own, parent: chain });
+            clipRect = cssIntersection(clipRect, own);
+          }
         }
       }
-      if (!sameRect(fragment.clipRect, clipRect)) {
-        this.#fragments.set(entry.id, { ...fragment, clipRect });
-      }
-      for (const child of fragment.children)
-        clipped.push({ id: child, inherited: clipRect });
+      this.#clipChains.set(fragment.id, chain);
+      if (!sameRect(fragment.clipRect, clipRect)) this.#fragments.set(entry.id, { ...fragment, clipRect });
+      for (const child of fragment.children) pending.push({ id: child, inherited: chain, clipRect });
     }
   }
 
@@ -7236,11 +7245,12 @@ class LayoutBuilder {
         this.#input,
         "invalid-context",
       );
-    this.#refreshInlineContinuationGeometry(root.fragment);
+    this.#refreshInlineContinuationGeometry();
     if (this.#hasInFlowPositioning) {
       this.#applyFinalInFlowPositions(root.fragment);
-      this.#refreshInlineContinuationGeometry(root.fragment);
+      this.#refreshInlineContinuationGeometry();
     }
+    this.#buildClipChains(root.fragment);
     this.#buildStackingMetadata(root.fragment);
     const outcome: LayoutOutcome =
       this.#truncated === null
@@ -7265,6 +7275,8 @@ class LayoutBuilder {
       this.#parentIndex,
       this.#lineBoxes,
       this.#stackingMetadata,
+      this.#scrollAttachments,
+      this.#clipChains,
       outcome,
       this.#rootFontMetrics,
     );
@@ -7272,6 +7284,7 @@ class LayoutBuilder {
 }
 
 class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
+  readonly #clipChains: ReadonlyMap<LayoutFragmentId, LayoutClipChain>;
   readonly formatting: FormattingTree;
   readonly context: BuildLayoutFragmentTreeInput["context"];
   readonly rootFontMetrics: UsedFontMetrics;
@@ -7292,6 +7305,10 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
     LayoutFragmentId,
     LayoutStackingMetadata
   >;
+  readonly #scrollAttachments: ReadonlyMap<
+    LayoutFragmentId,
+    LayoutScrollAttachment
+  >;
 
   public constructor(
     input: BuildLayoutFragmentTreeInput,
@@ -7302,9 +7319,12 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
     parentIndex: ReadonlyMap<LayoutFragmentId, LayoutFragmentId>,
     lineBoxes: readonly LineBox[],
     stackingMetadata: ReadonlyMap<LayoutFragmentId, LayoutStackingMetadata>,
+    scrollAttachments: ReadonlyMap<LayoutFragmentId, LayoutScrollAttachment>,
+    clipChains: ReadonlyMap<LayoutFragmentId, LayoutClipChain>,
     outcome: LayoutOutcome,
     rootMetrics: UsedFontMetrics,
   ) {
+    this.#clipChains = clipChains;
     this.formatting = input.formatting;
     this.context = Object.freeze({
       ...input.context,
@@ -7375,6 +7395,9 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
     this.#stackingMetadata = complete
       ? stackingMetadata
       : new Map([...stackingMetadata].filter(([id]) => reachable.has(id)));
+    this.#scrollAttachments = complete
+      ? scrollAttachments
+      : new Map([...scrollAttachments].filter(([id]) => reachable.has(id)));
     this.outcome = Object.freeze(
       outcome.status === "complete"
         ? {
@@ -7398,6 +7421,7 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
           ),
         );
     Object.freeze(this);
+    registerRetainedOwner(this, () => [this.#clipChains, this.#fragments, this.#parents, this.#formattingIndex, this.#documentIndex, this.#stackingMetadata, this.#scrollAttachments]);
   }
 
   public static rejected(
@@ -7464,10 +7488,14 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
           }),
         ],
       ]),
+      new Map(),
+      new Map(),
       { status: "rejected", reason },
       REJECTED_FONT_METRICS,
     );
   }
+
+  public clipChain(id: LayoutFragmentId): LayoutClipChain | null { return this.#clipChains.get(id) ?? null; }
 
   public fragment(id: LayoutFragmentId): LayoutFragment {
     const fragment = this.#fragments.get(id);
@@ -7490,6 +7518,10 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
     if (metadata === undefined)
       throw new RangeError(`Unknown layout stacking metadata: ${id}`);
     return metadata;
+  }
+
+  public scrollAttachment(id: LayoutFragmentId): LayoutScrollAttachment | null {
+    return this.#scrollAttachments.get(id) ?? null;
   }
 
   public forFormattingNode(node: FormattingNodeId): readonly LayoutFragment[] {

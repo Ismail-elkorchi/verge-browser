@@ -35,6 +35,7 @@ import { formatHelpText, parseCommand, type BrowserCommand } from "../app/comman
 import { NetworkFetchError } from "../app/fetch-page.js";
 import type { DownloadRecord } from "../app/storage.js";
 import type { PageRequestOptions, IndexedPageSnapshot } from "../app/types.js";
+import { measured, type RenderInstrumentation } from "../presentation/renderer/index.js";
 import {
   applyDocumentAction,
   createDocumentState,
@@ -46,9 +47,8 @@ import {
 import type { BrowserController } from "./browser-controller.js";
 import {
   actionById,
-  actionId,
-  RenderPipelineCache,
-  renderDocumentForViewport,
+  browserRenderPreferences,
+  documentContentColumns,
   documentScrollRow,
   documentWithScrollRow,
   scrollToSource
@@ -56,6 +56,8 @@ import {
 import type {
   BrowserDocumentSearch,
   BrowserDocumentState,
+  BrowserPlaceholderTabState,
+  BrowserTabState,
   BrowserTuiMessage,
   BrowserTuiState,
   PickerKind,
@@ -63,6 +65,7 @@ import type {
 } from "./model.js";
 import { browserMenuItems, formComboboxPageSize, linkMenuItems } from "./model.js";
 import { browserView } from "./view.js";
+import type { ViewportRequestParameters } from "./render-worker/index.js";
 
 const EMPTY_COMMAND_SUGGESTIONS = createCommandSuggestions([]);
 const MAX_PAGE_SEARCH_MATCHES = 2000;
@@ -134,10 +137,24 @@ function submittedCommandInput(
   });
 }
 
+function activeTab(state: BrowserTuiState): BrowserTabState {
+  const tab = state.documents[state.activeDocumentIndex];
+  if (!tab) throw new Error("No browser tab is active.");
+  return tab;
+}
+
 function activeDocument(state: BrowserTuiState): BrowserDocumentState {
-  const document = state.documents[state.activeDocumentIndex];
-  if (!document) throw new Error("No browser document is active.");
-  return document;
+  const tab = activeTab(state);
+  if (tab.kind !== "ready") throw new Error("The active browser tab is not ready.");
+  return tab;
+}
+
+function tabUrl(tab: BrowserTabState): string {
+  return tab.kind === "ready" ? tab.snapshot.finalUrl : tab.requestedUrl;
+}
+
+function tabLabel(tab: BrowserTabState): string {
+  return tab.kind === "ready" ? tab.snapshot.document.title : tab.label;
 }
 
 function updateDocument(
@@ -147,8 +164,41 @@ function updateDocument(
 ): BrowserTuiState {
   return {
     ...state,
-    documents: state.documents.map((document) => document.id === documentId ? update(document) : document)
+    documents: state.documents.map((document) => {
+      if (document.id !== documentId) return document;
+      if (document.kind !== "ready") return document;
+      const updated = update(document);
+      if (updated.documentState === document.documentState) return updated;
+      const requiresViewport = documentStateRequiresViewport(document, updated.documentState);
+      return {
+        ...updated,
+        stateRevision: requiresViewport ? document.stateRevision + 1 : document.stateRevision,
+        ...(requiresViewport ? {
+          search: updated.search === null ? null : { ...updated.search, anchors: new Map(), layoutRevision: null },
+          rendering: { ...updated.rendering, requestKey: null, pendingSearch: null,
+            searchRequestGeneration: updated.rendering.searchRequestGeneration + 1 },
+        } : {}),
+      };
+    })
   };
+}
+
+function documentStateRequiresViewport(
+  document: BrowserDocumentState,
+  next: BrowserDocumentState["documentState"],
+): boolean {
+  const previous = document.documentState;
+  if (previous.controls !== next.controls || previous.open !== next.open) return true;
+  const dependencies = document.rendering.summary?.authorStateDependencies;
+  if (dependencies === undefined) return true;
+  const has = (value: typeof dependencies[number]): boolean => dependencies.includes(value);
+  if (previous.hover !== next.hover && has("hover")) return true;
+  if (previous.active !== next.active && has("active")) return true;
+  if (previous.urlTarget !== next.urlTarget && has("target")) return true;
+  if (previous.focus !== next.focus) {
+    return has("focus");
+  }
+  return false;
 }
 
 function documentWithFocus(
@@ -200,7 +250,7 @@ function effect(
   id: string,
   run: (context: TuiEffectContext) => Promise<BrowserTuiMessage>,
   concurrency: TuiEffect<BrowserTuiMessage>["concurrency"] = "enqueue",
-  documentId?: string
+  navigation?: BrowserDocumentState
 ): TuiEffect<BrowserTuiMessage> {
   return {
     id,
@@ -217,9 +267,11 @@ function effect(
         return {
           kind: "message",
           message: {
-            kind: "operationFailed",
+            ...(navigation === undefined ? { kind: "operationFailed" as const } : {
+              kind: "navigationFailed" as const, documentId: navigation.id,
+              documentRevision: navigation.documentRevision, navigationGeneration: navigation.navigationGeneration + 1,
+            }),
             message: error instanceof Error ? error.message : String(error),
-            ...(documentId === undefined ? {} : { documentId }),
             ...(downloadTarget === undefined ? {} : { downloadTarget })
           }
         };
@@ -259,6 +311,123 @@ function contentColumns(state: BrowserTuiState, terminalColumns: number): number
   return Math.max(1, available - 1);
 }
 
+function viewportParameters(
+  state: BrowserTuiState,
+  document: BrowserDocumentState,
+  terminalSize: Pick<TuiContext, "terminalSize">["terminalSize"],
+): ViewportRequestParameters {
+  const columns = documentContentColumns(contentColumns(state, terminalSize.columns));
+  const rows = Math.max(1, terminalSize.rows - (state.findBar === null ? 3 : 4));
+  return Object.freeze({
+    columns,
+    rows,
+    scrollRow: documentScrollRow(document),
+    overscanBefore: Math.min(6, rows),
+    overscanAfter: Math.min(12, rows),
+    preferences: browserRenderPreferences(),
+    searchQuery: document.search?.query ?? null,
+  });
+}
+
+function viewportRequestKey(
+  document: BrowserDocumentState,
+  parameters: ViewportRequestParameters,
+): string {
+  return [
+    document.id,
+    document.documentRevision,
+    parameters.columns,
+    parameters.rows,
+    parameters.scrollRow,
+    parameters.overscanBefore,
+    parameters.overscanAfter,
+    JSON.stringify(parameters.preferences),
+    parameters.searchQuery ?? "",
+  ].join(":");
+}
+
+function viewportEffect(
+  controller: BrowserController,
+  document: BrowserDocumentState,
+  viewportRevision: number,
+  parameters: ViewportRequestParameters,
+): TuiEffect<BrowserTuiMessage> {
+  return effect(`render:${document.id}`, async (context) => {
+    const cancel = (): void => { controller.cancelViewport(document.id); };
+    context.signal.addEventListener("abort", cancel, { once: true });
+    try {
+      const payload = await controller.renderViewport(document, viewportRevision, parameters);
+      return {
+        kind: "viewportReady",
+        payload,
+      };
+    } catch (error) {
+      return {
+        kind: "viewportFailed",
+        documentId: document.id,
+        documentRevision: document.documentRevision,
+        viewportRevision,
+        message: error instanceof Error ? error.message : String(error),
+      };
+    } finally {
+      context.signal.removeEventListener("abort", cancel);
+    }
+  }, "replace");
+}
+
+function searchEffect(
+  controller: BrowserController,
+  document: BrowserDocumentState,
+  query: string,
+  parameters: ViewportRequestParameters,
+): TuiEffect<BrowserTuiMessage> {
+  return effect(`search:${document.id}`, async (context) => {
+    const cancel = (): void => { controller.cancelSearch(document.id); };
+    context.signal.addEventListener("abort", cancel, { once: true });
+    try {
+      const result = await controller.searchDocument(document, query, parameters, document.rendering.searchRequestGeneration);
+      return {
+        kind: "searchReady", documentId: document.id,
+        documentRevision: result.documentRevision, stateRevision: result.stateRevision,
+        requestGeneration: result.requestGeneration, layoutRevision: result.layoutRevision,
+        anchors: result.anchors, query: result.query,
+        matches: result.matches.slice(0, MAX_PAGE_SEARCH_MATCHES),
+        truncated: result.truncated || result.matches.length > MAX_PAGE_SEARCH_MATCHES,
+      };
+    } catch (error) {
+      context.signal.throwIfAborted();
+      return { kind: "searchFailed", documentId: document.id, documentRevision: document.documentRevision,
+        stateRevision: document.stateRevision, requestGeneration: document.rendering.searchRequestGeneration,
+        message: error instanceof Error ? error.message : String(error) };
+    } finally { context.signal.removeEventListener("abort", cancel); }
+  }, "replace");
+}
+
+function scheduleTabRestorations(
+  controller: BrowserController,
+  state: BrowserTuiState,
+): {
+  readonly state: BrowserTuiState;
+  readonly effects: readonly TuiEffect<BrowserTuiMessage>[];
+} {
+  const documents = [...state.documents];
+  const effects: TuiEffect<BrowserTuiMessage>[] = [];
+  const begin = (index: number): void => {
+    const candidate = documents[index];
+    if (candidate === undefined || candidate.kind !== "restoring") return;
+    const loading = { ...candidate, kind: "loading" as const };
+    documents[index] = loading;
+    effects.push(restoreTabEffect(controller, loading));
+  };
+  const active = documents[state.activeDocumentIndex];
+  if (active !== undefined) controller.configureRestoration(active);
+  begin(state.activeDocumentIndex);
+  for (let index = 0; index < documents.length; index += 1) begin(index);
+  return effects.length === 0
+    ? { state, effects }
+    : { state: { ...state, documents }, effects: Object.freeze(effects) };
+}
+
 function pageFromSnapshot(
   document: BrowserDocumentState,
   snapshot: IndexedPageSnapshot,
@@ -269,19 +438,30 @@ function pageFromSnapshot(
     [document.snapshot.finalUrl]: {
       document: document.snapshot.document,
       scrollAnchor: document.scrollAnchor,
-      search: document.search
     }
   };
   const candidate = savedViews[snapshot.finalUrl];
   const restored = candidate?.document === snapshot.document ? candidate : undefined;
   return {
     ...document,
+    documentRevision: document.documentRevision + 1,
+    stateRevision: document.stateRevision + 1,
     snapshot,
     scrollAnchor: restored?.scrollAnchor
       ?? { source: snapshot.document.body ?? snapshot.document.documentElement, rowOffset: 0 },
-    search: restored?.search ?? null,
+    search: null,
     documentState: createDocumentState(snapshot.document),
-    renderPipelineCache: new RenderPipelineCache(),
+    rendering: {
+      status: "idle",
+      requestedViewportRevision: 0,
+      committedViewportRevision: 0,
+      requestKey: null,
+      pendingSearch: null, searchRequestGeneration: 0,
+      pendingFocus: null,
+      viewport: null,
+      summary: null,
+      error: null
+    },
     formEditors: {},
     savedViews,
     loading: false,
@@ -298,13 +478,13 @@ function focusedControlActionId(
 ): string | null {
   const document = state.documents[state.activeDocumentIndex];
   const target = focusPath?.at(-1);
-  if (document === undefined || target === undefined) return null;
+  if (document === undefined || document.kind !== "ready" || target === undefined) return null;
   const control = document.snapshot.document.control(target as DocumentNodeRef);
   return control === null ? null : `control:${control.node}`;
 }
 
-function pageText(document: BrowserDocumentState, columns: number): string {
-  return renderDocumentForViewport(document, columns).terminal.cellBuffer.rows.map((row) => row.text).join("\n");
+function pageText(document: BrowserDocumentState): string {
+  return document.snapshot.document.text(document.snapshot.document.root);
 }
 
 function navigationMessage(
@@ -315,6 +495,8 @@ function navigationMessage(
 ): BrowserTuiMessage {
   return {
     kind: "pageLoaded",
+    navigationGeneration: document.navigationGeneration + 1,
+    documentRevision: document.documentRevision,
     documentId: document.id,
     snapshot,
     status: label,
@@ -332,7 +514,7 @@ function navigationEffect(
     document,
     await controller.traverse(document, operation, context.signal),
     operation === "back" ? "Back" : operation === "forward" ? "Forward" : "Reloaded"
-  ), "replace", document.id);
+  ), "replace", document);
 }
 
 function loadEffect(
@@ -354,7 +536,7 @@ function loadEffect(
       options.parseMode
     ),
     `Opened ${target}`
-  ), "replace", document.id);
+  ), "replace", document);
 }
 
 function beginNavigation(
@@ -366,7 +548,7 @@ function beginNavigation(
   const next = updateDocument(
     { ...state, overlay: null, status: status(`Loading ${target}…`) },
     document.id,
-    (current) => ({ ...current, loading: true, pendingUrl: target, error: null })
+    (current) => ({ ...current, navigationGeneration: current.navigationGeneration + 1, loading: true, pendingUrl: target, error: null })
   );
   return result(next, { effects: [navigation] });
 }
@@ -377,7 +559,7 @@ function openPicker(
   picker: PickerKind,
   query = ""
 ): BrowserTuiState {
-  const entries = controller.pickerEntries(picker, state.documents, state.activeDocumentIndex, query);
+  const entries = controller.pickerEntries(picker, [activeDocument(state)], 0, query);
   const index = createSearchPickerIndex(entries);
   return {
     ...state,
@@ -391,53 +573,9 @@ function openPicker(
   };
 }
 
-function searchDocument(
-  document: BrowserDocumentState,
-  query: string,
-  columns: number
-): { readonly search: BrowserDocumentSearch; readonly firstRow: number | null } {
-  const boundedQuery = query.slice(0, MAX_PAGE_SEARCH_QUERY_CODE_UNITS);
-  if (boundedQuery.length === 0) {
-    return {
-      search: { query: boundedQuery, matches: [], activeMatchIndex: 0, truncated: false },
-      firstRow: null
-    };
-  }
-  const result = renderDocumentForViewport(document, columns).terminal.search(boundedQuery);
-  const projected = result.matches.slice(0, MAX_PAGE_SEARCH_MATCHES);
-  const matches = projected.map((match) => ({
-    id: match.id,
-    sources: Object.freeze([...new Set(match.ranges.map((range) => range.documentNode))])
-  }));
-  return {
-    search: {
-      query: boundedQuery,
-      matches,
-      activeMatchIndex: 0,
-      truncated: result.truncated || result.matches.length > MAX_PAGE_SEARCH_MATCHES
-    },
-    firstRow: projected[0]?.ranges[0]?.row ?? null
-  };
-}
-
-function applySearch(state: BrowserTuiState, query: string, columns: number): BrowserTuiState {
-  const document = activeDocument(state);
-  const { search, firstRow } = searchDocument(document, query, columns);
-  const updated = firstRow === null
-    ? { ...document, search }
-    : documentWithScrollRow({ ...document, search }, renderDocumentForViewport(document, columns).terminal, firstRow);
-  return {
-    ...updateDocument(state, document.id, () => updated),
-    status: search.matches.length === 0
-      ? status(`No matches for "${search.query}"`, "error")
-      : status(`1/${String(search.matches.length)}${search.truncated ? "+" : ""} matches`, "success")
-  };
-}
-
 function moveSearch(
   document: BrowserDocumentState,
   direction: "next" | "prev",
-  columns: number
 ): BrowserDocumentState {
   const search = document.search;
   if (!search || search.matches.length === 0) return document;
@@ -445,10 +583,11 @@ function moveSearch(
   const activeMatchIndex = (search.activeMatchIndex + delta + search.matches.length) % search.matches.length;
   const match = search.matches[activeMatchIndex];
   if (match === undefined) return document;
-  const terminalRender = renderDocumentForViewport(document, columns).terminal;
-  const row = terminalRender.search(search.query).matches.find((candidate) => candidate.id === match.id)?.ranges[0]?.row;
   const updated = { ...document, search: { ...search, activeMatchIndex } };
-  return row === undefined ? updated : documentWithScrollRow(updated, terminalRender, row);
+  const anchor = search.anchors.get(match.id);
+  return anchor === undefined || document.rendering.status !== "ready"
+    || search.layoutRevision !== document.rendering.viewport?.layoutRevision
+    ? updated : documentWithScrollRow(updated, anchor);
 }
 
 function controlById(
@@ -567,26 +706,55 @@ function openNewDocumentEffect(
   controller: BrowserController,
   target: string,
   background: boolean,
-  replaceCurrent = false,
-  sourceDocument?: BrowserDocumentState
+  sourceDocument: BrowserDocumentState
 ): TuiEffect<BrowserTuiMessage> {
   return effect("new-document", async (context) => ({
     kind: "documentOpened",
-    document: sourceDocument === undefined
-      ? await controller.openNew(target, context.signal)
-      : await controller.openNewFromDocument(sourceDocument, target, context.signal),
+    document: await controller.openNewFromDocument(sourceDocument, target, context.signal),
     background,
-    ...(replaceCurrent ? { replaceCurrent: true } : {})
   }), "enqueue");
+}
+
+function restoreTabEffect(
+  controller: BrowserController,
+  tab: BrowserPlaceholderTabState,
+): TuiEffect<BrowserTuiMessage> {
+  return {
+    id: `restore:${tab.id}`,
+    concurrency: "replace",
+    async run(context) {
+      try {
+        const document = await controller.restorePlaceholder(tab, context.signal);
+        return {
+          kind: "message",
+          message: {
+            kind: "tabRestored",
+            document,
+            restoreRevision: tab.restoreRevision,
+          },
+        };
+      } catch (error) {
+        context.signal.throwIfAborted();
+        return {
+          kind: "message",
+          message: {
+            kind: "tabRestoreFailed",
+            documentId: tab.id,
+            restoreRevision: tab.restoreRevision,
+            message: error instanceof Error ? error.message : String(error),
+          },
+        };
+      }
+    },
+  };
 }
 
 function runCommand(
   controller: BrowserController,
   state: BrowserTuiState,
   command: BrowserCommand,
-  columns: number
+  context: Pick<TuiContext, "terminalSize">,
 ): TuiUpdateResult<BrowserTuiState, BrowserTuiMessage> {
-  const document = activeDocument(state);
   if (command.kind === "invalid") {
     return result({
       ...state,
@@ -600,22 +768,40 @@ function runCommand(
     case "quit":
       return { state, exit: { reason: "quit" } };
     case "help":
-      return updateBrowser(controller, state, { kind: "openDetail", detail: "help" }, { terminalSize: { columns, rows: 24 } });
+      return updateBrowser(controller, state, { kind: "openDetail", detail: "help" }, context);
+    case "history-list":
+      return updateBrowser(controller, state, { kind: "toggleSidePanel", panel: "history" }, context);
+    case "download-list":
+      return updateBrowser(controller, state, { kind: "toggleSidePanel", panel: "downloads" }, context);
+    case "bookmark-list":
+      return updateBrowser(controller, state, { kind: "toggleSidePanel", panel: "bookmarks" }, context);
+    case "back":
+    case "forward":
+    case "reload":
+      return updateBrowser(controller, state, { kind: "navigate", operation: command.kind }, context);
+    case "cookie-clear":
+      return result({ ...state, overlay: null }, { effects: [effect("cookie-clear", async () => ({
+        kind: "operationComplete",
+        status: await controller.clearCookies()
+      }))] });
+    case "close-document":
+      return updateBrowser(controller, state, { kind: "closeDocument" }, context);
+    case "reopen-document":
+      return updateBrowser(controller, state, { kind: "reopenDocument" }, context);
+    default: break;
+  }
+  if (activeTab(state).kind !== "ready") return result(state);
+  const document = activeDocument(state);
+  switch (command.kind) {
     case "reader":
     case "diag":
       return updateBrowser(controller, state, {
         kind: "openDetail",
         detail: command.kind === "reader" ? "reader" : "diagnostics"
-      }, { terminalSize: { columns, rows: 24 } });
+      }, context);
     case "links":
     case "outline":
       return result(openPicker(controller, state, command.kind));
-    case "history-list":
-      return updateBrowser(controller, state, { kind: "toggleSidePanel", panel: "history" });
-    case "download-list":
-      return updateBrowser(controller, state, { kind: "toggleSidePanel", panel: "downloads" });
-    case "bookmark-list":
-      return updateBrowser(controller, state, { kind: "toggleSidePanel", panel: "bookmarks" });
     case "bookmark-add":
       return result(state, { effects: [effect("bookmark", async () => ({
         kind: "operationComplete",
@@ -624,30 +810,26 @@ function runCommand(
     case "recall":
       return result(openPicker(controller, state, "recall", command.query));
     case "page-down":
-      return updateBrowser(controller, state, { kind: "scroll", rows: 10 }, { terminalSize: { columns, rows: 24 } });
+      return updateBrowser(controller, state, { kind: "scroll", rows: 10 }, context);
     case "page-up":
-      return updateBrowser(controller, state, { kind: "scroll", rows: -10 }, { terminalSize: { columns, rows: 24 } });
+      return updateBrowser(controller, state, { kind: "scroll", rows: -10 }, context);
     case "page-top":
-      return updateBrowser(controller, state, { kind: "scrollTop" }, { terminalSize: { columns, rows: 24 } });
+      return updateBrowser(controller, state, { kind: "scrollTop" }, context);
     case "page-bottom":
-      return updateBrowser(controller, state, { kind: "scrollBottom" }, { terminalSize: { columns, rows: 24 } });
+      return updateBrowser(controller, state, { kind: "scrollBottom" }, context);
     case "find":
-      return result(applySearch({ ...state, findBar: { input: { text: command.query, cursor: command.query.length } } }, command.query, columns));
+      return result({ ...state, findBar: { input: { text: command.query, cursor: command.query.length } } });
     case "find-next":
     case "find-prev":
       return updateBrowser(controller, state, {
         kind: "moveSearch",
         direction: command.kind === "find-next" ? "next" : "prev"
-      }, { terminalSize: { columns, rows: 24 } });
-    case "back":
-    case "forward":
-    case "reload":
-      return updateBrowser(controller, state, { kind: "navigate", operation: command.kind });
+      }, context);
     case "download":
       return updateBrowser(controller, state, {
         kind: "download",
         ...(command.target === undefined ? {} : { target: command.target })
-      });
+      }, context);
     case "save-page":
       return result({ ...state, overlay: null }, { effects: [effect("save-page", async () => ({
         kind: "operationComplete",
@@ -656,10 +838,10 @@ function runCommand(
     case "save-text":
       return result({ ...state, overlay: null }, { effects: [effect("save-text", async () => ({
         kind: "operationComplete",
-        status: await controller.saveText(command.path, pageText(document, columns))
+        status: await controller.saveText(command.path, pageText(document))
       }))] });
     case "open-external":
-      return updateBrowser(controller, state, { kind: "openExternal" });
+      return updateBrowser(controller, state, { kind: "openExternal" }, context);
     case "go":
     case "go-stream": {
       const target = controller.resolveOmnibox(command.target, document.snapshot.finalUrl);
@@ -671,95 +853,621 @@ function runCommand(
       );
     }
     case "cookie-list":
-      return updateBrowser(controller, state, { kind: "openDetail", detail: "cookies" });
-    case "cookie-clear":
-      return result({ ...state, overlay: null }, { effects: [effect("cookie-clear", async () => ({
-        kind: "operationComplete",
-        status: await controller.clearCookies()
-      }))] });
-    case "close-document":
-      return updateBrowser(controller, state, { kind: "closeDocument" });
-    case "reopen-document":
-      return updateBrowser(controller, state, { kind: "reopenDocument" });
+      return updateBrowser(controller, state, { kind: "openDetail", detail: "cookies" }, context);
   }
 }
 
-export function updateBrowser(
+function reduceBrowser(
   controller: BrowserController,
   state: BrowserTuiState,
   message: BrowserTuiMessage,
   context: Pick<TuiContext, "terminalSize"> = { terminalSize: { columns: 100, rows: 24 } }
 ): TuiUpdateResult<BrowserTuiState, BrowserTuiMessage> {
-  const document = activeDocument(state);
-  const columns = contentColumns(state, context.terminalSize.columns);
+  if (message.kind === "tabRestored") {
+    const current = state.documents.find((entry) => entry.id === message.document.id);
+    if (current === undefined || current.kind !== "loading"
+      || current.restoreRevision !== message.restoreRevision) return result(state);
+    const next = {
+      ...state,
+      documents: state.documents.map((entry) => entry.id === current.id ? message.document : entry),
+      ...(state.activeDocumentIndex === state.documents.indexOf(current) && !state.omniboxDirty
+        ? { omnibox: resetCommandInput(state.omnibox, message.document.snapshot.finalUrl) }
+        : {}),
+      status: status(`Opened ${message.document.snapshot.finalUrl}`, "success"),
+    };
+    const restoredActive = state.activeDocumentIndex === state.documents.indexOf(current);
+    return result(next, {
+      effects: restoredActive ? [] : [
+        ...(activeTab(state).kind === "ready" && activeDocument(state).rendering.status === "ready"
+          ? [persistSnapshotEffect(controller, message.document.snapshot)]
+          : []),
+        persistEffect(controller, next),
+      ],
+    });
+  }
+  if (message.kind === "tabRestoreFailed") {
+    const current = state.documents.find((entry) => entry.id === message.documentId);
+    if (current === undefined || current.kind !== "loading"
+      || current.restoreRevision !== message.restoreRevision) return result(state);
+    const next = {
+      ...state,
+      documents: state.documents.map((entry) => entry.id === current.id
+        ? { ...current, kind: "failed" as const, error: message.message }
+        : entry),
+      status: status(message.message, "error"),
+    };
+    return result(next, { effects: [persistEffect(controller, next)] });
+  }
+  if (message.kind === "restoreTab") {
+    const current = state.documents.find((entry) => entry.id === message.documentId);
+    if (current === undefined || current.kind === "ready" || current.kind === "loading") return result(state);
+    return result({
+      ...state,
+      documents: state.documents.map((entry) => entry.id === current.id
+        ? {
+            ...current,
+            kind: "restoring" as const,
+            restoreRevision: current.restoreRevision + 1,
+            retryCount: current.retryCount + 1,
+            error: null,
+          }
+        : entry),
+    });
+  }
+  if (message.kind === "scroll" && state.overlay?.kind === "detail") {
+    return result({ ...state, overlay: { ...state.overlay, scrollRow: Math.max(0, state.overlay.scrollRow + message.rows) } });
+  }
+  const selectedTab = activeTab(state);
   const viewportRows = Math.max(1, context.terminalSize.rows - (state.findBar === null ? 3 : 4));
-  const terminalRender = renderDocumentForViewport(document, columns, viewportRows).terminal;
   switch (message.kind) {
+    case "terminalResized":
+      return result({ ...state, documents: state.documents.map((tab) => tab.kind !== "ready" || tab.search === null ? tab : ({
+        ...tab, search: { ...tab.search, anchors: new Map(), layoutRevision: null },
+        rendering: { ...tab.rendering, pendingSearch: null, searchRequestGeneration: tab.rendering.searchRequestGeneration + 1 },
+      })) });
+    case "viewportReady": {
+      const payload = message.payload;
+      const current = state.documents.find((entry) => entry.id === payload.documentId);
+      if (current === undefined || current.kind !== "ready"
+        || current.documentRevision !== payload.documentRevision
+        || current.stateRevision !== payload.stateRevision
+        || current.rendering.requestedViewportRevision !== payload.viewportRevision
+        || payload.summary.identity !== payload.summaryIdentity) return result(state);
+      controller.acknowledgeViewport(payload);
+      const pendingFocus = current.rendering.pendingFocus;
+      const focusVisible = current.id === selectedTab.id && pendingFocus !== null
+        && payload.focusTargets.some((target) => target.node === pendingFocus.node);
+      const updated = updateDocument(state, current.id, (entry) => ({
+        ...entry,
+        rendering: {
+          ...entry.rendering,
+          status: "ready",
+          committedViewportRevision: payload.viewportRevision,
+          viewport: payload,
+          summary: payload.summary,
+          pendingFocus: focusVisible ? null : entry.rendering.pendingFocus,
+          error: null
+        }
+      }));
+      const firstCommittedViewport = current.rendering.committedViewportRevision === 0;
+      return result(updated, {
+        ...(focusVisible ? {
+          focus: pendingFocus.formControl
+            ? { kind: "element", elementId: pendingFocus.node }
+            : {
+                kind: "elementTarget",
+                elementId: `browser-${current.id}`,
+                targetId: pendingFocus.actionId,
+              },
+        } : {}),
+        ...(firstCommittedViewport
+          ? {
+              effects: [
+                persistSnapshotEffect(controller, current.snapshot),
+                persistEffect(controller, updated),
+              ],
+            }
+          : {}),
+      });
+    }
+    case "viewportFailed": {
+      const current = state.documents.find((entry) => entry.id === message.documentId);
+      if (current === undefined || current.kind !== "ready"
+        || current.documentRevision !== message.documentRevision
+        || current.rendering.requestedViewportRevision !== message.viewportRevision) return result(state);
+      return result(updateDocument(state, current.id, (entry) => ({
+        ...entry,
+        rendering: { ...entry.rendering, status: "failed", error: message.message }
+      })));
+    }
+    case "searchFailed": {
+      const current = state.documents.find((tab) => tab.id === message.documentId);
+      if (current?.kind !== "ready" || current.documentRevision !== message.documentRevision
+        || current.stateRevision !== message.stateRevision
+        || current.rendering.pendingSearch?.requestGeneration !== message.requestGeneration) return result(state);
+      return result({ ...updateDocument(state, current.id, (document) => ({
+        ...document, rendering: { ...document.rendering, pendingSearch: null },
+      })), status: status(message.message, "error") });
+    }
+    case "searchReady": {
+      const current = state.documents.find((entry) => entry.id === message.documentId);
+      if (current === undefined || current.kind !== "ready"
+        || current.documentRevision !== message.documentRevision || current.stateRevision !== message.stateRevision
+        || current.rendering.pendingSearch?.requestGeneration !== message.requestGeneration
+        || current.rendering.pendingSearch.query !== message.query
+        || current.rendering.viewport?.layoutRevision !== message.layoutRevision) return result(state);
+      const previousId = current.search?.query === message.query
+        ? current.search.matches[current.search.activeMatchIndex]?.id : undefined;
+      const activeMatchIndex = Math.max(0, message.matches.findIndex((match) => match.id === previousId));
+      const search: BrowserDocumentSearch = {
+        documentRevision: message.documentRevision, stateRevision: message.stateRevision,
+        requestGeneration: message.requestGeneration, layoutRevision: message.layoutRevision,
+        anchors: new Map(message.anchors), query: message.query, matches: message.matches,
+        activeMatchIndex, truncated: message.truncated,
+      };
+      const match = search.matches[activeMatchIndex];
+      const anchor = match === undefined ? undefined : search.anchors.get(match.id);
+      const withSearch = { ...current, search, rendering: { ...current.rendering, pendingSearch: null } };
+      const updated = anchor === undefined ? withSearch : documentWithScrollRow(withSearch, anchor, viewportRows);
+      return result({
+        ...updateDocument(state, current.id, () => updated),
+        ...(current.id !== selectedTab.id ? {} : { status: match === undefined
+          ? status(`No matches for "${search.query}"`, "error")
+          : status(`${String(activeMatchIndex + 1)}/${String(search.matches.length)}${search.truncated ? "+" : ""} matches`, "success") }),
+      });
+    }
+    case "closeFind":
+      return result({
+        ...state, findBar: null,
+        documents: state.documents.map((tab) => tab.kind !== "ready" ? tab : ({
+          ...tab, search: null, rendering: { ...tab.rendering, pendingSearch: null,
+            searchRequestGeneration: tab.rendering.searchRequestGeneration + 1 },
+        })),
+      }, { cancelEffects: state.documents.map((tab) => `search:${tab.id}`) });
+    case "actionPaletteSubmit":
+      return state.overlay?.kind !== "actionPalette"
+        ? result(state)
+        : runCommand(controller, state, parseCommand(message.value), context);
     case "quit":
       return { state, exit: { reason: "quit" } };
     case "dismiss":
       return result({ ...state, overlay: null });
+    case "navigate": {
+      if (selectedTab.kind !== "ready") {
+        if (message.operation === "stop") return result({
+          ...state, documents: state.documents.map((tab) => tab.id === selectedTab.id
+            ? { ...selectedTab, kind: "failed" as const, error: "Loading stopped.", restoreRevision: selectedTab.restoreRevision + 1 } : tab),
+        }, { cancelEffects: [`restore:${selectedTab.id}`] });
+        return message.operation === "reload"
+          ? reduceBrowser(controller, state, { kind: "restoreTab", documentId: selectedTab.id }, context)
+          : result(state);
+      }
+      const document = selectedTab;
+      if (message.operation === "stop") {
+        return result(updateDocument(state, document.id, (current) =>
+          ({ ...controller.restoreDocument(current), navigationGeneration: current.navigationGeneration + 1 })
+        ), { cancelEffects: [`navigation:${document.id}`] });
+      }
+      if (message.operation === "back" && !document.canGoBack) return result(state);
+      if (message.operation === "forward" && !document.canGoForward) return result(state);
+      return beginNavigation(
+        state,
+        document,
+        message.operation,
+        navigationEffect(controller, document, message.operation)
+      );
+    }
+    case "omniboxTransition": {
+      let omnibox = commandInputReducer(state.omnibox, message.transition);
+      const value = omnibox.editor.input.text;
+      omnibox = commandInputReducer(omnibox, {
+        kind: "setSuggestions",
+        suggestions: message.transition.kind === "acceptSuggestion"
+          ? EMPTY_COMMAND_SUGGESTIONS
+          : replacementCommandSuggestions(
+              value,
+              controller.omniboxSuggestions(value, selectedTab)
+            )
+      });
+      return result({
+        ...state,
+        omnibox,
+        omniboxDirty: true
+      });
+    }
+    case "focusOmnibox":
+      return result({
+        ...state,
+        omnibox: resetCommandInput(
+          state.omnibox,
+          tabUrl(selectedTab),
+          replacementCommandSuggestions(
+            tabUrl(selectedTab),
+            controller.omniboxSuggestions("", selectedTab)
+          )
+        ),
+        omniboxDirty: false
+      }, { focus: { kind: "element", elementId: "browser-omnibox" } });
+    case "cancelOmnibox":
+      return result({
+        ...state,
+        omnibox: resetCommandInput(state.omnibox, tabUrl(selectedTab)),
+        omniboxDirty: false
+      });
+    case "omniboxSubmit": {
+      const target = controller.resolveOmnibox(message.value, tabUrl(selectedTab));
+      if (selectedTab.kind !== "ready") {
+        return result({
+          ...state,
+          documents: state.documents.map((tab) => tab.id === selectedTab.id ? {
+            ...selectedTab, kind: "restoring" as const, requestedUrl: target, label: target,
+            restoreRevision: selectedTab.restoreRevision + 1, error: null,
+          } : tab),
+          omnibox: submittedCommandInput(state.omnibox, message.value, target), omniboxDirty: false,
+        }, { cancelEffects: [`restore:${selectedTab.id}`] });
+      }
+      const document = selectedTab;
+      return beginNavigation({
+        ...state,
+        omnibox: submittedCommandInput(state.omnibox, message.value, target),
+        omniboxDirty: false
+      }, document, target, loadEffect(controller, document, target));
+    }
+    case "openActionPalette":
+      return result({
+        ...state,
+        overlay: {
+          kind: "actionPalette",
+          state: createCommandInputState({
+            suggestions: replacementCommandSuggestions("", ACTION_SUGGESTIONS)
+          })
+        }
+      }, { focus: { kind: "element", elementId: "browser-action-input" } });
+    case "browserMenuTransition": {
+      const current = state.overlay?.kind === "browserMenu"
+        ? state.overlay.state
+        : { kind: "closed" as const };
+      const menu = menuTriggerReducer(current, message.transition, browserMenuItems);
+      return result({
+        ...state,
+        overlay: menu.kind === "closed" ? null : { kind: "browserMenu", state: menu }
+      });
+    }
+    case "browserMenuActivate": {
+      const id = message.event.id;
+      const next: BrowserTuiMessage | undefined = id === "history"
+        ? { kind: "toggleSidePanel", panel: "history" }
+        : id === "bookmarks"
+          ? { kind: "toggleSidePanel", panel: "bookmarks" }
+          : id === "downloads"
+            ? { kind: "toggleSidePanel", panel: "downloads" }
+            : id === "reader" || id === "diagnostics" || id === "cookies" || id === "help"
+              ? { kind: "openDetail", detail: id }
+              : id === "download"
+                ? { kind: "download" }
+                : id === "external"
+                  ? { kind: "openExternal" }
+                  : undefined;
+      return next === undefined
+        ? result({ ...state, overlay: null })
+        : updateBrowser(controller, { ...state, overlay: null }, next, context);
+    }
+    case "openDetail":
+      if (message.detail !== "help" && selectedTab.kind !== "ready") return result(state);
+      return result({
+        ...state,
+        overlay: {
+          kind: "detail",
+          detailKind: message.detail,
+          title: `${message.detail.charAt(0).toUpperCase()}${message.detail.slice(1)}`,
+          lines: message.detail === "help" ? formatHelpText().split("\n") : controller.detail(message.detail, selectedTab as BrowserDocumentState),
+          scrollRow: 0
+        }
+      });
+    case "toggleSidePanel": {
+      const next = {
+        ...state,
+        overlay: null,
+        sidePanel: state.sidePanel === message.panel ? null : message.panel,
+        sidePanelScroll: createScrollState(),
+        ...controller.library()
+      };
+      return result(next, { effects: [persistEffect(controller, next)] });
+    }
+    case "sidePanelScroll":
+      return result({
+        ...state,
+        sidePanelScroll: applyScrollRequest(state.sidePanelScroll, message.request)
+      });
+    case "newDocument": {
+      const tab = controller.placeholder(message.target ?? "about:newtab");
+      const next = {
+        ...state, documents: [...state.documents, tab],
+        activeDocumentIndex: message.background === true ? state.activeDocumentIndex : state.documents.length,
+        ...(message.background === true ? {} : { overlay: null, omnibox: resetCommandInput(state.omnibox, tab.requestedUrl), omniboxDirty: false }),
+      };
+      return result(next, { effects: [persistEffect(controller, next)],
+        ...(message.background === true ? {} : { focus: { kind: "element", elementId: tab.requestedUrl === "about:newtab" ? "browser-omnibox" : `browser-${tab.id}` } }),
+      });
+    }
+    case "closeDocument": {
+      const remaining = state.documents.filter((tab) => tab.id !== selectedTab.id);
+      const documents = remaining.length === 0 ? [controller.placeholder("about:newtab")] : remaining;
+      const activeDocumentIndex = Math.min(state.activeDocumentIndex, documents.length - 1);
+      const selected = documents[activeDocumentIndex];
+      const next = {
+        ...state, documents, activeDocumentIndex,
+        recentlyClosed: [selectedTab, ...state.recentlyClosed].slice(0, 10),
+        overlay: null, omniboxDirty: false, omnibox: resetCommandInput(state.omnibox, selected === undefined ? "" : tabUrl(selected)),
+        status: status(`Closed ${tabLabel(selectedTab)}.`, "success"),
+      };
+      return result(next, {
+        cancelEffects: [`restore:${selectedTab.id}`, `navigation:${selectedTab.id}`, `render:${selectedTab.id}`, `search:${selectedTab.id}`],
+        effects: [persistEffect(controller, next)],
+      });
+    }
+    case "reopenDocument": {
+      const closed = state.recentlyClosed[0];
+      if (!closed) return result({ ...state, status: status("No recently closed tab.", "error") });
+      const restored = closed.kind === "ready"
+        ? controller.restoreDocument(closed)
+        : { ...closed, kind: "restoring" as const, restoreRevision: closed.restoreRevision + 1 };
+      const next = {
+        ...state,
+        documents: [...state.documents, restored],
+        activeDocumentIndex: state.documents.length,
+        recentlyClosed: state.recentlyClosed.slice(1),
+        omnibox: resetCommandInput(state.omnibox, tabUrl(restored)), omniboxDirty: false,
+        status: status(`Reopened ${tabLabel(restored)}.`, "success")
+      };
+      return result(next, {
+        effects: [
+          ...(restored.kind === "ready" ? [persistSnapshotEffect(controller, restored.snapshot)] : []),
+          persistEffect(controller, next)
+        ]
+      });
+    }
+    case "selectDocument": {
+      const selected = state.documents[message.index];
+      if (!selected) return result(state);
+      const next = {
+        ...state,
+        activeDocumentIndex: message.index,
+        omnibox: resetCommandInput(state.omnibox, tabUrl(selected)), omniboxDirty: false
+      };
+      return result(next, { effects: [persistEffect(controller, next)] });
+    }
+    case "tabsTransition": {
+      const selected = state.documents[state.activeDocumentIndex];
+      if (!selected) return result(state);
+      const tabState = tabsReducer(
+        { activeId: selected.id, selectedId: selected.id },
+        message.transition,
+        { tabs: state.documents, activation: "automatic" }
+      );
+      const nextIndex = state.documents.findIndex((entry) => entry.id === tabState.selectedId);
+      return nextIndex < 0
+        ? result(state)
+        : updateBrowser(controller, state, { kind: "selectDocument", index: nextIndex }, context);
+    }
+    case "tabsClose": {
+      const index = state.documents.findIndex((entry) => entry.id === message.event.id);
+      return index < 0
+        ? result(state)
+        : updateBrowser(
+          controller,
+          { ...state, activeDocumentIndex: index },
+          { kind: "closeDocument" },
+          context
+        );
+    }
+    case "actionPaletteTransition": {
+      if (state.overlay?.kind !== "actionPalette") return result(state);
+      let palette = commandInputReducer(state.overlay.state, message.transition);
+      if (message.transition.kind !== "acceptSuggestion") {
+        palette = commandInputReducer(palette, {
+          kind: "setSuggestions",
+          suggestions: replacementCommandSuggestions(
+            palette.editor.input.text,
+            ACTION_SUGGESTIONS
+          )
+        });
+      }
+      return result({
+        ...state,
+        overlay: {
+          ...state.overlay,
+          state: palette
+        }
+      });
+    }
+    case "pageLoaded": {
+      const loadedIndex = state.documents.findIndex((entry) => entry.id === message.documentId);
+      const current = state.documents[loadedIndex];
+      if (!current || current.kind !== "ready" || current.documentRevision !== message.documentRevision
+        || current.navigationGeneration !== message.navigationGeneration) return result(state);
+      const loaded = pageFromSnapshot(current, message.snapshot, message);
+      const next = {
+        ...updateDocument(state, message.documentId, () => loaded),
+        ...(loadedIndex === state.activeDocumentIndex && !state.omniboxDirty
+          ? {
+            omnibox: resetCommandInput(state.omnibox, message.snapshot.finalUrl),
+            omniboxDirty: false
+          }
+          : {}),
+        ...controller.library(),
+        status: status(`${message.status}: ${message.snapshot.finalUrl}`, "success")
+      };
+      return result(next, {
+        effects: [persistSnapshotEffect(controller, message.snapshot), persistEffect(controller, next)]
+      });
+    }
+    case "documentOpened": {
+      const documents = [...state.documents, message.document];
+      const nextIndex = message.background ? state.activeDocumentIndex : documents.length - 1;
+      const next = {
+        ...state,
+        documents,
+        activeDocumentIndex: nextIndex,
+        recentlyClosed: state.recentlyClosed,
+        overlay: null,
+        ...(message.background
+          ? {}
+          : {
+            omnibox: resetCommandInput(state.omnibox, message.document.snapshot.finalUrl)
+          }),
+        status: status(`Opened ${message.document.snapshot.finalUrl}`, "success")
+      };
+      return result(next, {
+        effects: [persistSnapshotEffect(controller, message.document.snapshot), persistEffect(controller, next)],
+        ...(message.background
+          ? {}
+          : { focus: { kind: "element" as const, elementId: message.document.snapshot.finalUrl === "about:newtab" ? "browser-omnibox" : `browser-${message.document.id}` } })
+      });
+    }
+    case "downloadComplete":
+    case "downloadFailed": {
+      const next = {
+        ...state,
+        downloads: [message.download, ...state.downloads.filter((entry) => entry.id !== message.download.id)],
+        status: message.kind === "downloadComplete"
+          ? status(`Downloaded ${message.download.fileName}.`, "success")
+          : status(message.download.error ?? "Download failed.", "error")
+      };
+      return result(next);
+    }
+    case "libraryChanged":
+      return result({ ...state, ...controller.library() });
+    case "cancelDownload": {
+      const entry = state.downloads.find((download) => download.id === message.id);
+      if (!entry || entry.status !== "downloading") return result(state);
+      const interrupted = {
+        ...entry,
+        status: "interrupted" as const,
+        error: "Cancelled by the user.",
+        updatedAtIso: new Date().toISOString()
+      };
+      return result({
+        ...state,
+        downloads: [interrupted, ...state.downloads.filter((download) => download.id !== message.id)]
+      }, { cancelEffects: [`download:${message.id}`] });
+    }
+    case "removeDownload":
+      return result(state, { effects: [effect(`remove-download:${message.id}`, async () => ({
+        kind: "downloadsChanged",
+        downloads: (await controller.removeDownload(message.id), controller.library().downloads),
+        status: "Download removed from the list."
+      }))] });
+    case "openDownload":
+      return result(state, { effects: [effect(`open-download:${message.id}`, async () => ({
+        kind: "operationComplete",
+        status: await controller.openDownload(message.id, message.location)
+      }))] });
+    case "downloadsChanged":
+      return result({ ...state, downloads: message.downloads, status: status(message.status, "success") });
+    case "operationComplete":
+      return result({ ...state, ...controller.library(), status: status(message.status, "success") });
+    case "navigationFailed":
+    case "operationFailed": {
+      if (message.kind === "navigationFailed") {
+        const owner = state.documents.find((tab) => tab.id === message.documentId);
+        if (owner?.kind !== "ready" || owner.documentRevision !== message.documentRevision
+          || owner.navigationGeneration !== message.navigationGeneration) return result(state);
+      }
+      const failedState = message.kind === "operationFailed"
+        ? state
+        : updateDocument(state, message.documentId, (entry) => ({
+          ...entry,
+          loading: false,
+          pendingUrl: null,
+          error: message.downloadTarget === undefined ? message.message : null
+        }));
+      return result({
+        ...failedState,
+        overlay: message.downloadTarget === undefined
+          ? failedState.overlay
+          : { kind: "downloadPrompt", target: message.downloadTarget },
+        status: status(message.message, "error")
+      });
+    }
+    default: break;
+  }
+  if (selectedTab.kind !== "ready") return result(state);
+  const document = selectedTab;
+  switch (message.kind) {
+    case "requestActiveViewport":
+      return document.rendering.status === "failed"
+        ? result(updateDocument(state, document.id, (entry) => ({
+            ...entry,
+            rendering: { ...entry.rendering, status: "idle", requestKey: null, error: null },
+          })))
+        : result(state);
     case "focusDocumentNode":
       return result(updateDocumentFocus(state, document, message.target));
     case "scroll":
-      if (state.overlay?.kind === "detail") {
-        return result({ ...state, overlay: { ...state.overlay, scrollRow: Math.max(0, state.overlay.scrollRow + message.rows) } });
-      }
       return result(updateDocument(state, document.id, (current) =>
-        documentWithScrollRow(current, terminalRender, documentScrollRow(current, terminalRender) + message.rows, viewportRows)
+        documentWithScrollRow(current, documentScrollRow(current) + message.rows, viewportRows)
       ));
     case "scrollTo":
       return result(updateDocument(state, document.id, (current) =>
-        documentWithScrollRow(current, terminalRender, message.row, viewportRows)
+        documentWithScrollRow(current, message.row, viewportRows)
       ));
     case "scrollTop":
-      return result(updateDocument(state, document.id, (current) => documentWithScrollRow(current, terminalRender, 0, viewportRows)));
+      return result(updateDocument(state, document.id, (current) => documentWithScrollRow(current, 0, viewportRows)));
     case "scrollBottom":
       return result(updateDocument(state, document.id, (current) =>
-        documentWithScrollRow(current, terminalRender, terminalRender.cellBuffer.rows.length, viewportRows)
+        documentWithScrollRow(current, current.rendering.summary?.documentRowCount ?? 1, viewportRows)
       ));
     case "movePageFocus": {
-      const targets = terminalRender.focusMap.targets;
+      const targets = document.rendering.summary?.focusOrder ?? [];
       if (targets.length === 0) return result(state);
       const currentIndex = targets.findIndex((target) =>
-        actionId(target.action) === message.currentActionId
+        target.actionId === message.currentActionId
       );
       const nextIndex = message.direction === "next"
         ? (currentIndex + 1 + targets.length) % targets.length
         : (currentIndex - 1 + targets.length) % targets.length;
       const target = targets[nextIndex];
       if (target === undefined) return result(state);
-      const scrollAnchor = terminalRender.scrollAnchors.find((entry) => entry.documentNode === target.node);
-      let top = target.rects[0]?.row ?? scrollAnchor?.row ?? 0;
-      let bottom = top;
-      for (const rect of target.rects) {
-        top = Math.min(top, rect.row);
-        bottom = Math.max(bottom, rect.row + rect.height);
-      }
-      if (target.rects.length === 0) bottom = top + 1;
-      const currentRow = documentScrollRow(document, terminalRender);
+      const top = target.topRow;
+      const bottom = target.bottomRow;
+      const currentRow = documentScrollRow(document);
       const revealedRow = top < currentRow
         ? top
         : bottom > currentRow + viewportRows
           ? bottom - viewportRows
           : currentRow;
-      const updated = documentWithFocus(
-        documentWithScrollRow(document, terminalRender, revealedRow, viewportRows),
+      let updated = documentWithFocus(
+        documentWithScrollRow(document, revealedRow, viewportRows),
         target.node
       );
-      return result(updateDocument(state, document.id, () => updated), {
-        focus: target.action.kind === "form-control"
-          ? { kind: "element", elementId: target.action.node }
+      const visible = document.rendering.viewport?.focusTargets.some((entry) => entry.node === target.node) === true;
+      if (!visible) {
+        updated = {
+          ...updated,
+          rendering: {
+            ...updated.rendering,
+            pendingFocus: {
+              node: target.node,
+              actionId: target.actionId,
+              formControl: target.actionKind === "form-control",
+            },
+          },
+        };
+      }
+      return result(updateDocument(state, document.id, () => updated), visible ? {
+        focus: target.actionKind === "form-control"
+          ? { kind: "element", elementId: target.node }
           : {
             kind: "elementTarget",
             elementId: `browser-${document.id}`,
-            targetId: actionId(target.action)
+            targetId: target.actionId,
           }
-      });
+      } : {});
     }
     case "moveSearch": {
       if (!document.search) return result({ ...state, status: status("No active find query.", "error") });
-      const updated = moveSearch(document, message.direction, columns);
+      const updated = moveSearch(document, message.direction);
       const search = updated.search;
       return result({
         ...updateDocument(state, document.id, () => updated),
@@ -796,7 +1504,6 @@ export function updateBrowser(
             controller,
             action.destination,
             disposition === "newBackground",
-            false,
             focusedDocument
           )]
         });
@@ -810,7 +1517,7 @@ export function updateBrowser(
           `Opened ${action.label}`
         ),
         "replace",
-        document.id
+        focusedDocument
       ));
     }
     case "openLinkMenu": {
@@ -863,132 +1570,8 @@ export function updateBrowser(
         ? result({ ...state, overlay: null })
         : updateBrowser(controller, { ...state, overlay: null }, next, context);
     }
-    case "navigate":
-      if (message.operation === "stop") {
-        return result(updateDocument(state, document.id, (current) =>
-          controller.restoreDocument(current)
-        ), { cancelEffects: [`navigation:${document.id}`] });
-      }
-      if (message.operation === "back" && !document.canGoBack) return result(state);
-      if (message.operation === "forward" && !document.canGoForward) return result(state);
-      return beginNavigation(
-        state,
-        document,
-        message.operation,
-        navigationEffect(controller, document, message.operation)
-      );
-    case "omniboxTransition": {
-      let omnibox = commandInputReducer(state.omnibox, message.transition);
-      const value = omnibox.editor.input.text;
-      omnibox = commandInputReducer(omnibox, {
-        kind: "setSuggestions",
-        suggestions: message.transition.kind === "acceptSuggestion"
-          ? EMPTY_COMMAND_SUGGESTIONS
-          : replacementCommandSuggestions(
-              value,
-              controller.omniboxSuggestions(value, document)
-            )
-      });
-      return result({
-        ...state,
-        omnibox,
-        omniboxDirty: true
-      });
-    }
-    case "focusOmnibox":
-      return result({
-        ...state,
-        omnibox: resetCommandInput(
-          state.omnibox,
-          document.snapshot.finalUrl,
-          replacementCommandSuggestions(
-            document.snapshot.finalUrl,
-            controller.omniboxSuggestions("", document)
-          )
-        ),
-        omniboxDirty: false
-      }, { focus: { kind: "element", elementId: "browser-omnibox" } });
-    case "cancelOmnibox":
-      return result({
-        ...state,
-        omnibox: resetCommandInput(state.omnibox, document.snapshot.finalUrl),
-        omniboxDirty: false
-      });
-    case "omniboxSubmit": {
-      const target = controller.resolveOmnibox(message.value, document.snapshot.finalUrl);
-      return beginNavigation({
-        ...state,
-        omnibox: submittedCommandInput(state.omnibox, message.value, target),
-        omniboxDirty: false
-      }, document, target, loadEffect(controller, document, target));
-    }
-    case "openActionPalette":
-      return result({
-        ...state,
-        overlay: {
-          kind: "actionPalette",
-          state: createCommandInputState({
-            suggestions: replacementCommandSuggestions("", ACTION_SUGGESTIONS)
-          })
-        }
-      }, { focus: { kind: "element", elementId: "browser-action-input" } });
-    case "browserMenuTransition": {
-      const current = state.overlay?.kind === "browserMenu"
-        ? state.overlay.state
-        : { kind: "closed" as const };
-      const menu = menuTriggerReducer(current, message.transition, browserMenuItems);
-      return result({
-        ...state,
-        overlay: menu.kind === "closed" ? null : { kind: "browserMenu", state: menu }
-      });
-    }
-    case "browserMenuActivate": {
-      const id = message.event.id;
-      const next: BrowserTuiMessage | undefined = id === "history"
-        ? { kind: "toggleSidePanel", panel: "history" }
-        : id === "bookmarks"
-          ? { kind: "toggleSidePanel", panel: "bookmarks" }
-          : id === "downloads"
-            ? { kind: "toggleSidePanel", panel: "downloads" }
-            : id === "reader" || id === "diagnostics" || id === "cookies" || id === "help"
-              ? { kind: "openDetail", detail: id }
-              : id === "download"
-                ? { kind: "download" }
-                : id === "external"
-                  ? { kind: "openExternal" }
-                  : undefined;
-      return next === undefined
-        ? result({ ...state, overlay: null })
-        : updateBrowser(controller, { ...state, overlay: null }, next, context);
-    }
     case "openPicker":
       return result(openPicker(controller, state, message.picker, message.query));
-    case "openDetail":
-      return result({
-        ...state,
-        overlay: {
-          kind: "detail",
-          detailKind: message.detail,
-          title: `${message.detail.charAt(0).toUpperCase()}${message.detail.slice(1)}`,
-          lines: message.detail === "help" ? formatHelpText().split("\n") : controller.detail(message.detail, document),
-          scrollRow: 0
-        }
-      });
-    case "toggleSidePanel": {
-      const next = {
-        ...state,
-        overlay: null,
-        sidePanel: state.sidePanel === message.panel ? null : message.panel,
-        sidePanelScroll: createScrollState(),
-        ...controller.library()
-      };
-      return result(next, { effects: [persistEffect(controller, next)] });
-    }
-    case "sidePanelScroll":
-      return result({
-        ...state,
-        sidePanelScroll: applyScrollRequest(state.sidePanelScroll, message.request)
-      });
     case "toggleBookmark":
       return result(state, { effects: [effect("bookmark", async () => ({
         kind: "operationComplete",
@@ -1003,110 +1586,6 @@ export function updateBrowser(
           message.target === undefined ? "direct" : "page-initiated"
         )
       }))] });
-    case "newDocument": {
-      const target = message.target ?? "about:newtab";
-      return result(state, {
-        effects: [openNewDocumentEffect(controller, target, message.background ?? false)]
-      });
-    }
-    case "closeDocument":
-      if (state.documents.length === 1) {
-        return result(state, {
-          cancelEffects: [`navigation:${document.id}`],
-          effects: [openNewDocumentEffect(controller, "about:newtab", false, true)]
-        });
-      } else {
-        const nextDocuments = state.documents.filter((_, index) => index !== state.activeDocumentIndex);
-        const nextIndex = Math.min(state.activeDocumentIndex, nextDocuments.length - 1);
-        const selected = nextDocuments[nextIndex];
-        const next = {
-          ...state,
-          documents: nextDocuments,
-          activeDocumentIndex: nextIndex,
-          recentlyClosed: [document, ...state.recentlyClosed].slice(0, 10),
-          overlay: null,
-          omnibox: resetCommandInput(state.omnibox, selected?.snapshot.finalUrl ?? ""),
-          status: status(`Closed ${document.snapshot.document.title}.`, "success")
-        };
-        return result(next, {
-          cancelEffects: [`navigation:${document.id}`],
-          effects: [persistEffect(controller, next)]
-        });
-      }
-    case "reopenDocument": {
-      const closed = state.recentlyClosed[0];
-      if (!closed) return result({ ...state, status: status("No recently closed tab.", "error") });
-      const restored = controller.restoreDocument(closed);
-      const next = {
-        ...state,
-        documents: [...state.documents, restored],
-        activeDocumentIndex: state.documents.length,
-        recentlyClosed: state.recentlyClosed.slice(1),
-        omnibox: resetCommandInput(state.omnibox, restored.snapshot.finalUrl),
-        status: status(`Reopened ${restored.snapshot.document.title}.`, "success")
-      };
-      return result(next, {
-        effects: [persistSnapshotEffect(controller, restored.snapshot), persistEffect(controller, next)]
-      });
-    }
-    case "selectDocument": {
-      const selected = state.documents[message.index];
-      if (!selected) return result(state);
-      const next = {
-        ...state,
-        activeDocumentIndex: message.index,
-        omnibox: resetCommandInput(state.omnibox, selected.snapshot.finalUrl)
-      };
-      return result(next, { effects: [persistEffect(controller, next)] });
-    }
-    case "tabsTransition": {
-      const selected = state.documents[state.activeDocumentIndex];
-      if (!selected) return result(state);
-      const tabState = tabsReducer(
-        { activeId: selected.id, selectedId: selected.id },
-        message.transition,
-        { tabs: state.documents, activation: "automatic" }
-      );
-      const nextIndex = state.documents.findIndex((entry) => entry.id === tabState.selectedId);
-      return nextIndex < 0
-        ? result(state)
-        : updateBrowser(controller, state, { kind: "selectDocument", index: nextIndex }, context);
-    }
-    case "tabsClose": {
-      const index = state.documents.findIndex((entry) => entry.id === message.event.id);
-      return index < 0
-        ? result(state)
-        : updateBrowser(
-          controller,
-          { ...state, activeDocumentIndex: index },
-          { kind: "closeDocument" },
-          context
-        );
-    }
-    case "actionPaletteTransition": {
-      if (state.overlay?.kind !== "actionPalette") return result(state);
-      let palette = commandInputReducer(state.overlay.state, message.transition);
-      if (message.transition.kind !== "acceptSuggestion") {
-        palette = commandInputReducer(palette, {
-          kind: "setSuggestions",
-          suggestions: replacementCommandSuggestions(
-            palette.editor.input.text,
-            ACTION_SUGGESTIONS
-          )
-        });
-      }
-      return result({
-        ...state,
-        overlay: {
-          ...state.overlay,
-          state: palette
-        }
-      });
-    }
-    case "actionPaletteSubmit":
-      return state.overlay?.kind !== "actionPalette"
-        ? result(state)
-        : runCommand(controller, state, parseCommand(message.value), columns);
     case "pickerTransition":
       return state.overlay?.kind !== "picker"
         ? result(state)
@@ -1169,18 +1648,12 @@ export function updateBrowser(
             MAX_PAGE_SEARCH_QUERY_CODE_UNITS
           )
         };
-      return result(applySearch({ ...state, findBar: { input } }, input.text, columns));
+      return result({ ...state, findBar: { input } });
     }
     case "findSubmit":
       return state.findBar === null
         ? result(state)
-        : result(applySearch(state, state.findBar.input.text, columns));
-    case "closeFind":
-      return result({
-        ...state,
-        findBar: null,
-        documents: state.documents.map((entry) => ({ ...entry, search: null }))
-      });
+        : result(state);
     case "formText": {
       const control = controlById(document, message.controlId);
       if (!control || control.kind !== "text" || control.inputType === "number") return result(state);
@@ -1431,57 +1904,8 @@ export function updateBrowser(
           "Submitted form"
         ),
         "replace",
-        document.id
+        focusedDocument
       ));
-    }
-    case "pageLoaded": {
-      const loadedIndex = state.documents.findIndex((entry) => entry.id === message.documentId);
-      const current = state.documents[loadedIndex];
-      if (!current) return result(state);
-      const loaded = pageFromSnapshot(current, message.snapshot, message);
-      const next = {
-        ...updateDocument(state, message.documentId, () => loaded),
-        overlay: null,
-        ...(loadedIndex === state.activeDocumentIndex
-          ? {
-            omnibox: resetCommandInput(state.omnibox, message.snapshot.finalUrl),
-            omniboxDirty: false
-          }
-          : {}),
-        ...controller.library(),
-        status: status(`${message.status}: ${message.snapshot.finalUrl}`, "success")
-      };
-      return result(next, {
-        effects: [persistSnapshotEffect(controller, message.snapshot), persistEffect(controller, next)]
-      });
-    }
-    case "documentOpened": {
-      const replaced = message.replaceCurrent === true;
-      const documents = replaced
-        ? state.documents.map((entry, index) => index === state.activeDocumentIndex ? message.document : entry)
-        : [...state.documents, message.document];
-      const nextIndex = message.background
-        ? state.activeDocumentIndex
-        : replaced ? state.activeDocumentIndex : documents.length - 1;
-      const next = {
-        ...state,
-        documents,
-        activeDocumentIndex: nextIndex,
-        recentlyClosed: replaced ? [document, ...state.recentlyClosed].slice(0, 10) : state.recentlyClosed,
-        overlay: null,
-        ...(message.background
-          ? {}
-          : {
-            omnibox: resetCommandInput(state.omnibox, message.document.snapshot.finalUrl)
-          }),
-        status: status(`Opened ${message.document.snapshot.finalUrl}`, "success")
-      };
-      return result(next, {
-        effects: [persistSnapshotEffect(controller, message.document.snapshot), persistEffect(controller, next)],
-        ...(message.background
-          ? {}
-          : { focus: { kind: "element" as const, elementId: message.document.snapshot.finalUrl === "about:newtab" ? "browser-omnibox" : `browser-${message.document.id}` } })
-      });
     }
     case "download": {
       let target: string;
@@ -1544,70 +1968,110 @@ export function updateBrowser(
         }]
       });
     }
-    case "downloadComplete":
-    case "downloadFailed": {
-      const next = {
-        ...state,
-        downloads: [message.download, ...state.downloads.filter((entry) => entry.id !== message.download.id)],
-        status: message.kind === "downloadComplete"
-          ? status(`Downloaded ${message.download.fileName}.`, "success")
-          : status(message.download.error ?? "Download failed.", "error")
-      };
-      return result(next);
-    }
-    case "libraryChanged":
-      return result({ ...state, ...controller.library() });
-    case "cancelDownload": {
-      const entry = state.downloads.find((download) => download.id === message.id);
-      if (!entry || entry.status !== "downloading") return result(state);
-      const interrupted = {
-        ...entry,
-        status: "interrupted" as const,
-        error: "Cancelled by the user.",
-        updatedAtIso: new Date().toISOString()
-      };
-      return result({
-        ...state,
-        downloads: [interrupted, ...state.downloads.filter((download) => download.id !== message.id)]
-      }, { cancelEffects: [`download:${message.id}`] });
-    }
     case "retryDownload": {
       const entry = state.downloads.find((download) => download.id === message.id);
       return entry === undefined ? result(state) : updateBrowser(controller, state, { kind: "download", target: entry.url }, context);
     }
-    case "removeDownload":
-      return result(state, { effects: [effect(`remove-download:${message.id}`, async () => ({
-        kind: "downloadsChanged",
-        downloads: (await controller.removeDownload(message.id), controller.library().downloads),
-        status: "Download removed from the list."
-      }))] });
-    case "openDownload":
-      return result(state, { effects: [effect(`open-download:${message.id}`, async () => ({
-        kind: "operationComplete",
-        status: await controller.openDownload(message.id, message.location)
-      }))] });
-    case "downloadsChanged":
-      return result({ ...state, downloads: message.downloads, status: status(message.status, "success") });
-    case "operationComplete":
-      return result({ ...state, ...controller.library(), status: status(message.status, "success") });
-    case "operationFailed": {
-      const failedState = message.documentId === undefined
-        ? state
-        : updateDocument(state, message.documentId, (entry) => ({
-          ...entry,
-          loading: false,
-          pendingUrl: null,
-          error: message.downloadTarget === undefined ? message.message : null
-        }));
-      return result({
-        ...failedState,
-        overlay: message.downloadTarget === undefined
-          ? failedState.overlay
-          : { kind: "downloadPrompt", target: message.downloadTarget },
-        status: status(message.message, "error")
-      });
+  }
+}
+
+/** Reduces browser state synchronously, then schedules only dependency-relevant worker work. */
+export function updateBrowser(
+  controller: BrowserController,
+  state: BrowserTuiState,
+  message: BrowserTuiMessage,
+  context: Pick<TuiContext, "terminalSize"> = { terminalSize: { columns: 100, rows: 24 } },
+): TuiUpdateResult<BrowserTuiState, BrowserTuiMessage> {
+  const reduced = reduceBrowser(controller, state, message, context);
+  const previous = activeTab(state);
+  const selectedId = reduced.exit === undefined ? activeTab(reduced.state).id : null;
+  controller.prioritizeRendering(selectedId);
+  if (reduced.exit !== undefined || reduced.state.documents.length === 0) return reduced;
+  const restoration = scheduleTabRestorations(controller, reduced.state);
+  let nextState = restoration.state;
+  for (const tab of state.documents) {
+    if (tab.kind !== "ready") continue;
+    const next = nextState.documents.find((entry) => entry.id === tab.id);
+    if (next?.kind !== "ready" || (next.loading && !tab.loading)) controller.cancelDocumentRendering(tab.id);
+    if (next?.kind !== "ready" || next.rendering.searchRequestGeneration !== tab.rendering.searchRequestGeneration
+      || (next.loading && !tab.loading) || (tab.id === previous.id && previous.id !== selectedId)) {
+      controller.cancelSearch(tab.id);
+      nextState = updateDocument(nextState, tab.id, (document) => ({
+        ...document, rendering: { ...document.rendering, pendingSearch: null,
+          searchRequestGeneration: Math.max(document.rendering.searchRequestGeneration, tab.rendering.searchRequestGeneration + 1) },
+      }));
     }
   }
+  if (previous.id !== selectedId && previous.kind === "ready") {
+    nextState = updateDocument(nextState, previous.id, (document) => document.rendering.status !== "rendering" ? document : ({
+      ...document, rendering: { ...document.rendering, status: "idle", requestKey: null,
+        requestedViewportRevision: document.rendering.requestedViewportRevision + 1 },
+    }));
+  }
+  const selected = activeTab(nextState);
+  const restorationEffects = [...restoration.effects];
+  if (selected.kind !== "ready") {
+    const effects = [...(reduced.effects ?? []), ...restorationEffects];
+    return {
+      ...reduced,
+      state: nextState,
+      ...(effects.length === 0 ? {} : { effects: Object.freeze(effects) }),
+    };
+  }
+  let active = activeDocument(nextState);
+  const addedEffects = [...(reduced.effects ?? []), ...restorationEffects];
+  if (active.rendering.status === "failed") {
+    return {
+      ...reduced,
+      state: nextState,
+      ...(addedEffects.length === 0 ? {} : { effects: Object.freeze(addedEffects) }),
+    };
+  }
+  const parameters = viewportParameters(nextState, active, context.terminalSize);
+  const key = viewportRequestKey(active, parameters);
+  if (active.rendering.requestKey !== key && message.kind !== "viewportFailed") {
+    const viewportRevision = active.rendering.requestedViewportRevision + 1;
+    const requested = {
+      ...active,
+      rendering: {
+        ...active.rendering,
+        status: "rendering" as const,
+        requestedViewportRevision: viewportRevision,
+        requestKey: key,
+        error: null
+      }
+    };
+    nextState = updateDocument(nextState, active.id, () => requested);
+    addedEffects.push(viewportEffect(controller, requested, viewportRevision, parameters));
+  }
+  active = activeDocument(nextState);
+  const query = nextState.findBar?.input.text.slice(0, MAX_PAGE_SEARCH_QUERY_CODE_UNITS) ?? null;
+  const pending = active.rendering.pendingSearch;
+  if (pending !== null && (pending.query !== query || pending.stateRevision !== active.stateRevision || active.loading)) {
+    controller.cancelSearch(active.id);
+    nextState = updateDocument(nextState, active.id, (document) => ({
+      ...document, rendering: { ...document.rendering, pendingSearch: null,
+        searchRequestGeneration: document.rendering.searchRequestGeneration + 1 },
+    }));
+    active = activeDocument(nextState);
+  }
+  if (query !== null && active.rendering.status === "ready" && !active.loading && message.kind !== "searchFailed"
+    && active.rendering.pendingSearch === null
+    && (query !== active.search?.query || active.search.stateRevision !== active.stateRevision
+      || active.search.layoutRevision !== active.rendering.viewport?.layoutRevision)) {
+    const requestGeneration = active.rendering.searchRequestGeneration + 1;
+    nextState = updateDocument(nextState, active.id, (document) => ({
+      ...document, rendering: { ...document.rendering, searchRequestGeneration: requestGeneration,
+        pendingSearch: { query, requestGeneration, stateRevision: document.stateRevision } },
+    }));
+    active = activeDocument(nextState);
+    addedEffects.push(searchEffect(controller, active, query, viewportParameters(nextState, active, context.terminalSize)));
+  }
+  return {
+    ...reduced,
+    state: nextState,
+    ...(addedEffects.length === 0 ? {} : { effects: Object.freeze(addedEffects) })
+  };
 }
 
 function textBinding(id: string, text: string, message: BrowserTuiMessage) {
@@ -1622,7 +2086,8 @@ function textBinding(id: string, text: string, message: BrowserTuiMessage) {
 
 export function createBrowserApp(
   initialState: BrowserTuiState,
-  controller: BrowserController
+  controller: BrowserController,
+  instrumentation?: RenderInstrumentation,
 ) {
   const tabNumberBindings: readonly TuiInputBinding<BrowserTuiState, BrowserTuiMessage>[] = (
     ["1", "2", "3", "4", "5", "6", "7", "8", "9"] as const
@@ -1635,9 +2100,20 @@ export function createBrowserApp(
   }));
   return defineTui<BrowserTuiState, BrowserTuiMessage>({
     id: "verge-browser",
-    init: () => ({ state: initialState }),
+    init: (context) => {
+      const initialized = updateBrowser(controller, initialState, { kind: "requestActiveViewport" }, context);
+      return {
+        state: initialized.state,
+        ...(initialized.effects === undefined ? {} : { effects: initialized.effects }),
+      };
+    },
     update: (state, message, context) => updateBrowser(controller, state, message, context),
-    view: browserView,
+    view: (state, context) => measured(
+      instrumentation,
+      "terminal-ui-element-tree-construction",
+      () => browserView(state, context),
+    ),
+    resizeMessage: () => ({ kind: "terminalResized" }),
     inputBindings: [
       { id: "quit-control", phase: "beforeFocus", triggers: [{ kind: "key", key: "c", modifiers: { ctrl: true } }], message: { kind: "quit" } },
       { id: "new-tab", phase: "beforeFocus", triggers: [{ kind: "key", key: "t", modifiers: { ctrl: true } }], message: { kind: "newDocument" } },
@@ -1678,7 +2154,7 @@ export function createBrowserApp(
         enabled: ({ state, focusPath }) => {
           const current = state.documents[state.activeDocumentIndex];
           const target = focusPath?.at(-1);
-          return state.overlay === null && current !== undefined
+          return state.overlay === null && current?.kind === "ready"
             && target !== undefined && actionById(current, target) !== undefined;
         },
         toMessage: ({ focusPath }) => ({
@@ -1694,7 +2170,7 @@ export function createBrowserApp(
         enabled: ({ state, focusPath }) => {
           const current = state.documents[state.activeDocumentIndex];
           const target = focusPath?.at(-1);
-          return state.overlay === null && current !== undefined
+          return state.overlay === null && current?.kind === "ready"
             && target !== undefined && actionById(current, target) !== undefined;
         },
         toMessage: ({ focusPath }) => ({
@@ -1749,7 +2225,7 @@ export function createBrowserApp(
 }
 
 export function createBrowserInitialState(
-  documents: readonly BrowserDocumentState[],
+  documents: readonly BrowserTabState[],
   activeDocumentIndex: number,
   controller: BrowserController,
   sidePanel: BrowserTuiState["sidePanel"] = null
@@ -1757,13 +2233,14 @@ export function createBrowserInitialState(
   const activeIndex = Math.max(0, Math.min(documents.length - 1, activeDocumentIndex));
   const active = documents[activeIndex];
   if (!active) throw new Error("The browser requires at least one document.");
+  const activeUrl = tabUrl(active);
   return {
     documents,
     activeDocumentIndex: activeIndex,
     recentlyClosed: [],
     omnibox: createCommandInputState({
-      value: active.snapshot.finalUrl,
-      cursor: active.snapshot.finalUrl.length,
+      value: activeUrl,
+      cursor: activeUrl.length,
       submissions: [],
       submissionLimit: 50,
       suggestions: EMPTY_COMMAND_SUGGESTIONS
@@ -1774,6 +2251,8 @@ export function createBrowserInitialState(
     sidePanelScroll: createScrollState(),
     ...controller.library(),
     overlay: null,
-    status: status(`Opened ${active.snapshot.finalUrl}`, "success")
+    status: active.kind === "ready"
+      ? status(`Opened ${activeUrl}`, "success")
+      : status(`Restoring ${activeUrl}`)
   };
 }

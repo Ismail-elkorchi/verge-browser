@@ -36,12 +36,16 @@ import {
   parseGridTemplateAreas,
   parseGridTrackList
 } from "../../dist/presentation/style/grid/index.js";
-import { buildTextSearchIndex } from "../../dist/presentation/search/index.js";
-import { embeddedStylesheetSources, resolveStyles } from "../../dist/presentation/style/index.js";
+import { buildTextSearchIndex, projectTextSearchToLayout } from "../../dist/presentation/search/index.js";
+import { compileStylesheetProgram, embeddedStylesheetSources, resolveStyles } from "../../dist/presentation/style/index.js";
 import { buildInlineItemStreamSet } from "../../dist/presentation/text/index.js";
 import {
-  buildTerminalDisplayList,
-  rasterizeTerminalDisplayList
+  buildDisplayListSpatialIndex,
+  buildDocumentGeometryIndex,
+  buildDocumentDisplayList,
+  buildViewportDisplayList,
+  buildViewportTerminalResult,
+  rasterizeViewportDisplayList
 } from "../../dist/presentation/terminal/index.js";
 import {
   terminalCellMeasurer,
@@ -86,10 +90,10 @@ function formatting(html, columns = 80, rows = 24, formattingBudgets) {
     finalUrl: "https://example.test/"
   });
   const state = createDocumentState(document);
+  const resources = embeddedStylesheetSources(document);
   const styles = resolveStyles({
-    document,
+    program: compileStylesheetProgram({ document, resources }),
     state,
-    resources: embeddedStylesheetSources(document),
     environment: media(columns, rows)
   });
   return buildFormattingTree({
@@ -97,6 +101,37 @@ function formatting(html, columns = 80, rows = 24, formattingBudgets) {
     state,
     styles,
     ...(formattingBudgets === undefined ? {} : { budgets: formattingBudgets })
+  });
+}
+
+function viewportDisplayList(displayList, options = {}) {
+  return buildViewportDisplayList({
+    documentDisplayList: displayList,
+    spatialIndex: buildDisplayListSpatialIndex(displayList),
+    context: displayList.context,
+    window: {
+      scrollRow: options.scrollRow ?? 0,
+      viewportRows: options.viewportRows ?? displayList.context.rows,
+      overscanBefore: options.overscanBefore ?? 0,
+      overscanAfter: options.overscanAfter ?? 0
+    },
+    ...(options.signal === undefined ? {} : { signal: options.signal })
+  });
+}
+
+function terminalViewport(displayList, options = {}) {
+  const retainedDisplayList = viewportDisplayList(displayList, options);
+  const cells = rasterizeViewportDisplayList({
+    displayList: retainedDisplayList,
+    ...(options.signal === undefined ? {} : { signal: options.signal })
+  });
+  return buildViewportTerminalResult({
+    displayList: retainedDisplayList,
+    cellBuffer: cells.cellBuffer,
+    documentGeometry: buildDocumentGeometryIndex(displayList, options.signal),
+    ...(options.searchProjection === undefined ? {} : { searchProjection: options.searchProjection }),
+    truncations: cells.truncations,
+    ...(options.signal === undefined ? {} : { signal: options.signal })
   });
 }
 
@@ -121,7 +156,7 @@ function renderFormatting(formattingTree, columns, rows = 24, budgets = {}, capa
       ),
       scrollport: cssRect(
         cssCoordinate(ZERO),
-        cssCoordinate(cssLengthFromFixed((capabilities.scrollRow ?? 0) * ROW_HEIGHT)),
+        cssCoordinate(ZERO),
         cssLengthFromFixed(columns * CELL_WIDTH),
         cssLengthFromFixed(rows * ROW_HEIGHT)
       ),
@@ -139,9 +174,10 @@ function renderFormatting(formattingTree, columns, rows = 24, budgets = {}, capa
     cellMeasurer: terminalCellMeasurer(capabilities.ambiguousWidth ?? 1),
     ...(budgets.terminal === undefined ? {} : { budgets: budgets.terminal })
   };
-  const displayList = buildTerminalDisplayList({ layout, context });
-  const terminal = rasterizeTerminalDisplayList({ displayList, textSearchIndex: searchIndex });
-  return { formatting: formattingTree, inlineItemStreams, searchIndex, layout, displayList, terminal };
+  const displayList = buildDocumentDisplayList({ layout, context });
+  const documentGeometry = buildDocumentGeometryIndex(displayList);
+  const terminal = terminalViewport(displayList, { scrollRow: capabilities.scrollRow ?? 0, viewportRows: rows });
+  return { formatting: formattingTree, inlineItemStreams, searchIndex, layout, displayList, documentGeometry, terminal };
 }
 
 function render(html, columns = 80, rows = 24, budgets = {}, capabilities = {}) {
@@ -162,7 +198,20 @@ function principalFragment(result, node) {
 }
 
 function renderedText(result) {
-  return result.terminal.cellBuffer.rows.map((row) => row.text).join("\n");
+  return result.terminal.cellBuffer.rows.map((row) => row.text).join("\n").replace(/\n+$/u, "");
+}
+
+function paintedRows(result) {
+  return result.terminal.cellBuffer.rows.filter((row) => row.cells.length > 0);
+}
+
+function search(result, query) {
+  const projection = projectTextSearchToLayout(result.searchIndex, result.layout, query, 10_000);
+  return terminalViewport(result.displayList, {
+    viewportRows: result.terminal.cellBuffer.viewportRows,
+    scrollRow: result.terminal.cellBuffer.windowStartRow + result.terminal.cellBuffer.overscanBefore,
+    searchProjection: projection
+  }).search;
 }
 
 function reachableFragments(layout) {
@@ -566,7 +615,7 @@ test("generated text, list markers, controls, and replaced boxes share line-box 
   const kinds = new Set(result.displayList.commands.map((command) => result.layout.fragment(command.layoutFragment).kind));
   assert.ok(kinds.has("control"));
   assert.ok(kinds.has("replaced"));
-  const controlSearch = result.terminal.search("value");
+  const controlSearch = search(result, "value");
   assert.equal(controlSearch.matches.length, 1);
   assert.ok(controlSearch.matches[0].ranges.length > 0);
 });
@@ -1239,7 +1288,12 @@ test("positioned layout resolves containing blocks, out-of-flow geometry, sticky
   const boundedSticky = principalFragment(scrolled, elementById(scrolled, "scrolled-sticky"));
   assert.equal(cssPixels(boundedSticky.borderRect.y), 64);
   assert.ok(boundedSticky.borderRect.y < scrollportY);
-  assert.equal(principalFragment(scrolled, elementById(scrolled, "scrolled-fixed")).borderRect.y, scrollportY);
+  assert.equal(principalFragment(scrolled, elementById(scrolled, "scrolled-fixed")).borderRect.y, 0);
+  const scrolledViewport = viewportDisplayList(scrolled.displayList, { scrollRow: 5, viewportRows: 4 });
+  const fixedViewportCommand = scrolledViewport.commands.find((command) =>
+    command.kind === "text" && command.text === "fixed");
+  assert.ok(fixedViewportCommand);
+  assert.equal(fixedViewportCommand.rect.y, scrollportY);
 
   const directionalInsets = render(`<div id="direction-cb" style="position:relative;width:100px">
     <div id="rtl-absolute" style="position:absolute;direction:rtl;left:10px;right:20px;width:30px">a</div>
@@ -1347,7 +1401,7 @@ test("relative positioning moves complete inline visual and interaction geometry
       unshiftedBackgrounds.map((command) => command.rect.x + cssPx(8))
     );
     assert.ok(shifted.terminal.hitTestIndex.regions.some((region) => region.action.node === shiftedLink));
-    assert.ok(shifted.terminal.search("Latin אבג").ranges.length > 0);
+    assert.ok(search(shifted, "Latin אבג").ranges.length > 0);
   }
 });
 
@@ -1555,7 +1609,7 @@ test("terminal color depth changes actual cell styles without changing layout ge
 test("cell differences arise only during terminal snapping", () => {
   const tree = formatting(`<div id="box" style="width:17px">x</div>`, 20);
   const normal = renderFormatting(tree, 20);
-  const narrowCells = buildTerminalDisplayList({
+  const narrowCells = buildDocumentDisplayList({
     layout: normal.layout,
     context: {
       columns: 40,
@@ -1571,18 +1625,17 @@ test("cell differences arise only during terminal snapping", () => {
   assert.equal(principalFragment(normal, elementById(normal, "box")).contentRect.width, cssPx(17));
   assert.equal(narrowCells.layout, normal.layout);
   assert.notDeepEqual(
-    rasterizeTerminalDisplayList({
-      displayList: narrowCells,
-      textSearchIndex: normal.searchIndex
-    }).cellBuffer,
+    terminalViewport(narrowCells).cellBuffer,
     normal.terminal.cellBuffer
   );
 });
 
 test("logical search IDs survive wrapping and cell-metric changes", () => {
   const tree = formatting(`<p>alpha beta gamma delta</p>`, 40);
-  const narrow = renderFormatting(tree, 8).terminal.search("beta gamma");
-  const wide = renderFormatting(tree, 40).terminal.search("beta gamma");
+  const narrowResult = renderFormatting(tree, 8);
+  const wideResult = renderFormatting(tree, 40);
+  const narrow = search(narrowResult, "beta gamma");
+  const wide = search(wideResult, "beta gamma");
   assert.equal(narrow.matches.length, 1);
   assert.equal(wide.matches.length, 1);
   assert.equal(narrow.matches[0].id, wide.matches[0].id);
@@ -1632,7 +1685,7 @@ test("CSS-clipped semantic content stays accessible without synthetic paint or h
   const result = render(`<a href="#main" style="position:absolute;width:1px;height:1px;overflow:hidden;
     clip:rect(0,0,0,0)">Skip to main</a><main id="main">Visible</main>`, 30);
   assert.doesNotMatch(renderedText(result), /Skip to main/u);
-  assert.equal(result.terminal.search("Skip to main").ranges.length, 0);
+  assert.equal(search(result, "Skip to main").ranges.length, 0);
   assert.equal(result.terminal.hitTestIndex.regions.some((entry) => entry.action.kind === "link"), false);
   assert.ok(result.terminal.accessibilityBounds.some((entry) => entry.role === "link" && entry.name === "Skip to main"));
 });
@@ -1778,22 +1831,18 @@ test("layout, display-list construction, and cell rasterization honor cancellati
   const complete = renderFormatting(tree, 20);
   const displayController = new globalThis.AbortController();
   displayController.abort();
-  assert.throws(() => buildTerminalDisplayList({
+  assert.throws(() => buildDocumentDisplayList({
     layout: complete.layout,
     context: complete.displayList.context,
     signal: displayController.signal
   }), { name: "AbortError" });
   const paintController = new globalThis.AbortController();
-  const displayList = buildTerminalDisplayList({
+  const displayList = buildDocumentDisplayList({
     layout: complete.layout,
     context: complete.displayList.context
   });
   paintController.abort();
-  assert.throws(() => rasterizeTerminalDisplayList({
-    displayList,
-    textSearchIndex: complete.searchIndex,
-    signal: paintController.signal
-  }), { name: "AbortError" });
+  assert.throws(() => terminalViewport(displayList, { signal: paintController.signal }), { name: "AbortError" });
 });
 
 test("terminal paint budgets truncate only the cell buffer", () => {
@@ -1941,11 +1990,7 @@ test("text and border paint-unit generation remain cancellable and prefix determ
     }
   };
   assert.throws(
-    () => rasterizeTerminalDisplayList({
-      displayList: bordered.displayList,
-      textSearchIndex: bordered.searchIndex,
-      signal
-    }),
+    () => terminalViewport(bordered.displayList, { signal }),
     { name: "AbortError" }
   );
 });
@@ -1962,7 +2007,7 @@ test("terminal budget validation keeps zero as no-work and rejects malformed lim
   });
   assert.deepEqual(invalid.displayList.outcome, { status: "rejected", reason: "invalid-budget" });
   assert.deepEqual(invalid.terminal.cellBuffer.outcome, { status: "rejected", reason: "invalid-budget" });
-  const malformedList = buildTerminalDisplayList({
+  const malformedList = buildDocumentDisplayList({
     layout: zero.layout,
     context: {
       ...zero.displayList.context,
@@ -1972,10 +2017,7 @@ test("terminal budget validation keeps zero as no-work and rejects malformed lim
       }
     }
   });
-  const malformed = rasterizeTerminalDisplayList({
-    displayList: malformedList,
-    textSearchIndex: zero.searchIndex
-  });
+  const malformed = terminalViewport(malformedList);
   assert.deepEqual(malformed.cellBuffer.outcome, {
     status: "rejected",
     reason: "invalid-cell-measurement"
@@ -2010,7 +2052,7 @@ test("terminal actual values preserve every grapheme at all supported CSS font s
     assert.equal(text, actual);
   }
   const highlighted = render(`<span>a👍🏽b</span>`, 20, 10);
-  const highlight = highlighted.terminal.search("👍🏽").ranges[0];
+  const highlight = search(highlighted, "👍🏽").ranges[0];
   assert.ok(highlight);
   const highlightedRow = highlighted.terminal.cellBuffer.rows[highlight.row];
   assert.equal(highlightedRow?.text.slice(highlight.startCodeUnit, highlight.endCodeUnit), "👍🏽");
@@ -2033,12 +2075,14 @@ test("bidi paragraphs span inline boxes while tree paint order retains fragment 
     result.displayList.commands.filter((command) => command.kind === "text").map((command) => command.text).join(""),
     "abc גבא 123"
   );
-  const narrow = render(`<p>abc <span>אבג</span> 123</p>`, 8).terminal.search("אבג");
-  const wide = result.terminal.search("אבג");
+  const narrowResult = render(`<p>abc <span>אבג</span> 123</p>`, 8);
+  const narrow = search(narrowResult, "אבג");
+  const wide = search(result, "אבג");
   assert.equal(narrow.matches[0]?.id, wide.matches[0]?.id);
-  const oppositeDirection = render(`<p dir="rtl">abc <span>אבג</span> 123</p>`, 20).terminal.search("אבג");
+  const oppositeDirectionResult = render(`<p dir="rtl">abc <span>אבג</span> 123</p>`, 20);
+  const oppositeDirection = search(oppositeDirectionResult, "אבג");
   assert.equal(oppositeDirection.matches[0]?.id, wide.matches[0]?.id);
-  const acrossRuns = result.terminal.search("c אב");
+  const acrossRuns = search(result, "c אב");
   assert.equal(acrossRuns.matches.length, 1);
   assert.ok(acrossRuns.ranges.length >= 3);
   assert.equal(wide.ranges.length, 3);
@@ -2124,7 +2168,7 @@ test("paragraph direction, overrides, logical alignment, and per-line bidi reord
   const overridden = render(`<p><bdo dir="rtl">abc</bdo></p>`, 20);
   assert.equal(renderedText(overridden), "cba");
   const wrapped = render(`<p style="width:5ch;overflow-wrap:anywhere">abcאבג123</p>`, 20);
-  assert.deepEqual(wrapped.terminal.cellBuffer.rows.map((row) => row.text), ["abcבא", "123ג"]);
+  assert.deepEqual(paintedRows(wrapped).map((row) => row.text), ["abcבא", "123ג"]);
   assert.deepEqual(
     wrapped.layout.lineBoxes.map((line) => line.breakCause),
     ["wrap", "end-of-paragraph"]
@@ -2133,13 +2177,13 @@ test("paragraph direction, overrides, logical alignment, and per-line bidi reord
 
 test("wbr and manual soft hyphens create source-linked break opportunities without changing logical search text", () => {
   const wordBreak = render(`<p style="width:2ch">ab<wbr>cd</p>`, 20);
-  assert.deepEqual(wordBreak.terminal.cellBuffer.rows.map((row) => row.text), ["ab", "cd"]);
+  assert.deepEqual(paintedRows(wordBreak).map((row) => row.text), ["ab", "cd"]);
   assert.equal(wordBreak.searchIndex.text.includes("\u200b"), false);
-  assert.equal(wordBreak.terminal.search("abcd").matches.length, 1);
+  assert.equal(search(wordBreak, "abcd").matches.length, 1);
 
   const brokenHyphen = render(`<p style="width:3ch">ab\u00adcd</p>`, 20);
-  assert.deepEqual(brokenHyphen.terminal.cellBuffer.rows.map((row) => row.text), ["ab-", "cd"]);
-  assert.equal(brokenHyphen.terminal.search("abcd").matches.length, 1);
+  assert.deepEqual(paintedRows(brokenHyphen).map((row) => row.text), ["ab-", "cd"]);
+  assert.equal(search(brokenHyphen, "abcd").matches.length, 1);
   const unbrokenHyphen = render(`<p style="width:10ch">ab\u00adcd</p>`, 20);
   assert.equal(renderedText(unbrokenHyphen), "abcd");
   const disabled = render(`<p style="width:3ch;hyphens:none">ab\u00adcd</p>`, 20);
@@ -2150,11 +2194,11 @@ test("wbr and manual soft hyphens create source-linked break opportunities witho
 test("preserved tabs use inherited CSS tab-size and plaintext chooses each paragraph base direction", () => {
   const tabs = render(`<pre style="margin:0;tab-size:4">a\tb</pre>`, 20);
   assert.equal(renderedText(tabs), "a   b");
-  assert.equal(tabs.terminal.search("a b").matches.length, 1);
+  assert.equal(search(tabs, "a b").matches.length, 1);
   const plaintext = render(`<pre dir="auto" style="margin:0">abc\nאבג</pre>`, 20);
-  assert.deepEqual(plaintext.terminal.cellBuffer.rows.map((row) => row.text.trimStart()), ["abc", "גבא"]);
+  assert.deepEqual(paintedRows(plaintext).map((row) => row.text.trimStart()), ["abc", "גבא"]);
   assert.deepEqual(
-    plaintext.terminal.cellBuffer.rows.map((row) => row.cells.find((cell) => cell.text.length > 0)?.column),
+    paintedRows(plaintext).map((row) => row.cells.find((cell) => cell.text.length > 0)?.column),
     [0, 17]
   );
 
@@ -2319,18 +2363,19 @@ test("pointer, focus, accessibility, scroll, and search geometry have separate c
     JSON.stringify(result.terminal.hitTestIndex.regions)
   );
   const clipped = elementById(result, "clipped");
-  assert.equal(result.terminal.focusMap.forNode(clipped)?.rects.length, 0);
+  assert.equal(result.terminal.focusMap.forNode(clipped), null);
+  assert.equal(result.documentGeometry.focusForNode(clipped)?.rects.length, 0);
   assert.ok(result.terminal.accessibilityBounds.some((entry) => entry.documentNode === clipped
     && entry.rect.width === 0 && entry.rect.height === 0));
-  assert.ok(result.terminal.scrollAnchors.some((entry) => entry.documentNode === clipped));
-  assert.equal(result.terminal.search("hidden").ranges.length, 0);
+  assert.ok(result.documentGeometry.scrollAnchors.some((entry) => entry.documentNode === clipped));
+  assert.equal(search(result, "hidden").ranges.length, 0);
 });
 
 test("zero-area CSS clipping remains empty after cell snapping", () => {
   const result = render(`<a href="/next" style="position:absolute;width:8px;height:16px;clip-path:inset(50%)">x</a>`, 20);
   assert.equal(result.terminal.hitTestIndex.regions.length, 0);
   assert.equal(result.terminal.cellBuffer.rows.flatMap((row) => row.cells).some((cell) => cell.text === "x"), false);
-  assert.equal(result.terminal.search("x").ranges.length, 0);
+  assert.equal(search(result, "x").ranges.length, 0);
 });
 
 test("terminal index budgets preserve deterministic box-derived prefixes", () => {
@@ -2354,7 +2399,7 @@ test("terminal index budgets preserve deterministic box-derived prefixes", () =>
     .map((entry) => entry.documentNode)
     .filter((node) => linkNodes.includes(node));
   assert.deepEqual(retainedAccessibleLinks, linkNodes.slice(0, retainedAccessibleLinks.length));
-  const retainedScrollLinks = first.terminal.scrollAnchors
+  const retainedScrollLinks = first.documentGeometry.scrollAnchors
     .map((entry) => entry.documentNode)
     .filter((node) => linkNodes.includes(node));
   assert.deepEqual(retainedScrollLinks, linkNodes.slice(0, retainedScrollLinks.length));

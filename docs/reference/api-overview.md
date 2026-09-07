@@ -37,8 +37,9 @@ Node/npm includes the supported library primitives and the packaged `verge` CLI 
 
 `PageSnapshot.document` is the one authoritative document snapshot. The
 package root deliberately does not expose fixed-width rendered snapshots or
-the internal computed style map, box tree, layout fragment tree, terminal
-display list, text search index, or terminal cell buffer.
+the internal computed style map, box tree, layout fragment tree, document
+display list, text-search index, display-list spatial index, or viewport cell
+buffer.
 Interactive and one-shot CLI output both use those same internal
 structural stages.
 

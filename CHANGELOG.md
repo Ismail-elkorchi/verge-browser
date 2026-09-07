@@ -4,6 +4,24 @@ All notable changes are documented in this file.
 
 ## Unreleased
 
+- Replace synchronous, scroll-keyed full-document rendering with a long-lived
+  rendering worker and cost-bounded retained artifact store. Retain verified
+  stylesheet syntax, compiled selectors and declarations, computed styles, the
+  box tree, inline streams, logical search, scroll-independent layout, the
+  document display list, spatial command index, and document geometry by
+  explicit dependency keys. Resolve fixed and sticky attachments per viewport,
+  rasterize only viewport plus overscan rows, and build row-bucketed visible
+  interaction indexes. Make viewport requests latest-wins through atomic
+  cancellation; keep update and view free of synchronous browser rendering; and
+  replace serial startup navigation with active-first, failure-isolated
+  placeholder restoration. Add deterministic large-page, interaction-latency,
+  event-loop, cancellation, and retained-memory controls. Consume exact
+  `@ismail-elkorchi/css-parser@0.2.7` for ordered indexed selector candidate
+  operations, reusable parsed-value validation, and component-value syntax-tree
+  materialization. Materialize repeated and nested custom-property
+  expansions before computed-value validation so one parser node is never
+  shared by several positions in CSS syntax.
+
 - Reuse one indexed CSS selector-matching session across the author cascade and
   consume `@ismail-elkorchi/css-parser@0.2.4` for compound candidate indexes,
   dynamic pseudo-class candidates, and document-order relationship joins. If
@@ -238,7 +256,7 @@ All notable changes are documented in this file.
 - Move normal block flow, margin collapse, explicit line-box construction,
   controls and replaced boxes, and the supported table, flex, and grid geometry
   out of the terminal subsystem. Delete the former cell-native layout engine.
-- Derive a `TerminalDisplayList` from layout fragments and make its cell
+- Derive a `DocumentDisplayList` from layout fragments and make its cell
   rasterizer the sole source of terminal text, borders, paint-order collision
   handling, hit testing, focus geometry, accessibility bounds, scroll anchors,
   and search highlights.

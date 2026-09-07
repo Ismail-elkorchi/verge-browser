@@ -113,9 +113,12 @@
 - Browser sessions retain source for buffered and streamed HTML. Document
   construction, dynamic state, and the concrete snapshot implementation are
   internal browser subsystems rather than root package APIs.
-- The render pipeline runs for the current viewport. There is no pre-rendered,
-  fixed-width field on the snapshot.
-- `stylesheets` contains the bounded resources attached to the document;
+- The rendering worker retains style, box, text, layout, display-list, spatial,
+  and semantic artifacts by their actual dependency keys. A scroll selects and
+  rasterizes a viewport window without rebuilding document analysis. There is
+  no pre-rendered, fixed-width field on the snapshot.
+- `stylesheets` contains bounded resources with verified parsed syntax and
+  dependency metadata attached to the document;
   `styleDiagnostics` contains stylesheet collection/load failures.
 - `diagnostics.stylesheetLoadIssueCount` counts those load failures. Cascade
   diagnostics remain part of the browser diagnostics because
@@ -125,6 +128,9 @@
   per form, and 2,000 options per select.
 
 ### Browser state storage
+- Workspace restoration starts with placeholder tabs, loads the active tab
+  first, and restores background tabs with bounded concurrency after the TUI
+  shell exists. One failed tab does not abort the workspace.
 - Persisted cookies, history, downloads, index data, tabs, and scroll anchors
   share one state file.
 - Persisted scroll anchors use durable HTML-id or source locators. Opaque

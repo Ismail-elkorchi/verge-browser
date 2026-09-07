@@ -14,12 +14,13 @@ import { BrowserStore } from "../../dist/app/storage.js";
 import {
   browserMediaEnvironment,
   browserRenderPreferences,
+  committedDocumentScrollRow,
   documentScrollRow,
   documentWithScrollRow,
-  renderDocumentForViewport,
   scrollToSource
 } from "../../dist/ui/document-layout.js";
 import { prepareBrowserTui, renderBrowserOnce } from "../../dist/ui/run.js";
+import { updateBrowser } from "../../dist/ui/app.js";
 
 function response(requestUrl, html) {
   return {
@@ -103,18 +104,25 @@ async function preparedFixture(options = {}) {
   const host = createMemoryTerminalHost({ terminalSize: options.terminalSize ?? { columns: 100, rows: 28 } });
   const runtime = createTuiRuntime({ app: prepared.app, host });
   await runtime.start();
+  if (options.waitForRender !== false) {
+    await waitUntil(runtime, () => {
+      const status = runtime.state().documents[0]?.rendering?.status;
+      return status === "ready" || status === "failed";
+    });
+    const rendering = runtime.state().documents[0]?.rendering;
+    assert.equal(rendering?.status, "ready", rendering?.error ?? "The initial viewport did not render.");
+  }
   return { runtime, prepared };
 }
 
 async function waitUntil(runtime, predicate) {
-  const signal = globalThis.AbortSignal.timeout(5_000);
+  const deadline = Date.now() + 20_000;
   while (!predicate()) {
-    try {
-      await runtime.nextChange(signal);
-    } catch (error) {
-      if (signal.aborted) assert.fail("Timed out waiting for browser state");
-      throw error;
+    if (Date.now() >= deadline) {
+      const rendering = runtime.state().documents[0]?.rendering;
+      assert.fail(`Timed out waiting for browser state (${rendering?.status ?? "missing"}: ${rendering?.error ?? "no error"}); diagnostics=${JSON.stringify(runtime.diagnostics())}`);
     }
+    await new Promise((resolve) => setTimeout(resolve, 5));
   }
 }
 
@@ -129,19 +137,136 @@ function key(key, modifiers = {}) {
   };
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+test("workspace restoration paints placeholders first, loads the active tab first, and isolates failures", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "verge-placeholder-restore-"));
+  const store = await BrowserStore.open({ statePath: join(directory, "state.json") });
+  const urls = ["https://restore.test/zero", "https://restore.test/one", "https://restore.test/active", "https://restore.test/three"];
+  await store.saveWorkspace({
+    documents: urls.map((url) => ({ url, scrollAnchor: { target: null, rowOffset: 0 } })),
+    activeDocumentIndex: 2,
+    sidePanel: null,
+  });
+  const pending = new Map();
+  const starts = [];
+  let sessions = 0;
+  const prepared = await prepareBrowserTui(urls[0], {
+    store,
+    restoreWorkspace: true,
+    services: {
+      async writeTextFile() {}, async downloadFile() { throw new Error("not used"); },
+      async openExternal() {}, async openPath() {}, async close() {},
+    },
+    createSession: () => {
+      sessions += 1;
+      return new BrowserSession({
+        loader: async (requestUrl) => {
+          starts.push(requestUrl);
+          const operation = deferred();
+          pending.set(requestUrl, operation);
+          return operation.promise;
+        },
+        stylesheetLoader: async () => { throw new Error("unexpected stylesheet"); },
+        defaultParseMode: "text",
+      });
+    },
+  });
+  assert.equal(sessions, 0);
+  assert.ok(prepared.state.documents.every((tab) => tab.kind === "restoring"));
+  const host = createMemoryTerminalHost({ terminalSize: { columns: 80, rows: 24 } });
+  const runtime = createTuiRuntime({ app: prepared.app, host });
+  try {
+    await runtime.start();
+    assert.ok(runtime.frame());
+    assert.equal(runtime.state().documents[2].kind, "loading");
+    await waitUntil(runtime, () => starts.length === 1);
+    assert.deepEqual(starts, [urls[2]]);
+    assert.equal(sessions, 1);
+
+    pending.get(urls[2]).resolve(response(urls[2], "<title>Active</title><h1>Active restored tab</h1>"));
+    await waitUntil(runtime, () => runtime.state().documents[2].kind === "ready" && starts.length === 3);
+    assert.deepEqual(new Set(starts.slice(1)), new Set([urls[0], urls[1]]));
+    assert.equal(sessions, 3);
+
+    pending.get(urls[0]).reject(new Error("isolated background failure"));
+    pending.get(urls[1]).resolve(response(urls[1], "<title>One</title><p>One</p>"));
+    await waitUntil(runtime, () => starts.includes(urls[3]));
+    pending.get(urls[3]).resolve(response(urls[3], "<title>Three</title><p>Three</p>"));
+    await waitUntil(runtime, () => runtime.state().documents.every((tab) => tab.kind === "ready" || tab.kind === "failed"));
+    await waitUntil(runtime, () => runtime.state().documents[2].rendering?.status === "ready");
+    assert.equal(runtime.state().documents[0].kind, "failed");
+    assert.deepEqual(runtime.state().documents.slice(1).map((tab) => tab.kind), ["ready", "ready", "ready"]);
+    assert.match(renderFramePlain(runtime.frame()), /Active restored tab/u);
+  } finally {
+    for (const operation of pending.values()) operation.resolve(response("https://restore.test/cleanup", "<p>cleanup</p>"));
+    await runtime.dispose();
+    await prepared.controller.close();
+  }
+});
+
+test("a rendering-worker failure retains the last frame and restarts only after explicit retry", async () => {
+  const { runtime, prepared } = await preparedFixture();
+  try {
+    const current = runtime.state();
+    const ready = current.documents[0];
+    assert.equal(ready?.kind, "ready");
+    const failed = {
+      ...current,
+      documents: current.documents.map((tab, index) => index === 0 && tab.kind === "ready"
+        ? {
+            ...tab,
+            rendering: { ...tab.rendering, status: "failed", error: "worker stopped" },
+          }
+        : tab),
+    };
+    const context = { terminalSize: { columns: 100, rows: 28 } };
+    const ignoredScroll = updateBrowser(prepared.controller, failed, { kind: "scroll", rows: 3 }, context);
+    assert.equal(ignoredScroll.state.documents[0]?.rendering?.status, "failed");
+    assert.equal(ignoredScroll.effects?.some((effect) => effect.id.startsWith("render:")) ?? false, false);
+
+    const retry = updateBrowser(prepared.controller, failed, { kind: "requestActiveViewport" }, context);
+    assert.equal(retry.state.documents[0]?.rendering?.status, "rendering");
+    assert.equal(retry.effects?.some((effect) => effect.id.startsWith("render:")), true);
+  } finally {
+    await runtime.dispose();
+    await prepared.controller.close();
+  }
+});
+
 test("interactive browser renders the cell buffer and preserves link focus across resize", async () => {
   const { runtime, prepared } = await preparedFixture({ terminalSize: { columns: 72, rows: 24 } });
   try {
     const document = runtime.state().documents[0];
     assert.equal(document.snapshot.document.title, "Index");
-    assert.equal(renderDocumentForViewport(document, 71, 21), renderDocumentForViewport(document, 71, 21));
+    assert.equal(document.rendering.status, "ready");
     assert.match(renderFramePlain(runtime.frame()), /Next page with a wrapping label/u);
+    const pendingScroll = documentWithScrollRow(document, documentScrollRow(document) + 3, 20);
+    assert.notEqual(documentScrollRow(pendingScroll), documentScrollRow(document));
+    assert.equal(committedDocumentScrollRow(pendingScroll), committedDocumentScrollRow(document));
+    const metricsBeforeFocus = await prepared.controller.renderingMetrics();
+    const renderStateRevisionBeforeFocus = document.stateRevision;
     const linkId = `link:${document.snapshot.document.links[0].node}`;
     for (let count = 0; count < 20 && !runtime.frame().focusPath?.includes(linkId); count += 1) {
       await runtime.handleInput(key("tab"));
     }
     assert.ok(runtime.frame().focusPath?.includes(linkId));
     assert.equal(runtime.state().documents[0].documentState.focus, document.snapshot.document.links[0].node);
+    const metricsAfterFocus = await prepared.controller.renderingMetrics();
+    assert.equal(runtime.state().documents[0].stateRevision, renderStateRevisionBeforeFocus);
+    assert.equal(metricsAfterFocus.viewportRequests, metricsBeforeFocus.viewportRequests);
+    assert.equal(
+      metricsAfterFocus.stages.find((stage) => stage.stage === "computed-style-resolution")?.invocations,
+      metricsBeforeFocus.stages.find((stage) => stage.stage === "computed-style-resolution")?.invocations
+    );
     const focusedLinkCells = runtime.frame().cells.filter((cell) =>
       cell.link?.href === "https://example.test/next"
     );
@@ -173,22 +298,26 @@ test("terminal control focus reveals offscreen fragment geometry through the pag
     }
     assert.ok(runtime.frame().focusPath?.includes(linkId));
     await runtime.handleInput(key("arrowDown"));
+    await waitUntil(runtime, () => runtime.frame().focusPath?.includes(query.node));
     assert.ok(runtime.frame().focusPath?.includes(query.node));
     assert.equal(runtime.state().documents[0].documentState.focus, query.node);
     await runtime.handleInput(key("tab"));
+    await waitUntil(runtime, () => runtime.frame().focusPath?.includes(language.node));
     assert.ok(runtime.frame().focusPath?.includes(language.node));
     assert.equal(runtime.state().documents[0].documentState.focus, language.node);
     await runtime.handleInput(key("tab", { shift: true }));
+    await waitUntil(runtime, () => runtime.frame().focusPath?.includes(query.node));
     assert.ok(runtime.frame().focusPath?.includes(query.node));
     assert.equal(runtime.state().documents[0].documentState.focus, query.node);
     assert.ok(runtime.frame().focusPath?.includes(query.node));
     const current = runtime.state().documents[0];
-    const layout = renderDocumentForViewport(current, 71, 21).terminal;
-    assert.ok(documentScrollRow(current, layout) > 0);
+    assert.ok(documentScrollRow(current) > 0);
     assert.match(renderFramePlain(runtime.frame()), /Query/u);
     await runtime.handleInput(key("tab"));
+    await waitUntil(runtime, () => runtime.frame().focusPath?.includes(language.node));
     assert.ok(runtime.frame().focusPath?.includes(language.node));
     await runtime.handleInput(key("tab", { shift: true }));
+    await waitUntil(runtime, () => runtime.frame().focusPath?.includes(query.node));
     assert.ok(runtime.frame().focusPath?.includes(query.node));
   } finally {
     await runtime.dispose();
@@ -202,9 +331,8 @@ test("outline document nodes resolve through layout-fragment geometry", async ()
     const document = runtime.state().documents[0];
     const heading = document.snapshot.document.headings.find((entry) => entry.text === "Forms");
     assert.ok(heading);
-    const layout = renderDocumentForViewport(document, 79, 24).terminal;
     const anchored = scrollToSource(document, heading.node);
-    assert.ok(documentScrollRow(anchored, layout) > 20);
+    assert.ok(documentScrollRow(anchored) > 20);
   } finally {
     await runtime.dispose();
     await prepared.controller.close();
@@ -217,11 +345,9 @@ test("sticky and fixed paint does not replace the normal-flow scroll anchor", as
   const { runtime, prepared } = await preparedFixture({ loader: async (requestUrl) => response(requestUrl, page) });
   try {
     const document = runtime.state().documents[0];
-    const initial = renderDocumentForViewport(document, 50, 10).terminal;
-    const scrolled = documentWithScrollRow(document, initial, 12, 10);
+    const scrolled = documentWithScrollRow(document, 12, 10);
     assert.notEqual(scrolled.scrollAnchor.source, document.snapshot.document.elementById("sticky"));
-    const rendered = renderDocumentForViewport(scrolled, 50, 10).terminal;
-    assert.equal(documentScrollRow(scrolled, rendered), 12);
+    assert.equal(documentScrollRow(scrolled), 12);
   } finally {
     await runtime.dispose();
     await prepared.controller.close();
@@ -242,7 +368,8 @@ test("summary activation updates document state and reveals details through the 
     await runtime.dispatch({ kind: "activateActionAt", actionId: `disclosure:${disclosure.node}` });
     const opened = runtime.state().documents[0];
     assert.equal(opened.documentState.open.has(disclosure.node), true);
-    assert.match(renderDocumentForViewport(opened, 80).terminal.cellBuffer.rows.map((row) => row.text).join("\n"), /Secret text/u);
+    await waitUntil(runtime, () => renderFramePlain(runtime.frame()).includes("Secret text"));
+    assert.match(renderFramePlain(runtime.frame()), /Secret text/u);
   } finally {
     await runtime.dispose();
     await prepared.controller.close();
@@ -290,6 +417,7 @@ test("find and scrolling preserve layout-fragment and document-node identities",
       kind: "findAction",
       transition: { kind: "edit", operation: { kind: "insert", text: "alpha" } }
     });
+    await waitUntil(runtime, () => runtime.state().documents[0].search?.query === "alpha");
     const search = runtime.state().documents[0].search;
     assert.ok(search?.matches.length > 1);
     assert.ok(search.matches.every((match) => match.sources.every((source) => source !== null)));
@@ -310,18 +438,21 @@ test("interactive find keeps one logical match while resize reprojects its highl
       kind: "findAction",
       transition: { kind: "edit", operation: { kind: "insert", text: query } }
     });
+    await waitUntil(runtime, () => runtime.state().documents[0].search?.query === query
+      && runtime.state().documents[0].rendering.viewport?.search?.query === query);
     const narrowDocument = runtime.state().documents[0];
     const narrowSearch = narrowDocument.search;
     assert.equal(narrowSearch?.matches.length, 1);
     const matchId = narrowSearch.matches[0].id;
-    const narrowSearchResult = renderDocumentForViewport(narrowDocument, 23, 16).terminal.search(query);
+    const narrowSearchResult = narrowDocument.rendering.viewport.search;
     assert.equal(narrowSearchResult.matches[0]?.id, matchId);
     assert.ok(new Set(narrowSearchResult.matches[0].ranges.map((range) => range.row)).size > 1);
 
     await runtime.resize({ columns: 80, rows: 24 });
+    await waitUntil(runtime, () => runtime.state().documents[0].rendering.viewport?.cellBuffer.columns === 79);
     const wideDocument = runtime.state().documents[0];
     assert.equal(wideDocument.search?.matches[0]?.id, matchId);
-    const wideSearchResult = renderDocumentForViewport(wideDocument, 79, 20).terminal.search(query);
+    const wideSearchResult = wideDocument.rendering.viewport.search;
     assert.equal(wideSearchResult.matches[0]?.id, matchId);
     assert.equal(new Set(wideSearchResult.matches[0].ranges.map((range) => range.row)).size, 1);
   } finally {
@@ -378,7 +509,7 @@ test("terminal-ui form controls update document state and submit through semanti
     const query = form.controls.find((control) => control.name === "q");
     const language = form.controls.find((control) => control.name === "lang");
     const submit = form.controls.find((control) => control.kind === "submit");
-    assert.ok(renderDocumentForViewport(initial, 80).terminal.focusMap.targets.some((target) => target.node === query.node));
+    assert.ok(initial.rendering.summary.focusOrder.some((target) => target.node === query.node));
     await runtime.dispatch({
       kind: "formText",
       controlId: query.node,
@@ -432,7 +563,7 @@ test("standalone controls use the same terminal-ui editing path without inventin
     const control = initial.snapshot.document.controls[0];
     assert.ok(control);
     assert.equal(control.form, null);
-    assert.ok(renderDocumentForViewport(initial, 80).terminal.focusMap.targets.some((target) => target.node === control.node));
+    assert.ok(initial.rendering.summary.focusOrder.some((target) => target.node === control.node));
     await runtime.dispatch({
       kind: "formText",
       controlId: control.node,
@@ -476,7 +607,7 @@ test("ordinary buttons use the native terminal control path without debug prose"
 });
 
 test("rendering truncation takes precedence over a stale navigation success status", async () => {
-  const rules = Array.from({ length: 4_097 }, () => "p { color:red }").join("\n");
+  const rules = Array.from({ length: 4_097 }, (_, index) => `.selector-${index} { color:red }`).join("\n");
   const incompleteLoader = async (requestUrl) => response(
     requestUrl,
     `<title>Incomplete</title><style>${rules}</style><main><p>Visible text</p></main>`
@@ -537,11 +668,252 @@ test("one-shot output and the interactive view consume the same cell-buffer rows
   assert.match(output, /Second page/u);
   const { runtime, prepared } = await preparedFixture({ terminalSize: { columns: 80, rows: 24 } });
   try {
-    const terminalRender = renderDocumentForViewport(runtime.state().documents[0], 79).terminal;
+    const terminalRender = runtime.state().documents[0].rendering.viewport;
     assert.ok(terminalRender.cellBuffer.rows.some((row) => row.text.includes("Index")));
     assert.match(renderFramePlain(runtime.frame()), /Index/u);
   } finally {
     await runtime.dispose();
     await prepared.controller.close();
   }
+});
+
+test("browser-global actions and completions are independent of selected placeholder readiness", async () => {
+  const { runtime, prepared } = await preparedFixture();
+  try {
+    const ready = runtime.state().documents[0];
+    for (const kind of ["restoring", "loading", "failed"]) {
+      const placeholder = { ...prepared.controller.placeholder("https://example.test/pending"), kind };
+      const state = { ...runtime.state(), documents: [ready, placeholder], activeDocumentIndex: 1 };
+      const focus = updateBrowser(prepared.controller, state, { kind: "focusOmnibox" });
+      assert.equal(focus.focus?.elementId, "browser-omnibox", kind);
+      const edited = updateBrowser(prepared.controller, focus.state, {
+        kind: "omniboxTransition", transition: { kind: "setValue", value: "https://example.test/next" },
+      });
+      assert.equal(edited.state.omnibox.editor.input.text, "https://example.test/next", kind);
+      const submitted = updateBrowser(prepared.controller, edited.state, {
+        kind: "omniboxSubmit", value: "https://example.test/next",
+      });
+      assert.equal(submitted.state.documents[1].requestedUrl, "https://example.test/next", kind);
+      const opened = updateBrowser(prepared.controller, state, { kind: "newDocument" });
+      assert.equal(opened.state.documents.length, 3, kind);
+      assert.equal(updateBrowser(prepared.controller, state, { kind: "quit" }).exit.reason, "quit");
+      const payload = { ...ready.rendering.viewport, viewportRevision: ready.rendering.requestedViewportRevision + 1 };
+      const rendering = { ...ready, rendering: { ...ready.rendering, status: "rendering", requestedViewportRevision: payload.viewportRevision } };
+      const completed = updateBrowser(prepared.controller, { ...state, documents: [rendering, placeholder] }, { kind: "viewportReady", payload });
+      assert.equal(completed.state.documents[0].rendering.status, "ready", kind);
+      assert.equal(completed.state.documents[0].rendering.viewport, payload);
+      const library = updateBrowser(prepared.controller, state, { kind: "downloadsChanged", downloads: [], status: "done" });
+      assert.equal(library.state.status.text, "done", kind);
+    }
+  } finally {
+    await runtime.dispose();
+    await prepared.controller.close();
+  }
+});
+
+test("rapid placeholder selection keeps a total bound on restoration loads", async () => {
+  const { runtime, prepared } = await preparedFixture();
+  try {
+    let state = { ...runtime.state(), documents: Array.from({ length: 50 }, (_, index) =>
+      prepared.controller.placeholder(`https://example.test/${index}`)), activeDocumentIndex: 0 };
+    for (let index = 0; index < 50; index += 1) {
+      state = updateBrowser(prepared.controller, state, { kind: "selectDocument", index }).state;
+      assert.ok(prepared.controller.restorationMetrics().live <= 3, `selection ${index}`);
+    }
+  } finally {
+    await runtime.dispose();
+    await prepared.controller.close();
+  }
+});
+
+async function settleViewportEffects(controller, state, context) {
+  let update = updateBrowser(controller, state, { kind: "requestActiveViewport" }, context);
+  for (let iteration = 0; iteration < 12; iteration += 1) {
+    const effects = (update.effects ?? []).filter((effect) => /^(render|search):/u.test(effect.id));
+    if (effects.length === 0) return update.state;
+    let next;
+    for (const effect of effects) {
+      const completion = await effect.run({ signal: new globalThis.AbortController().signal });
+      assert.equal(completion.kind, "message");
+      next = updateBrowser(controller, update.state, completion.message, context);
+      update = next;
+    }
+  }
+  assert.fail("viewport effects did not converge");
+}
+
+test("late logical search matches refresh anchors on resize before next-match navigation", async () => {
+  const { runtime, prepared } = await preparedFixture();
+  try {
+    const wide = { terminalSize: { columns: 100, rows: 28 } };
+    let state = { ...runtime.state(), findBar: { input: { text: "Paragraph", cursor: 9 } } };
+    state = await settleViewportEffects(prepared.controller, state, wide);
+    const document = state.documents[0];
+    assert.ok(document.search.matches.length >= 29);
+    const previous = document.search;
+    const late = { ...document, search: { ...previous, activeMatchIndex: 27 } };
+    const narrow = { terminalSize: { columns: 18, rows: 28 } };
+    const resized = updateBrowser(prepared.controller, { ...state, documents: [late] }, { kind: "terminalResized" }, narrow);
+    assert.equal(resized.state.documents[0].search.anchors.size, 0);
+    const next = updateBrowser(prepared.controller, resized.state, { kind: "moveSearch", direction: "next" }, narrow);
+    assert.equal(next.state.documents[0].search.activeMatchIndex, 28);
+    state = await settleViewportEffects(prepared.controller, { ...next.state, documents: next.state.documents.map((tab) => ({
+      ...tab, rendering: { ...tab.rendering, requestKey: null },
+    })) }, narrow);
+    const updated = state.documents[0].search;
+    assert.deepEqual(updated.matches.map((match) => match.id), previous.matches.map((match) => match.id));
+    assert.equal(updated.layoutRevision, state.documents[0].rendering.viewport.layoutRevision);
+    assert.notEqual(updated.anchors.get(updated.matches[28].id), previous.anchors.get(previous.matches[28].id));
+    assert.equal(updated.activeMatchIndex, 28);
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});
+
+test("search completion requires document, state, query, generation, and layout identities", async () => {
+  const { runtime, prepared } = await preparedFixture();
+  try {
+    const original = runtime.state().documents[0];
+    const document = { ...original, stateRevision: 2, rendering: { ...original.rendering,
+      searchRequestGeneration: 2, pendingSearch: { query: "alpha", requestGeneration: 2, stateRevision: 2 } } };
+    const state = { ...runtime.state(), findBar: { input: { text: "alpha", cursor: 5 } }, documents: [document] };
+    const completion = { kind: "searchReady", documentId: document.id, documentRevision: document.documentRevision,
+      stateRevision: 2, requestGeneration: 2, layoutRevision: document.rendering.viewport.layoutRevision,
+      query: "alpha", matches: [{ id: "logical", sources: [] }], anchors: [["logical", 3]], truncated: false };
+    for (const invalid of [{ stateRevision: 1 }, { requestGeneration: 1 }, { query: "older" }, { documentRevision: 0 }, { layoutRevision: "older" }]) {
+      const ignored = updateBrowser(prepared.controller, state, { ...completion, ...invalid });
+      assert.equal(ignored.state.documents[0].search, null);
+    }
+    const closed = updateBrowser(prepared.controller, state, { kind: "closeFind" });
+    assert.equal(closed.state.documents[0].rendering.pendingSearch, null);
+    assert.ok(closed.state.documents[0].rendering.searchRequestGeneration > completion.requestGeneration);
+    const obsolete = updateBrowser(prepared.controller, closed.state, completion);
+    assert.equal(obsolete.state.documents[0].search, null);
+    const placeholder = prepared.controller.placeholder("https://example.test/pending");
+    const routed = updateBrowser(prepared.controller, { ...state, documents: [document, placeholder], activeDocumentIndex: 1 }, completion);
+    assert.equal(routed.state.documents[0].search.matches[0].id, "logical");
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});
+
+test("unresolved initial navigation can be replaced through the omnibox", async () => {
+  const initial = deferred();
+  const started = deferred();
+  const { runtime, prepared } = await preparedFixture({ waitForRender: false,
+    loader: (url) => {
+      if (url.endsWith("/next")) return Promise.resolve(response(url, "<title>Replacement</title><p>replacement page</p>"));
+      started.resolve();
+      return initial.promise;
+    } });
+  try {
+    await started.promise;
+    await runtime.dispatch({ kind: "focusOmnibox" });
+    await runtime.dispatch({ kind: "omniboxTransition", transition: { kind: "setValue", value: "https://example.test/next" } });
+    await runtime.dispatch({ kind: "omniboxSubmit", value: "https://example.test/next" });
+    await waitUntil(runtime, () => runtime.state().documents[0]?.rendering?.status === "ready");
+    assert.equal(runtime.state().documents[0].snapshot.finalUrl, "https://example.test/next");
+    initial.resolve(response("https://example.test/", "<p>obsolete initial page</p>"));
+  } finally { initial.resolve(response("https://example.test/", "<p>cleanup</p>")); await runtime.dispose(); await prepared.controller.close(); }
+});
+
+test("failed initial navigation permits help, retry, and a new navigable tab", async () => {
+  let attempts = 0;
+  const { runtime, prepared } = await preparedFixture({ waitForRender: false, loader: (url) => {
+    attempts += 1;
+    return attempts === 1 ? Promise.reject(new Error("initial failure")) : Promise.resolve(response(url, "<p>recovered</p>"));
+  } });
+  try {
+    await waitUntil(runtime, () => runtime.state().documents[0].kind === "failed");
+    await runtime.dispatch({ kind: "openActionPalette" });
+    await runtime.dispatch({ kind: "actionPaletteSubmit", value: "help" });
+    assert.equal(runtime.state().overlay?.detailKind, "help");
+    await runtime.dispatch({ kind: "dismiss" });
+    await runtime.dispatch({ kind: "navigate", operation: "reload" });
+    await waitUntil(runtime, () => runtime.state().documents[0]?.rendering?.status === "ready");
+    await runtime.dispatch({ kind: "newDocument", target: "https://example.test/new" });
+    await waitUntil(runtime, () => runtime.state().documents[1]?.rendering?.status === "ready");
+    assert.equal(runtime.state().documents[1].snapshot.finalUrl, "https://example.test/new");
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});
+
+test("navigation completion routes to ready A while placeholder B owns selection", async () => {
+  const navigation = deferred();
+  const background = deferred();
+  const { runtime, prepared } = await preparedFixture({ loader: (url) => url.endsWith("/next") ? navigation.promise
+    : url.endsWith("/pending") ? background.promise : loader(url) });
+  try {
+    await runtime.dispatch({ kind: "omniboxSubmit", value: "https://example.test/next" });
+    await runtime.dispatch({ kind: "newDocument", target: "https://example.test/pending" });
+    assert.equal(runtime.state().activeDocumentIndex, 1);
+    navigation.resolve(response("https://example.test/next", "<p>completed in inactive A</p>"));
+    await waitUntil(runtime, () => runtime.state().documents[0].snapshot.finalUrl.endsWith("/next"));
+    assert.equal(runtime.state().documents[1].kind, "loading");
+    await runtime.dispatch({ kind: "selectDocument", index: 0 });
+    await waitUntil(runtime, () => runtime.state().documents[0]?.rendering?.status === "ready");
+  } finally {
+    navigation.resolve(response("https://example.test/next", "<p>cleanup</p>"));
+    background.resolve(response("https://example.test/pending", "<p>cleanup</p>"));
+    await runtime.dispose(); await prepared.controller.close();
+  }
+});
+
+
+test("obsolete navigation failures cannot stop a replacement navigation", async () => {
+  const failed = deferred();
+  const { runtime, prepared } = await preparedFixture({ loader: (url) => url.endsWith("/failed") ? failed.promise : loader(url) });
+  try {
+    const first = updateBrowser(prepared.controller, runtime.state(), { kind: "omniboxSubmit", value: "https://example.test/failed" });
+    const effect = first.effects.find((entry) => entry.id.startsWith("navigation:"));
+    const pending = effect.run({ signal: new globalThis.AbortController().signal });
+    const second = updateBrowser(prepared.controller, first.state, { kind: "omniboxSubmit", value: "https://example.test/next" });
+    failed.reject(new Error("obsolete failure"));
+    const completion = await pending;
+    assert.equal(completion.message.kind, "navigationFailed");
+    const ignored = updateBrowser(prepared.controller, second.state, completion.message);
+    assert.equal(ignored.state.documents[0].loading, true);
+    assert.equal(ignored.state.documents[0].pendingUrl, "https://example.test/next");
+    assert.equal(ignored.state.documents[0].error, null);
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});
+
+
+test("control text changes and closing then reopening the same query reject pending logical search", async () => {
+  const { runtime, prepared } = await preparedFixture();
+  const pending = deferred();
+  const update = (state, message) => updateBrowser(prepared.controller, state, message, { terminalSize: { columns: 100, rows: 29 } });
+  try {
+    const document = runtime.state().documents[0];
+    const control = document.snapshot.document.controls.find((entry) => entry.name === "q");
+    prepared.controller.searchDocument = () => pending.promise;
+    const opened = update({ ...runtime.state(), findBar: { input: { text: "alpha", cursor: 5 } } }, { kind: "requestActiveViewport" });
+    const searchEffect = opened.effects.find((entry) => entry.id.startsWith("search:"));
+    const completion = searchEffect.run({ signal: new globalThis.AbortController().signal });
+    const changed = update(opened.state, { kind: "formText", controlId: control.node,
+      transition: { kind: "edit", operation: { kind: "insert", text: "replacement" } } });
+    assert.ok(changed.state.documents[0].stateRevision > document.stateRevision);
+    pending.resolve({ documentRevision: document.documentRevision, stateRevision: document.stateRevision,
+      requestGeneration: opened.state.documents[0].rendering.searchRequestGeneration,
+      layoutRevision: document.rendering.viewport.layoutRevision, query: "alpha", matches: [{ id: "old", sources: [] }], anchors: [["old", 0]], truncated: false });
+    const delivered = await completion;
+    assert.equal(update(changed.state, delivered.message).state.documents[0].search, null);
+    const closed = update(opened.state, { kind: "closeFind" });
+    const reopened = update({ ...closed.state, findBar: { input: { text: "alpha", cursor: 5 } } }, { kind: "requestActiveViewport" });
+    assert.ok(reopened.state.documents[0].rendering.searchRequestGeneration > opened.state.documents[0].rendering.searchRequestGeneration);
+    assert.equal(update(reopened.state, delivered.message).state.documents[0].search, null);
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});
+
+
+test("restoration completion preserves an omnibox edit made during loading", async () => {
+  const navigation = deferred();
+  const started = deferred();
+  const { runtime, prepared } = await preparedFixture({ waitForRender: false, loader: () => {
+    started.resolve(); return navigation.promise;
+  } });
+  try {
+    await started.promise;
+    await runtime.dispatch({ kind: "focusOmnibox" });
+    await runtime.dispatch({ kind: "omniboxTransition", transition: { kind: "setValue", value: "unfinished replacement" } });
+    navigation.resolve(response("https://example.test/", "<p>initial completion</p>"));
+    await waitUntil(runtime, () => runtime.state().documents[0]?.rendering?.status === "ready");
+    assert.equal(runtime.state().omnibox.editor.input.text, "unfinished replacement");
+    assert.equal(runtime.state().omniboxDirty, true);
+  } finally { navigation.resolve(response("https://example.test/", "<p>cleanup</p>")); await runtime.dispose(); await prepared.controller.close(); }
 });

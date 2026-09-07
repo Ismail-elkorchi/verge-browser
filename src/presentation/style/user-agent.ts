@@ -38,11 +38,6 @@ html|bdo[dir=ltr] { direction: ltr; unicode-bidi: bidi-override; }
 html|bdo[dir=rtl] { direction: rtl; unicode-bidi: bidi-override; }
 html|input[dir=auto], html|textarea[dir=auto], html|pre[dir=auto] { unicode-bidi: plaintext; }
 
-html|a:any-link:focus-visible, html|summary:focus-visible {
-  font-weight: bold;
-  text-decoration-line: underline;
-}
-
 html|li { display: list-item; }
 html|summary { display: list-item; }
 html|ol { list-style-type: decimal; }

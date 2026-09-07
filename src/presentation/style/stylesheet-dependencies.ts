@@ -13,7 +13,8 @@ import type {
   CascadeLayerPath,
   StylesheetDependencyInspection,
   StylesheetImportDependency,
-  StylesheetResource
+  StylesheetResource,
+  StylesheetSyntaxInstrumentation,
 } from "./types.js";
 
 function significant(values: readonly ComponentValue[]): readonly ComponentValue[] {
@@ -103,8 +104,22 @@ function countRules(items: readonly CssBlockItem[]): number {
   return count;
 }
 
+function sourceFingerprint(bytes: Uint8Array): string {
+  let high = 0xcbf29ce4;
+  let low = 0x84222325;
+  for (const byte of bytes) {
+    low ^= byte;
+    const lowProduct = low * 0x1b3;
+    const carry = Math.floor(lowProduct / 0x1_0000_0000);
+    low = lowProduct >>> 0;
+    high = (high * 0x1b3 + carry + low * 0x100) >>> 0;
+  }
+  return `${high.toString(16).padStart(8, "0")}${low.toString(16).padStart(8, "0")}`;
+}
+
 function inspectParsed(
-  parsed: ReturnType<typeof parseStylesheet> | ReturnType<typeof parseStylesheetBytes>
+  parsed: ReturnType<typeof parseStylesheet> | ReturnType<typeof parseStylesheetBytes>,
+  bytes: Uint8Array
 ): StylesheetDependencyInspection {
   if (!parsed.ok) return Object.freeze({ status: "rejected", reason: "parse" });
   const imports: StylesheetImportDependency[] = [];
@@ -127,24 +142,40 @@ function inspectParsed(
   return Object.freeze({
     status: "complete",
     imports: Object.freeze(imports),
-    parsedRules: countRules(parsed.value.rules)
+    parsedRules: countRules(parsed.value.rules),
+    syntax: parsed.value,
+    byteSize: bytes.byteLength,
+    contentFingerprint: sourceFingerprint(bytes),
+    parserDiagnostics: Object.freeze(parsed.errors.map((error) => error.message))
   });
 }
 
 /** Style-owned syntax inspection used by the application-owned dependency fetcher. */
 export function inspectStylesheetText(
   css: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  instrumentation?: StylesheetSyntaxInstrumentation,
 ): StylesheetDependencyInspection {
-  return inspectParsed(parseStylesheet(css, { ...(signal === undefined ? {} : { signal }) }));
+  const bytes = new TextEncoder().encode(css);
+  const started = instrumentation === undefined ? 0 : performance.now();
+  try {
+    return inspectParsed(
+      parseStylesheet(css, { ...(signal === undefined ? {} : { signal }) }),
+      bytes
+    );
+  } finally {
+    instrumentation?.record("stylesheet-syntax-parsing", performance.now() - started);
+  }
 }
 
 /** Style-owned CSS decoding and syntax inspection for fetched stylesheet bytes. */
 export function inspectStylesheetBytes(
   bytes: Uint8Array,
   transportEncodingLabel: string | null,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  instrumentation?: StylesheetSyntaxInstrumentation,
 ): StylesheetDependencyInspection {
+  const started = instrumentation === undefined ? 0 : performance.now();
   try {
     return inspectParsed(parseStylesheetBytes(bytes, {
       ...(transportEncodingLabel === null ? {} : { transportEncodingLabel }),
@@ -156,26 +187,28 @@ export function inspectStylesheetBytes(
         maxSteps: 2_000_000
       },
       ...(signal === undefined ? {} : { signal })
-    }));
+    }), bytes);
   } catch {
     signal?.throwIfAborted();
     return Object.freeze({ status: "rejected", reason: "encoding" });
+  } finally {
+    instrumentation?.record("stylesheet-syntax-parsing", performance.now() - started);
   }
 }
 
 /** Builds complete source records for embedded roots when no resource loader is involved. */
 export function embeddedStylesheetSources(
   document: IndexedWebDocumentSnapshot,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  instrumentation?: StylesheetSyntaxInstrumentation,
 ): readonly StylesheetResource[] {
-  const encoder = new TextEncoder();
   const resources: StylesheetResource[] = [];
   let dependencyOrder = 0;
   for (const reference of document.stylesheets) {
     signal?.throwIfAborted();
     if (reference.kind !== "embedded") continue;
     const sourceUrl = `${document.finalUrl}#style-${String(reference.order)}`;
-    const inspection = inspectStylesheetText(reference.cssText, signal);
+    const inspection = inspectStylesheetText(reference.cssText, signal, instrumentation);
     if (inspection.status !== "complete") continue;
     resources.push(Object.freeze({
       sourceKind: "embedded",
@@ -183,8 +216,10 @@ export function embeddedStylesheetSources(
       requestUrl: sourceUrl,
       finalUrl: sourceUrl,
       contentType: "text/css",
-      bytes: encoder.encode(reference.cssText),
-      transportEncodingLabel: "utf-8",
+      syntax: inspection.syntax,
+      byteSize: inspection.byteSize,
+      contentFingerprint: inspection.contentFingerprint,
+      parserDiagnostics: inspection.parserDiagnostics,
       rootOrder: reference.order,
       dependencyOrder: dependencyOrder++,
       importDepth: 0,
