@@ -1,14 +1,11 @@
+import { controlValues, controlOptions, textEditor, numberEditor, areaEditor, selectEditor, multiSelectEditor } from "./form-editors.js";
 import {
   commandInputView,
   contextMenuView,
-  createNumberInputConfiguration,
-  createScrollState,
-  createTextAreaState,
   menuTriggerView,
   numberInputView,
   radioGroupReducer,
-  searchPickerView,
-  textInputState
+  searchPickerView
 } from "@ismail-elkorchi/terminal-ui/behavior";
 import {
   button,
@@ -64,6 +61,8 @@ import type {
 } from "../presentation/terminal/index.js";
 import { documentActionId } from "../presentation/formatting/index.js";
 import {
+  BROWSER_SIDE_PANEL_COLUMNS,
+  BROWSER_SIDE_PANEL_MIN_COLUMNS,
   committedDocumentScrollRow,
   documentContentBounds
 } from "./document-layout.js";
@@ -84,7 +83,6 @@ import { terminalCellMeasurer } from "./terminal-measure.js";
 const TERMINAL_CELL_MEASURER = terminalCellMeasurer();
 
 interface BrowserDocumentComponentModel {
-  readonly id: string;
   readonly source: BrowserDocumentState;
   readonly terminalRender: BrowserViewportTerminal;
   readonly finalUrl: string;
@@ -95,7 +93,6 @@ interface BrowserDocumentComponentModel {
     readonly end: number;
   }[]>;
   readonly controlGroups: readonly BrowserControlGroup[];
-  readonly formEditors: BrowserDocumentState["formEditors"];
 }
 
 interface BrowserViewportTerminal {
@@ -134,14 +131,8 @@ const browserControlSlots = {
 
 const browserControlComponent = defineComponent<
   BrowserControlComponentOptions,
-  BrowserControlComponentOptions,
-  Extract<BrowserTuiMessage, { readonly kind: "focusDocumentNode" }>,
-  never,
-  readonly [],
-  "required",
-  readonly [],
-  typeof browserControlSlots
->({
+  Extract<BrowserTuiMessage, { readonly kind: "focusDocumentNode" }>
+>()({
   name: "verge-browser/components/labelled-control",
   identity: "required",
   structure: "composite",
@@ -353,7 +344,7 @@ function documentNodeForTerminalFocusTarget(
   if (directControl !== null) return directControl.node;
   for (const group of document.controlGroups) {
     if (radioGroupElementId(group) !== targetId) continue;
-    return group.controls.find((control) => formControlValues(document, control).length > 0)?.node
+    return group.controls.find((control) => controlValues(document.source, control).length > 0)?.node
       ?? group.controls[0]?.node
       ?? null;
   }
@@ -361,26 +352,6 @@ function documentNodeForTerminalFocusTarget(
     (candidate) => documentActionId(candidate.action) === targetId
   );
   return action?.node ?? null;
-}
-
-function formControlValues(document: BrowserDocumentComponentModel, control: DocumentFormControl): readonly string[] {
-  const explicit = document.source.documentState.controls.get(control.node)?.values;
-  if (explicit !== undefined) return explicit;
-  if (control.kind === "hidden" || control.kind === "text" || control.kind === "textarea") return [control.defaultValue];
-  if ((control.kind === "checkbox" || control.kind === "radio") && control.defaultChecked) return [control.value];
-  if (control.kind === "select") return control.options.filter((option) => option.defaultSelected).map((option) => option.value);
-  return [];
-}
-
-function formControlSelections(
-  document: BrowserDocumentComponentModel,
-  control: Extract<DocumentFormControl, { readonly kind: "select" }>
-): ReadonlySet<DocumentNodeRef> {
-  const explicit = document.source.documentState.controls.get(control.node)?.selected;
-  if (explicit !== undefined) return new Set(explicit);
-  const defaults = control.options.filter((option) => option.defaultSelected);
-  const effective = control.multiple ? defaults : [defaults.at(-1) ?? control.options[0]];
-  return new Set(effective.flatMap((option) => option === undefined ? [] : [option.node]));
 }
 
 function radioAction(
@@ -424,100 +395,62 @@ function inlineFormControl(
   control: DocumentFormControl,
   formId: DocumentNodeRef | null
 ): Element<BrowserTuiMessage> | null {
-  const values = formControlValues(document, control);
+  const values = controlValues(document.source, control);
   if (control.kind === "hidden") return null;
   if (control.kind === "unsupported") {
     return text({ content: `${control.label}: ${control.reason}`, id: `${control.node}:unsupported` });
   }
   if (control.kind === "text") {
-    const editor = document.formEditors[control.node];
-    const value = values[0] ?? "";
     if (control.inputType === "number") {
-      const numberEditor = editor?.kind === "number"
-        ? editor.state
-        : {
-          input: { text: value, cursor: value.length },
-          configuration: createNumberInputConfiguration({
-            ...(control.min === null ? {} : { min: control.min }),
-            ...(control.max === null ? {} : { max: control.max }),
-            ...(control.step === null ? {} : { step: control.step })
-          })
-        };
+      const editor = numberEditor(document.source, control);
       const numberOptions = {
         id: control.node,
-        view: numberInputView(numberEditor),
+        view: numberInputView(editor),
         ...(control.placeholder === null ? {} : { placeholder: control.placeholder }),
         required: control.required
       };
-      const input = control.disabled
-        ? numberInput({ ...numberOptions, disabled: true })
-        : numberInput({
-          ...numberOptions,
-          readOnly: control.readOnly,
-          onTransition: (transition): BrowserTuiMessage => ({
-            kind: "formNumber",
-            controlId: control.node,
-            transition
-          })
-        });
+      const input = numberInput({
+        ...numberOptions,
+        disabled: control.disabled,
+        readOnly: control.readOnly,
+        onTransition: (transition): BrowserTuiMessage => ({
+          kind: "formNumber",
+          controlId: control.node,
+          transition
+        })
+      });
       return input;
     }
-    const inputState = editor?.kind === "text"
-      ? textInputState(editor.state)
-      : { value, cursor: value.length };
+    const inputState = textEditor(document.source, control);
     const inputOptions = {
       id: control.node,
       state: inputState,
       ...(control.placeholder === null ? {} : { placeholder: control.placeholder }),
       required: control.required
     };
-    const input = control.inputType === "password"
-      ? control.disabled
-        ? passwordInput({ ...inputOptions, disabled: true })
-        : passwordInput({
-          ...inputOptions,
-          readOnly: control.readOnly,
-          onTransition: (transition): BrowserTuiMessage => ({
-            kind: "formText",
-            controlId: control.node,
-            transition
-          })
-        })
-      : control.disabled
-        ? textInput({ ...inputOptions, disabled: true })
-        : textInput({
-          ...inputOptions,
-          readOnly: control.readOnly,
-          onTransition: (transition): BrowserTuiMessage => ({
-            kind: "formText",
-            controlId: control.node,
-            transition
-          })
-        });
+    const input = (control.inputType === "password" ? passwordInput : textInput)({
+      ...inputOptions,
+      disabled: control.disabled,
+      readOnly: control.readOnly,
+      onTransition: (transition): BrowserTuiMessage => ({ kind: "formText", controlId: control.node, transition })
+    });
     return input;
   }
   if (control.kind === "textarea") {
-    const editor = document.formEditors[control.node];
-    const areaState = editor?.kind === "textarea"
-      ? editor.state
-      : createTextAreaState({
-        value: values[0] ?? "",
-        scroll: createScrollState()
-      });
+    const areaState = areaEditor(document.source, control);
     const areaOptions = {
       id: control.node,
       state: areaState,
       wrap: true
     };
-    const area = control.disabled
-      ? textArea({ ...areaOptions, disabled: true })
-      : textArea({
-        ...areaOptions,
-        readOnly: control.readOnly,
-        onTransition: (
-          transition: Extract<BrowserTuiMessage, { readonly kind: "formArea" }>["transition"]
-        ): BrowserTuiMessage => ({ kind: "formArea", controlId: control.node, transition })
-      });
+    const area = textArea({
+      ...areaOptions,
+      disabled: control.disabled,
+      readOnly: control.readOnly,
+      onTransition: (
+        transition: Extract<BrowserTuiMessage, { readonly kind: "formArea" }>["transition"]
+      ): BrowserTuiMessage => ({ kind: "formArea", controlId: control.node, transition })
+    });
     return area;
   }
   if (control.kind === "checkbox") {
@@ -527,139 +460,90 @@ function inlineFormControl(
       checked: values.includes(control.value),
       required: control.required
     };
-    return control.disabled
-      ? checkbox({ ...checkboxOptions, disabled: true })
-      : checkbox({
-        ...checkboxOptions,
-        onTransition: (transition): BrowserTuiMessage => ({
-          kind: "formValues",
-          controlId: control.node,
-          values: transition.checked ? [control.value] : []
-        })
-      });
+    return checkbox({
+      ...checkboxOptions,
+      disabled: control.disabled,
+      onTransition: (transition): BrowserTuiMessage => ({
+        kind: "formValues",
+        controlId: control.node,
+        values: transition.checked ? [control.value] : []
+      })
+    });
   }
   if (control.kind === "select") {
-    const selectedNodes = formControlSelections(document, control);
     if (control.multiple) {
-      const selectedIds = control.options.flatMap((option, index) =>
-        selectedNodes.has(option.node) ? [`${control.node}:${String(index)}`] : []
-      );
-      const editor = document.formEditors[control.node];
       const groupOptions = {
         id: control.node,
         label: control.label,
-        options: control.options.map((option, index) => ({
-          id: `${control.node}:${String(index)}`,
-          label: option.label,
-          value: option.value,
-          disabled: option.disabled
-        })),
-        state: editor?.kind === "checkboxGroup"
-          ? editor.state
-          : {
-            ...(selectedIds[0] === undefined ? {} : { activeId: selectedIds[0] }),
-            selection: { mode: "multiple" as const, selectedIds }
-          },
+        options: controlOptions(control),
+        state: multiSelectEditor(document.source, control),
         required: control.required
       };
-      return control.disabled
-        ? checkboxGroup({ ...groupOptions, disabled: true })
-        : checkboxGroup({
-          ...groupOptions,
-          onTransition: (transition): BrowserTuiMessage => multiChoiceAction(control, transition)
-        });
+      return checkboxGroup({
+        ...groupOptions,
+        disabled: control.disabled,
+        onTransition: (transition): BrowserTuiMessage => multiChoiceAction(control, transition)
+      });
     }
-    const selectedIndex = control.options.findIndex((option) => selectedNodes.has(option.node));
-    const editor = document.formEditors[control.node];
-    const selectedId = selectedIndex < 0 ? undefined : `${control.node}:${String(selectedIndex)}`;
-    const closedState = {
-      kind: "select" as const,
-      open: false as const,
-      interaction: {
-        ...(selectedId === undefined ? {} : { activeId: selectedId }),
-        selection: {
-          mode: "single" as const,
-          ...(selectedId === undefined ? {} : { selectedId })
-        }
-      }
-    };
+    const editor = selectEditor(document.source, control);
     const selectOptions = {
       id: control.node,
       label: control.label,
-      options: control.options.map((option, index) => ({
-        id: `${control.node}:${String(index)}`,
-        label: option.label,
-        value: option.value,
-        disabled: option.disabled
-      })),
+      options: controlOptions(control),
       required: control.required,
       maxVisibleOptions: formComboboxPageSize
     };
-    return control.disabled
-      ? combobox({
-        ...selectOptions,
-        state: closedState,
-        disabled: true
+    return combobox({
+      disabled: control.disabled,
+      ...selectOptions,
+      state: editor.state,
+      onTransition: (transition): BrowserTuiMessage => ({
+        kind: "formComboboxTransition",
+        controlId: control.node,
+        transition
+      }),
+      onCommit: (event): BrowserTuiMessage => ({
+        kind: "formComboboxCommit",
+        controlId: control.node,
+        event
       })
-      : combobox({
-        ...selectOptions,
-        state: editor?.kind === "combobox" ? editor.state : closedState,
-        onTransition: (transition): BrowserTuiMessage => ({
-          kind: "formComboboxTransition",
-          controlId: control.node,
-          transition
-        }),
-        onCommit: (event): BrowserTuiMessage => ({
-          kind: "formComboboxCommit",
-          controlId: control.node,
-          event
-        })
-      });
+    });
   }
   if (control.kind === "submit") {
-    const buttonOptions = {
+    return button({
       id: control.node,
       label: control.label || control.value || "Submit",
-      tone: "primary" as const
-    };
-    return control.disabled || formId === null
-      ? button({ ...buttonOptions, disabled: true })
-      : button({
-        ...buttonOptions,
-        onPress: buttonAction({
-          kind: "submitForm",
-          formId,
-          submitterId: control.node
-        })
-      });
+      tone: "primary",
+      disabled: control.disabled || formId === null,
+      onPress: () => formId === null ? ignoreMessage() : ({
+        kind: "submitForm",
+        formId,
+        submitterId: control.node
+      })
+    });
   }
   if (control.kind === "reset") {
-    const buttonOptions = {
+    return button({
       id: control.node,
-      label: control.label || "Reset"
-    };
-    return control.disabled || formId === null
-      ? button({ ...buttonOptions, disabled: true })
-      : button({
-        ...buttonOptions,
-        onPress: buttonAction({
-          kind: "resetForm",
-          formId,
-          resetterId: control.node
-        })
-      });
+      label: control.label || "Reset",
+      disabled: control.disabled || formId === null,
+      onPress: () => formId === null ? ignoreMessage() : ({
+        kind: "resetForm",
+        formId,
+        resetterId: control.node
+      })
+    });
   }
   if (control.kind === "button") {
     const buttonOptions = {
       id: control.node,
       label: control.label || control.value || "Button"
     };
-    return control.disabled
-      ? button({ ...buttonOptions, disabled: true })
-      : button({
+    return button({
         ...buttonOptions,
-        onPress: buttonAction({ kind: "activateButton", controlId: control.node })
-      });
+      disabled: control.disabled,
+      onPress: buttonAction({ kind: "activateButton", controlId: control.node })
+    });
   }
   return null;
 }
@@ -680,7 +564,7 @@ function inlineControlGroup(
   const controls = group.controls.filter(
     (control): control is DocumentChoiceControl => control.kind === "radio"
   );
-  const selected = controls.find((candidate) => formControlValues(document, candidate).length > 0);
+  const selected = controls.find((candidate) => controlValues(document.source, candidate).length > 0);
   const id = radioGroupElementId(group);
   if (id === null) throw new Error("A radio control group requires a radio-group identity.");
   const control = radioGroup({
@@ -747,16 +631,7 @@ const browserDocumentSlots = {
   controls: { cardinality: "many", owner: "caller", messages: "bubble" }
 } as const;
 
-const browserDocumentComponent = defineComponent<
-  BrowserDocumentComponentOptions,
-  BrowserDocumentComponentOptions,
-  BrowserDocumentAction,
-  never,
-  readonly [],
-  "required",
-  readonly [],
-  typeof browserDocumentSlots
->({
+const browserDocumentComponent = defineComponent<BrowserDocumentComponentOptions, BrowserDocumentAction>()({
   name: "verge-browser/components/document",
   identity: "required",
   structure: "composite",
@@ -1023,7 +898,6 @@ function browserDocumentComponentModel(
     }
   }
   return {
-    id: document.id,
     source: document,
     terminalRender,
     finalUrl: document.snapshot.finalUrl,
@@ -1032,8 +906,7 @@ function browserDocumentComponentModel(
     controlGroups: controlGroups(terminalRender.visibleDocumentNodes.flatMap((node) => {
       const control = document.snapshot.document.control(node);
       return control === null ? [] : [control];
-    })),
-    formEditors: document.formEditors
+    }))
   };
 }
 
@@ -1223,109 +1096,88 @@ function browserToolbar(
     meta: { accessibleName: "Address and search" }
   });
   const showLibrary = columns >= 96;
-  const back = ready?.canGoBack === true
-    ? button({
-      id: "browser-back",
-      label: "←",
-      accessibleName: "Back",
-      density: "compact",
-      tone: "ghost",
-      onPress: buttonAction({ kind: "navigate", operation: "back" })
-    })
-    : button({
-      id: "browser-back",
-      label: "←",
-      accessibleName: "Back",
-      density: "compact",
-      tone: "ghost",
-      disabled: true
-    });
-  const forward = ready?.canGoForward === true
-    ? button({
-      id: "browser-forward",
-      label: "→",
-      accessibleName: "Forward",
-      density: "compact",
-      tone: "ghost",
-      onPress: buttonAction({ kind: "navigate", operation: "forward" })
-    })
-    : button({
-      id: "browser-forward",
-      label: "→",
-      accessibleName: "Forward",
-      density: "compact",
-      tone: "ghost",
-      disabled: true
-    });
+  const back = button({
+    id: "browser-back",
+    label: "←",
+    accessibleName: "Back",
+    density: "compact",
+    tone: "ghost",
+    disabled: ready?.canGoBack !== true,
+    onPress: buttonAction({ kind: "navigate", operation: "back" })
+  });
+  const forward = button({
+    id: "browser-forward",
+    label: "→",
+    accessibleName: "Forward",
+    density: "compact",
+    tone: "ghost",
+    disabled: ready?.canGoForward !== true,
+    onPress: buttonAction({ kind: "navigate", operation: "forward" })
+  });
   return surface(toolbarComponent(row([
-    back,
-    forward,
-    button({
-      id: "browser-reload",
-      label: loading ? "■" : "↻",
-      accessibleName: loading ? "Stop loading" : "Reload",
-      density: "compact",
-      tone: "ghost",
-      onPress: buttonAction({ kind: "navigate", operation: loading ? "stop" : "reload" })
-    }),
-    button({
-      id: "browser-new-tab",
-      label: "+",
-      accessibleName: "New tab",
-      density: "compact",
-      tone: "ghost",
-      onPress: buttonAction({ kind: "newDocument" })
-    }),
-    omnibox,
-    toggleButton({
-      id: "browser-bookmark",
-      label: bookmarked ? "★" : "☆",
-      accessibleName: "Bookmark current page",
-      pressed: bookmarked,
-      density: "compact",
-      tone: "ghost",
-      onTransition: () => ({ kind: "toggleBookmark" })
-    }),
-    ...(showLibrary
-      ? [button({
-          id: "browser-library",
-          label: "Library",
-          density: "compact",
-          tone: state.sidePanel === null ? "ghost" : "primary",
-          onPress: buttonAction({ kind: "toggleSidePanel", panel: "history" })
-        })]
-      : []),
-    menuTrigger({
-      id: "browser-menu",
-      items: browserMenuItems,
-      view: menuTriggerView(
-        browserMenuItems,
-        state.overlay?.kind === "browserMenu" ? state.overlay.state : { kind: "closed" }
-      ),
-      placeholder: "☰",
-      density: "compact",
-      placement: "below",
-      onTransition: (transition): BrowserTuiMessage => ({
-        kind: "browserMenuTransition",
-        transition
+    row([
+      back,
+      forward,
+      button({
+        id: "browser-reload",
+        label: loading ? "■" : "↻",
+        accessibleName: loading ? "Stop loading" : "Reload",
+        density: "compact",
+        tone: "ghost",
+        onPress: buttonAction({ kind: "navigate", operation: loading ? "stop" : "reload" })
       }),
-      onActivate: (event): BrowserTuiMessage => ({ kind: "browserMenuActivate", event }),
-      meta: { accessibleName: "Browser menu" }
-    })
+      button({
+        id: "browser-new-tab",
+        label: "+",
+        accessibleName: "New tab",
+        density: "compact",
+        tone: "ghost",
+        onPress: buttonAction({ kind: "newDocument" })
+      }),
+    ], { gap: 1, align: "center" }),
+    omnibox,
+    row([
+      toggleButton({
+        id: "browser-bookmark",
+        label: bookmarked ? "★" : "☆",
+        accessibleName: "Bookmark current page",
+        pressed: bookmarked,
+        density: "compact",
+        tone: "ghost",
+        onTransition: () => ({ kind: "toggleBookmark" })
+      }),
+      ...(showLibrary
+        ? [button({
+            id: "browser-library",
+            label: "Library",
+            density: "compact",
+            tone: state.sidePanel === null ? "ghost" : "primary",
+            onPress: buttonAction({ kind: "toggleSidePanel", panel: "history" })
+          })]
+        : []),
+      menuTrigger({
+        id: "browser-menu",
+        items: browserMenuItems,
+        view: menuTriggerView(
+          browserMenuItems,
+          state.overlay?.kind === "browserMenu" ? state.overlay.state : { kind: "closed" }
+        ),
+        placeholder: "☰",
+        density: "compact",
+        placement: "below",
+        onTransition: (transition): BrowserTuiMessage => ({
+          kind: "browserMenuTransition",
+          transition
+        }),
+        onActivate: (event): BrowserTuiMessage => ({ kind: "browserMenuActivate", event }),
+        meta: { accessibleName: "Browser menu" }
+      })
+    ], { gap: 1, align: "center" })
   ], {
     id: "browser-toolbar-layout",
     gap: 1,
     align: "center",
-    sizes: [
-      { kind: "content" },
-      { kind: "content" },
-      { kind: "content" },
-      { kind: "content" },
-      { kind: "fill" },
-      { kind: "content" },
-      ...(showLibrary ? [{ kind: "content" as const }] : []),
-      { kind: "content" }
-    ]
+    sizes: [{ kind: "content" }, { kind: "fill" }, { kind: "content" }]
   }), {
     id: "browser-toolbar",
     label: "Browser navigation"
@@ -1343,10 +1195,9 @@ function findBar(state: BrowserTuiState): Element<BrowserTuiMessage> | null {
   return row([
     textInput({
       id: "browser-find-input",
-      state: textInputState(state.findBar.input),
+      state: state.findBar.input,
       placeholder: "Find in page",
       onTransition: (transition): BrowserTuiMessage => ({ kind: "findAction", transition }),
-      onSubmit: (): BrowserTuiMessage => ({ kind: "findSubmit" }),
       meta: { accessibleName: "Find in page" }
     }),
     text({
@@ -1423,25 +1274,23 @@ function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMe
         ]), { appearance: "neutral" })
       : browserDocument(ready, terminalRender);
   const body = state.sidePanel !== null
-    ? columns >= 100
+    ? columns >= BROWSER_SIDE_PANEL_MIN_COLUMNS
       ? splitPane([pagePanel, sidePanel(state)], {
         id: "browser-content-with-panel",
         direction: "horizontal",
         gap: 1,
-        sizes: [{ kind: "fill" }, { kind: "fixed", cells: 40 }]
+        sizes: [{ kind: "fill" }, { kind: "fixed", cells: BROWSER_SIDE_PANEL_COLUMNS }]
       })
       : sidePanel(state)
     : pagePanel;
   const find = findBar(state);
   const selectedPanel = column([
-    browserToolbar(state, selected, columns),
-    ...(find === null ? [] : [find]),
+    column([browserToolbar(state, selected, columns), ...(find === null ? [] : [find])]),
     body
   ], {
     id: "browser-selected-tab",
     sizes: [
-      { kind: "fixed", cells: 1 },
-      ...(find === null ? [] : [{ kind: "fixed" as const, cells: 1 }]),
+      { kind: "content" },
       { kind: "fill" }
     ]
   });

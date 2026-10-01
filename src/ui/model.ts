@@ -317,7 +317,6 @@ export type BrowserTuiMessage =
   | { readonly kind: "pickerSelect"; readonly value?: PickerValue }
   | { readonly kind: "openFind" }
   | { readonly kind: "findAction"; readonly transition: TextInputTransition }
-  | { readonly kind: "findSubmit" }
   | { readonly kind: "closeFind" }
   | { readonly kind: "formText"; readonly controlId: string; readonly transition: TextInputTransition }
   | { readonly kind: "formNumber"; readonly controlId: string; readonly transition: NumberInputControlTransition }

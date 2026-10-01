@@ -917,3 +917,74 @@ test("restoration completion preserves an omnibox edit made during loading", asy
     assert.equal(runtime.state().omniboxDirty, true);
   } finally { navigation.resolve(response("https://example.test/", "<p>cleanup</p>")); await runtime.dispose(); await prepared.controller.close(); }
 });
+
+test("HTML editors share initialization, retain edits, and reset to document defaults", async () => {
+  const { runtime, prepared } = await preparedFixture({ loader: async (url) => response(url, `<title>Editors</title>
+    <form><input name="quantity" type="number" value="2" min="0" max="8" step="2">
+    <textarea name="notes">initial</textarea>
+    <select name="choice"><option value="same">First</option><option value="same" selected>Second</option></select>
+    <select name="many" multiple><option value="a" selected>A</option><option value="b">B</option></select>
+    <button type="reset">Reset</button></form>`) });
+  try {
+    const initial = runtime.state().documents[0];
+    const form = initial.snapshot.document.forms[0];
+    const quantity = form.controls.find((control) => control.name === "quantity");
+    const notes = form.controls.find((control) => control.name === "notes");
+    const choice = form.controls.find((control) => control.name === "choice");
+    const many = form.controls.find((control) => control.name === "many");
+    await runtime.dispatch({ kind: "formNumber", controlId: quantity.node, transition: { kind: "step", direction: "increment" } });
+    await runtime.dispatch({ kind: "formArea", controlId: notes.node, transition: { kind: "edit", operation: { kind: "insert", text: "X" } } });
+    await runtime.dispatch({ kind: "formComboboxTransition", controlId: choice.node, transition: { kind: "open" } });
+    await runtime.dispatch({ kind: "formComboboxCommit", controlId: choice.node, event: { kind: "commit", id: `${choice.node}:0` } });
+    await runtime.dispatch({ kind: "formCheckboxGroup", controlId: many.node, transition: { kind: "toggleSelection", id: `${many.node}:1` } });
+    const edited = runtime.state().documents[0];
+    assert.equal(edited.documentState.controls.get(quantity.node).values[0], "4");
+    assert.equal(edited.documentState.controls.get(notes.node).values[0].includes("X"), true);
+    assert.deepEqual(edited.documentState.controls.get(choice.node).selected, [choice.options[0].node]);
+    assert.deepEqual(edited.documentState.controls.get(many.node).values, ["a", "b"]);
+    await runtime.resize({ columns: 80, rows: 24 });
+    assert.equal(runtime.state().documents[0].formEditors[quantity.node].state.input.text, "4");
+    await runtime.dispatch({ kind: "resetForm", formId: form.node });
+    const reset = runtime.state().documents[0];
+    assert.deepEqual(reset.formEditors, {});
+    assert.equal(reset.documentState.controls.get(quantity.node).values[0], "2");
+    assert.equal(reset.documentState.controls.get(notes.node).values[0], "initial");
+    assert.deepEqual(reset.documentState.controls.get(choice.node).selected, [choice.options[1].node]);
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});
+
+test("disabled HTML controls retain callbacks without becoming focusable", async () => {
+  const { runtime, prepared } = await preparedFixture({ terminalSize: { columns: 100, rows: 60 }, loader: async (url) => response(url, `<title>Disabled</title><main>
+    <input disabled value="text"><input disabled type="number" value="2"><textarea disabled>notes</textarea>
+    <select disabled><option>A</option></select><input disabled type="checkbox"><button disabled>Disabled button</button>
+    <button type="button">Enabled button</button></main>`) });
+  try {
+    const document = runtime.state().documents[0];
+    const disabled = document.snapshot.document.controls.filter((control) => control.disabled);
+    const enabled = document.snapshot.document.controls.find((control) => !control.disabled);
+    await runtime.dispatch({ kind: "movePageFocus", direction: "next", currentActionId: "" });
+    await waitUntil(runtime, () => runtime.frame().focusPath?.includes(enabled.node));
+    for (let count = 0; count < 20; count += 1) {
+      await runtime.handleInput(key("tab"));
+      assert.ok(disabled.every((control) => !runtime.frame().focusPath?.includes(control.node)));
+      if (runtime.frame().focusPath?.includes(enabled.node)) break;
+    }
+    assert.ok(runtime.frame().focusPath?.includes(enabled.node));
+    await runtime.handleInput(key("enter"));
+    assert.equal(runtime.state().status?.text, "This button has no native HTML action.");
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});
+
+test("page geometry is identical for live and one-shot rendering with find and library chrome", async () => {
+  const { browserPageSize } = await import("../../dist/ui/document-layout.js");
+  assert.deepEqual(browserPageSize({ sidePanel: "history", findBar: {} }, { columns: 110, rows: 30 }), { columns: 68, rows: 26 });
+  assert.deepEqual(browserPageSize({ sidePanel: null, findBar: null }, { columns: 110, rows: 30 }), { columns: 109, rows: 27 });
+  assert.deepEqual(browserPageSize({ sidePanel: null, findBar: null }, { columns: 1, rows: 1 }), { columns: 1, rows: 1 });
+  const { runtime, prepared } = await preparedFixture({ terminalSize: { columns: 110, rows: 30 } });
+  try {
+    await runtime.dispatch({ kind: "toggleSidePanel", panel: "history" });
+    await runtime.dispatch({ kind: "openFind" });
+    await waitUntil(runtime, () => runtime.state().documents[0].rendering.status === "ready");
+    assert.equal(runtime.state().documents[0].rendering.viewport.cellBuffer.columns, 68);
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});

@@ -1,3 +1,4 @@
+import { controlValues, controlOptions, textEditor, numberEditor, areaEditor, selectEditor, multiSelectEditor } from "./form-editors.js";
 import {
   applyScrollRequest,
   checkboxGroupReducer,
@@ -6,10 +7,8 @@ import {
   commandInputReducer,
   contextMenuReducer,
   createCommandInputState,
-  createNumberInputConfiguration,
   createScrollState,
   createSearchPickerState,
-  createTextAreaState,
   menuTriggerReducer,
   createCommandSuggestions,
   createSearchPickerIndex,
@@ -21,7 +20,6 @@ import {
   textInputReducer
 } from "@ismail-elkorchi/terminal-ui/behavior";
 import { textDocumentText } from "@ismail-elkorchi/terminal-ui/text";
-import { createCollectionInteractionIndex } from "@ismail-elkorchi/terminal-ui/interaction";
 import {
   defineTui,
   type TuiContext,
@@ -48,7 +46,7 @@ import type { BrowserController } from "./browser-controller.js";
 import {
   actionById,
   browserRenderPreferences,
-  documentContentColumns,
+  browserPageSize,
   documentScrollRow,
   documentWithScrollRow,
   scrollToSource
@@ -304,20 +302,12 @@ function persistSnapshotEffect(
   }, "enqueue");
 }
 
-function contentColumns(state: BrowserTuiState, terminalColumns: number): number {
-  const available = state.sidePanel !== null && terminalColumns >= 100
-    ? Math.max(1, terminalColumns - 40)
-    : Math.max(1, terminalColumns);
-  return Math.max(1, available - 1);
-}
-
 function viewportParameters(
   state: BrowserTuiState,
   document: BrowserDocumentState,
   terminalSize: Pick<TuiContext, "terminalSize">["terminalSize"],
 ): ViewportRequestParameters {
-  const columns = documentContentColumns(contentColumns(state, terminalSize.columns));
-  const rows = Math.max(1, terminalSize.rows - (state.findBar === null ? 3 : 4));
+  const { columns, rows } = browserPageSize(state, terminalSize);
   return Object.freeze({
     columns,
     rows,
@@ -595,32 +585,6 @@ function controlById(
   controlId: string
 ): DocumentFormControl | undefined {
   return document.snapshot.document.control(controlId as DocumentNodeRef) ?? undefined;
-}
-
-function defaultControlValues(control: DocumentFormControl): readonly string[] {
-  if (control.kind === "hidden" || control.kind === "text" || control.kind === "textarea") return [control.defaultValue];
-  if ((control.kind === "checkbox" || control.kind === "radio") && control.defaultChecked) return [control.value];
-  if (control.kind === "select") {
-    return control.options
-      .filter((option) => option.defaultSelected && !option.disabled)
-      .map((option) => option.value);
-  }
-  return [];
-}
-
-function controlValues(document: BrowserDocumentState, control: DocumentFormControl): readonly string[] {
-  return document.documentState.controls.get(control.node)?.values ?? defaultControlValues(control);
-}
-
-function controlSelections(
-  document: BrowserDocumentState,
-  control: Extract<DocumentFormControl, { readonly kind: "select" }>
-): readonly DocumentNodeRef[] {
-  const explicit = document.documentState.controls.get(control.node)?.selected;
-  if (explicit !== undefined) return explicit;
-  const defaults = control.options.filter((option) => option.defaultSelected);
-  return (control.multiple ? defaults : [defaults.at(-1) ?? control.options[0]])
-    .flatMap((option) => option === undefined ? [] : [option.node]);
 }
 
 function updateFormControl(
@@ -918,7 +882,7 @@ function reduceBrowser(
     return result({ ...state, overlay: { ...state.overlay, scrollRow: Math.max(0, state.overlay.scrollRow + message.rows) } });
   }
   const selectedTab = activeTab(state);
-  const viewportRows = Math.max(1, context.terminalSize.rows - (state.findBar === null ? 3 : 4));
+  const viewportRows = browserPageSize(state, context.terminalSize).rows;
   switch (message.kind) {
     case "terminalResized":
       return result({ ...state, documents: state.documents.map((tab) => tab.kind !== "ready" || tab.search === null ? tab : ({
@@ -1650,35 +1614,17 @@ function reduceBrowser(
         };
       return result({ ...state, findBar: { input } });
     }
-    case "findSubmit":
-      return state.findBar === null
-        ? result(state)
-        : result(state);
     case "formText": {
       const control = controlById(document, message.controlId);
       if (!control || control.kind !== "text" || control.inputType === "number") return result(state);
-      const current = document.formEditors[control.node];
-      const editor = current?.kind === "text"
-        ? current.state
-        : { text: controlValues(document, control)[0] ?? "", cursor: (controlValues(document, control)[0] ?? "").length };
+      const editor = textEditor(document, control);
       const next = textInputReducer(editor, message.transition);
       return result(updateFormControl(state, document, control, [next.text], { kind: "text", state: next }));
     }
     case "formNumber": {
       const control = controlById(document, message.controlId);
       if (!control || control.kind !== "text" || control.inputType !== "number") return result(state);
-      const value = controlValues(document, control)[0] ?? "";
-      const current = document.formEditors[control.node];
-      const editor = current?.kind === "number"
-        ? current.state
-        : {
-          input: { text: value, cursor: value.length },
-          configuration: createNumberInputConfiguration({
-            ...(control.min === null ? {} : { min: control.min }),
-            ...(control.max === null ? {} : { max: control.max }),
-            ...(control.step === null ? {} : { step: control.step })
-          })
-        };
+      const editor = numberEditor(document, control);
       const next = numberInputReducer(editor, message.transition);
       return result(updateFormControl(
         state,
@@ -1691,13 +1637,7 @@ function reduceBrowser(
     case "formArea": {
       const control = controlById(document, message.controlId);
       if (!control || control.kind !== "textarea") return result(state);
-      const current = document.formEditors[control.node];
-      const editor = current?.kind === "textarea"
-        ? current.state
-        : createTextAreaState({
-          value: controlValues(document, control)[0] ?? "",
-          scroll: createScrollState()
-        });
+      const editor = areaEditor(document, control);
       const next = textAreaReducer(editor, message.transition);
       return result(updateFormControl(
         state,
@@ -1710,35 +1650,8 @@ function reduceBrowser(
     case "formComboboxTransition": {
       const control = controlById(document, message.controlId);
       if (!control || control.kind !== "select" || control.multiple) return result(state);
-      const options = control.options.map((option, index) => ({
-        id: `${control.node}:${String(index)}`,
-        label: option.label,
-        value: option.value,
-        disabled: option.disabled
-      }));
       const values = controlValues(document, control);
-      const selected = new Set(controlSelections(document, control));
-      const selectedIndex = control.options.findIndex((option) => selected.has(option.node));
-      const current = document.formEditors[control.node];
-      const selectedId = selectedIndex < 0 ? undefined : `${control.node}:${String(selectedIndex)}`;
-      const editor = current?.kind === "combobox"
-        ? current.state
-        : {
-          kind: "select" as const,
-          open: false,
-          interaction: {
-            ...(selectedId === undefined ? {} : { activeId: selectedId }),
-            selection: {
-              mode: "single" as const,
-              ...(selectedId === undefined ? {} : { selectedId })
-            }
-          }
-        };
-      const index = current?.kind === "combobox"
-        ? current.index
-        : createCollectionInteractionIndex(
-          options.filter((option) => !option.disabled).map((option) => option.id)
-        );
+      const { state: editor, index } = selectEditor(document, control);
       const next = comboboxReducer(editor, message.transition, {
         index,
         pageSize: formComboboxPageSize
@@ -1776,24 +1689,8 @@ function reduceBrowser(
     case "formCheckboxGroup": {
       const control = controlById(document, message.controlId);
       if (!control || control.kind !== "select" || !control.multiple) return result(state);
-      const options = control.options.map((option, index) => ({
-        id: `${control.node}:${String(index)}`,
-        label: option.label,
-        value: option.value,
-        disabled: option.disabled
-      }));
-      const selectedIds = control.options.flatMap((option, index) =>
-        controlSelections(document, control).includes(option.node)
-          ? [`${control.node}:${String(index)}`]
-          : []
-      );
-      const current = document.formEditors[control.node];
-      const interaction = current?.kind === "checkboxGroup"
-        ? current.state
-        : {
-          ...(selectedIds[0] === undefined ? {} : { activeId: selectedIds[0] }),
-          selection: { mode: "multiple" as const, selectedIds }
-        };
+      const options = controlOptions(control);
+      const interaction = multiSelectEditor(document, control);
       const next = checkboxGroupReducer(interaction, message.transition, options);
       const nextIds = next.selection.mode === "multiple" ? next.selection.selectedIds : [];
       const nextValues = nextIds.flatMap((id) => {
