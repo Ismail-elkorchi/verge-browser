@@ -1,3 +1,4 @@
+import { validateDependencyInstall } from "./dependency-package-contract.mjs";
 import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -76,20 +77,17 @@ function verifyPackedFiles(packEntry) {
 async function validateInstalledDependency(name, installedVerge, workspaceManifest, consumerLock, consumerRoot) {
   const installed = await readJson(join(consumerRoot, "node_modules", ...name.split("/"), "package.json"));
   const declared = installedVerge.dependencies?.[name];
-  const locked = consumerLock.packages?.[`node_modules/${name}`];
-  if (
-    typeof declared !== "string"
-    || !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u.test(declared)
-    || declared !== workspaceManifest.dependencies?.[name]
-    || installed.name !== name
-    || locked?.version !== installed.version
-    || locked.version !== declared
-    || typeof locked.integrity !== "string"
-    || !/^sha512-[A-Za-z0-9+/]+={0,2}$/u.test(locked.integrity)
-  ) {
-    throw new Error(`packed Verge does not install its declared ${name} release`);
+  if (declared !== workspaceManifest.dependencies?.[name]) {
+    throw new Error(`packed Verge changed its declared ${name} dependency`);
   }
-  return { name, version: installed.version };
+  const installedLock = await readJson(join(consumerRoot, "node_modules", ".package-lock.json"));
+  return validateDependencyInstall({
+    name,
+    dependencySpec: declared,
+    lockEntry: consumerLock.packages?.[`node_modules/${name}`],
+    installedManifest: installed,
+    installedLockEntry: installedLock.packages?.[`node_modules/${name}`]
+  });
 }
 
 const root = process.cwd();
@@ -251,7 +249,7 @@ await session.close();
   process.stdout.write(
     `packed consumer verified: ${workspaceManifest.name}@${workspaceManifest.version} (${String(packedFileCount)} files) -> ` +
       `${parserEvidence.name}@${parserEvidence.version} ${parserEvidence.integrity}; `
-      + `${sharedDependencies.map((entry) => `${entry.name}@${entry.version}`).join("; ")}\n`
+      + `${sharedDependencies.map((entry) => `${entry.name}@${entry.revision ?? entry.version}`).join("; ")}\n`
   );
 } finally {
   await rm(temporaryRoot, { recursive: true, force: true });
