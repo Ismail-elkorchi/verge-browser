@@ -988,3 +988,44 @@ test("page geometry is identical for live and one-shot rendering with find and l
     assert.equal(runtime.state().documents[0].rendering.viewport.cellBuffer.columns, 68);
   } finally { await runtime.dispose(); await prepared.controller.close(); }
 });
+
+test("picker preparation is replaced, cancelled on close, and fenced across reopen", async () => {
+  const { runtime, prepared } = await preparedFixture();
+  const originalEntries = prepared.controller.pickerEntries;
+  prepared.controller.pickerEntries = () => Array.from({ length: 4096 }, (_, index) => ({
+    id: String(index), label: `needle ${index}`, value: { kind: "link", index }
+  }));
+  try {
+    const opened = updateBrowser(prepared.controller, runtime.state(), { kind: "openPicker", picker: "links" });
+    assert.equal(opened.state.pickerQuery.pending, true);
+    const oldEffect = opened.effects.find(effect => effect.id === "browser-picker-query");
+    const entered = deferred();
+    const gate = deferred();
+    const oldController = new globalThis.AbortController();
+    const oldResult = oldEffect.run({ signal: oldController.signal, clock: {
+      now: () => Date.now(), sleep: async () => { entered.resolve(); await gate.promise; }
+    } });
+    await entered.promise;
+    const edited = updateBrowser(prepared.controller, opened.state, { kind: "pickerTransition", transition: { kind: "setQuery", query: { text: "needle", mode: "contains" } } });
+    assert.equal(edited.state.pickerQuery.revision, opened.state.pickerQuery.revision + 1);
+    assert.equal(edited.effects.find(effect => effect.id === "browser-picker-query").concurrency, "replace");
+    const closed = updateBrowser(prepared.controller, edited.state, { kind: "dismiss" });
+    assert.ok(closed.cancelEffects.includes("browser-picker-query"));
+    assert.equal(closed.state.pickerQuery.result, null);
+    const reopened = updateBrowser(prepared.controller, closed.state, { kind: "openPicker", picker: "links" });
+    gate.resolve();
+    const stale = await oldResult;
+    const ignored = updateBrowser(prepared.controller, reopened.state, stale.message);
+    assert.equal(ignored.state.pickerQuery, reopened.state.pickerQuery);
+    const current = reopened.effects.find(effect => effect.id === "browser-picker-query");
+    const completion = await current.run({ signal: new globalThis.AbortController().signal, clock: { now: () => Date.now(), sleep: async () => {} } });
+    const ready = updateBrowser(prepared.controller, reopened.state, completion.message);
+    assert.equal(ready.state.pickerQuery.pending, false);
+    assert.equal(ready.state.pickerQuery.result.searchPickerIndex, ready.state.overlay.index);
+    assert.equal(ready.state.overlay.state.editor.activeId, "0");
+  } finally {
+    prepared.controller.pickerEntries = originalEntries;
+    await runtime.dispose();
+    await prepared.controller.close();
+  }
+});

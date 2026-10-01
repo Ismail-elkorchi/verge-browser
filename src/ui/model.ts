@@ -30,7 +30,8 @@ import type {
   CollectionInteractionState,
   ScrollRequest
 } from "@ismail-elkorchi/terminal-ui/interaction";
-import type { SearchPickerIndex } from "@ismail-elkorchi/terminal-ui/behavior";
+import type { TuiPreparedQueryState, TuiPreparedQueryMessage } from "@ismail-elkorchi/terminal-ui/tui";
+import type { SearchPickerIndex, SearchPickerQueryResult } from "@ismail-elkorchi/terminal-ui/behavior";
 import type { TextEditBuffer } from "@ismail-elkorchi/terminal-ui/text";
 
 import type {
@@ -228,6 +229,7 @@ export interface BrowserTuiState {
   readonly bookmarks: readonly BookmarkEntry[];
   readonly downloads: readonly DownloadRecord[];
   readonly overlay: BrowserOverlay | null;
+  readonly pickerQuery: TuiPreparedQueryState<SearchPickerQueryResult<PickerValue>>;
   readonly status: StatusMessage | null;
 }
 
@@ -312,6 +314,7 @@ export type BrowserTuiMessage =
   | { readonly kind: "tabsClose"; readonly event: TabCloseEvent }
   | { readonly kind: "actionPaletteTransition"; readonly transition: CommandInputTransition }
   | { readonly kind: "actionPaletteSubmit"; readonly value: string }
+  | { readonly kind: "pickerQuery"; readonly message: TuiPreparedQueryMessage<SearchPickerQueryResult<PickerValue>> }
   | { readonly kind: "pickerTransition"; readonly transition: SearchPickerControlTransition }
   | { readonly kind: "pickerAccept"; readonly event: SearchPickerAcceptEvent }
   | { readonly kind: "pickerSelect"; readonly value?: PickerValue }

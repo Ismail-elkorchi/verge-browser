@@ -1377,7 +1377,7 @@ function actionPaletteView(palette: ActionPaletteOverlay): Element<BrowserTuiMes
   });
 }
 
-function pickerView(picker: PickerOverlay): Element<BrowserTuiMessage> {
+function pickerView(picker: PickerOverlay, query: BrowserTuiState["pickerQuery"]): Element<BrowserTuiMessage> {
   return dialog({
     id: "browser-picker",
     title: picker.title,
@@ -1387,6 +1387,7 @@ function pickerView(picker: PickerOverlay): Element<BrowserTuiMessage> {
       content: searchPicker({
         id: "browser-picker-list",
         searchPickerIndex: picker.index,
+        queryResult: query.result,
         view: searchPickerView(picker.state),
         onTransition: (transition): BrowserTuiMessage => ({
           kind: "pickerTransition",
@@ -1473,7 +1474,7 @@ export function browserView(
   const transient = state.overlay.kind === "actionPalette"
     ? actionPaletteView(state.overlay)
     : state.overlay.kind === "picker"
-      ? pickerView(state.overlay)
+      ? pickerView(state.overlay, state.pickerQuery)
       : state.overlay.kind === "detail"
         ? detailView(state.overlay)
         : state.overlay.kind === "linkMenu"

@@ -12,6 +12,9 @@ import {
   menuTriggerReducer,
   createCommandSuggestions,
   createSearchPickerIndex,
+  prepareSearchPickerQuery,
+  type SearchPickerIndex,
+  searchPickerQueryPosition,
   numberInputReducer,
   searchPickerReducer,
   searchPickerEntryById,
@@ -19,9 +22,11 @@ import {
   textAreaReducer,
   textInputReducer
 } from "@ismail-elkorchi/terminal-ui/behavior";
+import type { CollectionQuery } from "@ismail-elkorchi/terminal-ui/text";
 import { textDocumentText } from "@ismail-elkorchi/terminal-ui/text";
 import {
   defineTui,
+  createTuiPreparedQuery,
   type TuiContext,
   type TuiEffect,
   type TuiEffectContext,
@@ -59,11 +64,22 @@ import type {
   BrowserTuiMessage,
   BrowserTuiState,
   PickerKind,
+  PickerValue,
   StatusMessage
 } from "./model.js";
 import { browserMenuItems, formComboboxPageSize, linkMenuItems } from "./model.js";
 import { browserView } from "./view.js";
 import type { ViewportRequestParameters } from "./render-worker/index.js";
+
+const pickerQuery = createTuiPreparedQuery({
+  id: "browser-picker-query",
+  prepare: (input: { readonly index: SearchPickerIndex<PickerValue>; readonly query: CollectionQuery }, context) =>
+    prepareSearchPickerQuery(input.index, input.query, {
+      signal: context.signal,
+      yield: async () => { await context.clock.sleep(0, context.signal); }
+    }),
+  toMessage: (message): BrowserTuiMessage => ({ kind: "pickerQuery", message })
+});
 
 const EMPTY_COMMAND_SUGGESTIONS = createCommandSuggestions([]);
 const MAX_PAGE_SEARCH_MATCHES = 2000;
@@ -558,7 +574,7 @@ function openPicker(
       pickerKind: picker,
       title: picker === "recall" ? `Search visited pages: ${query}` : `${picker[0]?.toUpperCase() ?? ""}${picker.slice(1)}`,
       index,
-      state: createSearchPickerState({ query: { text: "", mode: "fuzzy" } }, index)
+      state: createSearchPickerState({ query: { text: "", mode: "fuzzy" }, queryResult: null }, index)
     }
   };
 }
@@ -827,6 +843,17 @@ function reduceBrowser(
   message: BrowserTuiMessage,
   context: Pick<TuiContext, "terminalSize"> = { terminalSize: { columns: 100, rows: 24 } }
 ): TuiUpdateResult<BrowserTuiState, BrowserTuiMessage> {
+  if (message.kind === "pickerQuery") {
+    const settled = pickerQuery.update(state.pickerQuery, message.message).state;
+    if (settled === state.pickerQuery || state.overlay?.kind !== "picker") return result(state);
+    const id = settled.result?.entries.find(entry => !entry.disabled)?.id;
+    return result({ ...state, pickerQuery: settled,
+      overlay: { ...state.overlay, state: searchPickerReducer(state.overlay.state,
+        { kind: "setActive", ...(id === undefined ? {} : { id }) },
+        { searchPickerIndex: state.overlay.index, queryResult: settled.result }) },
+      ...(settled.error === null ? {} : { status: status(settled.error.message, "error") })
+    });
+  }
   if (message.kind === "tabRestored") {
     const current = state.documents.find((entry) => entry.id === message.document.id);
     if (current === undefined || current.kind !== "loading"
@@ -1560,12 +1587,13 @@ function reduceBrowser(
             state: searchPickerReducer(
               state.overlay.state,
               message.transition,
-              { searchPickerIndex: state.overlay.index }
+              { searchPickerIndex: state.overlay.index, queryResult: state.pickerQuery.result }
             )
           }
         });
     case "pickerAccept": {
-      if (state.overlay?.kind !== "picker") return result(state);
+      if (state.overlay?.kind !== "picker" || state.pickerQuery.pending || state.pickerQuery.result === null
+        || searchPickerQueryPosition(state.pickerQuery.result, message.event.id) === undefined) return result(state);
       const entry = searchPickerEntryById(state.overlay.index, message.event.id);
       return updateBrowser(
         controller,
@@ -1873,13 +1901,33 @@ function reduceBrowser(
 }
 
 /** Reduces browser state synchronously, then schedules only dependency-relevant worker work. */
+function preparePickerUpdate(previous: BrowserTuiState, update: TuiUpdateResult<BrowserTuiState, BrowserTuiMessage>): TuiUpdateResult<BrowserTuiState, BrowserTuiMessage> {
+  const next = update.state;
+  // Recursive browser actions may already have prepared their final overlay.
+  if (next.pickerQuery !== previous.pickerQuery) return update;
+  if (next.overlay?.kind !== "picker") {
+    if (previous.overlay?.kind !== "picker") return update;
+    const cancelled = pickerQuery.cancel(next.pickerQuery);
+    return { ...update, state: { ...next, pickerQuery: { ...cancelled.state, result: null } },
+      cancelEffects: [...(update.cancelEffects ?? []), ...(cancelled.cancelEffects ?? [])] };
+  }
+  const before = previous.overlay?.kind === "picker" ? previous.overlay : undefined;
+  const editor = next.overlay.state;
+  if (before?.index === next.overlay.index && before.state.editor.input.text === editor.editor.input.text
+    && before.state.mode === editor.mode && before.state.caseSensitive === editor.caseSensitive) return update;
+  const requested = pickerQuery.request({ ...next.pickerQuery, result: null }, {
+    index: next.overlay.index, query: { text: editor.editor.input.text, mode: editor.mode, caseSensitive: editor.caseSensitive }
+  });
+  return { ...update, state: { ...next, pickerQuery: requested.state }, effects: [...(update.effects ?? []), ...(requested.effects ?? [])] };
+}
+
 export function updateBrowser(
   controller: BrowserController,
   state: BrowserTuiState,
   message: BrowserTuiMessage,
   context: Pick<TuiContext, "terminalSize"> = { terminalSize: { columns: 100, rows: 24 } },
 ): TuiUpdateResult<BrowserTuiState, BrowserTuiMessage> {
-  const reduced = reduceBrowser(controller, state, message, context);
+  const reduced = preparePickerUpdate(state, reduceBrowser(controller, state, message, context));
   const previous = activeTab(state);
   const selectedId = reduced.exit === undefined ? activeTab(reduced.state).id : null;
   controller.prioritizeRendering(selectedId);
@@ -2148,6 +2196,7 @@ export function createBrowserInitialState(
     sidePanelScroll: createScrollState(),
     ...controller.library(),
     overlay: null,
+    pickerQuery: pickerQuery.init(),
     status: active.kind === "ready"
       ? status(`Opened ${activeUrl}`, "success")
       : status(`Restoring ${activeUrl}`)
