@@ -247,14 +247,14 @@ function status(text: string, tone: StatusMessage["tone"] = "info"): StatusMessa
 function result(
   state: BrowserTuiState,
   options: {
-    readonly cancelEffects?: readonly string[];
+    readonly cancel?: TuiUpdateResult<BrowserTuiState, BrowserTuiMessage>["cancel"];
     readonly effects?: readonly TuiEffect<BrowserTuiMessage>[];
     readonly focus?: TuiUpdateResult<BrowserTuiState, BrowserTuiMessage>["focus"];
   } = {}
 ): TuiUpdateResult<BrowserTuiState, BrowserTuiMessage> {
   return {
     state,
-    ...(options.cancelEffects === undefined ? {} : { cancelEffects: options.cancelEffects }),
+    ...(options.cancel === undefined ? {} : { cancel: options.cancel }),
     ...(options.effects === undefined ? {} : { effects: options.effects }),
     ...(options.focus === undefined ? {} : { focus: options.focus })
   };
@@ -1014,7 +1014,7 @@ function reduceBrowser(
           ...tab, search: null, rendering: { ...tab.rendering, pendingSearch: null,
             searchRequestGeneration: tab.rendering.searchRequestGeneration + 1 },
         })),
-      }, { cancelEffects: state.documents.map((tab) => `search:${tab.id}`) });
+      }, { cancel: state.documents.map((tab) => ({ kind: "effect" as const, id: `search:${tab.id}` })) });
     case "actionPaletteSubmit":
       return state.overlay?.kind !== "actionPalette"
         ? result(state)
@@ -1028,7 +1028,7 @@ function reduceBrowser(
         if (message.operation === "stop") return result({
           ...state, documents: state.documents.map((tab) => tab.id === selectedTab.id
             ? { ...selectedTab, kind: "failed" as const, error: "Loading stopped.", restoreRevision: selectedTab.restoreRevision + 1 } : tab),
-        }, { cancelEffects: [`restore:${selectedTab.id}`] });
+        }, { cancel: [{ kind: 'effect', id: `restore:${selectedTab.id}` }] });
         return message.operation === "reload"
           ? reduceBrowser(controller, state, { kind: "restoreTab", documentId: selectedTab.id }, context)
           : result(state);
@@ -1037,7 +1037,7 @@ function reduceBrowser(
       if (message.operation === "stop") {
         return result(updateDocument(state, document.id, (current) =>
           ({ ...controller.restoreDocument(current), navigationGeneration: current.navigationGeneration + 1 })
-        ), { cancelEffects: [`navigation:${document.id}`] });
+        ), { cancel: [{ kind: 'effect', id: `navigation:${document.id}` }] });
       }
       if (message.operation === "back" && !document.canGoBack) return result(state);
       if (message.operation === "forward" && !document.canGoForward) return result(state);
@@ -1095,7 +1095,7 @@ function reduceBrowser(
             restoreRevision: selectedTab.restoreRevision + 1, error: null,
           } : tab),
           omnibox: submittedCommandInput(state.omnibox, message.value, target), omniboxDirty: false,
-        }, { cancelEffects: [`restore:${selectedTab.id}`] });
+        }, { cancel: [{ kind: 'effect', id: `restore:${selectedTab.id}` }] });
       }
       const document = selectedTab;
       return beginNavigation({
@@ -1193,7 +1193,7 @@ function reduceBrowser(
         status: status(`Closed ${tabLabel(selectedTab)}.`, "success"),
       };
       return result(next, {
-        cancelEffects: [`restore:${selectedTab.id}`, `navigation:${selectedTab.id}`, `render:${selectedTab.id}`, `search:${selectedTab.id}`],
+        cancel: [{ kind: 'effect', id: `restore:${selectedTab.id}` }, { kind: 'effect', id: `navigation:${selectedTab.id}` }, { kind: 'effect', id: `render:${selectedTab.id}` }, { kind: 'effect', id: `search:${selectedTab.id}` }],
         effects: [persistEffect(controller, next)],
       });
     }
@@ -1341,7 +1341,7 @@ function reduceBrowser(
       return result({
         ...state,
         downloads: [interrupted, ...state.downloads.filter((download) => download.id !== message.id)]
-      }, { cancelEffects: [`download:${message.id}`] });
+      }, { cancel: [{ kind: 'effect', id: `download:${message.id}` }] });
     }
     case "removeDownload":
       return result(state, { effects: [effect(`remove-download:${message.id}`, async () => ({
@@ -1909,7 +1909,7 @@ function preparePickerUpdate(previous: BrowserTuiState, update: TuiUpdateResult<
     if (previous.overlay?.kind !== "picker") return update;
     const cancelled = pickerQuery.cancel(next.pickerQuery);
     return { ...update, state: { ...next, pickerQuery: { ...cancelled.state, result: null } },
-      cancelEffects: [...(update.cancelEffects ?? []), ...(cancelled.cancelEffects ?? [])] };
+      cancel: [...(update.cancel ?? []), ...(cancelled.cancel ?? [])] };
   }
   const before = previous.overlay?.kind === "picker" ? previous.overlay : undefined;
   const editor = next.overlay.state;

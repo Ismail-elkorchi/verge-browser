@@ -1010,7 +1010,7 @@ test("picker preparation is replaced, cancelled on close, and fenced across reop
     assert.equal(edited.state.pickerQuery.revision, opened.state.pickerQuery.revision + 1);
     assert.equal(edited.effects.find(effect => effect.id === "browser-picker-query").concurrency, "replace");
     const closed = updateBrowser(prepared.controller, edited.state, { kind: "dismiss" });
-    assert.ok(closed.cancelEffects.includes("browser-picker-query"));
+    assert.ok(closed.cancel.some((request) => request.kind === "effect" && request.id === "browser-picker-query"));
     assert.equal(closed.state.pickerQuery.result, null);
     const reopened = updateBrowser(prepared.controller, closed.state, { kind: "openPicker", picker: "links" });
     gate.resolve();
