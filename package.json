@@ -65,7 +65,7 @@
     "@ismail-elkorchi/css-parser": "0.2.7",
     "@ismail-elkorchi/html-parser": "0.2.1",
     "@ismail-elkorchi/http-client": "0.1.1",
-    "@ismail-elkorchi/terminal-ui": "git+https://github.com/Ismail-elkorchi/terminal-ui.git#819b1e618dae04891a59ab15e3317ddd5f0237b7",
+    "@ismail-elkorchi/terminal-ui": "git+https://github.com/Ismail-elkorchi/terminal-ui.git#8292da0f66d2da52c0d7fa57cde14bda26b755ef",
     "tough-cookie": "6.0.2"
   },
   "devDependencies": {
