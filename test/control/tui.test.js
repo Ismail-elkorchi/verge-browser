@@ -21,6 +21,7 @@ import {
 } from "../../dist/ui/document-layout.js";
 import { prepareBrowserTui, renderBrowserOnce } from "../../dist/ui/run.js";
 import { updateBrowser } from "../../dist/ui/app.js";
+import { selectEditor } from "../../dist/ui/form-editors.js";
 
 function response(requestUrl, html) {
   return {
@@ -922,7 +923,7 @@ test("HTML editors share initialization, retain edits, and reset to document def
   const { runtime, prepared } = await preparedFixture({ loader: async (url) => response(url, `<title>Editors</title>
     <form><input name="quantity" type="number" value="2" min="0" max="8" step="2">
     <textarea name="notes">initial</textarea>
-    <select name="choice"><option value="same">First</option><option value="same" selected>Second</option></select>
+    <select name="choice"><option value="same">First</option><option value="same" selected>Second</option><option disabled>Unavailable</option><option value="last">Last</option></select>
     <select name="many" multiple><option value="a" selected>A</option><option value="b">B</option></select>
     <button type="reset">Reset</button></form>`) });
   try {
@@ -932,24 +933,41 @@ test("HTML editors share initialization, retain edits, and reset to document def
     const notes = form.controls.find((control) => control.name === "notes");
     const choice = form.controls.find((control) => control.name === "choice");
     const many = form.controls.find((control) => control.name === "many");
+    const select = selectEditor(initial, choice);
+    assert.equal(selectEditor(initial, choice).collection, select.collection);
+    assert.equal(selectEditor(initial, choice).optionsView, select.optionsView);
+    assert.equal(select.optionsView.entryAt(1).value.node, choice.options[1].node);
     await runtime.dispatch({ kind: "formNumber", controlId: quantity.node, transition: { kind: "step", direction: "increment" } });
     await runtime.dispatch({ kind: "formArea", controlId: notes.node, transition: { kind: "edit", operation: { kind: "insert", text: "X" } } });
     await runtime.dispatch({ kind: "formComboboxTransition", controlId: choice.node, transition: { kind: "open" } });
+    await runtime.dispatch({ kind: "formComboboxTransition", controlId: choice.node, transition: { kind: "moveActive", delta: 1 } });
+    assert.equal(runtime.state().documents[0].formEditors[choice.node].state.interaction.activeId, `${choice.node}:3`);
+    const beforeDisabledCommit = runtime.state().documents[0].documentState.controls.get(choice.node);
+    await runtime.dispatch({ kind: "formComboboxCommit", controlId: choice.node, event: { kind: "commit", id: `${choice.node}:2` } });
+    assert.equal(runtime.state().documents[0].documentState.controls.get(choice.node), beforeDisabledCommit);
     await runtime.dispatch({ kind: "formComboboxCommit", controlId: choice.node, event: { kind: "commit", id: `${choice.node}:0` } });
     await runtime.dispatch({ kind: "formCheckboxGroup", controlId: many.node, transition: { kind: "toggleSelection", id: `${many.node}:1` } });
     const edited = runtime.state().documents[0];
+    assert.equal(edited.formEditors[choice.node].collection, select.collection);
+    assert.equal(edited.formEditors[choice.node].optionsView, select.optionsView);
     assert.equal(edited.documentState.controls.get(quantity.node).values[0], "4");
     assert.equal(edited.documentState.controls.get(notes.node).values[0].includes("X"), true);
     assert.deepEqual(edited.documentState.controls.get(choice.node).selected, [choice.options[0].node]);
     assert.deepEqual(edited.documentState.controls.get(many.node).values, ["a", "b"]);
     await runtime.resize({ columns: 80, rows: 24 });
     assert.equal(runtime.state().documents[0].formEditors[quantity.node].state.input.text, "4");
+    assert.equal(runtime.state().documents[0].formEditors[choice.node].collection, select.collection);
+    assert.equal(runtime.state().documents[0].formEditors[choice.node].optionsView, select.optionsView);
     await runtime.dispatch({ kind: "resetForm", formId: form.node });
     const reset = runtime.state().documents[0];
     assert.deepEqual(reset.formEditors, {});
     assert.equal(reset.documentState.controls.get(quantity.node).values[0], "2");
     assert.equal(reset.documentState.controls.get(notes.node).values[0], "initial");
     assert.deepEqual(reset.documentState.controls.get(choice.node).selected, [choice.options[1].node]);
+    const resetSelect = selectEditor(reset, choice);
+    assert.equal(resetSelect.collection, select.collection);
+    assert.equal(resetSelect.optionsView, select.optionsView);
+    assert.equal(resetSelect.state.interaction.selection.selectedId, `${choice.node}:1`);
   } finally { await runtime.dispose(); await prepared.controller.close(); }
 });
 
@@ -993,10 +1011,12 @@ test("picker preparation is replaced, cancelled on close, and fenced across reop
   const { runtime, prepared } = await preparedFixture();
   const originalEntries = prepared.controller.pickerEntries;
   prepared.controller.pickerEntries = () => Array.from({ length: 4096 }, (_, index) => ({
-    id: String(index), label: `needle ${index}`, value: { kind: "link", index }
+    id: String(index), label: `needle ${index}`, value: { kind: "link", index }, disabled: index === 0
   }));
   try {
-    const opened = updateBrowser(prepared.controller, runtime.state(), { kind: "openPicker", picker: "links" });
+    const initial = updateBrowser(prepared.controller, runtime.state(), { kind: "openPicker", picker: "links" });
+    // Empty retained-source queries need no scan. A nonempty query exercises cooperative cancellation.
+    const opened = updateBrowser(prepared.controller, initial.state, { kind: "pickerTransition", transition: { kind: "setQuery", query: { text: "needle", mode: "contains" } } });
     assert.equal(opened.state.pickerQuery.pending, true);
     const oldEffect = opened.effects.find(effect => effect.id === "browser-picker-query");
     const entered = deferred();
@@ -1006,7 +1026,7 @@ test("picker preparation is replaced, cancelled on close, and fenced across reop
       now: () => Date.now(), sleep: async () => { entered.resolve(); await gate.promise; }
     } });
     await entered.promise;
-    const edited = updateBrowser(prepared.controller, opened.state, { kind: "pickerTransition", transition: { kind: "setQuery", query: { text: "needle", mode: "contains" } } });
+    const edited = updateBrowser(prepared.controller, opened.state, { kind: "pickerTransition", transition: { kind: "setQuery", query: { text: "needle 1", mode: "contains" } } });
     assert.equal(edited.state.pickerQuery.revision, opened.state.pickerQuery.revision + 1);
     assert.equal(edited.effects.find(effect => effect.id === "browser-picker-query").concurrency, "replace");
     const closed = updateBrowser(prepared.controller, edited.state, { kind: "dismiss" });
@@ -1022,7 +1042,9 @@ test("picker preparation is replaced, cancelled on close, and fenced across reop
     const ready = updateBrowser(prepared.controller, reopened.state, completion.message);
     assert.equal(ready.state.pickerQuery.pending, false);
     assert.equal(ready.state.pickerQuery.result.searchPickerIndex, ready.state.overlay.index);
-    assert.equal(ready.state.overlay.state.editor.activeId, "0");
+    assert.equal(ready.state.pickerQuery.result.count, 4096);
+    assert.equal(ready.state.pickerQuery.result.entryAt(0).disabled, true);
+    assert.equal(ready.state.overlay.state.editor.activeId, "1");
   } finally {
     prepared.controller.pickerEntries = originalEntries;
     await runtime.dispose();

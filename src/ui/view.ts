@@ -489,7 +489,8 @@ function inlineFormControl(
     const selectOptions = {
       id: control.node,
       label: control.label,
-      options: controlOptions(control),
+      collection: editor.collection,
+      optionsView: editor.optionsView,
       required: control.required,
       maxVisibleOptions: formComboboxPageSize
     };

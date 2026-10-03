@@ -1,9 +1,11 @@
-import { createNumberInputConfiguration, createScrollState, createTextAreaState } from "@ismail-elkorchi/terminal-ui/behavior";
-import { createCollectionInteractionIndex } from "@ismail-elkorchi/terminal-ui/interaction";
+import { createListboxCollection, createListboxView, createNumberInputConfiguration, createScrollState, createTextAreaState } from "@ismail-elkorchi/terminal-ui/behavior";
 import type { DocumentFormControl, DocumentNodeRef } from "../document/index.js";
 import type { BrowserDocumentState } from "./model.js";
 
 type SelectControl = Extract<DocumentFormControl, { readonly kind: "select" }>;
+type SelectEditor = Extract<BrowserDocumentState["formEditors"][string], { readonly kind: "combobox" }>;
+const selectOptions = new WeakMap<SelectControl, Pick<SelectEditor, "collection" | "optionsView">>();
+
 type TextControl = Extract<DocumentFormControl, { readonly kind: "text" }>;
 
 export function controlValues(document: BrowserDocumentState, control: DocumentFormControl): readonly string[] {
@@ -62,9 +64,19 @@ export function areaEditor(document: BrowserDocumentState, control: DocumentForm
   });
 }
 
-export function selectEditor(document: BrowserDocumentState, control: SelectControl) {
+export function selectEditor(document: BrowserDocumentState, control: SelectControl): SelectEditor {
   const current = document.formEditors[control.node];
   if (current?.kind === "combobox") return current;
+  let options = selectOptions.get(control);
+  if (options === undefined) {
+    const collection = createListboxCollection(control.options, (option, index) => ({
+      id: `${control.node}:${String(index)}`,
+      label: option.label,
+      disabled: option.disabled
+    }));
+    options = { collection, optionsView: createListboxView(collection) };
+    selectOptions.set(control, options);
+  }
   const selected = new Set(controlSelections(document, control));
   const selectedId = control.options.findIndex((option) => selected.has(option.node));
   const id = selectedId < 0 ? undefined : `${control.node}:${String(selectedId)}`;
@@ -78,7 +90,7 @@ export function selectEditor(document: BrowserDocumentState, control: SelectCont
         selection: { mode: "single" as const, ...(id === undefined ? {} : { selectedId: id }) }
       }
     },
-    index: createCollectionInteractionIndex(controlOptions(control).filter((option) => !option.disabled).map((option) => option.id))
+    ...options
   };
 }
 

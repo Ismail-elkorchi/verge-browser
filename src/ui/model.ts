@@ -6,6 +6,7 @@ import type {
   CommandInputTransition,
   ContextMenuTransition,
   MenuItem,
+  ListboxView,
   MenuActivateEvent,
   MenuTriggerTransition,
   NumberInputControlTransition,
@@ -18,6 +19,7 @@ import type {
 } from "@ismail-elkorchi/terminal-ui/components";
 import type {
   CommandInputState,
+  CompleteListboxCollection,
   ContextMenuState,
   MenuTriggerState,
   NumberInputState,
@@ -26,7 +28,6 @@ import type {
   UnscrolledSearchPickerState
 } from "@ismail-elkorchi/terminal-ui/behavior";
 import type {
-  CollectionInteractionIndex,
   CollectionInteractionState,
   ScrollRequest
 } from "@ismail-elkorchi/terminal-ui/interaction";
@@ -41,7 +42,7 @@ import type {
   StoredBrowserDocument,
 } from "../app/storage.js";
 import type { IndexedPageSnapshot } from "../app/types.js";
-import type { DocumentNodeRef, DocumentState } from "../document/index.js";
+import type { DocumentNodeRef, DocumentSelectOption, DocumentState } from "../document/index.js";
 import type { RenderDocumentSummary, ViewportRenderPayload } from "./render-worker/index.js";
 
 export type PickerKind = "links" | "outline" | "recall";
@@ -128,7 +129,8 @@ export interface BrowserDocumentState {
     | {
         readonly kind: "combobox";
         readonly state: UnscrolledComboboxState;
-        readonly index: CollectionInteractionIndex;
+        readonly collection: CompleteListboxCollection<DocumentSelectOption>;
+        readonly optionsView: ListboxView<DocumentSelectOption>;
       }
     | { readonly kind: "checkboxGroup"; readonly state: CollectionInteractionState }
   >>;

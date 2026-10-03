@@ -846,10 +846,9 @@ function reduceBrowser(
   if (message.kind === "pickerQuery") {
     const settled = pickerQuery.update(state.pickerQuery, message.message).state;
     if (settled === state.pickerQuery || state.overlay?.kind !== "picker") return result(state);
-    const id = settled.result?.entries.find(entry => !entry.disabled)?.id;
     return result({ ...state, pickerQuery: settled,
       overlay: { ...state.overlay, state: searchPickerReducer(state.overlay.state,
-        { kind: "setActive", ...(id === undefined ? {} : { id }) },
+        { kind: "firstActive" },
         { searchPickerIndex: state.overlay.index, queryResult: settled.result }) },
       ...(settled.error === null ? {} : { status: status(settled.error.message, "error") })
     });
@@ -1679,9 +1678,9 @@ function reduceBrowser(
       const control = controlById(document, message.controlId);
       if (!control || control.kind !== "select" || control.multiple) return result(state);
       const values = controlValues(document, control);
-      const { state: editor, index } = selectEditor(document, control);
-      const next = comboboxReducer(editor, message.transition, {
-        index,
+      const editor = selectEditor(document, control);
+      const next = comboboxReducer(editor.state, message.transition, {
+        index: editor.optionsView.interactionIndex,
         pageSize: formComboboxPageSize
       });
       return result(updateFormControl(
@@ -1689,7 +1688,7 @@ function reduceBrowser(
         document,
         control,
         values,
-        { kind: "combobox", state: next, index }
+        { ...editor, state: next }
       ));
     }
     case "formComboboxCommit": {
@@ -1702,7 +1701,7 @@ function reduceBrowser(
       const current = document.formEditors[control.node];
       if (current?.kind !== "combobox") return result(state);
       const next = commitCombobox(current.state, message.event, {
-        index: current.index,
+        index: current.optionsView.interactionIndex,
         pageSize: formComboboxPageSize
       });
       return result(updateFormControl(
@@ -1710,7 +1709,7 @@ function reduceBrowser(
         document,
         control,
         [option.value],
-        { kind: "combobox", state: next, index: current.index },
+        { ...current, state: next },
         [option.node]
       ));
     }
