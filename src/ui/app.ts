@@ -1,3 +1,4 @@
+import { controlValues, controlOptions, textEditor, numberEditor, areaEditor, selectEditor, multiSelectEditor } from "./form-editors.js";
 import {
   applyScrollRequest,
   checkboxGroupReducer,
@@ -6,13 +7,14 @@ import {
   commandInputReducer,
   contextMenuReducer,
   createCommandInputState,
-  createNumberInputConfiguration,
   createScrollState,
   createSearchPickerState,
-  createTextAreaState,
   menuTriggerReducer,
   createCommandSuggestions,
   createSearchPickerIndex,
+  prepareSearchPickerQuery,
+  type SearchPickerIndex,
+  searchPickerQueryPosition,
   numberInputReducer,
   searchPickerReducer,
   searchPickerEntryById,
@@ -20,10 +22,11 @@ import {
   textAreaReducer,
   textInputReducer
 } from "@ismail-elkorchi/terminal-ui/behavior";
+import type { CollectionQuery } from "@ismail-elkorchi/terminal-ui/text";
 import { textDocumentText } from "@ismail-elkorchi/terminal-ui/text";
-import { createCollectionInteractionIndex } from "@ismail-elkorchi/terminal-ui/interaction";
 import {
   defineTui,
+  createTuiPreparedQuery,
   type TuiContext,
   type TuiEffect,
   type TuiEffectContext,
@@ -48,7 +51,7 @@ import type { BrowserController } from "./browser-controller.js";
 import {
   actionById,
   browserRenderPreferences,
-  documentContentColumns,
+  browserPageSize,
   documentScrollRow,
   documentWithScrollRow,
   scrollToSource
@@ -61,11 +64,22 @@ import type {
   BrowserTuiMessage,
   BrowserTuiState,
   PickerKind,
+  PickerValue,
   StatusMessage
 } from "./model.js";
 import { browserMenuItems, formComboboxPageSize, linkMenuItems } from "./model.js";
 import { browserView } from "./view.js";
 import type { ViewportRequestParameters } from "./render-worker/index.js";
+
+const pickerQuery = createTuiPreparedQuery({
+  id: "browser-picker-query",
+  prepare: (input: { readonly index: SearchPickerIndex<PickerValue>; readonly query: CollectionQuery }, context) =>
+    prepareSearchPickerQuery(input.index, input.query, {
+      signal: context.signal,
+      yield: async () => { await context.clock.sleep(0, context.signal); }
+    }),
+  toMessage: (message): BrowserTuiMessage => ({ kind: "pickerQuery", message })
+});
 
 const EMPTY_COMMAND_SUGGESTIONS = createCommandSuggestions([]);
 const MAX_PAGE_SEARCH_MATCHES = 2000;
@@ -233,14 +247,14 @@ function status(text: string, tone: StatusMessage["tone"] = "info"): StatusMessa
 function result(
   state: BrowserTuiState,
   options: {
-    readonly cancelEffects?: readonly string[];
+    readonly cancel?: TuiUpdateResult<BrowserTuiState, BrowserTuiMessage>["cancel"];
     readonly effects?: readonly TuiEffect<BrowserTuiMessage>[];
     readonly focus?: TuiUpdateResult<BrowserTuiState, BrowserTuiMessage>["focus"];
   } = {}
 ): TuiUpdateResult<BrowserTuiState, BrowserTuiMessage> {
   return {
     state,
-    ...(options.cancelEffects === undefined ? {} : { cancelEffects: options.cancelEffects }),
+    ...(options.cancel === undefined ? {} : { cancel: options.cancel }),
     ...(options.effects === undefined ? {} : { effects: options.effects }),
     ...(options.focus === undefined ? {} : { focus: options.focus })
   };
@@ -304,20 +318,12 @@ function persistSnapshotEffect(
   }, "enqueue");
 }
 
-function contentColumns(state: BrowserTuiState, terminalColumns: number): number {
-  const available = state.sidePanel !== null && terminalColumns >= 100
-    ? Math.max(1, terminalColumns - 40)
-    : Math.max(1, terminalColumns);
-  return Math.max(1, available - 1);
-}
-
 function viewportParameters(
   state: BrowserTuiState,
   document: BrowserDocumentState,
   terminalSize: Pick<TuiContext, "terminalSize">["terminalSize"],
 ): ViewportRequestParameters {
-  const columns = documentContentColumns(contentColumns(state, terminalSize.columns));
-  const rows = Math.max(1, terminalSize.rows - (state.findBar === null ? 3 : 4));
+  const { columns, rows } = browserPageSize(state, terminalSize);
   return Object.freeze({
     columns,
     rows,
@@ -568,7 +574,7 @@ function openPicker(
       pickerKind: picker,
       title: picker === "recall" ? `Search visited pages: ${query}` : `${picker[0]?.toUpperCase() ?? ""}${picker.slice(1)}`,
       index,
-      state: createSearchPickerState({ query: { text: "", mode: "fuzzy" } }, index)
+      state: createSearchPickerState({ query: { text: "", mode: "fuzzy" }, queryResult: null }, index)
     }
   };
 }
@@ -595,32 +601,6 @@ function controlById(
   controlId: string
 ): DocumentFormControl | undefined {
   return document.snapshot.document.control(controlId as DocumentNodeRef) ?? undefined;
-}
-
-function defaultControlValues(control: DocumentFormControl): readonly string[] {
-  if (control.kind === "hidden" || control.kind === "text" || control.kind === "textarea") return [control.defaultValue];
-  if ((control.kind === "checkbox" || control.kind === "radio") && control.defaultChecked) return [control.value];
-  if (control.kind === "select") {
-    return control.options
-      .filter((option) => option.defaultSelected && !option.disabled)
-      .map((option) => option.value);
-  }
-  return [];
-}
-
-function controlValues(document: BrowserDocumentState, control: DocumentFormControl): readonly string[] {
-  return document.documentState.controls.get(control.node)?.values ?? defaultControlValues(control);
-}
-
-function controlSelections(
-  document: BrowserDocumentState,
-  control: Extract<DocumentFormControl, { readonly kind: "select" }>
-): readonly DocumentNodeRef[] {
-  const explicit = document.documentState.controls.get(control.node)?.selected;
-  if (explicit !== undefined) return explicit;
-  const defaults = control.options.filter((option) => option.defaultSelected);
-  return (control.multiple ? defaults : [defaults.at(-1) ?? control.options[0]])
-    .flatMap((option) => option === undefined ? [] : [option.node]);
 }
 
 function updateFormControl(
@@ -863,6 +843,16 @@ function reduceBrowser(
   message: BrowserTuiMessage,
   context: Pick<TuiContext, "terminalSize"> = { terminalSize: { columns: 100, rows: 24 } }
 ): TuiUpdateResult<BrowserTuiState, BrowserTuiMessage> {
+  if (message.kind === "pickerQuery") {
+    const settled = pickerQuery.update(state.pickerQuery, message.message).state;
+    if (settled === state.pickerQuery || state.overlay?.kind !== "picker") return result(state);
+    return result({ ...state, pickerQuery: settled,
+      overlay: { ...state.overlay, state: searchPickerReducer(state.overlay.state,
+        { kind: "firstActive" },
+        { searchPickerIndex: state.overlay.index, queryResult: settled.result }) },
+      ...(settled.error === null ? {} : { status: status(settled.error.message, "error") })
+    });
+  }
   if (message.kind === "tabRestored") {
     const current = state.documents.find((entry) => entry.id === message.document.id);
     if (current === undefined || current.kind !== "loading"
@@ -918,7 +908,7 @@ function reduceBrowser(
     return result({ ...state, overlay: { ...state.overlay, scrollRow: Math.max(0, state.overlay.scrollRow + message.rows) } });
   }
   const selectedTab = activeTab(state);
-  const viewportRows = Math.max(1, context.terminalSize.rows - (state.findBar === null ? 3 : 4));
+  const viewportRows = browserPageSize(state, context.terminalSize).rows;
   switch (message.kind) {
     case "terminalResized":
       return result({ ...state, documents: state.documents.map((tab) => tab.kind !== "ready" || tab.search === null ? tab : ({
@@ -1023,7 +1013,7 @@ function reduceBrowser(
           ...tab, search: null, rendering: { ...tab.rendering, pendingSearch: null,
             searchRequestGeneration: tab.rendering.searchRequestGeneration + 1 },
         })),
-      }, { cancelEffects: state.documents.map((tab) => `search:${tab.id}`) });
+      }, { cancel: state.documents.map((tab) => ({ kind: "effect" as const, id: `search:${tab.id}` })) });
     case "actionPaletteSubmit":
       return state.overlay?.kind !== "actionPalette"
         ? result(state)
@@ -1037,7 +1027,7 @@ function reduceBrowser(
         if (message.operation === "stop") return result({
           ...state, documents: state.documents.map((tab) => tab.id === selectedTab.id
             ? { ...selectedTab, kind: "failed" as const, error: "Loading stopped.", restoreRevision: selectedTab.restoreRevision + 1 } : tab),
-        }, { cancelEffects: [`restore:${selectedTab.id}`] });
+        }, { cancel: [{ kind: 'effect', id: `restore:${selectedTab.id}` }] });
         return message.operation === "reload"
           ? reduceBrowser(controller, state, { kind: "restoreTab", documentId: selectedTab.id }, context)
           : result(state);
@@ -1046,7 +1036,7 @@ function reduceBrowser(
       if (message.operation === "stop") {
         return result(updateDocument(state, document.id, (current) =>
           ({ ...controller.restoreDocument(current), navigationGeneration: current.navigationGeneration + 1 })
-        ), { cancelEffects: [`navigation:${document.id}`] });
+        ), { cancel: [{ kind: 'effect', id: `navigation:${document.id}` }] });
       }
       if (message.operation === "back" && !document.canGoBack) return result(state);
       if (message.operation === "forward" && !document.canGoForward) return result(state);
@@ -1104,7 +1094,7 @@ function reduceBrowser(
             restoreRevision: selectedTab.restoreRevision + 1, error: null,
           } : tab),
           omnibox: submittedCommandInput(state.omnibox, message.value, target), omniboxDirty: false,
-        }, { cancelEffects: [`restore:${selectedTab.id}`] });
+        }, { cancel: [{ kind: 'effect', id: `restore:${selectedTab.id}` }] });
       }
       const document = selectedTab;
       return beginNavigation({
@@ -1202,7 +1192,7 @@ function reduceBrowser(
         status: status(`Closed ${tabLabel(selectedTab)}.`, "success"),
       };
       return result(next, {
-        cancelEffects: [`restore:${selectedTab.id}`, `navigation:${selectedTab.id}`, `render:${selectedTab.id}`, `search:${selectedTab.id}`],
+        cancel: [{ kind: 'effect', id: `restore:${selectedTab.id}` }, { kind: 'effect', id: `navigation:${selectedTab.id}` }, { kind: 'effect', id: `render:${selectedTab.id}` }, { kind: 'effect', id: `search:${selectedTab.id}` }],
         effects: [persistEffect(controller, next)],
       });
     }
@@ -1350,7 +1340,7 @@ function reduceBrowser(
       return result({
         ...state,
         downloads: [interrupted, ...state.downloads.filter((download) => download.id !== message.id)]
-      }, { cancelEffects: [`download:${message.id}`] });
+      }, { cancel: [{ kind: 'effect', id: `download:${message.id}` }] });
     }
     case "removeDownload":
       return result(state, { effects: [effect(`remove-download:${message.id}`, async () => ({
@@ -1596,12 +1586,13 @@ function reduceBrowser(
             state: searchPickerReducer(
               state.overlay.state,
               message.transition,
-              { searchPickerIndex: state.overlay.index }
+              { searchPickerIndex: state.overlay.index, queryResult: state.pickerQuery.result }
             )
           }
         });
     case "pickerAccept": {
-      if (state.overlay?.kind !== "picker") return result(state);
+      if (state.overlay?.kind !== "picker" || state.pickerQuery.pending || state.pickerQuery.result === null
+        || searchPickerQueryPosition(state.pickerQuery.result, message.event.id) === undefined) return result(state);
       const entry = searchPickerEntryById(state.overlay.index, message.event.id);
       return updateBrowser(
         controller,
@@ -1650,35 +1641,17 @@ function reduceBrowser(
         };
       return result({ ...state, findBar: { input } });
     }
-    case "findSubmit":
-      return state.findBar === null
-        ? result(state)
-        : result(state);
     case "formText": {
       const control = controlById(document, message.controlId);
       if (!control || control.kind !== "text" || control.inputType === "number") return result(state);
-      const current = document.formEditors[control.node];
-      const editor = current?.kind === "text"
-        ? current.state
-        : { text: controlValues(document, control)[0] ?? "", cursor: (controlValues(document, control)[0] ?? "").length };
+      const editor = textEditor(document, control);
       const next = textInputReducer(editor, message.transition);
       return result(updateFormControl(state, document, control, [next.text], { kind: "text", state: next }));
     }
     case "formNumber": {
       const control = controlById(document, message.controlId);
       if (!control || control.kind !== "text" || control.inputType !== "number") return result(state);
-      const value = controlValues(document, control)[0] ?? "";
-      const current = document.formEditors[control.node];
-      const editor = current?.kind === "number"
-        ? current.state
-        : {
-          input: { text: value, cursor: value.length },
-          configuration: createNumberInputConfiguration({
-            ...(control.min === null ? {} : { min: control.min }),
-            ...(control.max === null ? {} : { max: control.max }),
-            ...(control.step === null ? {} : { step: control.step })
-          })
-        };
+      const editor = numberEditor(document, control);
       const next = numberInputReducer(editor, message.transition);
       return result(updateFormControl(
         state,
@@ -1691,13 +1664,7 @@ function reduceBrowser(
     case "formArea": {
       const control = controlById(document, message.controlId);
       if (!control || control.kind !== "textarea") return result(state);
-      const current = document.formEditors[control.node];
-      const editor = current?.kind === "textarea"
-        ? current.state
-        : createTextAreaState({
-          value: controlValues(document, control)[0] ?? "",
-          scroll: createScrollState()
-        });
+      const editor = areaEditor(document, control);
       const next = textAreaReducer(editor, message.transition);
       return result(updateFormControl(
         state,
@@ -1710,37 +1677,10 @@ function reduceBrowser(
     case "formComboboxTransition": {
       const control = controlById(document, message.controlId);
       if (!control || control.kind !== "select" || control.multiple) return result(state);
-      const options = control.options.map((option, index) => ({
-        id: `${control.node}:${String(index)}`,
-        label: option.label,
-        value: option.value,
-        disabled: option.disabled
-      }));
       const values = controlValues(document, control);
-      const selected = new Set(controlSelections(document, control));
-      const selectedIndex = control.options.findIndex((option) => selected.has(option.node));
-      const current = document.formEditors[control.node];
-      const selectedId = selectedIndex < 0 ? undefined : `${control.node}:${String(selectedIndex)}`;
-      const editor = current?.kind === "combobox"
-        ? current.state
-        : {
-          kind: "select" as const,
-          open: false,
-          interaction: {
-            ...(selectedId === undefined ? {} : { activeId: selectedId }),
-            selection: {
-              mode: "single" as const,
-              ...(selectedId === undefined ? {} : { selectedId })
-            }
-          }
-        };
-      const index = current?.kind === "combobox"
-        ? current.index
-        : createCollectionInteractionIndex(
-          options.filter((option) => !option.disabled).map((option) => option.id)
-        );
-      const next = comboboxReducer(editor, message.transition, {
-        index,
+      const editor = selectEditor(document, control);
+      const next = comboboxReducer(editor.state, message.transition, {
+        index: editor.optionsView.interactionIndex,
         pageSize: formComboboxPageSize
       });
       return result(updateFormControl(
@@ -1748,7 +1688,7 @@ function reduceBrowser(
         document,
         control,
         values,
-        { kind: "combobox", state: next, index }
+        { ...editor, state: next }
       ));
     }
     case "formComboboxCommit": {
@@ -1761,7 +1701,7 @@ function reduceBrowser(
       const current = document.formEditors[control.node];
       if (current?.kind !== "combobox") return result(state);
       const next = commitCombobox(current.state, message.event, {
-        index: current.index,
+        index: current.optionsView.interactionIndex,
         pageSize: formComboboxPageSize
       });
       return result(updateFormControl(
@@ -1769,31 +1709,15 @@ function reduceBrowser(
         document,
         control,
         [option.value],
-        { kind: "combobox", state: next, index: current.index },
+        { ...current, state: next },
         [option.node]
       ));
     }
     case "formCheckboxGroup": {
       const control = controlById(document, message.controlId);
       if (!control || control.kind !== "select" || !control.multiple) return result(state);
-      const options = control.options.map((option, index) => ({
-        id: `${control.node}:${String(index)}`,
-        label: option.label,
-        value: option.value,
-        disabled: option.disabled
-      }));
-      const selectedIds = control.options.flatMap((option, index) =>
-        controlSelections(document, control).includes(option.node)
-          ? [`${control.node}:${String(index)}`]
-          : []
-      );
-      const current = document.formEditors[control.node];
-      const interaction = current?.kind === "checkboxGroup"
-        ? current.state
-        : {
-          ...(selectedIds[0] === undefined ? {} : { activeId: selectedIds[0] }),
-          selection: { mode: "multiple" as const, selectedIds }
-        };
+      const options = controlOptions(control);
+      const interaction = multiSelectEditor(document, control);
       const next = checkboxGroupReducer(interaction, message.transition, options);
       const nextIds = next.selection.mode === "multiple" ? next.selection.selectedIds : [];
       const nextValues = nextIds.flatMap((id) => {
@@ -1976,13 +1900,33 @@ function reduceBrowser(
 }
 
 /** Reduces browser state synchronously, then schedules only dependency-relevant worker work. */
+function preparePickerUpdate(previous: BrowserTuiState, update: TuiUpdateResult<BrowserTuiState, BrowserTuiMessage>): TuiUpdateResult<BrowserTuiState, BrowserTuiMessage> {
+  const next = update.state;
+  // Recursive browser actions may already have prepared their final overlay.
+  if (next.pickerQuery !== previous.pickerQuery) return update;
+  if (next.overlay?.kind !== "picker") {
+    if (previous.overlay?.kind !== "picker") return update;
+    const cancelled = pickerQuery.cancel(next.pickerQuery);
+    return { ...update, state: { ...next, pickerQuery: { ...cancelled.state, result: null } },
+      cancel: [...(update.cancel ?? []), ...(cancelled.cancel ?? [])] };
+  }
+  const before = previous.overlay?.kind === "picker" ? previous.overlay : undefined;
+  const editor = next.overlay.state;
+  if (before?.index === next.overlay.index && before.state.editor.input.text === editor.editor.input.text
+    && before.state.mode === editor.mode && before.state.caseSensitive === editor.caseSensitive) return update;
+  const requested = pickerQuery.request({ ...next.pickerQuery, result: null }, {
+    index: next.overlay.index, query: { text: editor.editor.input.text, mode: editor.mode, caseSensitive: editor.caseSensitive }
+  });
+  return { ...update, state: { ...next, pickerQuery: requested.state }, effects: [...(update.effects ?? []), ...(requested.effects ?? [])] };
+}
+
 export function updateBrowser(
   controller: BrowserController,
   state: BrowserTuiState,
   message: BrowserTuiMessage,
   context: Pick<TuiContext, "terminalSize"> = { terminalSize: { columns: 100, rows: 24 } },
 ): TuiUpdateResult<BrowserTuiState, BrowserTuiMessage> {
-  const reduced = reduceBrowser(controller, state, message, context);
+  const reduced = preparePickerUpdate(state, reduceBrowser(controller, state, message, context));
   const previous = activeTab(state);
   const selectedId = reduced.exit === undefined ? activeTab(reduced.state).id : null;
   controller.prioritizeRendering(selectedId);
@@ -2251,6 +2195,7 @@ export function createBrowserInitialState(
     sidePanelScroll: createScrollState(),
     ...controller.library(),
     overlay: null,
+    pickerQuery: pickerQuery.init(),
     status: active.kind === "ready"
       ? status(`Opened ${activeUrl}`, "success")
       : status(`Restoring ${activeUrl}`)

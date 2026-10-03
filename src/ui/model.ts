@@ -6,6 +6,7 @@ import type {
   CommandInputTransition,
   ContextMenuTransition,
   MenuItem,
+  ListboxView,
   MenuActivateEvent,
   MenuTriggerTransition,
   NumberInputControlTransition,
@@ -18,6 +19,7 @@ import type {
 } from "@ismail-elkorchi/terminal-ui/components";
 import type {
   CommandInputState,
+  CompleteListboxCollection,
   ContextMenuState,
   MenuTriggerState,
   NumberInputState,
@@ -26,11 +28,11 @@ import type {
   UnscrolledSearchPickerState
 } from "@ismail-elkorchi/terminal-ui/behavior";
 import type {
-  CollectionInteractionIndex,
   CollectionInteractionState,
   ScrollRequest
 } from "@ismail-elkorchi/terminal-ui/interaction";
-import type { SearchPickerIndex } from "@ismail-elkorchi/terminal-ui/behavior";
+import type { TuiPreparedQueryState, TuiPreparedQueryMessage } from "@ismail-elkorchi/terminal-ui/tui";
+import type { SearchPickerIndex, SearchPickerQueryResult } from "@ismail-elkorchi/terminal-ui/behavior";
 import type { TextEditBuffer } from "@ismail-elkorchi/terminal-ui/text";
 
 import type {
@@ -40,7 +42,7 @@ import type {
   StoredBrowserDocument,
 } from "../app/storage.js";
 import type { IndexedPageSnapshot } from "../app/types.js";
-import type { DocumentNodeRef, DocumentState } from "../document/index.js";
+import type { DocumentNodeRef, DocumentSelectOption, DocumentState } from "../document/index.js";
 import type { RenderDocumentSummary, ViewportRenderPayload } from "./render-worker/index.js";
 
 export type PickerKind = "links" | "outline" | "recall";
@@ -127,7 +129,8 @@ export interface BrowserDocumentState {
     | {
         readonly kind: "combobox";
         readonly state: UnscrolledComboboxState;
-        readonly index: CollectionInteractionIndex;
+        readonly collection: CompleteListboxCollection<DocumentSelectOption>;
+        readonly optionsView: ListboxView<DocumentSelectOption>;
       }
     | { readonly kind: "checkboxGroup"; readonly state: CollectionInteractionState }
   >>;
@@ -228,6 +231,7 @@ export interface BrowserTuiState {
   readonly bookmarks: readonly BookmarkEntry[];
   readonly downloads: readonly DownloadRecord[];
   readonly overlay: BrowserOverlay | null;
+  readonly pickerQuery: TuiPreparedQueryState<SearchPickerQueryResult<PickerValue>>;
   readonly status: StatusMessage | null;
 }
 
@@ -312,12 +316,12 @@ export type BrowserTuiMessage =
   | { readonly kind: "tabsClose"; readonly event: TabCloseEvent }
   | { readonly kind: "actionPaletteTransition"; readonly transition: CommandInputTransition }
   | { readonly kind: "actionPaletteSubmit"; readonly value: string }
+  | { readonly kind: "pickerQuery"; readonly message: TuiPreparedQueryMessage<SearchPickerQueryResult<PickerValue>> }
   | { readonly kind: "pickerTransition"; readonly transition: SearchPickerControlTransition }
   | { readonly kind: "pickerAccept"; readonly event: SearchPickerAcceptEvent }
   | { readonly kind: "pickerSelect"; readonly value?: PickerValue }
   | { readonly kind: "openFind" }
   | { readonly kind: "findAction"; readonly transition: TextInputTransition }
-  | { readonly kind: "findSubmit" }
   | { readonly kind: "closeFind" }
   | { readonly kind: "formText"; readonly controlId: string; readonly transition: TextInputTransition }
   | { readonly kind: "formNumber"; readonly controlId: string; readonly transition: NumberInputControlTransition }

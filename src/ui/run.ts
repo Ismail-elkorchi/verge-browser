@@ -11,7 +11,7 @@ import type { RenderWorkerClient } from "./render-worker/client.js";
 import type { BrowserServices } from "./services.js";
 import { createBrowserApp, createBrowserInitialState } from "./app.js";
 import { BrowserController } from "./browser-controller.js";
-import { browserRenderPreferences, documentContentColumns, documentScrollRow } from "./document-layout.js";
+import { browserRenderPreferences, browserPageSize, documentScrollRow } from "./document-layout.js";
 import { browserView } from "./view.js";
 
 export interface BrowserTuiOptions {
@@ -121,17 +121,14 @@ export async function renderBrowserOnce(
     const selected = selectedTab.kind === "ready"
       ? selectedTab
       : await prepared.controller.restorePlaceholder(selectedTab);
-    const pageColumns = prepared.state.sidePanel !== null && terminalSize.columns >= 100
-      ? terminalSize.columns - 41
-      : terminalSize.columns;
-    const viewportRows = Math.max(1, terminalSize.rows - (prepared.state.findBar === null ? 3 : 4));
+    const pageSize = browserPageSize(prepared.state, terminalSize);
     const viewportRevision = selected.rendering.requestedViewportRevision + 1;
     const payload = await prepared.controller.renderViewport(selected, viewportRevision, {
-      columns: documentContentColumns(Math.max(1, pageColumns - 1)),
-      rows: viewportRows,
+      columns: pageSize.columns,
+      rows: pageSize.rows,
       scrollRow: documentScrollRow(selected),
-      overscanBefore: Math.min(6, viewportRows),
-      overscanAfter: Math.min(12, viewportRows),
+      overscanBefore: Math.min(6, pageSize.rows),
+      overscanAfter: Math.min(12, pageSize.rows),
       preferences: browserRenderPreferences(),
       searchQuery: selected.search?.query ?? null,
     });

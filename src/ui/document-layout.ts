@@ -1,10 +1,26 @@
 import type { Rect } from "@ismail-elkorchi/terminal-ui/renderer";
 
 import type { DocumentForm, DocumentFormControl, DocumentLink, DocumentNodeRef } from "../document/index.js";
-import type { BrowserDocumentState } from "./model.js";
+import type { BrowserDocumentState, BrowserTuiState } from "./model.js";
 import type { ViewportRenderPayload } from "./render-worker/index.js";
 
 const MAX_DOCUMENT_COLUMNS = 120;
+
+export const BROWSER_SIDE_PANEL_COLUMNS = 40;
+export const BROWSER_SIDE_PANEL_MIN_COLUMNS = 100;
+
+/** The page rectangle shared by interactive rendering and one-shot output. */
+export function browserPageSize(
+  state: Pick<BrowserTuiState, "sidePanel" | "findBar">,
+  terminalSize: { readonly columns: number; readonly rows: number }
+) {
+  const panelColumns = state.sidePanel !== null && terminalSize.columns >= BROWSER_SIDE_PANEL_MIN_COLUMNS
+    ? BROWSER_SIDE_PANEL_COLUMNS + 1 : 0;
+  return {
+    columns: documentContentColumns(terminalSize.columns - panelColumns - 1),
+    rows: Math.max(1, terminalSize.rows - (state.findBar === null ? 3 : 4))
+  };
+}
 
 export interface BrowserRenderPreferences {
   readonly colorScheme: "light" | "dark";

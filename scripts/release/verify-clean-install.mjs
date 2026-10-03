@@ -1,5 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { validateDependencyInstall } from "./dependency-package-contract.mjs";
 
 import { validateWorkspaceParserInstall } from "./parser-package-contract.mjs";
 
@@ -10,6 +12,7 @@ async function readJson(path) {
 const root = process.cwd();
 const manifest = await readJson(resolve(root, "package.json"));
 const lockfile = await readJson(resolve(root, "package-lock.json"));
+const installedLock = await readJson(resolve(root, "node_modules", ".package-lock.json"));
 const evidence = validateWorkspaceParserInstall({
   manifest,
   lockfile,
@@ -21,51 +24,26 @@ const dependencyEvidence = await Promise.all([
   "@ismail-elkorchi/css-parser",
   "@ismail-elkorchi/http-client",
   "@ismail-elkorchi/terminal-ui"
-].map(async (name) => validatePublishedDependencyInstall({
-  name,
-  manifest,
-  lockfile,
-  installedManifest: await readJson(resolve(root, "node_modules", ...name.split("/"), "package.json"))
-})));
+].map(async (name) => {
+  const dependencySpec = manifest.dependencies?.[name];
+  if (lockfile.packages?.[""]?.dependencies?.[name] !== dependencySpec) {
+    throw new Error(`package.json and package-lock.json disagree on ${name}`);
+  }
+  return validateDependencyInstall({
+    name,
+    dependencySpec,
+    lockEntry: lockfile.packages?.[`node_modules/${name}`],
+    installedLockEntry: installedLock.packages?.[`node_modules/${name}`],
+    installedManifest: await readJson(resolve(root, "node_modules", ...name.split("/"), "package.json"))
+  });
+}));
+
+// A Git install must run the upstream prepare build; source metadata alone is insufficient.
+for (const entry of ["component", "components", "tui"]) {
+  await import(pathToFileURL(resolve(root, "node_modules", "@ismail-elkorchi", "terminal-ui", "dist", entry, "index.js")).href);
+}
 
 process.stdout.write(
   `clean install verified: ${evidence.name}@${evidence.version} ${evidence.integrity}; `
-  + `${dependencyEvidence.map((entry) => `${entry.name}@${entry.version} ${entry.integrity}`).join("; ")}\n`
+  + `${dependencyEvidence.map((entry) => `${entry.name}@${entry.revision ?? entry.version} ${entry.integrity}`).join("; ")}\n`
 );
-
-function validatePublishedDependencyInstall({
-  name,
-  manifest,
-  lockfile,
-  installedManifest
-}) {
-  const dependency = manifest.dependencies?.[name];
-  if (typeof dependency !== "string" || !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u.test(dependency)) {
-    throw new Error(`${name} must use an exact published version`);
-  }
-  const rootLock = lockfile.packages?.[""];
-  const lockEntry = lockfile.packages?.[`node_modules/${name}`];
-  if (rootLock?.dependencies?.[name] !== dependency) {
-    throw new Error(`package.json and package-lock.json disagree on ${name}`);
-  }
-  if (
-    typeof lockEntry?.version !== "string"
-    || lockEntry.version !== dependency
-    || lockEntry.resolved !== `https://registry.npmjs.org/${name}/-/${name.split("/").at(-1)}-${lockEntry.version}.tgz`
-    || typeof lockEntry?.integrity !== "string"
-    || !/^sha512-[A-Za-z0-9+/]+={0,2}$/u.test(lockEntry.integrity)
-  ) {
-    throw new Error(`${name} must resolve from the public npm registry with integrity`);
-  }
-  if (
-    installedManifest.name !== name
-    || installedManifest.version !== lockEntry.version
-  ) {
-    throw new Error(`installed ${name} does not match the public-registry lock entry`);
-  }
-  return Object.freeze({
-    name,
-    version: installedManifest.version,
-    integrity: lockEntry.integrity
-  });
-}
