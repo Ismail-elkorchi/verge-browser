@@ -3,7 +3,7 @@ import type { DocumentNodeRef, DocumentSemanticEntry, DocumentSourceRange } from
 import type { DocumentActionIdentity, FormattingNodeId } from "../formatting/index.js";
 import type {
   CssEdges, CssPixelLength, CssRect, LayoutFragmentId,
-  LayoutFragmentTree, LayoutPaintStyle, LayoutTextCluster
+  LayoutFragmentTree, LayoutFragment, LayoutPaintStyle, LayoutTextCluster
 } from "../layout/index.js";
 import type { TextSearchMatchId } from "../search/index.js";
 
@@ -126,9 +126,10 @@ export interface DisplayListSpatialIndex {
   query(rect: CssRect, signal?: AbortSignal, projection?: ViewportGeometryProjection): DisplayListSpatialQuery;
 }
 
+/** Block alignment is explicit; inline reveal always uses CSSOM nearest. */
 export type ViewportRevealRequest =
-  | { readonly node: DocumentNodeRef; readonly align: "start" | "nearest" }
-  | { readonly query: string; readonly match: string; readonly align: "start" | "nearest" };
+  | { readonly node: DocumentNodeRef; readonly blockAlign: "start" | "nearest" }
+  | { readonly query: string; readonly match: string; readonly blockAlign: "start" | "nearest" };
 
 export interface ViewportWindow {
   readonly scrollColumn?: number;
@@ -391,6 +392,8 @@ export interface ViewportTerminalResult {
 
 export interface BuildDocumentDisplayListInput {
   readonly layout: LayoutFragmentTree;
+  /** Current paint inputs after a verified background-only style transition. */
+  readonly paintStyle?: (fragment: LayoutFragment) => LayoutPaintStyle;
   readonly context: TerminalRenderContext;
   readonly signal?: AbortSignal;
 }

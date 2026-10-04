@@ -133,6 +133,8 @@ export interface FormattingBudgets {
   readonly maxDepth: number;
   readonly maxTextCodeUnits: number;
   readonly maxAnonymousWrappers: number;
+  readonly maxCounterOperations: number;
+  readonly maxCounterStates: number;
 }
 
 export type FormattingOutcome =
@@ -160,6 +162,7 @@ export interface FormattingTree {
   readonly root: FormattingNodeId;
   readonly suppressed: readonly SuppressedFormattingSubtree[];
   readonly outcome: FormattingOutcome;
+  semantic(source: DocumentNodeRef): DocumentSemanticEntry | null;
   node(id: FormattingNodeId): FormattingNode;
   parent(id: FormattingNodeId): FormattingNode | null;
   children(id: FormattingNodeId): readonly FormattingNode[];

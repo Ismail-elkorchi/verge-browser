@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { DEFAULT_VARIANTS, ROW_HEIGHT_CSS_PX, fixtureRequestUrl, fixtureResources, mediaEnvironment } from "./environment.mjs";
 import { compareOracleCase } from "./oracle-comparison.mjs";
+import { nativeFormObservations, collectBrowserFormObservations, chromiumAccessibleNames } from "./form-observations.mjs";
 import { collectVisibleBrowserText } from "./browser-text.mjs";
 import { openFixture, renderSnapshot, principalRectangle, paintExpectations } from "./run.mjs";
 
@@ -60,6 +61,7 @@ function nativeInspection(fixture, variant, snapshot, pipeline) {
     paintedPhrases: pipeline.evidence.paintedPhrases,
     zeroFontPainted: pipeline.evidence.paintCoverage.zeroFont.painted.length,
     logicalText: pipeline.artifacts.textSearchIndex.text,
+    formSemantics: nativeFormObservations(snapshot.document),
     byId: Object.fromEntries([...ids].map((id) => {
       const node = snapshot.document.elementById(id);
       return [id, node === null ? null : { rectangle: principalRectangle(snapshot, pipeline, id), style: nativeStyle(pipeline.artifacts.computedStyles.style(node)) }];
@@ -138,6 +140,8 @@ const inspect = async (javaScriptEnabled) => {
             };
           });
           Object.assign(inspection, await page.evaluate(collectVisibleBrowserText));
+          inspection.formSemantics = await page.evaluate(collectBrowserFormObservations);
+          inspection.accessibleNames = await chromiumAccessibleNames(context, page, inspection.formSemantics.nameTargets);
           let native = null;
           let comparison = null;
           if (!javaScriptEnabled) {
@@ -167,10 +171,10 @@ try {
 }
 const failures = scriptingDisabled.flatMap((entry) => entry.comparison.failures.map((failure) => ({ case: entry.id, ...failure })));
 const result = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   chromiumExecutableHash: createHash("sha256").update(await readFile(executablePath)).digest("hex"),
   chromiumVersion: browser.version(),
-  comparisonScope: "Layout-visible DOM text, CSSOM generated strings, and native control text (not pixel occlusion) versus complete native painted-source coverage; expected text and explicit controlled computed-style/geometry assertions; no pixel equality or terminal font-metric equality.",
+  comparisonScope: "Native DOM form owners, sanitized values, option selectedness, ordered FormData entries, and CDP accessible names for opted-in fixtures; layout-visible DOM text, CSSOM generated strings, and native control text (not pixel occlusion) versus complete native painted-source coverage; expected text and explicit controlled computed-style/geometry assertions; no pixel equality or terminal font-metric equality.",
   summary: { caseCount: scriptingDisabled.length, comparedTextPhrases: scriptingDisabled.reduce((sum, entry) => sum + entry.comparison.comparedTextPhrases, 0), failures },
   scriptingDisabled, scriptingEnabled
 };

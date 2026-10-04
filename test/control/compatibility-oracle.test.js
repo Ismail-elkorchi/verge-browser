@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { parseWebDocument } from "../../dist/document/index.js";
+import { nativeFormObservations, chromiumAccessibleNames } from "../../scripts/compat/form-observations.mjs";
 
 import { DEFAULT_VARIANTS, fixtureRequestUrl, mediaEnvironment } from "../../scripts/compat/environment.mjs";
 import { compareOracleCase } from "../../scripts/compat/oracle-comparison.mjs";
@@ -52,4 +54,61 @@ test("oracle comparisons reject missing controlled style targets in both engines
   delete native.byId.box;
   delete chromium.byId.box;
   assert.equal(compareOracleCase(fixture, DEFAULT_VARIANTS[0], native, chromium).failures[0].kind, "missing-style-target");
+});
+
+test("form oracle preserves hidden controls and stable positions despite duplicate HTML IDs", () => {
+  const document = parseWebDocument(`<div id="duplicate"></div><form id="duplicate"><input id="duplicate" type="hidden" name="hidden" value="secret"><input form="duplicate" name="not-owned"></form>`, {
+    requestUrl: "https://example.test", finalUrl: "https://example.test",
+  });
+  const observed = nativeFormObservations(document);
+  assert.equal(observed.controls.length, 2);
+  assert.equal(observed.controls[0].inputType, "hidden");
+  assert.equal(new Set(observed.controls.map((control) => control.key)).size, 2);
+  assert.equal(observed.controls[0].form, observed.forms[0].key);
+  assert.equal(observed.controls[1].form, null);
+  assert.deepEqual(observed.forms[0].entries, { status: "complete", entries: [{ name: "hidden", value: "secret" }] });
+});
+
+test("form comparisons reject owner, selectedness and entry-order drift", () => {
+  const { fixture, native, chromium } = observations();
+  fixture.oracle.formSemantics = true;
+  const formSemantics = { controls: [{ key: "element:5", form: "element:3", value: "a", options: [{ key: "element:6", selected: true }] }],
+    forms: [{ key: "element:3", entries: { status: "complete", entries: [{ name: "same", value: "a" }, { name: "same", value: "b" }] }, submitters: [] }] };
+  chromium.formSemantics = globalThis.structuredClone(formSemantics);
+  native.formSemantics = globalThis.structuredClone(formSemantics);
+  assert.deepEqual(compareOracleCase(fixture, DEFAULT_VARIANTS[0], native, chromium).failures, []);
+  native.formSemantics.controls[0].form = null;
+  native.formSemantics.controls[0].options[0].selected = false;
+  native.formSemantics.forms[0].entries.entries.reverse();
+  assert.deepEqual(compareOracleCase(fixture, DEFAULT_VARIANTS[0], native, chromium).failures.map((failure) => failure.kind), ["form-control-state", "form-entry-list"]);
+});
+
+test("accessible-name comparisons require real CDP observations and detect name mismatches", () => {
+  const { fixture, native, chromium } = observations();
+  fixture.oracle.accessibleNames = true;
+  native.formSemantics = { nameTargets: [{ key: "element:5", name: "Image action" }] };
+  chromium.formSemantics = { nameTargets: ["element:5"] };
+  chromium.accessibleNames = { status: "unavailable", reason: "CDP unavailable" };
+  assert.equal(compareOracleCase(fixture, DEFAULT_VARIANTS[0], native, chromium).failures[0].kind, "accessible-name-oracle-unavailable");
+  chromium.accessibleNames = { status: "complete", byKey: { "element:5": { name: "Different", ignored: false } } };
+  assert.equal(compareOracleCase(fixture, DEFAULT_VARIANTS[0], native, chromium).failures[0].kind, "accessible-name");
+  chromium.accessibleNames.byKey["element:5"].name = "Image action";
+  assert.deepEqual(compareOracleCase(fixture, DEFAULT_VARIANTS[0], native, chromium).failures, []);
+});
+
+test("CDP name collection maps backend IDs to document positions without deriving names from DOM text", async () => {
+  let detached = false;
+  const session = {
+    async send(method) {
+      if (method === "Accessibility.enable") return {};
+      if (method === "DOM.getDocument") return { root: { nodeType: 9, children: [{ nodeType: 1, backendNodeId: 10,
+        children: [{ nodeType: 1, backendNodeId: 20, children: [{ nodeType: 3, backendNodeId: 30, nodeValue: "Wrong DOM name" }] }] }] } };
+      if (method === "Accessibility.getFullAXTree") return { nodes: [{ backendDOMNodeId: 20, role: { value: "button" }, name: { value: "Native AX name" }, ignored: false }] };
+      throw new Error(`Unexpected CDP method ${method}`);
+    },
+    async detach() { detached = true; },
+  };
+  const observed = await chromiumAccessibleNames({ async newCDPSession() { return session; } }, {}, ["element:1"]);
+  assert.deepEqual(observed, { status: "complete", byKey: { "element:1": { role: "button", name: "Native AX name", ignored: false } } });
+  assert.equal(detached, true);
 });

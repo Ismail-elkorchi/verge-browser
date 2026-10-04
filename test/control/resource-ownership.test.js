@@ -104,7 +104,7 @@ test("nested immutable and shared-resource adoption never depend on provisional 
   registerRetainedOwner(outer, () => {
     if (!entered) {
       entered = true;
-      innerOwner = accounting.immutable(inner, new Set(), undefined, true);
+      innerOwner = accounting.immutable(inner, new Set(), undefined, [shared]);
     }
     return [];
   });
@@ -228,10 +228,12 @@ test("warm metrics and scroll account no allocations; uncached misses account on
   try {
     f.store.analyze(request());
     const before = f.store.metrics().accountedAllocations;
+    const scans = f.store.metrics().sideCacheScans;
     for (let index = 0; index < 10; index += 1) f.store.metrics();
     for (let index = 0; index < 5; index += 1) f.store.renderViewport({ ...request(), viewportRevision: index + 1,
       window: { scrollRow: index * 3, viewportRows: 24, overscanBefore: 0, overscanAfter: 0 } });
     assert.equal(f.store.metrics().accountedAllocations, before);
+    assert.equal(f.store.metrics().sideCacheScans, scans, "warm metrics and scrolling must not scan stream caches");
     f.store.search(request(), "absent unique query");
     const after = f.store.metrics().accountedAllocations;
     assert.ok(after - before < 100, `An absent query measured ${after - before} allocations`);
@@ -328,4 +330,61 @@ test("reading custom properties cannot grow an already admitted immutable style 
       assertConservative(f.store);
     }
   } finally { f.store.dispose(); }
+});
+
+test("accounting batch keeps no strong allocation roots before retirement finishes", async () => {
+  if (globalThis.gc === undefined) {
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const { fileURLToPath } = await import("node:url");
+    const environment = { ...process.env };
+    delete environment["NODE_TEST_CONTEXT"];
+    const { stdout } = await promisify(execFile)(process.execPath, ["--expose-gc", ...process.execArgv.filter((arg) => arg !== "--expose-gc"),
+      "--test", "--test-name-pattern=accounting batch keeps no strong allocation roots", fileURLToPath(import.meta.url)], { env: environment });
+    assert.match(stdout, /accounting batch keeps no strong allocation roots/u);
+    return;
+  }
+  const { setImmediate } = await import("node:timers/promises");
+  const accounting = new RetainedCostAccounting();
+  function retire() {
+    const root = { values: Array.from({ length: 4096 }, (_, index) => ({ index, label: `allocation ${index}` })) };
+    const owner = accounting.immutable(root);
+    const references = [root, root.values, root.values[0], root.values.at(-1)].map((value) => new globalThis.WeakRef(value));
+    return { owner, references };
+  }
+  const { owner, references } = retire();
+  // No endBatch: the pending replacement may still need construction-local sharing.
+  for (let iteration = 0; iteration < 5; iteration += 1) { await setImmediate(); globalThis.gc(); }
+  assert.ok(references.every((reference) => reference.deref() === undefined),
+    "cost records and construction ledgers must not keep retired phase allocations alive");
+  assert.ok(accounting.total([owner]) > 0, "a surviving numeric cost record contains no strong graph roots");
+  accounting.endBatch();
+});
+
+test("nested mutable and failed measurements restore active ownership without provisional dependencies", () => {
+  for (const failed of [false, true]) {
+    const accounting = new RetainedCostAccounting();
+    const shared = { values: ["shared"] };
+    const outer = { shared };
+    const inner = { outer, shared };
+    let entered = false;
+    registerRetainedOwner(outer, () => {
+      if (!entered) {
+        entered = true;
+        if (failed) {
+          let checks = 0;
+          assert.throws(() => accounting.immutable(inner, new Set(), {
+            throwIfAborted() { if (++checks === 2) throw new Error("nested cancellation"); },
+          }), /nested cancellation/u);
+        } else accounting.mutable(inner);
+      }
+      return [];
+    });
+    const owner = accounting.immutable(outer);
+    assert.ok(!owner.dependencies.includes(owner));
+    assert.equal(owner.dependencies.length, 0);
+    assert.ok(accounting.total([owner]) >= estimatedRetainedCost([outer]));
+    const next = accounting.immutable({ shared });
+    assert.deepEqual(next.dependencies, [owner]);
+  }
 });

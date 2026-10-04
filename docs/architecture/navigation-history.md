@@ -49,6 +49,26 @@ default form actions and navigation capability sources. The immutable parsed
 document retains its acquisition/base-resolution provenance. Fragment wrappers
 reuse acquisition diagnostics and do not fabricate a fetch or parse.
 
+## Rendering across activations
+
+Every accepted activation advances `documentRevision`, including fragment,
+Back, and Forward transitions. That revision is a stale-result fence, not the
+immutable source identity. The controller compares the current entry's live
+`documentId` with the one acknowledged by its tab's worker lifecycle. A same-source
+activation updates state and the activation fence through `update-document-state`;
+it performs no HTML hydration or stylesheet parsing/compilation. Different sources,
+an absent attachment, and worker restart require attachment. Equal URLs alone do
+not establish source identity, and the worker keeps only one source family per
+tab rather than every history document.
+
+While a same-source projection is pending, the last accepted viewport remains an
+explicitly previous display with its original revisions. It is never relabeled as
+newly accepted or used to bypass current-result checks. Entry-specific root
+position/focus and current live controls/nested offsets retain their existing
+owners. Serialized preparation, worker epochs, request generations, and accepted
+terminal writes still fence activation and persistence. A genuine cascade no-op
+can reuse downstream phases; changed control content or disclosure state cannot.
+
 ## Fragment and reveal behavior
 
 The one resolver distinguishes an element, top, and no match. It tries the raw
@@ -91,3 +111,7 @@ rejected host writes and rejected effect plans. `document-scroll.test.js` covers
 nested clamping/chaining and hidden/clip policy. TUI tests exercise accepted frames
 for duplicate URLs, fragment targets, editing during acquisition, Stop, late
 responses, close/reopen, workspace restoration and background-tab completion.
+`render-worker-transport.test.js` and `retained-phase-ownership.test.js` additionally
+cover same-source preparation, stale activation fences, worker hydration parity,
+phase identity, and failed-admission recovery. Same-source history controls check
+that rapid activations and rejected writes never rewrite the previous display.

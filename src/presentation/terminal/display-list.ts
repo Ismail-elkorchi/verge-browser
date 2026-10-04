@@ -68,7 +68,7 @@ export function validTerminalRenderContext(input: BuildDocumentDisplayListInput[
     && typeof input.cellMeasurer.width === "function";
 }
 
-function commandGroup(fragment: LayoutFragment): readonly Omit<TerminalPaintCommand, "paintOrder">[] {
+function commandGroup(fragment: LayoutFragment, style = fragment.style): readonly Omit<TerminalPaintCommand, "paintOrder">[] {
   const common = {
     layoutFragment: fragment.id,
     formattingNode: fragment.formattingNode,
@@ -79,10 +79,10 @@ function commandGroup(fragment: LayoutFragment): readonly Omit<TerminalPaintComm
     clipRect: fragment.clipRect,
     action: fragment.action,
     semantic: fragment.semantic,
-    style: fragment.style
+    style
   } as const;
   const commands: Omit<TerminalPaintCommand, "paintOrder">[] = [];
-  if (fragment.style.visible && fragment.kind !== "text") {
+  if (style.visible && fragment.kind !== "text") {
     const boxes = fragment.inlineContinuations ?? [{
       contentRect: fragment.contentRect,
       paddingRect: fragment.paddingRect,
@@ -90,7 +90,7 @@ function commandGroup(fragment: LayoutFragment): readonly Omit<TerminalPaintComm
       marginRect: fragment.marginRect
     }];
     for (const [continuation, box] of boxes.entries()) {
-      if (fragment.style.background !== null && fragment.style.background.a > 0) {
+      if (style.background !== null && style.background.a > 0) {
         commands.push(Object.freeze({
           ...common,
           id: `terminal-paint:background:${fragment.id}:${String(continuation)}`,
@@ -109,7 +109,7 @@ function commandGroup(fragment: LayoutFragment): readonly Omit<TerminalPaintComm
         left: cssMax(cssPx(0), cssCoordinateDifference(box.paddingRect.x, box.borderRect.x))
       });
       for (const side of ["top", "right", "bottom", "left"] as const) {
-        if (fragment.style.borderStyles[side] !== "solid") continue;
+        if (style.borderStyles[side] !== "solid") continue;
         if (borderWidths[side] <= 0) continue;
         commands.push(Object.freeze({
           ...common,
@@ -163,7 +163,7 @@ function commandGroup(fragment: LayoutFragment): readonly Omit<TerminalPaintComm
   const text = fragment.kind === "text" ? fragment.visualText
     : fragment.kind === "control" ? fragment.controlText ?? ""
       : fragment.kind === "replaced" ? fragment.replacedText ?? "" : "";
-  if (fragment.style.visible && text.length > 0) {
+  if (style.visible && text.length > 0) {
     commands.push(Object.freeze({
       ...common,
       id: `terminal-paint:text:${fragment.id}`,
@@ -194,7 +194,7 @@ export function buildDocumentDisplayList(input: BuildDocumentDisplayListInput): 
   const fragmentPaintOrder = [] as LayoutFragment["id"][];
   const append = (fragment: LayoutFragment): boolean => {
     input.signal?.throwIfAborted();
-    const group = commandGroup(fragment);
+    const group = commandGroup(fragment, input.paintStyle?.(fragment) ?? fragment.style);
     if (commands.length + group.length > budgets.maxDisplayListCommands) {
       return false;
     }

@@ -1,5 +1,5 @@
 import { createListboxCollection, createListboxView, createNumberInputConfiguration, createScrollState, createTextAreaState } from "@ismail-elkorchi/terminal-ui/behavior";
-import type { DocumentFormControl, DocumentNodeRef } from "../document/index.js";
+import { controlValues as documentControlValues, controlSelections as documentControlSelections, type DocumentFormControl, type DocumentNodeRef } from "../document/index.js";
 import type { BrowserDocumentState } from "./model.js";
 
 type SelectControl = Extract<DocumentFormControl, { readonly kind: "select" }>;
@@ -9,22 +9,11 @@ const selectOptions = new WeakMap<SelectControl, Pick<SelectEditor, "collection"
 type TextControl = Extract<DocumentFormControl, { readonly kind: "text" }>;
 
 export function controlValues(document: BrowserDocumentState, control: DocumentFormControl): readonly string[] {
-  const explicit = document.documentState.controls.get(control.node)?.values;
-  if (explicit !== undefined) return explicit;
-  if (control.kind === "hidden" || control.kind === "text" || control.kind === "textarea") return [control.defaultValue];
-  if ((control.kind === "checkbox" || control.kind === "radio") && control.defaultChecked) return [control.value];
-  if (control.kind === "select") {
-    return control.options.filter((option) => option.defaultSelected && !option.disabled).map((option) => option.value);
-  }
-  return [];
+  return documentControlValues(document.documentState, control);
 }
 
 export function controlSelections(document: BrowserDocumentState, control: SelectControl): readonly DocumentNodeRef[] {
-  const explicit = document.documentState.controls.get(control.node)?.selected;
-  if (explicit !== undefined) return explicit;
-  const defaults = control.options.filter((option) => option.defaultSelected);
-  return (control.multiple ? defaults : [defaults.at(-1) ?? control.options[0]])
-    .flatMap((option) => option === undefined ? [] : [option.node]);
+  return documentControlSelections(document.documentState, control);
 }
 
 export function controlOptions(control: SelectControl) {

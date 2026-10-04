@@ -1,8 +1,14 @@
+import { parseContent, parseCounterOperations, NORMAL_CONTENT, NO_COUNTER_OPERATIONS,
+  generatedContentEqual, counterOperationsEqual, htmlCounterDefaults } from "./generated-content.js";
+import { freezeComputedStyleRecords, StyleRecordSharing, sameComputedBoxStyle, sameComputedTextStyle,
+  sameComputedTextStyleExceptBackground, sameComputedDisplay } from "./immutable-records.js";
+import { fontShorthandValue, fontSizeValue, lineHeightValue, type FontShorthandValue } from "./font-values.js";
+import { MEDIUM_BORDER, LOGICAL_BORDER_PROPERTIES, borderPropertySupported, borderWidthValue, borderStyleValue,
+  borderShorthandValue, borderSideCandidates, borderSideComponents, borderInheritedSide, isBorderShorthand } from "./border-values.js";
 import { SelectorResultCache } from "./selector-cache.js";
 import { normalizedOverflow } from "./overflow.js";
 import { DiagnosticCollector, diagnosticIdentity } from "./diagnostics.js";
 import { EMPTY_NAMESPACES, bindSelectorNamespaces } from "./namespaces.js";
-import { namedColor } from "./named-colors.js";
 import { isValidMediaEnvironment, mediaApplies } from "./media.js";
 export { terminalMediaMayApply } from "./media.js";
 import { styleBudgets } from "./budgets.js";
@@ -29,6 +35,9 @@ import {
 } from "@ismail-elkorchi/css-parser";
 
 import {
+  controlChecked,
+  controlSelections,
+  controlValues,
   type DocumentNodeRef,
   type DocumentState,
   type WebDocumentNode,
@@ -59,7 +68,7 @@ import type {
   StylesheetNamespaces
 } from "./types.js";
 import {
-  parseCssFunctionalColor,
+  parseCssColorComponents,
   parseCssLength,
   evaluateCssMath,
   parseCssTranslations,
@@ -98,14 +107,13 @@ import {
   parseBorderSpacing,
   parseCaptionSide,
   parseEmptyCells,
-  parseTableBorderStyle,
   parseTableLayout,
   tablePropertyValueSupported,
 } from "./table/index.js";
 
 const SUPPORTED_PROPERTIES = new Set([
   "display", "visibility", "white-space", "color", "background", "background-color",
-  "font-weight", "font-style", "text-decoration", "text-decoration-line", "text-transform",
+  "font", "font-weight", "font-style", "text-decoration", "text-decoration-line", "text-transform",
   "font-size", "line-height", "vertical-align", "direction", "unicode-bidi", "text-align", "text-indent",
   "line-break", "word-break", "overflow-wrap", "hyphens", "tab-size",
   "list-style", "list-style-type", "margin", "margin-top", "margin-right",
@@ -123,13 +131,13 @@ const SUPPORTED_PROPERTIES = new Set([
   "border-right-width", "border-bottom-width", "border-left-width", "border-style",
   "border-top-style", "border-right-style", "border-bottom-style", "border-left-style",
   "border-color", "border-top-color", "border-right-color", "border-bottom-color", "border-left-color",
-  "border-top", "border-right", "border-bottom", "border-left",
+  "border-top", "border-right", "border-bottom", "border-left", ...LOGICAL_BORDER_PROPERTIES,
   "table-layout", "border-collapse", "border-spacing", "caption-side", "empty-cells",
   "overflow", "overflow-x", "overflow-y", "contain",
   "position", "top", "right", "bottom", "left", "inset", "inset-block", "inset-block-start",
   "inset-block-end", "inset-inline", "inset-inline-start", "inset-inline-end", "z-index",
   "float", "clear", "clip", "clip-path", "transform",
-  "content"
+  "content", "counter-reset", "counter-increment", "counter-set"
 ]);
 
 const INHERITED_PROPERTIES = new Set([
@@ -148,8 +156,8 @@ const ZERO: CssLength = Object.freeze({ kind: "zero" });
 const AUTO: CssLength = Object.freeze({ kind: "auto" });
 const NONE: CssLength = Object.freeze({ kind: "none" });
 const NORMAL_GAP = Object.freeze({ kind: "normal" as const });
-const MEDIUM_BORDER: CssLength = Object.freeze({ kind: "length", value: 3, unit: "px" });
 const TRANSPARENT: CssColor = Object.freeze({ r: 0, g: 0, b: 0, a: 0 });
+const EMPTY_COMPONENT_VALUES: readonly ComponentValue[] = Object.freeze([]);
 
 interface CascadeLayerPosition {
   readonly identity: string;
@@ -182,6 +190,48 @@ interface CandidateCollection {
   /** Null means no prior dynamic-state result can safely seed incremental computation. */
   readonly affectedDynamicNodes: ReadonlySet<DocumentNodeRef> | null;
   readonly fallback: "user-agent-only" | null;
+}
+
+/** Compare retained syntax semantically, excluding parser IDs and source spans. */
+function componentValuesEqual(left: readonly ComponentValue[], right: readonly ComponentValue[]): boolean {
+  const pending: (readonly [readonly ComponentValue[], readonly ComponentValue[]])[] = [[left, right]];
+  while (pending.length > 0) {
+    const pair = pending.pop();
+    if (pair === undefined) break;
+    const [a, b] = pair;
+    if (a === b) continue;
+    if (a.length !== b.length) return false;
+    for (let index = 0; index < a.length; index += 1) {
+      const x = a[index];
+      const y = b[index];
+      if (x === undefined || y === undefined || x.kind !== y.kind) return false;
+      switch (x.kind) {
+        case "function-block":
+          if (y.kind !== "function-block" || x.name !== y.name) return false;
+          pending.push([x.value, y.value]); break;
+        case "simple-block":
+          if (y.kind !== "simple-block" || x.associatedToken !== y.associatedToken) return false;
+          pending.push([x.value, y.value]); break;
+        case "number": case "percentage": case "dimension":
+          if (y.kind !== "number" && y.kind !== "percentage" && y.kind !== "dimension") return false;
+          if (x.value !== y.value || x.numberType !== y.numberType || x.sign !== y.sign || x.representation !== y.representation) return false;
+          if (x.kind === "dimension" && (y.kind !== "dimension" || x.unit !== y.unit)) return false;
+          break;
+        case "hash":
+          if (y.kind !== "hash" || x.value !== y.value || x.hashType !== y.hashType) return false;
+          break;
+        case "ident": case "at-keyword": case "string": case "url": case "delim":
+          if (!("value" in y) || x.value !== y.value) return false;
+          break;
+        case "unicode-range":
+          if (y.kind !== "unicode-range" || x.start !== y.start || x.end !== y.end) return false;
+          break;
+        case "bad-string": case "bad-url": case "whitespace": case "cdo": case "cdc":
+        case "colon": case "semicolon": case "comma": case "close-square": case "close-paren": case "close-curly": break;
+      }
+    }
+  }
+  return true;
 }
 
 let nextCustomPropertyEnvironment = 1;
@@ -239,6 +289,23 @@ class ImmutableCustomPropertyEnvironment implements ReadonlyMap<string, string> 
       if (result.ok) parsed.set(name, result.value);
     }
     return new ImmutableCustomPropertyEnvironment(null, parsed);
+  }
+  public equivalent(other: ImmutableCustomPropertyEnvironment,
+    parentsEqual: (left: ReadonlyMap<string, string>, right: ReadonlyMap<string, string>) => boolean): boolean {
+    if (this === other) return true;
+    const sameParent = this.#parent === other.#parent || (this.#parent !== null && other.#parent !== null
+      && parentsEqual(this.#parent, other.#parent));
+    if (sameParent && this.#changes.size === other.#changes.size
+      && [...this.#changes].every(([name, value]) => {
+        const right = other.#changes.get(name);
+        return value === right || (value !== null && right !== undefined && right !== null && componentValuesEqual(value, right));
+      })) return true;
+    const left = this.#components();
+    const right = other.#components();
+    return left.size === right.size && [...left].every(([name, value]) => {
+      const compared = right.get(name);
+      return compared !== undefined && componentValuesEqual(value, compared);
+    });
   }
   public has(key: string): boolean { return this.componentValues(key) !== undefined; }
   public entries(): MapIterator<[string, string]> { return this.#values().entries(); }
@@ -437,12 +504,11 @@ function selectorEnvironment(program: ResolveStylesInput["program"]): SelectorEn
         const refs: DocumentNodeRef[] = [];
         for (const control of document.controls) {
           if (control.kind === "checkbox" || control.kind === "radio") {
-            if (state.controls.get(control.node)?.checked ?? control.defaultChecked) {
+            if (controlChecked(state, control)) {
               refs.push(control.node);
             }
           } else if (control.kind === "select") {
-            const selected = state.controls.get(control.node)?.selected ??
-              control.options.filter((option) => option.defaultSelected).map((option) => option.node);
+            const selected = controlSelections(state, control);
             refs.push(...selected);
           }
         }
@@ -479,12 +545,12 @@ function selectorEnvironment(program: ResolveStylesInput["program"]): SelectorEn
       if (pseudo.name === "checked") {
         const control = document.control(node.ref);
         if (control?.kind === "checkbox" || control?.kind === "radio") {
-          return (state.controls.get(node.ref)?.checked ?? control.defaultChecked) ? "match" : "no-match";
+          return controlChecked(state, control) ? "match" : "no-match";
         }
         const option = document.option(node.ref);
         if (option === null) return "no-match";
-        const select = state.controls.get(option.select);
-        return (select?.selected.includes(option.node) ?? option.defaultSelected) ? "match" : "no-match";
+        const select = document.control(option.select);
+        return select?.kind === "select" && controlSelections(state, select).includes(option.node) ? "match" : "no-match";
       }
       if (pseudo.name === "open") {
         const disclosure = document.disclosure(node.ref);
@@ -552,6 +618,15 @@ function mergeCandidateMaps(target: CandidateMap, source: CandidateMap): void {
   }
 }
 
+function valueFamilySupported(property: string, components: readonly ComponentValue[]): boolean | null {
+  if (property === "content") return parseContent(components) !== undefined;
+  if (property === "counter-reset" || property === "counter-increment" || property === "counter-set") {
+    return parseCounterOperations(components, property) !== undefined;
+  }
+  if (property === "font") return fontShorthandValue(components) !== null;
+  return borderPropertySupported(property, components);
+}
+
 function implementationSupportsDeclaration(source: string): boolean {
   const parsed = parseDeclaration(source);
   if (!parsed.ok) return false;
@@ -566,6 +641,8 @@ function implementationSupportsDeclaration(source: string): boolean {
   if (TABLE_PROPERTIES.has(property)) return tablePropertyValueSupported(property, value);
   const validation = validateCssPropertyValue(parsed.value);
   if (validation.status !== "valid") return false;
+  const familySupport = valueFamilySupported(property, parsed.value.value);
+  if (familySupport !== null) return familySupport;
   const keyword = (...values: readonly string[]): boolean => values.includes(value);
   const length = (allowAuto = false, allowNegative = false, allowNone = false): boolean =>
     parseLength(value, allowAuto, allowNegative, allowNone) !== null;
@@ -657,36 +734,6 @@ function implementationSupportsDeclaration(source: string): boolean {
     case "align-content": return keyword(
       "start", "flex-start", "center", "end", "flex-end", "stretch", "space-between", "space-around", "space-evenly"
     );
-    case "border": {
-      return parseSupportedBorder(value, TRANSPARENT) !== null;
-    }
-    case "border-width": return (splitTopLevel(value, "space") ?? []).length >= 1
-      && (splitTopLevel(value, "space")?.length ?? 0) <= 4
-      && (splitTopLevel(value, "space") ?? []).every((part) => parseBorderWidth(part) !== null);
-    case "border-top-width":
-    case "border-right-width":
-    case "border-bottom-width":
-    case "border-left-width": return parseBorderWidth(value) !== null;
-    case "border-style": return (splitTopLevel(value, "space") ?? []).length >= 1
-      && (splitTopLevel(value, "space")?.length ?? 0) <= 4
-      && (splitTopLevel(value, "space") ?? []).every((part) => parseTableBorderStyle(part) !== null);
-    case "border-top-style":
-    case "border-right-style":
-    case "border-bottom-style":
-    case "border-left-style": return parseTableBorderStyle(value) !== null;
-    case "border-color": return (splitTopLevel(value, "space") ?? []).length >= 1
-      && (splitTopLevel(value, "space")?.length ?? 0) <= 4
-      && (splitTopLevel(value, "space") ?? []).every((part) => parseColor(part, TRANSPARENT) !== undefined);
-    case "border-top-color":
-    case "border-right-color":
-    case "border-bottom-color":
-    case "border-left-color": return parseColor(value, TRANSPARENT) !== undefined;
-    case "border-top":
-    case "border-right":
-    case "border-bottom":
-    case "border-left": {
-      return parseSupportedBorder(value, TRANSPARENT) !== null;
-    }
     case "overflow": {
       const parts = splitTopLevel(value, "space");
       return parts !== null && parts.length >= 1 && parts.length <= 2
@@ -714,18 +761,6 @@ function implementationSupportsDeclaration(source: string): boolean {
     case "clip": return parseLegacyClip(value) !== null;
     case "clip-path": return parseClipPath(value) !== null;
     case "transform": return parseCssTranslations(value) !== undefined;
-    case "content": {
-      if (value === "none" || value === "normal") return true;
-      const content = parseComponentValues(value);
-      if (!content.ok) return false;
-      const components = content.value.filter((component) => component.kind !== "whitespace");
-      return components.length > 0 && components.every((component) => {
-        if (component.kind === "string") return true;
-        if (component.kind !== "function-block" || component.name.toLowerCase() !== "attr") return false;
-        const argument = component.value.filter((entry) => entry.kind !== "whitespace");
-        return argument.length === 1 && argument[0]?.kind === "ident";
-      });
-    }
     default: return false;
   }
 }
@@ -986,6 +1021,11 @@ function collectCandidates(
             diagnostics.add("property-unsupported", source.sourceUrl, `Unsupported property ${property}.`);
             continue;
           }
+          if (!compiled.containsVariableReference && cssWide(compiled.serializedValue) === null
+            && valueFamilySupported(property, compiled.value) === false) {
+            diagnostics.add("value-unsupported", source.sourceUrl, `Unsupported ${property} value ${compiled.serializedValue}.`);
+            continue;
+          }
           sourceOrder += 1;
           for (const [pseudo, matching] of inheritedMatching) {
             for (const [ref, specificity] of matching) {
@@ -1116,6 +1156,11 @@ function collectCandidates(
       }
       if (!property.startsWith("--") && !SUPPORTED_PROPERTIES.has(property)) {
         diagnostics.add("property-unsupported", "inline-style", `Unsupported property ${property}.`);
+        continue;
+      }
+      if (!compiled.containsVariableReference && cssWide(compiled.serializedValue) === null
+        && valueFamilySupported(property, compiled.value) === false) {
+        diagnostics.add("value-unsupported", "inline-style", `Unsupported ${property} value ${compiled.serializedValue}.`);
         continue;
       }
       sourceOrder += 1;
@@ -1260,7 +1305,7 @@ function validatedValue(
   validationSession: ResolveStylesInput["program"]["propertyValidation"],
   substitutionCache: ResolveStylesInput["program"]["substitutedValues"],
   instrumentation: ResolveStylesInput["instrumentation"],
-): { readonly property: string; readonly value: string; readonly sourceUrl: string } | null {
+): { readonly property: string; readonly value: string; readonly sourceUrl: string; readonly components: readonly ComponentValue[] } | null {
   const properties = typeof names === "string" ? [names] : names;
   let entries = properties.flatMap((property) => candidates?.get(property) ?? []);
   let selected: {
@@ -1299,7 +1344,7 @@ function validatedValue(
     if (retainedValue === undefined) substitutionCache.set(substitutionKey, resolved);
     if (resolved === null) {
       diagnostics.add("property-invalid", candidate.sourceUrl, `Unresolved custom property in ${selectedName}.`);
-      break;
+      return { property: selectedName, value: "unset", sourceUrl: candidate.sourceUrl, components: EMPTY_COMPONENT_VALUES };
     }
     const wide = cssWide(resolved.serializedValue);
     if (wide === "revert" || wide === "revert-layer") {
@@ -1314,13 +1359,19 @@ function validatedValue(
   if (selected === null) return null;
   const { candidate, value, components } = selected;
   const selectedName = candidate.program.property ?? candidate.declaration.name.toLowerCase();
+  if (cssWide(value) === null && valueFamilySupported(selectedName, components) === false) {
+    diagnostics.add("value-unsupported", candidate.sourceUrl, `Unsupported ${selectedName} value ${value}.`);
+    return candidate.program.containsVariableReference
+      ? { property: selectedName, value: "unset", sourceUrl: candidate.sourceUrl, components: EMPTY_COMPONENT_VALUES } : null;
+  }
   if (selectedName !== "content") {
     const gridOwned = (selectedName.startsWith("grid-") || selectedName === "justify-items"
       || selectedName === "justify-self" || selectedName.startsWith("place-"))
       && cssWide(value) === null;
     if (gridOwned && !gridPropertyValueSupported(selectedName, value)) {
       diagnostics.add("property-invalid", candidate.sourceUrl, `Invalid value for ${selectedName}.`);
-      return null;
+      return candidate.program.containsVariableReference
+        ? { property: selectedName, value: "unset", sourceUrl: candidate.sourceUrl, components: EMPTY_COMPONENT_VALUES } : null;
     }
     if (!gridOwned) recordPropertyValidationValue(validationSession, value.length);
     const validation = gridOwned ? { status: "valid" as const }
@@ -1328,14 +1379,15 @@ function validatedValue(
         : { status: candidate.program.validationStatus };
     if (validation.status === "invalid") {
       diagnostics.add("property-invalid", candidate.sourceUrl, `Invalid value for ${selectedName}.`);
-      return null;
+      return candidate.program.containsVariableReference
+        ? { property: selectedName, value: "unset", sourceUrl: candidate.sourceUrl, components: EMPTY_COMPONENT_VALUES } : null;
     }
     if (validation.status === "unsupported" && selectedName !== "clip") {
       diagnostics.add("property-unsupported", candidate.sourceUrl, `CSS parser cannot validate ${selectedName}.`);
       return null;
     }
   }
-  return { property: selectedName, value, sourceUrl: candidate.sourceUrl };
+  return { property: selectedName, value, sourceUrl: candidate.sourceUrl, components };
 }
 
 function initialDisplay(replaced: boolean): ComputedDisplay {
@@ -1432,7 +1484,10 @@ function initialStyle(parent: ComputedStyle | null, replaced: boolean, htmlDirec
       overflowY: "visible",
       contain: "none"
     },
-    generatedContent: null,
+    generatedContent: NORMAL_CONTENT,
+    counterReset: NO_COUNTER_OPERATIONS,
+    counterIncrement: NO_COUNTER_OPERATIONS,
+    counterSet: NO_COUNTER_OPERATIONS,
     customProperties: parent?.customProperties ?? EMPTY_CUSTOM_PROPERTIES
   };
 }
@@ -1537,7 +1592,7 @@ function absoluteFontSize(
 
 function fontSizePixels(style: ComputedStyle | null): number {
   const size = style?.text.fontSize;
-  return size?.kind === "length" && size.unit === "px" ? size.value : 16;
+  return size?.kind === "zero" ? 0 : size?.kind === "length" && size.unit === "px" ? size.value : 16;
 }
 
 function blockifiedStyle(style: ComputedStyle): ComputedStyle {
@@ -1561,97 +1616,12 @@ function blockifiedStyle(style: ComputedStyle): ComputedStyle {
   });
 }
 
-function parseBorderWidth(value: string): CssLength | null {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "thin") return Object.freeze({ kind: "length", value: 1, unit: "px" });
-  if (normalized === "medium") return MEDIUM_BORDER;
-  if (normalized === "thick") return Object.freeze({ kind: "length", value: 5, unit: "px" });
-  const parsed = parseLength(normalized, false);
-  if (parsed?.kind === "length" && parsed.unit === "%") return null;
-  if (parsed?.kind === "calculation" && parsed.calculation.percentageDependence !== "none") return null;
-  return parsed;
-}
-
-interface ParsedSupportedBorder {
-  readonly width: CssLength;
-  readonly style: ComputedStyle["box"]["borderStyles"]["top"];
-  readonly color: CssColor | null;
-}
-
-function parseSupportedBorder(value: string, currentColor: CssColor | null): ParsedSupportedBorder | null {
-  const parts = splitTopLevel(value.trim(), "space");
-  if (parts === null || parts.length < 1 || parts.length > 3) return null;
-  let width: CssLength | null = null;
-  let borderStyle: ParsedSupportedBorder["style"] | null = null;
-  let color: CssColor | null | undefined;
-  for (const part of parts) {
-    const parsedWidth = parseBorderWidth(part);
-    if (parsedWidth !== null) {
-      if (width !== null) return null;
-      width = parsedWidth;
-      continue;
-    }
-    const parsedStyle = parseTableBorderStyle(part);
-    if (parsedStyle !== null) {
-      if (borderStyle !== null) return null;
-      borderStyle = parsedStyle;
-      continue;
-    }
-    const parsedColor = colorFromComponentValues(part, currentColor);
-    if (parsedColor === undefined || color !== undefined) return null;
-    color = parsedColor;
-  }
-  return Object.freeze({
-    width: width ?? MEDIUM_BORDER,
-    style: borderStyle ?? "none",
-    color: color === undefined ? currentColor : color,
-  });
-}
-
 function immutableComputedStyle(style: ComputedStyle): ComputedStyle {
-  const color = (value: CssColor | null): CssColor | null => value === null
-    ? null
-    : Object.freeze({ ...value });
-  const edge = (value: CssEdges): CssEdges => Object.freeze({ ...value });
-  return Object.freeze({
+  return freezeComputedStyleRecords({
     ...style,
-    display: Object.freeze({ ...style.display }),
-    text: Object.freeze({
-      ...style.text,
-      color: color(style.text.color),
-      background: color(style.text.background)
-    }),
-    box: Object.freeze({
-      ...style.box,
-      margin: edge(style.box.margin),
-      padding: edge(style.box.padding),
-      inset: edge(style.box.inset),
-      borderWidths: edge(style.box.borderWidths),
-      borderStyles: Object.freeze({ ...style.box.borderStyles }),
-      borderColors: Object.freeze({
-        top: color(style.box.borderColors.top),
-        right: color(style.box.borderColors.right),
-        bottom: color(style.box.borderColors.bottom),
-        left: color(style.box.borderColors.left),
-      }),
-      borderSpacing: Object.freeze({ ...style.box.borderSpacing }),
-      legacyClip: Object.freeze(style.box.legacyClip.kind === "auto"
-        ? { kind: "auto" }
-        : { kind: "rect", edges: edge(style.box.legacyClip.edges) }),
-      clipPath: Object.freeze(style.box.clipPath.kind === "none"
-        ? { kind: "none" }
-        : { kind: "inset", offsets: edge(style.box.clipPath.offsets) }),
-      gridTemplateColumns: style.box.gridTemplateColumns,
-      gridTemplateRows: style.box.gridTemplateRows,
-      gridTemplateAreas: style.box.gridTemplateAreas,
-      gridAutoColumns: Object.freeze([...style.box.gridAutoColumns]),
-      gridAutoRows: Object.freeze([...style.box.gridAutoRows]),
-      gridAutoFlow: Object.freeze({ ...style.box.gridAutoFlow }),
-      gridPlacement: Object.freeze({ ...style.box.gridPlacement })
-    }),
     customProperties: style.customProperties instanceof ImmutableCustomPropertyEnvironment
       ? style.customProperties
-      : ImmutableCustomPropertyEnvironment.fromSerialized(style.customProperties)
+      : ImmutableCustomPropertyEnvironment.fromSerialized(style.customProperties),
   });
 }
 
@@ -1783,49 +1753,21 @@ function boxParts(value: string): readonly string[] | null {
 }
 
 function parseColor(value: string, current: CssColor | null): CssColor | null | undefined {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "transparent") return TRANSPARENT;
-  if (normalized === "currentcolor") return current;
-  if (normalized.startsWith("#")) {
-    const raw = normalized.slice(1);
-    if (!/^(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/u.test(raw)) return undefined;
-    const expanded = raw.length <= 4 ? raw.replace(/[0-9a-f]/gu, (part) => `${part}${part}`) : raw;
-    return {
-      r: Number.parseInt(expanded.slice(0, 2), 16),
-      g: Number.parseInt(expanded.slice(2, 4), 16),
-      b: Number.parseInt(expanded.slice(4, 6), 16),
-      a: expanded.length === 8 ? Number.parseInt(expanded.slice(6), 16) / 255 : 1
-    };
-  }
-  return parseCssFunctionalColor(value) ?? namedColor(normalized);
+  const parsed = parseComponentValues(value);
+  return parsed.ok ? parseCssColorComponents(parsed.value, current) : undefined;
 }
 
 function colorFromComponentValues(value: string, current: CssColor | null): CssColor | null | undefined {
-  const direct = parseColor(value, current);
-  if (direct !== undefined) return direct;
   const parsed = parseComponentValues(value);
   if (!parsed.ok) return undefined;
+  const direct = parseCssColorComponents(parsed.value, current);
+  if (direct !== undefined) return direct;
   for (const component of parsed.value) {
     if (component.kind === "whitespace" || component.kind === "comma") continue;
-    const candidate = parseColor(serializeCssComponentValues([component]), current);
+    const candidate = parseCssColorComponents([component], current);
     if (candidate !== undefined) return candidate;
   }
   return undefined;
-}
-
-function generatedContent(value: string, document: IndexedWebDocumentSnapshot, node: DocumentNodeRef): string | null | undefined {
-  const normalized = value.trim();
-  if (normalized === "none" || normalized === "normal") return null;
-  const pieces: string[] = [];
-  const pattern = /"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|attr\(\s*([-\w]+)\s*\)/gu;
-  let cursor = 0;
-  for (const match of normalized.matchAll(pattern)) {
-    if (normalized.slice(cursor, match.index).trim().length > 0) return undefined;
-    cursor = match.index + match[0].length;
-    if (match[3] !== undefined) pieces.push(document.attribute(node, match[3]) ?? "");
-    else pieces.push((match[1] ?? match[2] ?? "").replace(/\\([\\"'])/gu, "$1"));
-  }
-  return pieces.length === 0 || normalized.slice(cursor).trim().length > 0 ? undefined : pieces.join("");
 }
 
 function computeStyle(
@@ -1849,10 +1791,11 @@ function computeStyle(
     ? htmlDirectionality.direction : null;
   const control = pseudo === null ? document.control(node) : null;
   if (htmlDirectionality?.htmlMode === "auto" && (control?.kind === "text" || control?.kind === "textarea")) {
-    const currentValue = state.controls.get(control.node)?.values[0] ?? control.defaultValue;
+    const currentValue = controlValues(state, control)[0] ?? "";
     htmlDirection = document.directionForRenderedText(node, currentValue);
   }
   let style = initialStyle(parent, replaced, htmlDirection);
+  if (pseudo === null) style = { ...style, ...htmlCounterDefaults(document, node) };
   const variables = customProperties(
     parent?.customProperties ?? EMPTY_CUSTOM_PROPERTIES,
     candidates,
@@ -1998,66 +1941,72 @@ function computeStyle(
     if (computed === undefined) unsupported(background);
     else style = { ...style, text: { ...style.text, background: computed } };
   }
-  const weight = value("font-weight");
+  const parsedFonts = new Map<readonly ComponentValue[], FontShorthandValue | null>();
+  const font = (entry: NonNullable<ReturnType<typeof value>>): FontShorthandValue | null => {
+    if (!parsedFonts.has(entry.components)) parsedFonts.set(entry.components, fontShorthandValue(entry.components));
+    return parsedFonts.get(entry.components) ?? null;
+  };
+  const weight = value(["font-weight", "font"]);
   if (weight !== null) {
-    const computed = resolvedWide("font-weight", weight.value, "400", String(parent?.text.fontWeight ?? 400)).toLowerCase();
-    const numeric = computed === "normal" ? 400 : computed === "bold" || computed === "bolder" ? 700
-      : computed === "lighter" ? 300 : Number.parseInt(computed, 10);
+    const wide = cssWide(weight.value);
+    const input = wide === "inherit" || wide === "unset" ? parent?.text.fontWeight ?? 400
+      : wide === "initial" ? 400
+        : weight.property === "font" ? font(weight)?.weight ?? null
+          : weight.value.trim().toLowerCase();
+    const inheritedWeight = parent?.text.fontWeight ?? 400;
+    // CSS Fonts relative-weight table, shared by shorthand and longhand winners.
+    const numeric = typeof input === "number" ? input : input === "normal" ? 400
+      : input === "bold" ? 700
+        : input === "bolder" ? inheritedWeight < 350 ? 400 : inheritedWeight < 550 ? 700 : inheritedWeight < 900 ? 900 : inheritedWeight
+          : input === "lighter" ? inheritedWeight < 100 ? inheritedWeight : inheritedWeight < 550 ? 100 : inheritedWeight < 750 ? 400 : 700
+            : input === null ? NaN : Number(input);
     if (!Number.isFinite(numeric) || numeric < 1 || numeric > 1000) unsupported(weight);
     else style = { ...style, text: { ...style.text, fontWeight: numeric } };
   }
-  const fontStyle = value("font-style");
+  const fontStyle = value(["font-style", "font"]);
   if (fontStyle !== null) {
-    const computed = resolvedWide("font-style", fontStyle.value, "normal", parent?.text.fontStyle ?? null).toLowerCase();
-    const normalized = computed.startsWith("oblique") ? "oblique" : computed;
+    const wide = cssWide(fontStyle.value);
+    const input = wide === "inherit" || wide === "unset" ? parent?.text.fontStyle ?? "normal"
+      : wide === "initial" ? "normal" : fontStyle.property === "font" ? font(fontStyle)?.style ?? ""
+        : fontStyle.value.trim().toLowerCase();
+    const normalized = input.startsWith("oblique") ? "oblique" : input;
     if (normalized === "normal" || normalized === "italic" || normalized === "oblique") {
       style = { ...style, text: { ...style.text, fontStyle: normalized } };
     } else unsupported(fontStyle);
   }
-  const fontSize = value("font-size");
+  const fontSize = value(["font-size", "font"]);
   if (fontSize !== null) {
     const parentPx = fontSizePixels(parent);
     const wide = cssWide(fontSize.value);
     const keywords: Readonly<Record<string, number>> = {
       "xx-small": 9, "x-small": 10, small: 13, medium: 16, large: 18,
       "x-large": 24, "xx-large": 32, "xxx-large": 48,
-      smaller: parentPx / 1.2, larger: parentPx * 1.2
+      smaller: parentPx / 1.2, larger: parentPx * 1.2,
     };
-    const normalized = fontSize.value.trim().toLowerCase();
-    const specified = wide === "inherit" || wide === "unset"
+    const input = wide === "inherit" || wide === "unset"
       ? parent?.text.fontSize ?? Object.freeze({ kind: "length", value: 16, unit: "px" } as const)
-      : wide === "initial"
-        ? Object.freeze({ kind: "length", value: 16, unit: "px" } as const)
-        : keywords[normalized] === undefined
-          ? parseLength(normalized, false)
-          : Object.freeze({ kind: "length", value: keywords[normalized], unit: "px" } as const);
+      : wide === "initial" ? Object.freeze({ kind: "length", value: 16, unit: "px" } as const)
+        : fontSize.property === "font" ? font(fontSize)?.size ?? null : fontSizeValue(fontSize.components);
+    const specified = input?.kind === "keyword"
+      ? Object.freeze({ kind: "length", value: keywords[input.value] ?? 16, unit: "px" } as const) : input;
     valueDependencies.computedViewportInlineSize ||= usesLengthUnit(specified, "vw");
     valueDependencies.computedViewportBlockSize ||= usesLengthUnit(specified, "vh");
     const computed = specified === null ? null : absoluteFontSize(specified, parentPx, rootFontSizePx, environment);
     if (computed === null) unsupported(fontSize);
     else style = { ...style, text: { ...style.text, fontSize: computed } };
   }
-  const lineHeight = value("line-height");
+  const lineHeight = value(["line-height", "font"]);
   if (lineHeight !== null) {
     const wide = cssWide(lineHeight.value);
-    const normalized = lineHeight.value.trim().toLowerCase();
-    const inherited = parent?.text.lineHeight ?? Object.freeze({ kind: "normal" } as const);
-    let computed: ComputedStyle["text"]["lineHeight"] | null = null;
-    if (wide === "inherit" || wide === "unset") computed = inherited;
-    else if (wide === "initial" || normalized === "normal") computed = Object.freeze({ kind: "normal" });
-    else if (/^(?:\d+(?:\.\d+)?|\.\d+)$/u.test(normalized)) {
-      const number = Number(normalized);
-      if (Number.isFinite(number)) computed = Object.freeze({ kind: "number", value: number });
-    } else {
-      const parsed = parseLength(normalized, false);
-      if (parsed !== null) {
-        const absolute = parsed.kind === "length" && parsed.unit === "%"
-          ? Object.freeze({ kind: "length", value: fontSizePixels(style) * parsed.value / 100, unit: "px" } as const)
-          : parsed.kind === "length" && parsed.unit === "em"
-            ? Object.freeze({ kind: "length", value: fontSizePixels(style) * parsed.value, unit: "px" } as const)
-            : parsed;
-        computed = Object.freeze({ kind: "length", value: absolute });
-      }
+    let computed = wide === "inherit" || wide === "unset"
+      ? parent?.text.lineHeight ?? Object.freeze({ kind: "normal" } as const)
+      : wide === "initial" ? Object.freeze({ kind: "normal" } as const)
+        : lineHeight.property === "font" ? font(lineHeight)?.lineHeight ?? null : lineHeightValue(lineHeight.components);
+    if (computed?.kind === "length" && wide !== "inherit" && wide !== "unset") {
+      valueDependencies.computedViewportInlineSize ||= usesLengthUnit(computed.value, "vw");
+      valueDependencies.computedViewportBlockSize ||= usesLengthUnit(computed.value, "vh");
+      const absolute = absoluteFontSize(computed.value, fontSizePixels(style), rootFontSizePx, environment);
+      computed = absolute === null ? null : Object.freeze({ kind: "length", value: absolute });
     }
     if (computed === null) unsupported(lineHeight);
     else style = { ...style, text: { ...style.text, lineHeight: computed } };
@@ -2402,69 +2351,38 @@ function computeStyle(
   placementField("columnEnd", "grid-column-end");
   placementField("rowStart", "grid-row-start");
   placementField("rowEnd", "grid-row-end");
-  const borderWidthSides = [
-    ["border-top-width", "border-top", "top", 0], ["border-right-width", "border-right", "right", 1],
-    ["border-bottom-width", "border-bottom", "bottom", 2], ["border-left-width", "border-left", "left", 3]
-  ] as const;
-  for (const [property, sideShorthand, side, index] of borderWidthSides) {
-    const entry = value([property, sideShorthand, "border-width", "border"]);
-    if (entry === null) continue;
-    const wide = cssWide(entry.value);
-    let width: CssLength | null;
-    if (wide === "inherit") width = parent?.box.borderWidths[side] ?? MEDIUM_BORDER;
-    else if (wide === "initial" || wide === "unset") width = MEDIUM_BORDER;
-    else if (entry.property === "border" || entry.property === sideShorthand) {
-      width = parseSupportedBorder(entry.value, style.text.color)?.width ?? null;
-    } else if (entry.property === "border-width") {
-      const parts = splitTopLevel(entry.value, "space") ?? [];
-      const expanded = fourSides(parts);
-      width = expanded === null ? null : parseBorderWidth(expanded[index]);
-    } else width = parseBorderWidth(entry.value);
-    if (width === null) unsupported({ ...entry, property });
-    else style = {
-      ...style,
-      box: { ...style.box, borderWidths: { ...style.box.borderWidths, [side]: width } }
-    };
-  }
-  const borderStyleSides = [
-    ["border-top-style", "border-top", "top", 0], ["border-right-style", "border-right", "right", 1],
-    ["border-bottom-style", "border-bottom", "bottom", 2], ["border-left-style", "border-left", "left", 3]
-  ] as const;
-  for (const [property, sideShorthand, side, index] of borderStyleSides) {
-    const entry = value([property, sideShorthand, "border-style", "border"]);
-    if (entry === null) continue;
-    const wide = cssWide(entry.value);
-    let borderStyle: ComputedStyle["box"]["borderStyles"][typeof side] | null;
-    if (wide === "inherit") borderStyle = parent?.box.borderStyles[side] ?? "none";
-    else if (wide === "initial" || wide === "unset") borderStyle = "none";
-    else if (entry.property === "border-style") {
-      const expanded = fourSides(splitTopLevel(entry.value, "space") ?? []);
-      borderStyle = expanded === null ? null : parseTableBorderStyle(expanded[index]);
-    } else if (entry.property === "border" || entry.property === sideShorthand) {
-      borderStyle = parseSupportedBorder(entry.value, style.text.color)?.style ?? null;
-    } else borderStyle = parseTableBorderStyle(entry.value);
-    if (borderStyle === null) unsupported({ ...entry, property });
-    else style = { ...style, box: { ...style.box, borderStyles: { ...style.box.borderStyles, [side]: borderStyle } } };
-  }
-  const borderColorSides = [
-    ["border-top-color", "border-top", "top", 0], ["border-right-color", "border-right", "right", 1],
-    ["border-bottom-color", "border-bottom", "bottom", 2], ["border-left-color", "border-left", "left", 3]
-  ] as const;
-  for (const [property, sideShorthand, side, index] of borderColorSides) {
-    const entry = value([property, sideShorthand, "border-color", "border"]);
-    if (entry === null) continue;
-    const wide = cssWide(entry.value);
-    let borderColor: CssColor | null | undefined;
-    if (wide === "inherit") borderColor = parent?.box.borderColors[side] ?? null;
-    else if (wide === "initial" || wide === "unset") borderColor = null;
-    else if (entry.property === "border-color") {
-      const expanded = fourSides(splitTopLevel(entry.value, "space") ?? []);
-      borderColor = expanded === null ? undefined : colorFromComponentValues(expanded[index], style.text.color);
-    } else if (entry.property === "border" || entry.property === sideShorthand) {
-      borderColor = parseSupportedBorder(entry.value, style.text.color)?.color;
-    } else borderColor = colorFromComponentValues(entry.value, style.text.color);
-    if (borderColor === undefined) unsupported({ ...entry, property });
-    else style = { ...style, box: { ...style.box, borderColors: { ...style.box.borderColors, [side]: borderColor } } };
+  for (const side of ["top", "right", "bottom", "left"] as const) {
+    const direction = style.text.direction;
+    const widthEntry = value(borderSideCandidates(side, "width", direction));
+    if (widthEntry !== null) {
+      const wide = cssWide(widthEntry.value);
+      const width = wide === "inherit" ? parent?.box.borderWidths[borderInheritedSide(widthEntry.property, side, direction, parent.text.direction)] ?? MEDIUM_BORDER
+        : wide === "initial" || wide === "unset" ? MEDIUM_BORDER
+          : isBorderShorthand(widthEntry.property) ? borderShorthandValue(widthEntry.components, style.text.color)?.width ?? null
+            : borderWidthValue(borderSideComponents(widthEntry.property, widthEntry.components, side, direction));
+      if (width === null) unsupported(widthEntry);
+      else style = { ...style, box: { ...style.box, borderWidths: { ...style.box.borderWidths, [side]: width } } };
+    }
+    const styleEntry = value(borderSideCandidates(side, "style", direction));
+    if (styleEntry !== null) {
+      const wide = cssWide(styleEntry.value);
+      const borderStyle = wide === "inherit" ? parent?.box.borderStyles[borderInheritedSide(styleEntry.property, side, direction, parent.text.direction)] ?? "none"
+        : wide === "initial" || wide === "unset" ? "none"
+          : isBorderShorthand(styleEntry.property) ? borderShorthandValue(styleEntry.components, style.text.color)?.style ?? null
+            : borderStyleValue(borderSideComponents(styleEntry.property, styleEntry.components, side, direction));
+      if (borderStyle === null) unsupported(styleEntry);
+      else style = { ...style, box: { ...style.box, borderStyles: { ...style.box.borderStyles, [side]: borderStyle } } };
+    }
+    const colorEntry = value(borderSideCandidates(side, "color", direction));
+    if (colorEntry !== null) {
+      const wide = cssWide(colorEntry.value);
+      const borderColor = wide === "inherit" ? parent?.box.borderColors[borderInheritedSide(colorEntry.property, side, direction, parent.text.direction)] ?? null
+        : wide === "initial" || wide === "unset" ? null
+          : isBorderShorthand(colorEntry.property) ? borderShorthandValue(colorEntry.components, style.text.color)?.color
+            : parseCssColorComponents(borderSideComponents(colorEntry.property, colorEntry.components, side, direction), style.text.color);
+      if (borderColor === undefined) unsupported(colorEntry);
+      else style = { ...style, box: { ...style.box, borderColors: { ...style.box.borderColors, [side]: borderColor } } };
+    }
   }
   const tableLayout = value("table-layout");
   if (tableLayout !== null) {
@@ -2639,12 +2557,24 @@ function computeStyle(
   if (content !== null && pseudo !== null) {
     const wide = cssWide(content.value);
     const computed = wide === "inherit"
-      ? parent?.generatedContent ?? null
+      ? parent?.generatedContent ?? NORMAL_CONTENT
       : wide === "initial" || wide === "unset"
-        ? null
-        : generatedContent(content.value, document, node);
+        ? NORMAL_CONTENT
+        : parseContent(content.components);
     if (computed === undefined) unsupported(content);
     else style = { ...style, generatedContent: computed };
+  }
+  for (const [property, field] of [
+    ["counter-reset", "counterReset"], ["counter-increment", "counterIncrement"], ["counter-set", "counterSet"],
+  ] as const) {
+    const entry = value(property);
+    if (entry === null) continue;
+    const wide = cssWide(entry.value);
+    const operations = wide === "inherit" ? parent?.[field] ?? NO_COUNTER_OPERATIONS
+      : wide === "initial" || wide === "unset" ? NO_COUNTER_OPERATIONS
+        : parseCounterOperations(entry.components, property);
+    if (operations === undefined) unsupported(entry);
+    else style = { ...style, [field]: operations };
   }
   if (style.display.box === "principal"
     && (style.box.position === "absolute" || style.box.position === "fixed" || style.box.float !== "none")) {
@@ -2688,6 +2618,7 @@ class ImmutableStyleSnapshot implements StyleSnapshot {
   ) {
     const textDependency = ([identity, style]: readonly [string, ComputedStyle]): readonly unknown[] => [
       identity, style.display, style.visibility, style.listStyleType, style.generatedContent,
+      style.counterReset, style.counterIncrement, style.counterSet,
       style.text.whiteSpace, style.text.textTransform, style.box.position, style.box.float,
     ];
     this.logicalTextDependency = JSON.stringify([
@@ -2723,6 +2654,66 @@ class ImmutableStyleSnapshot implements StyleSnapshot {
   public retainedComputedDiagnostics(): ReadonlyMap<DocumentNodeRef, readonly ComputedDiagnosticContribution[]> {
     return this.#computedDiagnostics;
   }
+}
+
+function sameStyleOutcome(left: StyleOutcome, right: StyleOutcome): boolean {
+  if (left.status !== right.status) return false;
+  if (left.status === "complete") return right.status === "complete" && left.computedNodes === right.computedNodes;
+  if (left.status === "truncated") return right.status === "truncated" && left.computedNodes === right.computedNodes
+    && left.budget === right.budget && left.limit === right.limit && left.fallback === right.fallback;
+  if (left.status === "rejected") return right.status === "rejected" && left.reason === right.reason;
+  return right.status === "unsupported" && left.feature === right.feature;
+}
+
+/** Semantic and reporting identities are independent of the state revision that was evaluated. */
+export function compareStyleSnapshots(previous: StyleSnapshot, next: StyleSnapshot): {
+  readonly effectiveChanged: boolean; readonly reportingChanged: boolean; readonly backgroundOnly: boolean;
+} {
+  const reportingChanged = previous.stylesheetCount !== next.stylesheetCount
+    || previous.omittedDiagnosticCount !== next.omittedDiagnosticCount || !sameStyleOutcome(previous.outcome, next.outcome)
+    || previous.diagnostics.length !== next.diagnostics.length || previous.diagnostics.some((value, index) => {
+      const other = next.diagnostics[index];
+      return other === undefined || value.code !== other.code || value.sourceUrl !== other.sourceUrl
+        || value.detail !== other.detail || value.occurrences !== other.occurrences;
+    });
+  if (previous === next) return { effectiveChanged: false, reportingChanged, backgroundOnly: false };
+  if (!(previous instanceof ImmutableStyleSnapshot) || !(next instanceof ImmutableStyleSnapshot)
+    || previous.document !== next.document) return { effectiveChanged: true, reportingChanged, backgroundOnly: false };
+  const comparedEnvironments = new Map<ReadonlyMap<string, string>, Map<ReadonlyMap<string, string>, boolean>>();
+  const sameEnvironment = (a: ReadonlyMap<string, string>, b: ReadonlyMap<string, string>): boolean => {
+    if (a === b) return true;
+    const prior = comparedEnvironments.get(a)?.get(b);
+    if (prior !== undefined) return prior;
+    const equal = a instanceof ImmutableCustomPropertyEnvironment && b instanceof ImmutableCustomPropertyEnvironment
+      ? a.equivalent(b, sameEnvironment) : a.size === b.size && [...a].every(([name, value]) => b.get(name) === value);
+    const compared = comparedEnvironments.get(a) ?? new Map<ReadonlyMap<string, string>, boolean>();
+    compared.set(b, equal);
+    comparedEnvironments.set(a, compared);
+    return equal;
+  };
+  const changes = { effectiveChanged: false, backgroundOnly: true };
+  const compare = (a: ReadonlyMap<string, ComputedStyle>, b: ReadonlyMap<string, ComputedStyle>): void => {
+    if (a.size !== b.size) { changes.effectiveChanged = true; changes.backgroundOnly = false; }
+    for (const [key, left] of a) {
+      const right = b.get(key);
+      if (right === undefined) { changes.effectiveChanged = true; changes.backgroundOnly = false; continue; }
+      // Background participates in empty-cells suppression. Keep this unaudited table dependency on the canonical path.
+      if ((left.box.emptyCells === "hide" && left.display.box === "principal" && left.display.internal === "table-cell")
+        || (right.box.emptyCells === "hide" && right.display.box === "principal" && right.display.internal === "table-cell")) changes.backgroundOnly = false;
+      if (left === right) continue;
+      const sameOther = sameComputedDisplay(left.display, right.display) && left.visibility === right.visibility
+        && left.listStyleType === right.listStyleType && generatedContentEqual(left.generatedContent, right.generatedContent)
+        && counterOperationsEqual(left.counterReset, right.counterReset) && counterOperationsEqual(left.counterSet, right.counterSet)
+        && counterOperationsEqual(left.counterIncrement, right.counterIncrement)
+        && sameComputedBoxStyle(left.box, right.box) && sameEnvironment(left.customProperties, right.customProperties);
+      const sameText = sameComputedTextStyle(left.text, right.text);
+      if (!sameOther || !sameText) changes.effectiveChanged = true;
+      if (!sameOther || !sameComputedTextStyleExceptBackground(left.text, right.text)) changes.backgroundOnly = false;
+    }
+  };
+  compare(previous.retainedStyles(), next.retainedStyles());
+  compare(previous.retainedPseudos(), next.retainedPseudos());
+  return { effectiveChanged: changes.effectiveChanged, reportingChanged, backgroundOnly: changes.effectiveChanged && changes.backgroundOnly };
 }
 
 function styleEnvironmentIdentity(environment: MediaEnvironment): string {
@@ -2801,6 +2792,13 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
   const pseudos = incremental
     ? new Map(previous.retainedPseudos())
     : new Map<string, ComputedStyle>();
+  const sharing = new StyleRecordSharing();
+  if (incremental) {
+    for (const [ref, style] of styles) if (!affected.has(ref)) sharing.seed(style);
+    const replacedPseudos = new Set<string>();
+    for (const ref of affected) for (const pseudo of ["before", "after", "marker"] as const) replacedPseudos.add(styleKey(ref, pseudo));
+    for (const [key, style] of pseudos) if (!replacedPseudos.has(key)) sharing.seed(style);
+  }
   const computedDiagnostics = incremental
     ? new Map(previous.retainedComputedDiagnostics())
     : new Map<DocumentNodeRef, readonly ComputedDiagnosticContribution[]>();
@@ -2876,6 +2874,7 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
       }
       break;
     }
+    style = sharing.share(style);
     styles.set(ref, style);
     if (ref === input.program.document.documentElement) rootFontSizePx = fontSizePixels(style);
     for (const pseudo of ["before", "after", "marker"] as const) {
@@ -2906,7 +2905,7 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
         && (style.display.inner === "flex" || style.display.inner === "grid")) {
         pseudoStyle = blockifiedStyle(pseudoStyle);
       }
-      pseudos.set(styleKey(ref, pseudo), pseudoStyle);
+      pseudos.set(styleKey(ref, pseudo), sharing.share(pseudoStyle));
     }
     if (nodeDiagnostics.size > 0) {
       computedDiagnostics.set(ref, Object.freeze([...nodeDiagnostics].map(([descriptor, occurrences]) =>

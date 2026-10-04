@@ -55,6 +55,8 @@ export type DocumentStateDependencyChange =
   | "control-content";
 
 export interface UpdateDocumentArtifactsStateInput {
+  /** Prior activation fence for an already attached immutable source. */
+  readonly previousDocumentRevision?: number;
   readonly documentId: string;
   readonly documentRevision: number;
   readonly stateRevision: number;
@@ -63,6 +65,8 @@ export interface UpdateDocumentArtifactsStateInput {
 }
 
 export interface ArtifactDependencyKey {
+  /** Reporting may change independently of geometry. */
+  readonly reporting: string;
   readonly documentRevision: number;
   readonly stylesheetProgram: string;
   readonly stateRevision: number;
@@ -141,6 +145,10 @@ export interface DocumentSearchGeometryResult {
 export interface RenderArtifactStoreMetrics {
   readonly attachedDocuments: number;
   readonly retainedAnalyses: number;
+  readonly retainedResources: number;
+  readonly pinnedResources: number;
+  readonly reservedCost: number;
+  readonly sideCacheScans: number;
   readonly retainedCost: number;
   readonly evictions: number;
   readonly accountedAllocations: number;

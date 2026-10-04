@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { applyDocumentAction, createDocumentState, parseWebDocument } from "../../dist/document/index.js";
+import { applyDocumentAction, createDocumentState, parseWebDocument, documentTextEquivalent, htmlListMetadata, htmlListItemValue, parseHtmlInteger } from "../../dist/document/index.js";
 
 const context = {
   requestUrl: "https://example.test/start",
@@ -111,9 +111,7 @@ test("document indexes bind links, forms, labels, headings, landmarks, and names
   assert.equal(form.controls[0]?.label, "Email address");
   assert.equal(document.labels[0]?.target, form.controls[0]?.node);
   assert.equal(document.label(document.labels[0].node), document.labels[0]);
-  assert.equal(document.formOwner(form.node), form.node);
-  assert.equal(document.formOwner(document.labels[0].node), form.node);
-  assert.equal(document.formOwner(form.controls[0].node), form.node);
+  assert.equal(document.control(form.controls[0].node).form, form.node);
   assert.equal(document.outline[0]?.node, document.headings[0]?.node);
   assert.equal(document.outline[0]?.text, "Account");
   assert.ok(document.landmarks.some((entry) => entry.landmark === "navigation" && entry.accessibleName === "Primary"));
@@ -121,7 +119,7 @@ test("document indexes bind links, forms, labels, headings, landmarks, and names
   const selectedOption = form.controls[2].options[1];
   assert.equal(document.option(selectedOption.node), selectedOption);
   assert.equal(document.elementById("heading"), document.headings[0].node);
-  assert.equal(createDocumentState(document).controls.get(form.controls[2].node)?.values[0], "pro");
+  assert.equal(form.controls[2].options.find((option) => createDocumentState(document).controls.get(form.controls[2].node).selected.includes(option.node)).value, "pro");
 });
 
 test("initial document state resolves the final URL fragment through the ID index", () => {
@@ -165,7 +163,7 @@ test("standalone controls have immutable state and indexed radio groups without 
   assert.equal(document.forms.length, 0);
   assert.equal(document.controls.length, 3);
   assert.ok(document.controls.every((control) => control.form === null));
-  assert.equal(createDocumentState(document).controls.get(document.controls[0].node)?.values[0], "term");
+  assert.equal(createDocumentState(document).controls.get(document.controls[0].node)?.value, "term");
   assert.deepEqual(
     document.radioGroup(document.controls[1].node).map((control) => control.value),
     ["one", "two"]
@@ -218,7 +216,7 @@ test("form indexing does not retain controls with dangling truncated owners", ()
     throw new Error("Missing second form control");
   })();
   assert.equal(document.control(unowned), null);
-  assert.equal(document.formOwner(unowned), null);
+  assert.equal(document.control(unowned)?.form ?? null, null);
 });
 
 test("deep documents preserve structure without recursive indexing stack exhaustion", () => {
@@ -309,4 +307,100 @@ test("control intrinsic dimensions normalize HTML integer attributes independent
   const fallback = document.control(byId(document, "fallback"));
   assert.equal(fallback.rows, 2);
   assert.equal(fallback.cols, 20);
+});
+
+test("bounded text equivalents name image actions and ARIA references with explicit label targeting", () => {
+  const document = parseWebDocument(`<a id="home" href="/home"><img alt="Home"></a>
+    <span id="first"><img alt="First"></span><span id="second">Second</span>
+    <button id="references" aria-labelledby="first second">Caption</button>
+    <button id="self" aria-labelledby="self" aria-label="Self label">Caption</button>
+    <label for="missing">Wrong <input id="unlabelled"></label>
+    <div id="noncontrol"></div><label for="noncontrol">Wrong again <input id="other"></label>
+    <label for="hidden">Hidden label</label><input id="hidden" type="hidden">
+    <label for="target"><img alt="Image label"></label><input id="target">
+    <label for="target">Second label</label>
+    <img id="decorative" alt=""><img id="missingalt"><img id="named" alt="Picture">
+  `, context);
+  assert.equal(document.links[0].label, "Home");
+  assert.equal(document.semantic(byId(document, "references")).accessibleName, "First Second");
+  assert.equal(document.semantic(byId(document, "self")).accessibleName, "Self label");
+  assert.equal(document.control(byId(document, "unlabelled")).label, "");
+  assert.equal(document.control(byId(document, "other")).label, "");
+  assert.equal(document.labels.length, 2);
+  assert.equal(document.control(byId(document, "target")).label, "Image label Second label");
+  assert.deepEqual(["decorative", "missingalt", "named"].map((id) => {
+    const image = document.replaced(byId(document, id));
+    return [image.alternativeText, image.fallbackText];
+  }), [["", ""], [null, "Image"], ["Picture", "Picture"]]);
+});
+
+test("one text-equivalent path integrates generated semantic text beneath DOM and ARIA precedence", () => {
+  const document = parseWebDocument(`<a id="link" href="/"><span id="suppressed">old</span>core</a><button id="aria" aria-label="Author">core</button>`, context);
+  const generated = (ref, pseudo) => ref === byId(document, "link") || ref === byId(document, "aria") ? pseudo === "before" ? "before " : pseudo === "after" ? " after" : "" : "";
+  assert.equal(documentTextEquivalent(document, byId(document, "link"), generated, (ref) => ref === byId(document, "suppressed")), "before core after");
+  assert.equal(documentTextEquivalent(document, byId(document, "aria"), generated), "Author");
+});
+
+test("HTML list metadata preserves signed integer prefixes and authored reversed state", () => {
+  const document = parseWebDocument(`<ol id="list" start=" -3tail" reversed><li id="item" value="+4more">Item</li></ol><ul id="unordered"><li id="invalid" value="x">Invalid</li></ul>`, context);
+  assert.deepEqual(htmlListMetadata(document, byId(document, "list")), { start: -3, reversed: true });
+  assert.equal(htmlListMetadata(document, byId(document, "unordered")), null);
+  assert.equal(htmlListItemValue(document, byId(document, "item")), 4);
+  assert.equal(htmlListItemValue(document, byId(document, "invalid")), null);
+  assert.equal(parseHtmlInteger("\u00a01"), null);
+  assert.equal(parseHtmlInteger("9007199254740992"), null);
+  assert.equal(parseHtmlInteger("0"), 0);
+});
+
+test("empty HTML IDs cannot target labels or ARIA references", () => {
+  const document = parseWebDocument(`<input id=""><label for="">Wrong</label><select aria-label=" "><option>Option</option></select>`, context);
+  assert.equal(document.elementById(""), null);
+  assert.equal(document.labels.length, 0);
+  assert.deepEqual(document.controls.map((control) => control.label), ["", ""]);
+});
+
+test("empty content actions use title names without changing empty visible captions", () => {
+  const document = parseWebDocument(`<a href="/" title="Home"><img alt=""></a><button title="Action"><span> </span></button>`, context);
+  assert.equal(document.links[0].label, "Home");
+  assert.equal(document.controls[0].label, "Action");
+  assert.equal(document.controls[0].caption, "");
+});
+
+test("generated text on associated labels shares the bounded naming traversal without label recursion", () => {
+  const document = parseWebDocument(`<label id="label" for="named">Visible<input id="named"></label><label for="named">More</label><input id="aria" aria-labelledby="label">`, context);
+  const generated = (ref, pseudo) => ref === byId(document, "label") && pseudo === "before" ? "Prefix " : "";
+  assert.equal(documentTextEquivalent(document, byId(document, "named"), generated), "Prefix Visible More");
+  assert.equal(documentTextEquivalent(document, byId(document, "aria"), generated), "Prefix Visible");
+});
+
+test("empty and whitespace-only labels retain explicit and implicit association for generated names", () => {
+  const document = parseWebDocument(`<label id="explicit" for="first"></label><input id="first"><label id="implicit"> \n <input id="second"></label>`, context);
+  assert.deepEqual(document.labels.map((label) => [label.node, label.target, label.text]), [
+    [byId(document, "explicit"), byId(document, "first"), ""], [byId(document, "implicit"), byId(document, "second"), ""],
+  ]);
+  const generated = (ref, pseudo) => pseudo === "before" && document.label(ref) !== null ? "Name" : "";
+  assert.equal(documentTextEquivalent(document, byId(document, "first"), generated), "Name");
+  assert.equal(documentTextEquivalent(document, byId(document, "second"), generated), "Name");
+});
+
+test("empty label associations preserve native title and placeholder fallback when generated text is absent", () => {
+  const document = parseWebDocument(`<label for="title"></label><input id="title" title="Title name"><label for="hint"> </label><input id="hint" placeholder="Hint name">`, context);
+  const generated = () => "";
+  assert.equal(documentTextEquivalent(document, byId(document, "title"), generated), "Title name");
+  assert.equal(documentTextEquivalent(document, byId(document, "hint"), generated), "Hint name");
+});
+
+test("hidden label roots include descendants while visible label roots exclude hidden descendants", () => {
+  const document = parseWebDocument(`<label hidden for="hidden"><span>Hidden label</span></label><input id="hidden">
+    <label aria-hidden="true" for="aria-hidden"><span>ARIA-hidden label</span></label><input id="aria-hidden">
+    <label for="visible">Visible<span hidden> omitted</span></label><input id="visible">
+    <span hidden id="hidden-reference"><span>Hidden reference</span></span><button id="hidden-aria" aria-labelledby="hidden-reference"></button>
+    <span id="visible-reference">Visible reference<span hidden> omitted</span></span><button id="visible-aria" aria-labelledby="visible-reference"></button>`, context);
+  for (const [id, expected] of [["hidden", "Hidden label"], ["aria-hidden", "ARIA-hidden label"],
+    ["visible", "Visible"], ["hidden-aria", "Hidden reference"], ["visible-aria", "Visible reference"]]) {
+    const ref = byId(document, id);
+    assert.equal(document.semantic(ref).accessibleName, expected, `indexed ${id}`);
+    assert.equal(document.control(ref).label, expected, `control ${id}`);
+    assert.equal(documentTextEquivalent(document, ref), expected, `shared traversal ${id}`);
+  }
 });

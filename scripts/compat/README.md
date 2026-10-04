@@ -118,3 +118,36 @@ Focused harness tests run with:
 ```sh
 node --test test/control/compatibility-*.test.js
 ```
+
+### Native form and accessible-name observations
+
+The `form-semantics` fixture opts into `oracle.formSemantics` and
+`oracle.accessibleNames`. Form observations include hidden inputs, parser-repaired
+owners, explicit missing/non-form targets, forward references, option identities
+and selectedness, sanitized input values, and ordered native `FormData` entries
+for each form and eligible submitter. Nodes are keyed by document-order element
+position, so duplicate authored HTML IDs never alias observations. Entries are
+compared before URL-encoded CR/LF conversion; exact request bytes are covered by
+form unit tests.
+
+`data-oracle-name` marks controlled accessible-name targets. Chromium names come
+from CDP `Accessibility.getFullAXTree`, joined to `DOM.getDocument` backend node
+IDs. No handwritten JavaScript accessible-name algorithm supplies expected names.
+A missing CDP observation fails opted-in checks rather than silently passing.
+The existing hosted release-qualification job installs the isolated browser and
+runs these checks; browser packages remain outside runtime dependencies.
+
+With the optional browser dependencies configured above, run the focused check
+against a current build:
+
+```sh
+node scripts/compat/chromium-oracle.mjs --fixture=form-semantics --check
+```
+
+Browser form observations read native DOM properties and `FormData`; they do not
+reuse Verge's ownership, selection, sanitization, or request-entry algorithms.
+Generated counters need separate evidence: CSSOM `content` strings do not prove
+painted labels. `test/control/generated-content.test.js` checks independently
+expected labels and exact destinations for all 21 captured Wikipedia return-link
+identities at 80/120/160 columns, including source/pseudo and nonempty paint,
+hit, and focus geometry.

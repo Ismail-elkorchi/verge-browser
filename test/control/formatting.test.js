@@ -427,7 +427,7 @@ test("standalone HTML controls generate control boxes instead of disappearing", 
   const control = document.controls[0];
   assert.ok(control);
   assert.equal(control.form, null);
-  assert.equal(state.controls.get(control.node)?.values[0], "term");
+  assert.equal(state.controls.get(control.node)?.value, "term");
   assert.equal(formatting.forSource(control.node)[0]?.kind, "form-control");
 });
 

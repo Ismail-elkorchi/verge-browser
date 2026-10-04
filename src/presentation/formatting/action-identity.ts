@@ -1,8 +1,8 @@
-import { registerRetainedOwner } from "../../memory/retained-cost.js";
+import { registerRetainedCache, RetainedCacheMap } from "../../memory/retained-cost.js";
 import type { DocumentNodeRef } from "../../document/index.js";
 import type { DocumentActionIdentity, FormattingTree } from "./types.js";
 
-const ACTION_IDENTITY_CACHE = new WeakMap<FormattingTree, Map<DocumentNodeRef, DocumentActionIdentity | null>>();
+const ACTION_IDENTITY_CACHE = new WeakMap<FormattingTree, RetainedCacheMap<DocumentNodeRef, DocumentActionIdentity | null>>();
 
 /** Returns the stable browser action target identifier for one semantic action. */
 export function documentActionId(action: DocumentActionIdentity): string {
@@ -18,9 +18,9 @@ export function documentActionIdentity(
 ): DocumentActionIdentity | null {
   let cache = ACTION_IDENTITY_CACHE.get(tree);
   if (cache === undefined) {
-    cache = new Map<DocumentNodeRef, DocumentActionIdentity | null>();
+    cache = new RetainedCacheMap<DocumentNodeRef, DocumentActionIdentity | null>();
     ACTION_IDENTITY_CACHE.set(tree, cache);
-    registerRetainedOwner(tree, [cache]);
+    registerRetainedCache(tree, cache);
   }
   if (cache.has(source)) return cache.get(source) ?? null;
   const visited: DocumentNodeRef[] = [];

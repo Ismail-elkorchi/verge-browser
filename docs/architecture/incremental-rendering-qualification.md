@@ -1,14 +1,65 @@
 # Incremental rendering qualification
 
-This report records the PR #136 correctness and resource-control work on the
-retained artifact engine. The starting commit was
-`b271b3989459658c68da7bb1df3aef2ab9c835da`, tree
-`98cd786f4fc956d23821c2456964f24358cd0c7f`. Exact dependencies remain
+This document records current rendering/control qualification and preserves the
+PR #136 measurements below as historical evidence. The historical starting
+commit was `b271b3989459658c68da7bb1df3aef2ab9c835da`, tree
+`98cd786f4fc956d23821c2456964f24358cd0c7f`; its dependencies were
 `@ismail-elkorchi/css-parser@0.2.7` and
-`@ismail-elkorchi/terminal-ui@0.1.5`. The direct and worker custom-property
-syntax-tree regressions remain required.
+`@ismail-elkorchi/terminal-ui@0.1.5`. Those measurements do not qualify the current
+tree. Direct and worker custom-property syntax-tree regressions remain required.
 
-## Correctness controls
+## Current correctness and captured-page checks
+
+The retained store now owns separate phase resources, with actual semantic
+invalidation, environment-specific style freshness, independent reporting
+identities, and an audited background-only paint path. Same-source navigation
+advances activation fences without rehydrating HTML or recompiling stylesheets.
+Replacement construction retires eligible old geometry before building and keeps
+reservations, accounting metadata, and mutable side caches separately charged.
+Failed/cancelled construction can rebuild retired phases; it cannot rewrite the
+last accepted viewport or retain obsolete graphs in rollback state.
+
+Document controls use parser-produced form ownership and one canonical
+initialization/edit/reset state. Submission uses one ordered entry list. Typed
+generated-content programs and scoped counters preserve visual/source identity,
+with semantic alternative text separate from visual search. Font shorthand and
+horizontal logical borders use the ordinary ranked cascade and exhaustive
+immutable-record comparisons.
+
+The saved Wikipedia CSS article was checked at 80, 120, and 160 columns: all 21
+return links at each width, 63 targets in total, retained independently expected
+labels, exact destinations, and nonempty paint/hit/focus geometry. This is captured
+page evidence, not a claim that CSSOM `content` strings establish painted counter
+text. The reduced regression in `test/control/generated-content.test.js` preserves
+all 21 target identities and labels at the same three widths.
+
+At those widths, the saved example.com page produces 21 document rows and matches
+its font shorthand expanded into modeled longhands. MDN's captured note rail is
+present and its geometry matches the corresponding physical-border declarations.
+These are bounded capture checks, not broad browser-equivalence claims.
+
+Reproducible repository controls include:
+
+```sh
+npm run build
+node --expose-gc --test test/control/resource-ownership.test.js \
+  test/control/retained-phase-ownership.test.js test/control/retained-rendering.test.js
+node --test test/control/generated-content.test.js \
+  test/control/immutable-style-records.test.js test/control/style-font-logical-borders.test.js
+node --test test/control/document.test.js test/control/forms.test.js \
+  test/control/control-style-state.test.js test/control/navigation-history.test.js \
+  test/control/render-worker-transport.test.js
+npm run compat:check
+```
+
+The optional Chromium comparison uses native form owner/value/selectedness APIs,
+ordered `FormData`, and CDP accessible-name observations; duplicate HTML IDs do
+not alias its document-order identities. See the
+[compatibility harness](../../scripts/compat/README.md) for setup and the focused
+`form-semantics` oracle command. Independent expected generated labels and painted
+geometry remain necessary beyond that DOM/CSSOM oracle.
+
+## Historical PR #136 correctness controls
 
 | Owning defect | Correction and regression |
 | --- | --- |
@@ -38,9 +89,9 @@ at delivery, rejecting the obsolete result even when worker computation finished
 before cancellation. This reproduces the real-worker race caught during hosted
 qualification without depending on thread timing.
 
-## Offline measurements
+## Historical PR #136 offline measurements
 
-Clean hosted measurement on 2026-09-07, Node 24, Linux, at
+Historical clean hosted measurement on 2026-09-07, Node 24, Linux, at
 `2a66a64c5184ff126384a5d4606eb2fd1187971e`:
 [CI and downloadable reports](https://github.com/Ismail-elkorchi/verge-browser/actions/runs/34120657341).
 These samples include the final runtime owner audit. The subsequent correction
@@ -51,8 +102,8 @@ The independently authored MIT fixture has 2,000 sections; distributions use
 are unchanged; every incremental-rendering gate passed on this runner.
 A local diagnostic measured a 72,757.81 ms first usable frame and 184.29 ms
 shutdown, exceeding the unchanged 30-second first-frame wait. That local run
-did not qualify. Final qualification runs on the clean hosted runner; the exact
-reviewed HEAD, downloadable reports, and final measurements are recorded in
+did not qualify. The clean hosted qualification
+HEAD, downloadable reports, and final measurements are recorded in
 [PR #136](https://github.com/Ismail-elkorchi/verge-browser/pull/136).
 
 | Interaction | p50 or single measurement (ms) | p95 (ms) |
@@ -88,16 +139,15 @@ a Node heap limit as an additional termination boundary. Peaks are sampled
 allocation peaks, not an exact continuous heap profile. Retained allocation costs
 are estimates, not source-byte counts presented as heap measurements.
 
-The unchanged large latency fixture has explicit 1 GiB retention and 2 GiB
-working-set budgets. A separate cold-only measurement found 568,583,288 heap
+The historical PR #136 large latency fixture used explicit 1 GiB retention and
+2 GiB working-set budgets. Its separate cold-only measurement found 568,583,288 heap
 bytes retained after GC, a sampled 1,013,362,784-byte heap peak, and a
-652,603,960-byte retained-cost estimate. It therefore cannot honestly be admitted
-under the default 512 MiB budget. Default admission rejection is independently
-tested; the fixture's content and CSS support are unchanged.
+652,603,960-byte retained-cost estimate. That result exceeded the default
+512 MiB budget; default admission rejection is independently tested.
 
-The hosted worker run admits one resize layout after evicting two variants,
-while retaining shared upstream artifacts. The retained-cost estimate includes
-the weak side-cache owners:
+That historical hosted worker run admitted one resize layout after evicting two
+variants while retaining shared upstream artifacts. Its retained-cost estimate
+included the weak side-cache owners:
 
 | Memory measure | Bytes |
 | --- | ---: |
@@ -114,6 +164,45 @@ attachments, state growth, query limits, sharing, eviction, and reattachment.
 Released worker heap includes the worker/module baseline; it is not all live
 artifact memory. Estimates account for program-owned caches even without an
 analysis. No active analysis is exempt from admission or cleanup.
+
+## Current captured replacement-memory measurement
+
+Matched real-worker runs used the saved Arabic page and default budgets for
+120→160→80→120-column replacement, without forced GC during replacement. Baseline
+peak worker heap plus external allocations was 974,017,886 bytes (974.02 MB).
+Two updated runs peaked at 754,938,857 and 798,015,734 bytes (754.94/798.02 MB),
+22.5% and 18.1% lower. The retained cap stays 536,870,912 bytes (512 MiB) and the
+working-set cap stays 1,073,741,824 bytes (1 GiB).
+
+The baseline completed all four widths, then rejected the following search/focus
+work at a retained estimate of 579,728,332 bytes. The updated sequence completed
+replacement followed by logical search, focus, and rendering at a retained
+estimate of 528,619,400 bytes. Release left zero retained accounting, pins, and
+reservations.
+
+These measurements are deliberately separate:
+
+| Updated real-worker measure | Bytes |
+| --- | ---: |
+| Retained allocation estimate after the extended sequence | 528,619,400 |
+| First updated run: heap after diagnostic post-run GC | 350,011,712 |
+| First updated run: heap after release and diagnostic GC | 28,926,920 |
+
+Post-run collection is diagnostic only; no collection was forced during the
+replacement or focus sequence. Stage checkpoints sample worker heap plus external
+allocations, not continuous peaks, total RSS, or client/transfer ownership.
+Independent graph recount remains a separate accounting check; an in-process
+probe that recounts between replacements also allocates diagnostic traversal
+scratch and does not enforce the real worker's working-set cap.
+
+The matched runs establish a lower overall candidate replacement peak for this
+capture. They do not establish a general latency improvement or a statistically
+robust marginal peak benefit from the weak accounting ledger alone: an otherwise
+matched prior-ledger run peaked at 773,285,558 bytes, within the updated-run range.
+The ledger's removal of strong retained roots is covered independently by the
+resource-ownership reachability and nested/cancelled traversal regressions.
+`npm run test:bench` remains the repository timing benchmark; capture memory
+measurements do not replace final clean release qualification.
 
 ## Qualification and remaining work
 
@@ -132,7 +221,8 @@ and logical match projection remain measurable costs owned by style, layout,
 retention accounting, and search respectively. Terminal frame construction and
 serialized terminal output contribute to visible interaction latency. These
 costs remain reported separately; a fast reducer does not establish a responsive
-visible frame. This PR does not begin another optimization milestone.
+visible frame. Historical timings and current capture checks cannot substitute
+for measurements of the exact final qualified tree.
 
 The rendering worker is an ordinary Node worker, not an operating-system
 sandbox. Rendering performs no application network or filesystem operations;

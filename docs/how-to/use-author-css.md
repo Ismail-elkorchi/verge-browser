@@ -47,8 +47,15 @@ rasterization. The currently supported CSS slice includes:
   `not` conditions, using eight CSS pixels per column and sixteen per row;
 - visibility, whitespace, colors, text emphasis, decoration, font size, line
   height, vertical alignment, text alignment, and text indentation;
+- the modeled `font` shorthand: size, optional line height, style and weight,
+  with normal cascade competition and resets of omitted modeled values;
+- generated `::before`, `::after`, and `::marker` content using decoded strings,
+  `attr(name)`, `counter()` and `counters()`, plus optional `/` alternative text;
+  `counter-reset`, `counter-increment`, and `counter-set` share HTML list
+  `start`, `reversed`, and item `value` numbering;
 - margins (including negative and automatic values), padding, side-specific
-  border widths, percentages, viewport units, font-relative units,
+  border widths, horizontal LTR/RTL logical block/inline borders and their
+  width/style/color longhands, percentages, viewport units, font-relative units,
   `box-sizing`, and min/max constraints resolved to used CSS-pixel values;
 - block flow with adjoining-margin collapse, inline formatting with explicit
   line boxes, flexible-length resolution, automatic flex minimum sizes,
@@ -73,6 +80,17 @@ rasterization. The currently supported CSS slice includes:
 - bounded widths, heights, gaps, solid borders, CSS named colors and functional
   RGB/HSL colors, HTML `bgcolor` presentational hints, alpha composition, and
   overflow clipping.
+
+Generated counters support decimal, decimal-leading-zero, lower/upper-alpha
+(and lower/upper-latin aliases), disc, circle, square, and none. Generated
+alternative text affects semantic names under DOM/ARIA precedence but is not
+painted or included in visual search. Custom counter styles, counter images,
+and quote-depth handling remain unsupported.
+
+The `font` shorthand validates its required family syntax without selecting a
+terminal font. System-font keywords, font variants/stretch, angled oblique, and
+font-family selection remain outside the modeled subset. Logical borders map to
+physical sides before cascade winner selection; they do not add vertical writing.
 
 The terminal text measurer uses its actual fixed-size glyph advances and normal
 line metrics. Computed CSS font sizes and font-relative lengths remain distinct;

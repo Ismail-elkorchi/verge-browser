@@ -59,19 +59,20 @@ export function buildViewportDisplayList(input: BuildViewportDisplayListInput): 
       ? undefined : input.searchProjection.spans.find((entry) => entry.match === requestedReveal.match);
     const range = span === undefined ? null : logicalRangeRect(layout, span.fragment, span.contentStartCodeUnit, span.contentEndCodeUnit);
     const revealed = "node" in requestedReveal
-      ? revealDocumentNode(layout, rootViewport, offsets, requestedReveal.node, requestedReveal.align)
+      ? revealDocumentNode(layout, rootViewport, offsets, requestedReveal.node, requestedReveal.blockAlign, input.signal)
       : span !== undefined && range !== null
-        ? revealLayoutRect(layout, rootViewport, offsets, span.fragment, range, requestedReveal.align)
+        ? revealLayoutRect(layout, rootViewport, offsets, span.fragment, range, requestedReveal.blockAlign)
         : { offsets, rect: null };
     offsets = revealed.offsets;
     if (revealed.rect !== null) {
-      const inlineDelta = scrollRevealDelta(revealed.rect.x, revealed.rect.width, rootViewport.x, rootViewport.width, requestedReveal.align);
+      const inlineDelta = scrollRevealDelta(revealed.rect.x, revealed.rect.width, rootViewport.x, rootViewport.width, "nearest");
       const exactColumn = (rootViewport.x + inlineDelta) / cellWidth;
       const column = inlineDelta > 0 ? Math.ceil(exactColumn) : Math.floor(exactColumn);
       window = { ...window, scrollColumn: clampColumn(column) };
-      const delta = scrollRevealDelta(revealed.rect.y, revealed.rect.height, rootViewport.y, rootViewport.height, requestedReveal.align);
+      const delta = scrollRevealDelta(revealed.rect.y, revealed.rect.height, rootViewport.y, rootViewport.height, requestedReveal.blockAlign);
       const exactRow = (rootViewport.y+delta)/input.context.rowHeightCssPx;
-      const row = delta > 0 ? Math.ceil(exactRow) : Math.floor(exactRow);
+      // A block-start anchor must keep the cell containing its first painted line.
+      const row = requestedReveal.blockAlign === "start" || delta <= 0 ? Math.floor(exactRow) : Math.ceil(exactRow);
       const extent = Math.ceil(layout.scrollExtent.height / input.context.rowHeightCssPx);
       window = { ...window, scrollRow: Math.max(0, Math.min(row, Math.max(0, extent - window.viewportRows))) };
     }

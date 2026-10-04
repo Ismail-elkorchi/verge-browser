@@ -217,7 +217,7 @@ export class BrowserController {
   readonly #documentAttachments = new Map<string, {
     readonly epoch: number;
     desired: { readonly documentRevision: number; readonly stateRevision: number };
-    attached: { readonly documentRevision: number; readonly stateRevision: number; readonly state: DocumentState } | null;
+    attached: { readonly sourceId: string; readonly documentRevision: number; readonly stateRevision: number; readonly state: DocumentState } | null;
     preparation: Promise<RenderWorkerClient> | null;
     tail: Promise<unknown>;
   }>();
@@ -353,7 +353,7 @@ export class BrowserController {
     return this.#restorations.metrics();
   }
 
-  /** Attaches a document revision once and requests only a viewport result thereafter. */
+  /** Keeps one live source per tab; activation revisions fence every derived request. */
   public async renderViewport(
     document: BrowserDocumentState,
     viewportRevision: number,
@@ -406,6 +406,8 @@ export class BrowserController {
       })().finally(() => { this.#restart = null; });
       await this.#restart;
     }
+    const sourceId = currentEntry(document.navigation)?.documentId;
+    if (sourceId === undefined) throw new Error("Active rendering source is missing.");
     const renderer = this.#renderer;
     let attachment = this.#documentAttachments.get(document.id);
     if (attachment === undefined) {
@@ -431,9 +433,12 @@ export class BrowserController {
     const operation = lifecycle.tail.catch(() => undefined).then(async () => {
       validate();
       const attached = lifecycle.attached;
-      if (attached === null || attached.documentRevision !== document.documentRevision) {
+      if (attached === null || attached.sourceId !== sourceId) {
+        // A cancelled attach can have committed before its reply was detached.
+        // Until it acknowledges, do not claim the previous source is resident.
+        lifecycle.attached = null;
         await renderer.attach(document);
-      } else if (attached.stateRevision !== document.stateRevision) {
+      } else if (attached.documentRevision !== document.documentRevision || attached.stateRevision !== document.stateRevision) {
         const changed: string[] = [];
         const previous = attached.state;
         if (previous.focus !== document.documentState.focus) changed.push("focus");
@@ -442,10 +447,13 @@ export class BrowserController {
         if (previous.urlTarget !== document.documentState.urlTarget) changed.push("target");
         if (previous.open !== document.documentState.open) changed.push("disclosure-open");
         if (previous.controls !== document.documentState.controls) changed.push("control-content", "checked-selected");
-        await renderer.updateState(document, changed);
+        await renderer.updateState(document, changed, attached.documentRevision === document.documentRevision
+          ? undefined : attached.documentRevision);
       }
+      // Record an acknowledged producer even when its consumer was superseded.
+      // The serialized successor must advance from the worker's actual revision.
+      lifecycle.attached = { sourceId, documentRevision: document.documentRevision, stateRevision: document.stateRevision, state: document.documentState };
       validate();
-      lifecycle.attached = { documentRevision: document.documentRevision, stateRevision: document.stateRevision, state: document.documentState };
       return renderer;
     });
     lifecycle.preparation = operation;
@@ -580,13 +588,7 @@ export class BrowserController {
     document: BrowserDocumentState, form: DocumentForm, state: DocumentState,
     submitter: DocumentNodeRef | undefined, signal?: AbortSignal,
   ): Promise<AcquiredNavigation> {
-    const actionAttribute = document.snapshot.document.attribute(form.node, "action");
-    const controls = form.controls.map((control) => control.kind === "submit"
-      && document.snapshot.document.attribute(control.node, "formaction") === ""
-      ? { ...control, formAction: document.snapshot.finalUrl } : control);
-    const submission = buildFormSubmissionRequest({ ...form, controls,
-      action: actionAttribute === null || actionAttribute.length === 0 ? document.snapshot.finalUrl : form.action,
-    }, state, submitter);
+    const submission = buildFormSubmissionRequest(document.snapshot.document, form, state, submitter, document.snapshot.finalUrl);
     const provenance = { kind: "page-initiated" as const, sourceUrl: document.snapshot.finalUrl };
     const snapshot = await this.#acquisition(document.id).acquire(submission.url, {
       ...submission.requestOptions, ...(signal === undefined ? {} : { signal }),
@@ -869,7 +871,7 @@ export class BrowserController {
       scrollOffsets: [],
       documentState: createDocumentState(snapshot.document, snapshot.finalUrl),
       rendering: { ...emptyRendering(),
-        pendingReveal: restoredAnchor === undefined && fragment.kind === "node" ? { node: fragment.node, align: "start" } : null,
+        pendingReveal: restoredAnchor === undefined && fragment.kind === "node" ? { node: fragment.node, blockAlign: "start" } : null,
         pendingFocus: fragment.kind === "node" ? navigationFocus(snapshot, fragment.node) : null },
       search: null,
       formEditors: {},

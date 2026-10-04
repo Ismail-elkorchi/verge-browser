@@ -212,6 +212,7 @@ export interface DocumentFormControlBase {
 export interface DocumentTextControl extends DocumentFormControlBase {
   readonly kind: "text";
   readonly inputType: "text" | "search" | "email" | "url" | "tel" | "password" | "number";
+  readonly multiple: boolean;
   readonly size: number;
   readonly defaultValue: string;
   readonly placeholder: string | null;
@@ -248,6 +249,7 @@ export interface DocumentSelectOption {
 export interface DocumentSelectControl extends DocumentFormControlBase {
   readonly kind: "select";
   readonly multiple: boolean;
+  readonly displaySize: number;
   readonly options: readonly DocumentSelectOption[];
 }
 
@@ -262,6 +264,7 @@ export interface DocumentHiddenControl {
 
 export interface DocumentButtonControl extends DocumentFormControlBase {
   readonly kind: "submit" | "reset" | "button";
+  readonly caption: string;
   readonly value: string;
   readonly formAction: string | null;
   readonly formMethod: "get" | "post" | "dialog" | null;
@@ -303,6 +306,8 @@ export interface DocumentReplacedContent {
   readonly kind: "image" | "media" | "embedded" | "svg" | "mathml";
   readonly source: string | null;
   readonly fallbackText: string;
+  /** Null for an absent alt attribute, including non-image content. */
+  readonly alternativeText: string | null;
   readonly width: number | null;
   readonly height: number | null;
 }
@@ -365,11 +370,11 @@ export type DocumentAction =
   | { readonly kind: "hover"; readonly target: DocumentNodeRef | null }
   | { readonly kind: "activate"; readonly target: DocumentNodeRef | null };
 
-export interface DocumentControlState {
-  readonly values: readonly string[];
-  readonly checked: boolean | null;
-  readonly selected: readonly DocumentNodeRef[];
-}
+export type DocumentControlState =
+  | { readonly kind: "value"; readonly value: string }
+  | { readonly kind: "checked"; readonly checked: boolean }
+  | { readonly kind: "selected"; readonly selected: readonly DocumentNodeRef[] }
+  | { readonly kind: "none" };
 
 export interface DocumentState {
   readonly controls: ReadonlyMap<DocumentNodeRef, DocumentControlState>;
@@ -424,7 +429,6 @@ export interface IndexedWebDocumentSnapshot extends WebDocumentSnapshot {
   semantic(ref: DocumentNodeRef): DocumentSemanticEntry | null;
   elementById(id: string): DocumentNodeRef | null;
   form(ref: DocumentNodeRef): DocumentForm | null;
-  formOwner(ref: DocumentNodeRef): DocumentNodeRef | null;
   control(ref: DocumentNodeRef): DocumentFormControl | null;
   radioGroup(ref: DocumentNodeRef): readonly DocumentChoiceControl[];
   option(ref: DocumentNodeRef): DocumentSelectOption | null;

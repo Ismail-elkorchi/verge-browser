@@ -279,7 +279,7 @@ test("nested layers and generated pseudo-elements use the existing cascade", () 
     &::before { content:"prefix"; color:green } }</style><p class=parent id=t>x</p>`);
   assert.deepEqual(result.style().text.color, red);
   assert.deepEqual(result.styles.pseudo(result.document.elementById("t"), "before").text.color, green);
-  assert.equal(result.styles.pseudo(result.document.elementById("t"), "before").generatedContent, "prefix");
+  assert.deepEqual(result.styles.pseudo(result.document.elementById("t"), "before").generatedContent, { kind: "items", visual: [{ kind: "text", value: "prefix" }], alternative: null });
 });
 
 test("dynamic state in parent selectors invalidates nested matches", () => {

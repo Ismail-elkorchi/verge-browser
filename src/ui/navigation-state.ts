@@ -7,7 +7,7 @@ import { estimatedRetainedCost } from "../memory/retained-cost.js";
 
 export function emptyRendering(): BrowserDocumentState["rendering"] {
   return { status: "idle", requestedViewportRevision: 0, committedViewportRevision: 0, requestKey: null,
-    pendingSearch: null, searchRequestGeneration: 0, pendingReveal: null, pendingFocus: null, viewport: null, summary: null, error: null };
+    pendingSearch: null, searchRequestGeneration: 0, pendingReveal: null, pendingFocus: null, viewport: null, previousViewport: null, summary: null, error: null };
 }
 function closedEditors(editors: BrowserDocumentState["formEditors"]): BrowserDocumentState["formEditors"] {
   return Object.fromEntries(Object.entries(editors).map(([key, editor]) => [key, editor.kind === "combobox"
@@ -64,7 +64,8 @@ export function activateHistory(document: BrowserDocumentState, navigation: Navi
     search: view?.search === undefined || view.search === null ? null : { ...view.search, anchors: new Map(), layoutRevision: null,
       documentRevision: document.documentRevision + 1, stateRevision: document.stateRevision + 1, requestGeneration: 0, matches: [], truncated: false },
     rendering: { ...emptyRendering(),
-      pendingReveal: view === undefined && fragment.kind === "node" ? { node: fragment.node, align: "start" } : null,
+      previousViewport: sameDocument ? document.rendering.viewport ?? document.rendering.previousViewport : null,
+      pendingReveal: view === undefined && fragment.kind === "node" ? { node: fragment.node, blockAlign: "start" } : null,
       pendingFocus: navigationFocus(entry.snapshot, view?.focus ?? (view === undefined && fragment.kind === "node" ? fragment.node : null)),
     }, loading: false, pendingUrl: null, error: null,
     ...navigationAvailability(navigation),
@@ -78,5 +79,6 @@ export function resumeDocument(document: BrowserDocumentState): BrowserDocumentS
   return { ...document, navigationGeneration: document.navigationGeneration + 1,
     documentState: { ...document.documentState, hover: null, active: null }, formEditors: closedEditors(document.formEditors),
     documentRevision: document.documentRevision + 1, stateRevision: document.stateRevision + 1,
-    loading: false, pendingUrl: null, error: null, rendering: { ...emptyRendering(), pendingFocus: navigationFocus(document.snapshot, document.documentState.focus) } };
+    loading: false, pendingUrl: null, error: null, rendering: { ...emptyRendering(), previousViewport: document.rendering.viewport ?? document.rendering.previousViewport,
+      pendingFocus: navigationFocus(document.snapshot, document.documentState.focus) } };
 }

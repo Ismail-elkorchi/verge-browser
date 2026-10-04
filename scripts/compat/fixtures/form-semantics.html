@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Form semantics</title></head><body>
+<main><h1>Form semantics</h1>
+<table><form id="repaired" action="/submit"><tr><td>
+<label for="query">Query</label><input id="query" data-oracle-name name="q" value="a&#10;b">
+<input type="radio" name="choice" value="first" checked>
+<select name="fallback"><option disabled>Choose</option><optgroup disabled><option>Blocked</option></optgroup><option>Allowed</option></select>
+<select name="listbox" size="2"><option>One</option><option>Two</option></select>
+<select name="same"><option value="equal" selected>First</option><option value="equal" selected>Second</option></select>
+<select name="text"><option>  Green   apple&#10;&nbsp; end </option></select>
+<input type="number" name="number" value="invalid">
+<input type="email" name="email" value=" alice@example.test&#10; ">
+<input type="email" name="emails" multiple value=" a@example.test , b@example.test ">
+<input type="hidden" name="_charset_" value="wrong">
+<input name="rtl" dirname="rtl.dir" dir="auto" value="שלום">
+<textarea name="area&#10;name" dirname="area.dir" dir="rtl">First
+Second</textarea>
+<input name="duplicate" value=""><input name="duplicate" value="last">
+<input type="submit" name="empty" value="">
+<input type="submit" data-oracle-name name="default">
+<input type="submit" data-oracle-name name="go" value="Go" aria-label="Search now">
+<button data-oracle-name name="intent" value="send" aria-label="Send message"><img alt="Paper plane"></button>
+</td></tr></form></table>
+<input type="radio" form="repaired" name="choice" value="last" checked>
+<div id="duplicate-id"></div><form id="duplicate-id"><input name="not-owned" form="duplicate-id"><input name="also-not-owned" form="missing"><input type="hidden" name="owned" value="yes"></form>
+<input name="forward" form="future" value="present"><form id="future"><button name="submit" value="future">Future</button></form>
+<label for="missing-label">Wrong <input name="unlabelled"></label>
+<a href="/home" data-oracle-name><img alt="Home"></a>
+<span id="first-name"><img alt="First"></span><span id="second-name">Second</span>
+<button type="button" data-oracle-name aria-labelledby="first-name second-name">Visible caption</button>
+<template><form id="template"><input name="inert"></form></template>
+</main></body></html>

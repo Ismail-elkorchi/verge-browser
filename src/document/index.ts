@@ -7,7 +7,7 @@ export type {
   WebDocumentStreamBudgetOptions,
   WebDocumentStreamOptions
 } from "./parse.js";
-export { applyDocumentAction, createDocumentState, snapshotDocumentState } from "./state.js";
+export { applyDocumentAction, createDocumentState, snapshotDocumentState, controlState, controlValues, controlChecked, controlSelections } from "./state.js";
 export type * from "./types.js";
 export type {
   HtmlTableCellMetadata,
@@ -17,3 +17,6 @@ export type {
 } from "./table/index.js";
 
 export { resolveDocumentFragment, type DocumentFragmentTarget } from "./fragment.js";
+
+export { parseHtmlInteger, htmlListMetadata, htmlListItemValue } from "./html-integer.js";
+export { documentTextEquivalent, semanticNameFromContents, type GeneratedTextEquivalent } from "./text-equivalent.js";

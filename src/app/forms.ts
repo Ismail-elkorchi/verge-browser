@@ -1,7 +1,12 @@
-import type {
-  DocumentForm,
-  DocumentNodeRef,
-  DocumentState
+import {
+  controlChecked,
+  controlSelections,
+  controlValues,
+  type DocumentForm,
+  type DocumentFormControl,
+  type DocumentNodeRef,
+  type DocumentState,
+  type IndexedWebDocumentSnapshot,
 } from "../document/index.js";
 import type { PageRequestOptions } from "./types.js";
 
@@ -10,78 +15,102 @@ export interface FormSubmissionRequest {
   readonly requestOptions: PageRequestOptions;
 }
 
-function successfulValues(
-  form: DocumentForm,
-  state: DocumentState,
-  submitter?: DocumentNodeRef
-): URLSearchParams {
-  const params = new URLSearchParams();
-  for (const control of form.controls) {
-    if (control.disabled || control.name.length === 0 || control.kind === "reset"
-      || control.kind === "button" || control.kind === "unsupported") continue;
-    const dynamic = state.controls.get(control.node);
-    if (control.kind === "submit") {
-      if (control.node === submitter) params.append(control.name, control.value);
-      continue;
-    }
-    if (control.kind === "hidden") {
-      params.append(control.name, dynamic?.values[0] ?? control.defaultValue);
-      continue;
-    }
-    if (control.kind === "text" || control.kind === "textarea") {
-      params.append(control.name, dynamic?.values[0] ?? control.defaultValue);
-      continue;
-    }
-    if (control.kind === "checkbox" || control.kind === "radio") {
-      if (dynamic?.checked ?? control.defaultChecked) {
-        params.append(control.name, control.value);
-      }
-      continue;
-    }
-    if (!("options" in control)) continue;
-    const defaults = control.options.filter((option) => option.defaultSelected);
-    const effectiveDefaults = control.multiple
-      ? defaults
-      : [defaults.at(-1) ?? control.options[0]].filter((option) => option !== undefined);
-    const selected = new Set(dynamic?.selected ?? effectiveDefaults.map((option) => option.node));
-    for (const option of control.options) {
-      if (!option.disabled && selected.has(option.node)) params.append(control.name, option.value);
-    }
-  }
-  return params;
+export interface FormEntry {
+  readonly name: string;
+  readonly value: string;
 }
 
-export function buildGetSubmissionUrl(
+function inDatalist(document: IndexedWebDocumentSnapshot, control: DocumentFormControl): boolean {
+  let parent = document.parent(control.node);
+  while (parent !== null) {
+    if (parent.kind === "element" && parent.namespace === "http://www.w3.org/1999/xhtml" && parent.name === "datalist") return true;
+    parent = document.parent(parent.ref);
+  }
+  return false;
+}
+
+function selectedSubmitter(document: IndexedWebDocumentSnapshot, form: DocumentForm, submitter: DocumentNodeRef | undefined) {
+  if (document.form(form.node) !== form) throw new TypeError("Submission requires the indexed form");
+  if (submitter === undefined) return undefined;
+  const control = document.control(submitter);
+  if (control?.kind !== "submit" || control.form !== form.node || control.disabled || inDatalist(document, control)) {
+    throw new TypeError("Invalid form submitter");
+  }
+  return control;
+}
+
+/** The sole ordered successful-entry construction path, before transport newline normalization. */
+export function formEntries(
+  document: IndexedWebDocumentSnapshot,
   form: DocumentForm,
   state: DocumentState,
-  submitter?: DocumentNodeRef
-): string {
-  if (form.method !== "get") throw new Error(`Unsupported form method: ${form.method}`);
-  const url = new URL(form.action);
-  url.search = successfulValues(form, state, submitter).toString();
-  return url.toString();
+  submitter?: DocumentNodeRef,
+): readonly FormEntry[] {
+  selectedSubmitter(document, form, submitter);
+  if (document.indexOutcome.status !== "complete") throw new Error("Cannot submit an incompletely indexed document");
+  const entries: FormEntry[] = [];
+  const scalarValueString = (value: string): string => value.replace(/[\uD800-\uDFFF]/gu, "\uFFFD");
+  const append = (name: string, value: string): void => { entries.push(Object.freeze({ name: scalarValueString(name), value: scalarValueString(value) })); };
+  for (const control of form.controls) {
+    if (control.disabled || control.name.length === 0 || control.kind === "reset" || control.kind === "button" || inDatalist(document, control)) continue;
+    if (control.kind === "unsupported") {
+      // Image buttons contribute only when activated; activation itself is unsupported.
+      if (control.inputType === "image") continue;
+      throw new Error(`Unsupported contributing form control: ${control.inputType}`);
+    }
+    let values: readonly string[];
+    if (control.kind === "submit") {
+      if (control.node !== submitter) continue;
+      values = [control.value];
+    } else if (control.kind === "checkbox" || control.kind === "radio") {
+      if (!controlChecked(state, control)) continue;
+      values = [control.value];
+    } else if (control.kind === "select") {
+      const selected = new Set(controlSelections(state, control));
+      values = control.options.filter((option) => selected.has(option.node) && !option.disabled).map((option) => option.value);
+    } else {
+      values = control.kind === "hidden" && control.name.toLowerCase() === "_charset_" ? ["UTF-8"] : controlValues(state, control);
+    }
+    for (const value of values) append(control.name, value);
+    const element = document.node(control.node);
+    const supportsDirname = control.kind === "textarea" || control.kind === "hidden"
+      || (control.kind === "text" && control.inputType !== "number")
+      || (control.kind === "submit" && element.kind === "element" && element.name === "input");
+    if (supportsDirname) {
+      const dirname = document.attribute(control.node, "dirname");
+      if (dirname !== null && dirname.length > 0) append(dirname, document.directionForRenderedText(control.node, values[0] ?? ""));
+    }
+  }
+  return Object.freeze(entries);
+}
+
+function encodeEntries(entries: readonly FormEntry[]): string {
+  const normalize = (value: string): string => value.replace(/\r\n|\r|\n/gu, "\r\n");
+  const params = new URLSearchParams();
+  for (const entry of entries) params.append(normalize(entry.name), normalize(entry.value));
+  return params.toString();
 }
 
 export function buildFormSubmissionRequest(
+  document: IndexedWebDocumentSnapshot,
   form: DocumentForm,
   state: DocumentState,
-  submitter?: DocumentNodeRef
+  submitter?: DocumentNodeRef,
+  currentUrl: string = document.finalUrl,
 ): FormSubmissionRequest {
-  const submitControl = submitter === undefined
-    ? undefined
-    : form.controls.find((control) => control.node === submitter && control.kind === "submit");
-  const method = submitControl?.kind === "submit" ? submitControl.formMethod ?? form.method : form.method;
-  const encoding = submitControl?.kind === "submit" ? submitControl.formEncoding ?? form.encoding : form.encoding;
-  const action = submitControl?.kind === "submit" ? submitControl.formAction ?? form.action : form.action;
-  if (method !== "get" && method !== "post") {
-    throw new Error(`Unsupported form method: ${method}`);
-  }
-  if (method === "post" && encoding !== "application/x-www-form-urlencoded") {
-    throw new Error(`Unsupported form encoding: ${encoding}`);
-  }
+  const submitControl = selectedSubmitter(document, form, submitter);
+  const method = submitControl?.formMethod ?? form.method;
+  const encoding = submitControl?.formEncoding ?? form.encoding;
+  const overridesAction = submitControl !== undefined && submitControl.formAction !== null;
+  const rawAction = overridesAction
+    ? document.attribute(submitControl.node, "formaction") : document.attribute(form.node, "action");
+  const action = (rawAction ?? "").trim().length === 0 ? currentUrl : submitControl?.formAction ?? form.action;
+  if (method !== "get" && method !== "post") throw new Error(`Unsupported form method: ${method}`);
+  if (method === "post" && encoding !== "application/x-www-form-urlencoded") throw new Error(`Unsupported form encoding: ${encoding}`);
+  const body = encodeEntries(formEntries(document, form, state, submitter));
   if (method === "get") {
     const url = new URL(action);
-    url.search = successfulValues(form, state, submitter).toString();
+    url.search = body;
     return { url: url.toString(), requestOptions: { method: "GET" } };
   }
   return {
@@ -89,7 +118,7 @@ export function buildFormSubmissionRequest(
     requestOptions: {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded; charset=UTF-8" },
-      bodyText: successfulValues(form, state, submitter).toString()
-    }
+      bodyText: body,
+    },
   };
 }

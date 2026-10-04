@@ -118,6 +118,8 @@ export interface BrowserDocumentState {
       readonly formControl: boolean;
     } | null;
     readonly viewport: ViewportRenderPayload | null;
+    /** Last accepted same-source display, never relabeled with a new activation. */
+    readonly previousViewport: ViewportRenderPayload | null;
     readonly summary: RenderDocumentSummary | null;
     readonly error: string | null;
   };
@@ -343,7 +345,7 @@ export type BrowserTuiMessage =
   | { readonly kind: "formComboboxTransition"; readonly controlId: string; readonly transition: ComboboxControlTransition }
   | { readonly kind: "formComboboxCommit"; readonly controlId: string; readonly event: ComboboxCommitEvent }
   | { readonly kind: "formCheckboxGroup"; readonly controlId: string; readonly transition: CheckboxGroupTransition }
-  | { readonly kind: "formValues"; readonly controlId: string; readonly values: readonly string[]; readonly focusTarget?: DocumentNodeRef }
+  | { readonly kind: "formValues"; readonly controlId: string; readonly values: readonly string[]; readonly selectedOptions?: readonly DocumentNodeRef[]; readonly focusTarget?: DocumentNodeRef }
   | { readonly kind: "activateButton"; readonly controlId: string }
   | { readonly kind: "resetForm"; readonly formId: string; readonly resetterId?: string }
   | { readonly kind: "submitForm"; readonly formId: string; readonly submitterId?: string }

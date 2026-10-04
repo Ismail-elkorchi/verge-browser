@@ -1,6 +1,7 @@
+import { createPaintStyleSharing, formattingComputedStyle, computedPaintBackground } from "./paint-style.js";
 import type { CssOverflow } from "../style/types.js";
 import { clipsOverflow, isScrollableOverflow } from "../style/overflow.js";
-import { registerRetainedOwner } from "../../memory/retained-cost.js";
+import { registerRetainedOwner, registerRetainedCache, RetainedCacheMap } from "../../memory/retained-cost.js";
 import type {
   DocumentNodeRef,
   DocumentSourceRange,
@@ -451,26 +452,26 @@ interface InlineTextAnalysis {
 
 const INLINE_TEXT_ANALYSIS_CACHE = new WeakMap<
   InlineItemStream,
-  Map<string, InlineTextAnalysis>
+  RetainedCacheMap<string, InlineTextAnalysis>
 >();
 const PAINT_STYLE_CACHE = new WeakMap<
   FormattingTree,
-  Map<FormattingNodeId, LayoutPaintStyle>
+  RetainedCacheMap<FormattingNodeId, LayoutPaintStyle>
 >();
 const DOCUMENT_SEMANTIC_ANCESTOR_CACHE = new WeakMap<
   FormattingTree,
-  Map<DocumentNodeRef, readonly NonNullable<LayoutFragment["semantic"]>[]>
+  RetainedCacheMap<DocumentNodeRef, readonly NonNullable<LayoutFragment["semantic"]>[]>
 >();
 
 function formattingCache<K, V>(
-  caches: WeakMap<FormattingTree, Map<K, V>>,
+  caches: WeakMap<FormattingTree, RetainedCacheMap<K, V>>,
   formatting: FormattingTree,
 ): Map<K, V> {
   const cached = caches.get(formatting);
   if (cached !== undefined) return cached;
-  const created = new Map<K, V>();
+  const created = new RetainedCacheMap<K, V>();
   caches.set(formatting, created);
-  registerRetainedOwner(formatting, [created]);
+  registerRetainedCache(formatting, created);
   return created;
 }
 
@@ -827,6 +828,7 @@ class LayoutBuilder {
     { readonly underline: boolean; readonly lineThrough: boolean }
   >();
   readonly #paintStyleCache: Map<FormattingNodeId, LayoutPaintStyle>;
+  readonly #paintStyles = createPaintStyleSharing();
   readonly #documentSemanticAncestorCache: Map<
     DocumentNodeRef,
     readonly NonNullable<LayoutFragment["semantic"]>[]
@@ -939,11 +941,7 @@ class LayoutBuilder {
   }
 
   #computed(node: FormattingNode): ComputedStyle | null {
-    if (node.styleNode === null) return null;
-    return node.pseudo === null
-      ? this.#formatting.styles.style(node.styleNode)
-      : (this.#formatting.styles.pseudo(node.styleNode, node.pseudo) ??
-          this.#formatting.styles.style(node.styleNode));
+    return formattingComputedStyle(node, this.#formatting.styles);
   }
 
   #hasTransform(node: FormattingNode): boolean {
@@ -999,9 +997,10 @@ class LayoutBuilder {
     );
     let cache = INLINE_TEXT_ANALYSIS_CACHE.get(stream);
     if (cache === undefined) {
-      cache = new Map<string, InlineTextAnalysis>();
+      cache = new RetainedCacheMap<string, InlineTextAnalysis>();
       INLINE_TEXT_ANALYSIS_CACHE.set(stream, cache);
-      registerRetainedOwner(stream, [cache]);
+      registerRetainedCache(stream, cache);
+      registerRetainedCache(this.#input.inlineItemStreams, cache);
     }
     const cacheKey = [
       direction,
@@ -1853,9 +1852,7 @@ class LayoutBuilder {
     const paintStyle = Object.freeze({
       visible: style?.visibility === "visible",
       foreground: style?.text.color ?? null,
-      background: node.appliesBoxStyle && !hideEmptyCell
-        ? (style?.text.background ?? null)
-        : null,
+      background: computedPaintBackground(style, node.appliesBoxStyle, hideEmptyCell),
       bold: (style?.text.fontWeight ?? 400) >= 600,
       italic:
         style?.text.fontStyle !== undefined &&
@@ -1874,8 +1871,9 @@ class LayoutBuilder {
         ? style.box.borderStyles
         : { top: "none" as const, right: "none" as const, bottom: "none" as const, left: "none" as const }),
     });
-    this.#paintStyleCache.set(node.id, paintStyle);
-    return paintStyle;
+    const shared = this.#paintStyles.share(paintStyle);
+    this.#paintStyleCache.set(node.id, shared);
+    return shared;
   }
 
   #tableCellHasContent(node: FormattingNode): boolean {

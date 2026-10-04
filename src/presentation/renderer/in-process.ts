@@ -60,14 +60,12 @@ export function renderDocumentViewport(input: RenderDocumentViewportInput): InPr
       terminalContext: input.terminalContext,
       ...(input.signal === undefined ? {} : { signal: input.signal }),
     };
-    const artifacts = store.analyze(request);
-    const viewport = store.renderViewport({
+    return store.withViewportArtifacts({
       ...request,
       viewportRevision: 1,
       window: input.window,
       ...(input.searchQuery === undefined ? {} : { searchQuery: input.searchQuery }),
-    });
-    return Object.freeze({ artifacts, viewport });
+    }, (viewport, artifacts) => Object.freeze({ artifacts, viewport }));
   } finally {
     store.dispose();
   }

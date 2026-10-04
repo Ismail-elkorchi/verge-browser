@@ -70,7 +70,7 @@ async function fixture(overrides = {}) {
   const runtime = createTuiRuntime({ app: prepared.app, host: createMemoryTerminalHost({ terminalSize: overrides.terminalSize ?? terminalSize }) });
   await runtime.start();
   await waitUntil(runtime, () => ["ready", "failed"].includes(runtime.state().documents[0]?.rendering?.status));
-  assert.equal(runtime.state().documents[0]?.rendering?.status, "ready");
+  assert.equal(runtime.state().documents[0]?.rendering?.status, "ready", runtime.state().documents[0]?.rendering?.error ?? "Initial viewport did not render");
   return { runtime, prepared, options, async close() {
     await runtime.dispose(); await prepared.controller.close(); await rm(directory, { recursive: true, force: true });
   } };
@@ -384,14 +384,14 @@ test("focused retained editor survives a fully clipped resize while the new view
     assert.ok(f.runtime.frame().focusPath?.includes(control.node));
     await text(f.runtime,"Z");
     const pendingEditor=f.runtime.state().documents[0].formEditors[control.node];
-    assert.equal(f.runtime.state().documents[0].documentState.controls.get(control.node).values[0],"retainedXZ");
+    assert.equal(f.runtime.state().documents[0].documentState.controls.get(control.node).value,"retainedXZ");
     assert.equal(f.runtime.state().omnibox.editor.input.text,url);
     release();
     await waitUntil(f.runtime,()=>f.runtime.state().documents[0].rendering.status==="ready");
     assert.equal(f.runtime.state().documents[0].formEditors[control.node],pendingEditor);
     assert.ok(f.runtime.frame().focusPath?.includes(control.node));
     await text(f.runtime,"Y");
-    assert.equal(f.runtime.state().documents[0].documentState.controls.get(control.node).values[0],"retainedXZY");
+    assert.equal(f.runtime.state().documents[0].documentState.controls.get(control.node).value,"retainedXZY");
   } finally {release?.();await f.close();}
 });
 
@@ -420,6 +420,6 @@ test("fully clipped retained select suppresses its open portal during pending re
     await waitUntil(f.runtime,()=>f.runtime.state().documents[0].rendering.status==="ready");
     assert.ok(f.runtime.frame().focusPath?.includes(control.node));
     assert.equal(f.runtime.state().documents[0].formEditors[control.node],editor);
-    assert.deepEqual(f.runtime.state().documents[0].documentState.controls.get(control.node).values,["en"]);
+    assert.deepEqual(f.runtime.state().documents[0].documentState.controls.get(control.node).selected,[control.options[0].node]);
   } finally {release?.();await f.close();}
 });

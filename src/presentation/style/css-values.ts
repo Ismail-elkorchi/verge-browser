@@ -6,6 +6,8 @@ import {
   type CssFunction
 } from "@ismail-elkorchi/css-parser";
 
+import { namedColor } from "./named-colors.js";
+
 import type {
   CssColor,
   CssLength,
@@ -382,10 +384,8 @@ function hslToRgb(hue: number, saturation: number, lightness: number): readonly 
 }
 
 /** Parses common CSS color functions from component-value trees. */
-export function parseCssFunctionalColor(source: string): CssColor | undefined {
-  const parsed = parseComponentValues(source);
-  if (!parsed.ok) return undefined;
-  const values = compact(parsed.value);
+function parseCssFunctionalColor(input: readonly ComponentValue[]): CssColor | undefined {
+  const values = compact(input);
   if (values.length !== 1 || values[0]?.kind !== "function-block") return undefined;
   const fn = values[0];
   const name = fn.name.toLowerCase();
@@ -414,6 +414,31 @@ export function parseCssFunctionalColor(source: string): CssColor | undefined {
     }
   }
   return undefined;
+}
+
+/** Evaluates one color directly from retained syntax, including decoded identifiers. */
+export function parseCssColorComponents(values: readonly ComponentValue[], current: CssColor | null): CssColor | null | undefined {
+  const significant = compact(values);
+  if (significant.length !== 1) return undefined;
+  const component = significant[0];
+  if (component?.kind === "ident") {
+    const normalized = component.value.toLowerCase();
+    if (normalized === "transparent") return Object.freeze({ r: 0, g: 0, b: 0, a: 0 });
+    if (normalized === "currentcolor") return current;
+    return namedColor(normalized);
+  }
+  if (component?.kind === "hash") {
+    const raw = component.value.toLowerCase();
+    if (!/^(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/u.test(raw)) return undefined;
+    const expanded = raw.length <= 4 ? raw.replace(/[0-9a-f]/gu, (part) => `${part}${part}`) : raw;
+    return Object.freeze({
+      r: Number.parseInt(expanded.slice(0, 2), 16),
+      g: Number.parseInt(expanded.slice(2, 4), 16),
+      b: Number.parseInt(expanded.slice(4, 6), 16),
+      a: expanded.length === 8 ? Number.parseInt(expanded.slice(6), 16) / 255 : 1,
+    });
+  }
+  return parseCssFunctionalColor(significant);
 }
 
 /** The supported two-dimensional translation subset, preserving an authored zero transform. */

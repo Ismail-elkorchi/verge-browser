@@ -17,11 +17,12 @@ import type {
   TerminalSearchResult,
   ViewportCellBuffer,
 } from "../../presentation/terminal/index.js";
-import type {
-  DocumentControlState,
-  DocumentNodeRef,
-  DocumentState,
-  IndexedWebDocumentSnapshot,
+import {
+  snapshotDocumentState,
+  type DocumentControlState,
+  type DocumentNodeRef,
+  type DocumentState,
+  type IndexedWebDocumentSnapshot,
 } from "../../document/index.js";
 import type { DocumentActionIdentity } from "../../presentation/formatting/index.js";
 import type { RenderStageMeasurement } from "../../presentation/renderer/index.js";
@@ -49,7 +50,7 @@ export function transferDocumentState(state: DocumentState): TransferredDocument
 }
 
 export function hydrateDocumentState(state: TransferredDocumentState): DocumentState {
-  return Object.freeze({
+  return snapshotDocumentState({
     controls: new Map(state.controls),
     open: new Set(state.open),
     focus: state.focus,
@@ -180,6 +181,8 @@ export type RenderWorkerRequest = {
   readonly parameters: ViewportRequestParameters;
 } | {
   readonly kind: "update-document-state";
+  /** Expected resident activation when reusing the same live source. */
+  readonly previousDocumentRevision?: number;
   readonly requestId: number;
   readonly documentId: string;
   readonly documentRevision: number;

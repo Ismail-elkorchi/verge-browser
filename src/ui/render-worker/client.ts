@@ -194,9 +194,11 @@ export class RenderWorkerClient {
   public async updateState(
     document: BrowserDocumentState,
     changed: readonly string[],
+    previousDocumentRevision?: number,
   ): Promise<void> {
     await this.#acknowledge({
       kind: "update-document-state",
+      ...(previousDocumentRevision === undefined ? {} : { previousDocumentRevision }),
       requestId: this.#nextRequestId(),
       documentId: document.id,
       documentRevision: document.documentRevision,
@@ -283,7 +285,9 @@ export class RenderWorkerClient {
     Atomics.add(state.document, 0, 1);
     Atomics.add(state.viewport, 0, 1);
     Atomics.add(state.search, 0, 1);
-    this.#cancelRequests(documentId);
+    // State updates are atomic and have no cancellation checkpoint. Keep their
+    // acknowledgements so the controller knows the actual resident activation.
+    this.#cancelRequests(documentId, undefined, true);
   }
 
   public cancelSearch(documentId: string): void {
@@ -292,12 +296,13 @@ export class RenderWorkerClient {
     this.#cancelRequests(documentId, "search-document");
   }
 
-  #cancelRequests(documentId: string, kind?: RenderWorkerRequest["kind"]): void {
+  #cancelRequests(documentId: string, kind?: RenderWorkerRequest["kind"], preserveStatePreparation = false): void {
     for (const [id, pending] of this.#pending) {
       const request = pending.request;
       const owner = request.kind === "attach-document" ? request.attachment.documentId
         : "documentId" in request ? request.documentId : null;
-      if (request.kind === "release-document" || owner !== documentId || (kind !== undefined && request.kind !== kind)) continue;
+      if ((preserveStatePreparation && request.kind === "update-document-state")
+        || request.kind === "release-document" || owner !== documentId || (kind !== undefined && request.kind !== kind)) continue;
       this.#pending.delete(id);
       const queued = this.#queue.indexOf(id);
       if (queued >= 0) this.#queue.splice(queued, 1);
@@ -315,6 +320,7 @@ export class RenderWorkerClient {
 
   public async release(documentId: string): Promise<void> {
     this.cancelDocument(documentId);
+    this.#cancelRequests(documentId);
     this.#cancellation.delete(documentId);
     this.#summaries.delete(documentId);
     this.#viewports.delete(documentId);
@@ -330,7 +336,10 @@ export class RenderWorkerClient {
 
   async #close(): Promise<void> {
     this.#closed = true;
-    for (const id of this.#cancellation.keys()) this.cancelDocument(id);
+    for (const id of this.#cancellation.keys()) {
+      this.cancelDocument(id);
+      this.#cancelRequests(id);
+    }
     this.#settlePending(new Error("Rendering worker was disposed."));
     this.#summaries.clear();
     this.#viewports.clear();
