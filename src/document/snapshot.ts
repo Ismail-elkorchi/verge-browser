@@ -573,13 +573,13 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
       : resolveUrl(attribute(baseElement.ref, "href") ?? "", this.finalUrl);
 
     const labelTextByTarget = new Map<DocumentNodeRef, string>();
-    const textEquivalent = (root: DocumentNodeRef, name = true, includeContents = true): string => computeTextEquivalent({
+    const textEquivalent = (root: DocumentNodeRef, name = true, includeContents = true, nativeLabel = false): string => computeTextEquivalent({
       node: (ref) => nodes.get(ref),
       attribute,
       elementById: (id) => elementByHtmlId.get(id) ?? null,
       labelText: (ref) => labelTextByTarget.get(ref),
       hidden: (ref) => accessibilityHidden.get(ref) ?? false,
-    }, root, { name, includeContents, maxWork: limits.maxIndexedNodes, maxText: Math.min(32_768, limits.maxTextCodeUnits) });
+    }, root, { name, includeContents, nativeLabel, maxWork: limits.maxIndexedNodes, maxText: Math.min(32_768, limits.maxTextCodeUnits) });
     const optionText = (root: DocumentNodeRef): string => {
       const parts: string[] = [];
       const pending = [root];
@@ -607,7 +607,7 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
     const labels: DocumentLabel[] = [];
     for (const element of elements) {
       if (element.namespace !== HTML_NAMESPACE_URI || element.name !== "label") continue;
-      const labelText = textEquivalent(element.ref);
+      const labelText = textEquivalent(element.ref, true, true, true);
       const explicitTarget = attribute(element.ref, "for");
       let target = explicitTarget === null ? null : elementByHtmlId.get(explicitTarget) ?? null;
       if (target !== null && !labelable(target)) target = null;

@@ -212,6 +212,9 @@ export class RenderArtifactStore {
       for (const source of program.sources) this.#accounting.immutable(source.stylesheet, new Set(), input.signal, stylesheetOwnershipRoots(source.stylesheet, input.signal));
       return this.#accounting.immutable(program, new Set(cacheRoots), input.signal);
     });
+    // External revisions may restart or already be large after reattachment.
+    // Seed semantic freshness from the same monotonic source used by updates.
+    const semanticRevision = ++this.#clock;
     const attachment: AttachedDocument = {
       attachmentOwner,
       stateOwner: this.#accounting.immutable(input.state, new Set(), input.signal),
@@ -225,8 +228,8 @@ export class RenderArtifactStore {
       budgets: input.budgets,
       state: input.state,
       stateRevision: input.stateRevision,
-      analysisStateRevision: input.stateRevision,
-      textStateRevision: input.stateRevision,
+      analysisStateRevision: semanticRevision,
+      textStateRevision: semanticRevision,
       logicalText: null,
       styles: new Map(),
       resources: phaseResources(),

@@ -201,9 +201,9 @@ class FormattingBuilder {
       if (semantic === null || (!semanticNameFromContents(semantic.role) && !labelled.has(source)
         && this.#document.attribute(source, "aria-labelledby") === null)) continue;
       const accessibleName = documentTextEquivalent(this.#document, source,
-        (ref, pseudo, referenced) => {
+        (ref, pseudo, includeHidden) => {
           this.#semanticWork();
-          if (!referenced && this.#styles.pseudo(ref, pseudo)?.visibility !== "visible") return "";
+          if (!includeHidden && this.#styles.pseudo(ref, pseudo)?.visibility !== "visible") return "";
           return this.#generatedNames.get(ref)?.[pseudo] ?? "";
         },
         (ref) => { const style = this.#styles.style(ref); return style.display.box === "none" || style.visibility !== "visible"; });

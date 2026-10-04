@@ -1,6 +1,6 @@
 import type { DocumentNodeRef, IndexedWebDocumentSnapshot, WebDocumentNode, DocumentSemanticRole } from "./types.js";
 
-export type GeneratedTextEquivalent = (ref: DocumentNodeRef, pseudo: "marker" | "before" | "after", referenced: boolean) => string;
+export type GeneratedTextEquivalent = (ref: DocumentNodeRef, pseudo: "marker" | "before" | "after", includeHidden: boolean) => string;
 
 export interface TextEquivalentSource {
   node(ref: DocumentNodeRef): WebDocumentNode | undefined;
@@ -16,13 +16,17 @@ export interface TextEquivalentSource {
 export function computeTextEquivalent(
   source: TextEquivalentSource,
   root: DocumentNodeRef,
-  options: { readonly name?: boolean; readonly includeContents?: boolean; readonly maxWork: number; readonly maxText: number; readonly generated?: GeneratedTextEquivalent },
+  options: { readonly name?: boolean; readonly includeContents?: boolean; readonly nativeLabel?: boolean;
+    readonly maxWork: number; readonly maxText: number; readonly generated?: GeneratedTextEquivalent },
 ): string {
   type NodePending = { readonly kind: "node"; readonly ref: DocumentNodeRef; readonly name: boolean;
-    readonly referenced: boolean; readonly exclude: DocumentNodeRef | null; readonly skipNaming?: boolean };
+    readonly referenced: boolean; readonly includeHidden: boolean; readonly exclude: DocumentNodeRef | null; readonly skipNaming?: boolean };
   type Pending = NodePending | { readonly kind: "text"; readonly value: string }
     | { readonly kind: "label-fallback"; readonly node: NodePending; readonly checkpoint: number };
-  const pending: Pending[] = [{ kind: "node", ref: root, name: options.name ?? true, referenced: false, exclude: null }];
+  // A reference blocks recursive naming relations; only a hidden relation root
+  // includes hidden descendants. Visible labels must still omit hidden content.
+  const pending: Pending[] = [{ kind: "node", ref: root, name: options.name ?? true, referenced: false,
+    includeHidden: options.nativeLabel === true && source.hidden(root), exclude: null }];
   const parts: string[] = [];
   const visited = new Set<string>();
   let remaining = options.maxText;
@@ -44,7 +48,7 @@ export function computeTextEquivalent(
       continue;
     }
     if (item.ref === item.exclude) continue;
-    const key = `${item.ref}:${String(item.referenced)}:${String(item.skipNaming === true)}`;
+    const key = `${item.ref}:${String(item.referenced)}:${String(item.includeHidden)}:${String(item.skipNaming === true)}`;
     if (visited.has(key)) continue;
     visited.add(key);
     const node = source.node(item.ref);
@@ -52,7 +56,7 @@ export function computeTextEquivalent(
     if (node?.kind !== "element") continue;
     const html = node.namespace === "http://www.w3.org/1999/xhtml";
     if (html && ["script", "style", "template"].includes(node.name)) continue;
-    if (node.ref !== root && !item.referenced && source.hidden(node.ref)) continue;
+    if (node.ref !== root && !item.includeHidden && source.hidden(node.ref)) continue;
     if (item.name && item.skipNaming !== true) {
       const references = (source.attribute(node.ref, "aria-labelledby") ?? "").split(/[\t\n\f\r ]+/u)
         .flatMap((id) => { const ref = source.elementById(id); return ref === null ? [] : [ref]; });
@@ -60,7 +64,7 @@ export function computeTextEquivalent(
         for (let index = references.length - 1; index >= 0; index--) {
           const ref = references[index];
           if (ref !== undefined) {
-            pending.push({ kind: "node", ref, name: true, referenced: true, exclude: item.exclude });
+            pending.push({ kind: "node", ref, name: true, referenced: true, includeHidden: source.hidden(ref), exclude: item.exclude });
             if (index > 0) pending.push({ kind: "text", value: " " });
           }
         }
@@ -74,7 +78,7 @@ export function computeTextEquivalent(
         for (let index = labels.length - 1; index >= 0; index--) {
           const ref = labels[index];
           if (ref !== undefined) {
-            pending.push({ kind: "node", ref, name: true, referenced: true, exclude: node.ref });
+            pending.push({ kind: "node", ref, name: true, referenced: true, includeHidden: source.hidden(ref), exclude: node.ref });
             if (index > 0) pending.push({ kind: "text", value: " " });
           }
         }
@@ -103,16 +107,17 @@ export function computeTextEquivalent(
       continue;
     }
     if (node.ref === root && !item.referenced && item.name) rootContentFallback = source.attribute(node.ref, "title") ?? "";
-    const marker = options.generated?.(node.ref, "marker", item.referenced) ?? "";
-    const before = options.generated?.(node.ref, "before", item.referenced) ?? "";
-    const after = options.generated?.(node.ref, "after", item.referenced) ?? "";
+    const marker = options.generated?.(node.ref, "marker", item.includeHidden) ?? "";
+    const before = options.generated?.(node.ref, "before", item.includeHidden) ?? "";
+    const after = options.generated?.(node.ref, "after", item.includeHidden) ?? "";
     if (item.name && node.children.length === 0 && marker.length === 0 && before.length === 0 && after.length === 0) {
       append(source.attribute(node.ref, "title") ?? source.attribute(node.ref, "placeholder") ?? "");
     }
     if (after.length > 0) pending.push({ kind: "text", value: after });
     for (let index = node.children.length - 1; index >= 0; index--) {
       const ref = node.children[index];
-      if (ref !== undefined) pending.push({ kind: "node", ref, name: item.name, referenced: item.referenced, exclude: source.labelTarget?.(node.ref) ?? item.exclude });
+      if (ref !== undefined) pending.push({ kind: "node", ref, name: item.name, referenced: item.referenced,
+        includeHidden: item.includeHidden, exclude: source.labelTarget?.(node.ref) ?? item.exclude });
     }
     if (before.length > 0) pending.push({ kind: "text", value: before });
     if (marker.length > 0) pending.push({ kind: "text", value: marker });

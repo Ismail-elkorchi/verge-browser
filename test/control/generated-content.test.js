@@ -91,6 +91,22 @@ test("direct ARIA references include visibility-hidden generated labels without 
   assert.equal(formatting.semantic(document.elementById("ordinary")).accessibleName, "Visible");
 });
 
+test("generated native and ARIA labels include hidden descendants only when the referenced root is hidden", () => {
+  const { document, formatting } = fixture(`<style>label::before{content:"Generated "}
+    #hidden-label{visibility:hidden}#visible-label span,#visible-label::after{visibility:hidden}
+    #visible-label::after{content:" omitted"}</style>
+    <label id=hidden-label for=hidden-control><span>hidden label</span></label><input id=hidden-control>
+    <label id=visible-label for=visible-control>visible label<span> omitted</span></label><input id=visible-control>
+    <a id=hidden-reference href=/go aria-labelledby=hidden-label></a>
+    <a id=visible-reference href=/go aria-labelledby=visible-label></a>`);
+  for (const id of ["hidden-control", "hidden-reference"]) {
+    assert.equal(formatting.semantic(document.elementById(id)).accessibleName, "Generated hidden label", id);
+  }
+  for (const id of ["visible-control", "visible-reference"]) {
+    assert.equal(formatting.semantic(document.elementById(id)).accessibleName, "Generated visible label", id);
+  }
+});
+
 test("nested and sibling resets retain one scoped counter owner in source/pseudo order", () => {
   const { formatting } = fixture(`<style>
     main{counter-reset:x 1}section{counter-reset:x 3}a::before{counter-increment:x;content:counters(x,".")}

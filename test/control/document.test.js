@@ -389,3 +389,18 @@ test("empty label associations preserve native title and placeholder fallback wh
   assert.equal(documentTextEquivalent(document, byId(document, "title"), generated), "Title name");
   assert.equal(documentTextEquivalent(document, byId(document, "hint"), generated), "Hint name");
 });
+
+test("hidden label roots include descendants while visible label roots exclude hidden descendants", () => {
+  const document = parseWebDocument(`<label hidden for="hidden"><span>Hidden label</span></label><input id="hidden">
+    <label aria-hidden="true" for="aria-hidden"><span>ARIA-hidden label</span></label><input id="aria-hidden">
+    <label for="visible">Visible<span hidden> omitted</span></label><input id="visible">
+    <span hidden id="hidden-reference"><span>Hidden reference</span></span><button id="hidden-aria" aria-labelledby="hidden-reference"></button>
+    <span id="visible-reference">Visible reference<span hidden> omitted</span></span><button id="visible-aria" aria-labelledby="visible-reference"></button>`, context);
+  for (const [id, expected] of [["hidden", "Hidden label"], ["aria-hidden", "ARIA-hidden label"],
+    ["visible", "Visible"], ["hidden-aria", "Hidden reference"], ["visible-aria", "Visible reference"]]) {
+    const ref = byId(document, id);
+    assert.equal(document.semantic(ref).accessibleName, expected, `indexed ${id}`);
+    assert.equal(document.control(ref).label, expected, `control ${id}`);
+    assert.equal(documentTextEquivalent(document, ref), expected, `shared traversal ${id}`);
+  }
+});

@@ -17,12 +17,12 @@ function request(columns = 80, documentRevision = 1) {
     terminalContext: { columns, rows: 24, cellWidthCssPx: cssPx(8), rowHeightCssPx: cssPx(16), unicode: true,
       ambiguousWidth: 1, colorDepth: 24, cellMeasurer: terminalCellMeasurer() } };
 }
-function fixture(html) {
+function fixture(html, stateRevision = 1) {
   const document = parseWebDocument(html, { requestUrl: "https://phases.test/", finalUrl: "https://phases.test/" });
   const state = createDocumentState(document);
   const instrumentation = new RenderStageMetrics();
   const store = new RenderArtifactStore({ instrumentation });
-  store.attach({ documentId: "phases", documentRevision: 1, stateRevision: 1, document, state,
+  store.attach({ documentId: "phases", documentRevision: 1, stateRevision, document, state,
     resources: embeddedStylesheetSources(document) });
   return { document, state, store, instrumentation };
 }
@@ -124,6 +124,44 @@ test("same-source activation advances fences while retaining phase identity", ()
     assert.equal(next.key.documentRevision, 2);
   } finally { f.store.dispose(); }
 });
+
+for (const [initialRevision, change] of [[13, "focus"], [14, "checked-selected"]]) {
+  test(`attachment semantic generations do not alias external revision ${initialRevision}`, () => {
+    const f = fixture('<style>#t{color:red}#t:focus,#t:checked{color:blue}</style><input id=t type=checkbox>', initialRevision);
+    try {
+      const node = f.document.elementById("t");
+      const first = f.store.analyze(request());
+      const state = change === "focus" ? { ...f.state, focus: node }
+        : applyDocumentAction(f.document, f.state, { kind: "set-checked", target: node, checked: true });
+      update(f, state, initialRevision + 1, [change]);
+      const next = f.store.analyze(request());
+      assert.deepEqual(first.computedStyles.style(node).text.color, { r: 255, g: 0, b: 0, a: 1 });
+      assert.deepEqual(next.computedStyles.style(node).text.color, { r: 0, g: 0, b: 255, a: 1 });
+      assert.notEqual(next.computedStyles, first.computedStyles);
+
+      // A restarted or replaced worker source can start at any external revision.
+      f.store.attach({ documentId: "phases", documentRevision: 2, stateRevision: 100_000,
+        document: f.document, state: f.state, resources: embeddedStylesheetSources(f.document) });
+      const reattached = f.store.analyze(request(80, 2));
+      f.store.updateState({ documentId: "phases", documentRevision: 2, stateRevision: 100_001,
+        state, changed: new Set([change]) });
+      const updated = f.store.analyze(request(80, 2));
+      assert.deepEqual(reattached.computedStyles.style(node).text.color, { r: 255, g: 0, b: 0, a: 1 });
+      assert.deepEqual(updated.computedStyles.style(node).text.color, { r: 0, g: 0, b: 255, a: 1 });
+
+      // Advancing an activation fence may reset external revisions without invalidating semantics.
+      f.store.updateState({ documentId: "phases", previousDocumentRevision: 2, documentRevision: 3,
+        stateRevision: 1, state, changed: new Set() });
+      const activated = f.store.analyze(request(80, 3));
+      assert.equal(activated.documentLayout, updated.documentLayout);
+      assert.equal(activated.key.computedStyleMap, updated.key.computedStyleMap);
+      f.store.updateState({ documentId: "phases", documentRevision: 3, stateRevision: 2,
+        state: f.state, changed: new Set([change]) });
+      const restored = f.store.analyze(request(80, 3));
+      assert.deepEqual(restored.computedStyles.style(node).text.color, { r: 255, g: 0, b: 0, a: 1 });
+    } finally { f.store.dispose(); }
+  });
+}
 
 test("side cache growth and clear refresh costs after immutable phase admission", () => {
   const f = fixture('<p>cache owner</p>');
