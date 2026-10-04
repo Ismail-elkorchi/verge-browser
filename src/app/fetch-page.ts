@@ -187,11 +187,46 @@ async function sleep(delayMs: number, signal?: AbortSignal): Promise<void> {
 export class NetworkFetchError extends Error {
   readonly networkOutcome: NetworkOutcome;
 
-  constructor(networkOutcome: NetworkOutcome) {
-    super(`${networkOutcome.kind}: ${networkOutcome.detailMessage}`);
+  constructor(networkOutcome: NetworkOutcome, cause?: unknown) {
+    const code = networkOutcome.detailCode?.replace(/[^A-Za-z0-9_-]/gu, "").slice(0, 64);
+    const detail = networkOutcome.detailMessage.replace(/\p{Cc}/gu, " ").slice(0, 320);
+    super(`${networkOutcome.kind}${code === undefined || code.length === 0 ? "" : ` [${code}]`}: ${detail}`,
+      cause === undefined ? undefined : { cause });
     this.name = "NetworkFetchError";
     this.networkOutcome = networkOutcome;
   }
+}
+
+const SAFE_TRANSPORT_CODES: ReadonlySet<string> = new Set([
+  "ECONNREFUSED", "ECONNRESET", "EHOSTUNREACH", "ENETUNREACH", "ETIMEDOUT", "EPIPE",
+  "ENOTFOUND", "EAI_AGAIN", "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_DESTROYED", "UND_ERR_CLOSED",
+]);
+
+/** Inspect bounded data properties only; never expose arbitrary cause messages or objects. */
+function transportFailureCode(error: unknown): string | null {
+  const pending: unknown[] = [error];
+  const seen = new Set<object>();
+  for (let work = 0; pending.length > 0 && work < 32; work++) {
+    const value = pending.shift();
+    if (typeof value !== "object" || value === null || seen.has(value)) continue;
+    seen.add(value);
+    try {
+      const code: unknown = Object.getOwnPropertyDescriptor(value, "code")?.value;
+      if (typeof code === "string" && SAFE_TRANSPORT_CODES.has(code)) return code;
+      const cause: unknown = Object.getOwnPropertyDescriptor(value, "cause")?.value;
+      if (cause !== undefined && pending.length < 32) pending.push(cause);
+      const errors: unknown = Object.getOwnPropertyDescriptor(value, "errors")?.value;
+      if (Array.isArray(errors)) {
+        const length: unknown = Object.getOwnPropertyDescriptor(errors, "length")?.value;
+        const count = typeof length === "number" && Number.isSafeInteger(length) ? Math.min(length, 8) : 0;
+        for (let index = 0; index < count && pending.length < 32; index++) {
+          pending.push(Object.getOwnPropertyDescriptor(errors, String(index))?.value as unknown);
+        }
+      }
+    } catch { /* A foreign proxy is not diagnostic evidence. */ }
+  }
+  return null;
 }
 
 function outcomeFromHttpClientError(
@@ -200,6 +235,14 @@ function outcomeFromHttpClientError(
 ): NetworkOutcome {
   const finalUrl = error.url.length === 0 ? fallbackUrl : error.url;
   switch (error.code) {
+    case "NETWORK_FAILURE": {
+      const code = transportFailureCode(error.cause);
+      return createNetworkOutcome("transport", {
+        finalUrl,
+        detailCode: error.code,
+        detailMessage: code === null ? "The network request failed." : `The network request failed (${code}).`,
+      });
+    }
     case "CONNECT_TIMEOUT":
     case "RESPONSE_BODY_TIMEOUT":
     case "RESPONSE_FIELDS_TIMEOUT":
@@ -453,7 +496,7 @@ function networkFailure(error: unknown, finalUrl: string): unknown {
   if (error instanceof NetworkFetchError) return error;
   if (error instanceof HttpClientError) {
     return new NetworkFetchError(
-      outcomeFromHttpClientError(error, finalUrl)
+      outcomeFromHttpClientError(error, finalUrl), error
     );
   }
   return error;

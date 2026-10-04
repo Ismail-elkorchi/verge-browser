@@ -22,11 +22,8 @@ interface IntervalNode<TValue> {
   readonly right: IntervalNode<TValue> | null;
 }
 
-function commandInterval(command: TerminalPaintCommand): SpatialInterval<TerminalPaintCommand> {
-  return Object.freeze({ value: command, start: command.rect.y, end: command.rect.y + Math.max(1, command.rect.height) });
-}
-
-function intervalTree<TValue>(values: readonly SpatialInterval<TValue>[]): IntervalNode<TValue> | null {
+function intervalTree<TValue>(values: readonly SpatialInterval<TValue>[], signal?: AbortSignal): IntervalNode<TValue> | null {
+  signal?.throwIfAborted();
   if (values.length === 0) return null;
   const centers = values.map((value) => value.start + Math.floor((value.end - value.start) / 2))
     .sort((left, right) => left - right);
@@ -34,7 +31,9 @@ function intervalTree<TValue>(values: readonly SpatialInterval<TValue>[]): Inter
   const left: SpatialInterval<TValue>[] = [];
   const right: SpatialInterval<TValue>[] = [];
   const overlaps: SpatialInterval<TValue>[] = [];
+  let visited = 0;
   for (const value of values) {
+    if ((visited++ & 255) === 0) signal?.throwIfAborted();
     if (value.end <= center) left.push(value);
     else if (value.start > center) right.push(value);
     else overlaps.push(value);
@@ -48,8 +47,8 @@ function intervalTree<TValue>(values: readonly SpatialInterval<TValue>[]): Inter
     center,
     byStart: Object.freeze([...overlaps].sort((a, b) => a.start - b.start)),
     byEnd: Object.freeze([...overlaps].sort((a, b) => b.end - a.end)),
-    left: intervalTree(left),
-    right: intervalTree(right),
+    left: intervalTree(left, signal),
+    right: intervalTree(right, signal),
   });
 }
 
@@ -96,13 +95,13 @@ function queryIntervals<TValue>(
 
 interface AttachedCommands {
   readonly attachment: LayoutScrollAttachment;
-  readonly root: IntervalNode<TerminalPaintCommand> | null;
+  readonly root: IntervalNode<number> | null;
 }
 
 interface OwnerIndex {
   readonly paintOrder: number;
   readonly owner: LayoutScrollOwner | null;
-  readonly commands: IntervalNode<TerminalPaintCommand> | null;
+  readonly commands: IntervalNode<number> | null;
   readonly children: IntervalNode<LayoutScrollOwner> | null;
   readonly sticky: IntervalNode<AttachedCommands> | null;
   readonly fixed: readonly AttachedCommands[];
@@ -117,16 +116,22 @@ class ImmutableDisplayListSpatialIndex implements DisplayListSpatialIndex {
   readonly #owners: ReadonlyMap<LayoutFragmentId | null, OwnerIndex>;
   readonly #list: DocumentDisplayList;
 
-  public constructor(list: DocumentDisplayList) {
+  public constructor(list: DocumentDisplayList, signal?: AbortSignal) {
+    signal?.throwIfAborted();
     this.#list = list;
     const layout = list.layout;
-    const ownerPaintOrder = new Map(list.fragmentPaintOrder.flatMap((id,index)=>layout.scrollContainer(id)===null?[]:[[id,index] as const]));
+    const ownerPaintOrder = new Map<LayoutFragmentId, number>();
+    for (const [index, id] of list.fragmentPaintOrder.entries()) {
+      if ((index & 255) === 0) signal?.throwIfAborted();
+      if (layout.scrollContainer(id) !== null) ownerPaintOrder.set(id, index);
+    }
     const attachments = new Map<LayoutFragmentId, LayoutScrollAttachment | null>();
     const attachmentFor = (id: LayoutFragmentId): LayoutScrollAttachment | null => {
       const path: LayoutFragmentId[] = [];
       let current: LayoutFragmentId | null = id;
       let attachment: LayoutScrollAttachment | null = null;
       while (current !== null) {
+        if ((path.length & 255) === 0) signal?.throwIfAborted();
         if (attachments.has(current)) { attachment = attachments.get(current) ?? null; break; }
         path.push(current);
         attachment = layout.scrollAttachment(current);
@@ -138,9 +143,9 @@ class ImmutableDisplayListSpatialIndex implements DisplayListSpatialIndex {
     };
     const buckets = new Map<LayoutFragmentId | null, {
       owner: LayoutScrollOwner | null;
-      commands: SpatialInterval<TerminalPaintCommand>[];
+      commands: SpatialInterval<number>[];
       children: SpatialInterval<LayoutScrollOwner>[];
-      attached: Map<LayoutFragmentId, { attachment: LayoutScrollAttachment; commands: SpatialInterval<TerminalPaintCommand>[] }>;
+      attached: Map<LayoutFragmentId, { attachment: LayoutScrollAttachment; commands: SpatialInterval<number>[] }>;
     }>();
     const bucket = (id: LayoutFragmentId | null) => {
       let value = buckets.get(id);
@@ -152,6 +157,7 @@ class ImmutableDisplayListSpatialIndex implements DisplayListSpatialIndex {
     };
     bucket(null);
     for (const owner of layout.scrollOwners) {
+      signal?.throwIfAborted();
       bucket(owner.fragment);
       const attachment = attachmentFor(owner.fragment);
       const rect = attachment?.kind === "sticky" ? scrollAttachmentEnvelope(owner.scrollport, attachment, layout.scrollExtent, layout) : owner.scrollport;
@@ -160,36 +166,41 @@ class ImmutableDisplayListSpatialIndex implements DisplayListSpatialIndex {
         end: attachment?.kind === "fixed" ? Number.MAX_SAFE_INTEGER : rect.y + Math.max(1, rect.height),
       });
     }
-    for (const command of list.commands) {
-      const owner = layout.scrollAncestor(command.layoutFragment);
+    for (let index = 0; index < list.commands.length; index += 1) {
+      if ((index & 255) === 0) signal?.throwIfAborted();
+      const fragment = list.commands.layoutFragment(index);
+      const rect = list.commands.rect(index);
+      const interval = Object.freeze({ value: index, start: rect.y, end: rect.y + Math.max(1, rect.height) });
+      const owner = layout.scrollAncestor(fragment);
       const target = bucket(owner?.fragment ?? null);
-      const attachment = attachmentFor(command.layoutFragment);
+      const attachment = attachmentFor(fragment);
       // An attachment outside this owner is already represented by the owner's projection.
       if (attachment === null || (owner !== null && layout.scrollAncestor(attachment.root)?.fragment !== owner.fragment
-        && attachment.root !== command.layoutFragment)) {
-        target.commands.push(commandInterval(command));
+        && attachment.root !== fragment)) {
+        target.commands.push(interval);
       } else {
         let group = target.attached.get(attachment.root);
         if (group === undefined) { group = { attachment, commands: [] }; target.attached.set(attachment.root, group); }
-        group.commands.push(commandInterval(command));
+        group.commands.push(interval);
       }
     }
     this.commandCount = list.commands.length;
     this.#owners = new Map([...buckets].map(([id, value]) => {
+      signal?.throwIfAborted();
       const sticky: SpatialInterval<AttachedCommands>[] = [];
       const fixed: AttachedCommands[] = [];
       for (const group of value.attached.values()) {
-        const retained = Object.freeze({ attachment: group.attachment, root: intervalTree(group.commands) });
+        const retained = Object.freeze({ attachment: group.attachment, root: intervalTree(group.commands, signal) });
         if (group.attachment.kind === "fixed") fixed.push(retained);
         else {
           const attachment = group.attachment;
-          const bounds = cssUnion(group.commands.map(entry=>entry.value.rect), attachment.normalBorderRect);
+          const bounds = cssUnion(group.commands.map(entry=>list.commands.rect(entry.value)), attachment.normalBorderRect);
           const envelope = scrollAttachmentEnvelope(bounds, attachment, layout.scrollExtent, layout);
           sticky.push({ value: retained, start:envelope.y, end:envelope.y+Math.max(1,envelope.height) });
         }
       }
-      return [id, Object.freeze({ paintOrder:id===null?-1:ownerPaintOrder.get(id)??0, owner: value.owner, commands: intervalTree(value.commands),
-        children: intervalTree(value.children), sticky: intervalTree(sticky), fixed: Object.freeze(fixed) })];
+      return [id, Object.freeze({ paintOrder:id===null?-1:ownerPaintOrder.get(id)??0, owner: value.owner, commands: intervalTree(value.commands, signal),
+        children: intervalTree(value.children, signal), sticky: intervalTree(sticky, signal), fixed: Object.freeze(fixed) })];
     }));
     Object.freeze(this);
     registerRetainedOwner(this, () => [this.#list, this.#owners]);
@@ -199,22 +210,28 @@ class ImmutableDisplayListSpatialIndex implements DisplayListSpatialIndex {
     const projection = suppliedProjection ?? new ViewportGeometryProjection(this.#list.layout, rect);
     const commands: TerminalPaintCommand[] = [];
     let visitedIntervals = 0;
-    const retain = (command: TerminalPaintCommand): void => {
-      const resolvedRect = projection.rect(command.layoutFragment, command.rect);
-      const clipRect = projection.clip(command.layoutFragment, command.kind !== "text");
+    const retained = this.#list.commands;
+    const retain = (index: number): void => {
+      signal?.throwIfAborted();
+      const fragment = retained.layoutFragment(index);
+      const originalRect = retained.rect(index);
+      const resolvedRect = projection.rect(fragment, originalRect);
+      const clipRect = projection.clip(fragment, !retained.isText(index));
       const visible = cssIntersection(resolvedRect, clipRect);
-      if ((command.rect.width > 0 && command.rect.height > 0 && (visible.width <= 0 || visible.height <= 0))
+      if ((originalRect.width > 0 && originalRect.height > 0 && (visible.width <= 0 || visible.height <= 0))
         || visible.x >= rect.x + rect.width || visible.x + Math.max(1, visible.width) <= rect.x
         || visible.y >= rect.y + rect.height || visible.y + Math.max(1, visible.height) <= rect.y
         || clipRect.width <= 0 || clipRect.height <= 0) return;
+      const command = retained.at(index);
+      if (command === undefined) throw new RangeError("Missing indexed paint command.");
       const resolved = { ...command, rect: resolvedRect, clipRect };
       commands.push(Object.freeze(command.kind === "border-side"
-        ? { ...resolved, borderRect: projection.rect(command.layoutFragment, command.borderRect) } : resolved));
+        ? { ...resolved, borderRect: projection.rect(fragment, command.borderRect) } : resolved));
     };
-    const queryCommands = (root: IntervalNode<TerminalPaintCommand> | null, query: CssRect): void => {
-      const result = queryIntervals(root, query.y, query.y + query.height, (command) => inlineIntersects(command.rect, query), signal);
+    const queryCommands = (root: IntervalNode<number> | null, query: CssRect): void => {
+      const result = queryIntervals(root, query.y, query.y + query.height, (index) => inlineIntersects(retained.rect(index), query), signal);
       visitedIntervals += result.visitedIntervals;
-      for (const command of result.values) retain(command);
+      for (const index of result.values) retain(index);
     };
     const pending: (LayoutFragmentId | null)[] = [null];
     while (pending.length > 0) {
@@ -248,7 +265,7 @@ class ImmutableDisplayListSpatialIndex implements DisplayListSpatialIndex {
   }
 }
 
-/** Per-owner interval indexes retain commands by reference and query their current content window. */
-export function buildDisplayListSpatialIndex(list: DocumentDisplayList): DisplayListSpatialIndex {
-  return new ImmutableDisplayListSpatialIndex(list);
+/** Per-owner interval indexes retain packed command IDs and decode only visible query results. */
+export function buildDisplayListSpatialIndex(list: DocumentDisplayList, signal?: AbortSignal): DisplayListSpatialIndex {
+  return new ImmutableDisplayListSpatialIndex(list, signal);
 }

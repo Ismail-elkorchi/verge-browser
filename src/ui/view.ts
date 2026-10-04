@@ -1,35 +1,24 @@
-import { controlValues, controlOptions, textEditor, numberEditor, areaEditor, selectEditor, multiSelectEditor } from "./form-editors.js";
+import { nativeFormControl } from "./native-control.js";
 import {
   commandInputView,
   contextMenuView,
   menuTriggerView,
-  numberInputView,
-  radioGroupReducer,
   searchPickerView
 } from "@ismail-elkorchi/terminal-ui/behavior";
 import {
   button,
-  checkbox,
-  checkboxGroup,
-  combobox,
   commandInput,
   contextMenu,
   dialog,
   menuTrigger,
-  numberInput,
-  passwordInput,
   progressBar,
-  radioGroup,
   searchPicker,
   statusBar,
   tabs,
   text,
-  textArea,
   textInput,
   toggleButton,
   toolbar as toolbarComponent,
-  type CheckboxGroupTransition,
-  type RadioGroupTransition
 } from "@ismail-elkorchi/terminal-ui/components";
 import {
   defineComponent,
@@ -47,7 +36,6 @@ import type { TuiContext } from "@ismail-elkorchi/terminal-ui/tui";
 import { themeColor } from "@ismail-elkorchi/terminal-ui/theme";
 
 import type {
-  DocumentChoiceControl,
   DocumentFormControl,
   DocumentNodeRef
 } from "../document/index.js";
@@ -78,7 +66,7 @@ import type {
   LinkMenuOverlay,
   PickerOverlay
 } from "./model.js";
-import { browserMenuItems, formComboboxPageSize, linkMenuItems } from "./model.js";
+import { browserMenuItems, linkMenuItems } from "./model.js";
 import { terminalCellMeasurer } from "./terminal-measure.js";
 
 const TERMINAL_CELL_MEASURER = terminalCellMeasurer();
@@ -120,6 +108,7 @@ interface BrowserControlComponentOptions {
   readonly label: string;
   readonly node: DocumentNodeRef;
   readonly geometry: TerminalControlGeometry;
+  readonly implicitSubmit: boolean;
 }
 
 type BrowserDocumentAction = Extract<
@@ -133,7 +122,7 @@ const browserControlSlots = {
 
 const browserControlComponent = defineComponent<
   BrowserControlComponentOptions,
-  Extract<BrowserTuiMessage, { readonly kind: "focusDocumentNode" }>
+  Extract<BrowserTuiMessage, { readonly kind: "focusDocumentNode" | "implicitSubmit" }>
 >()({
   name: "verge-browser/components/labelled-control",
   identity: "required",
@@ -163,6 +152,7 @@ const browserControlComponent = defineComponent<
       ]
     };
   },
+  keys: ({ model }) => model.implicitSubmit ? { enter: () => ({ kind: "implicitSubmit" as const, controlId: model.node }) } : {},
   onFocus(event, { model }) {
     return {
       kind: "focusDocumentNode",
@@ -176,13 +166,15 @@ function labelledBrowserControl(
   node: DocumentNodeRef,
   label: string,
   control: Element<BrowserTuiMessage>,
-  geometry: TerminalControlGeometry
+  geometry: TerminalControlGeometry,
+  implicitSubmit: boolean
 ): Element<BrowserTuiMessage> {
   const labelled = browserControlComponent({
     id: `${id}:labelled-control`,
     label,
     node,
     geometry,
+    implicitSubmit,
     onAction: (action): BrowserTuiMessage => action,
     slots: { control }
   });
@@ -235,7 +227,6 @@ function rowSegments(
     readonly end: number;
   } & ({ readonly kind: "link"; readonly destination: string } | { readonly kind: "disclosure" });
   const rowText = cellRow.text;
-  const snapshot = document.source.snapshot.document;
   const inlineActions = cellRow.spans.flatMap((entry): InlineRowAction[] => {
     const action = entry.action;
     if (action === null || action.kind === "form-control") return [];
@@ -287,7 +278,9 @@ function rowSegments(
       span.startCodeUnit <= start
       && span.endCodeUnit >= end
       && span.documentNode !== null
-      && snapshot.control(span.documentNode) !== null
+      && document.terminalRender.controls.some((control) => control.node === span.documentNode
+        && rowIndex >= control.visible.row && rowIndex < control.visible.row + control.visible.height
+        && span.column >= control.visible.column && span.column + span.width <= control.visible.column + control.visible.width)
     );
     const style: TerminalStyle = {
       ...(inlineAction?.kind !== "link"
@@ -304,6 +297,7 @@ function rowSegments(
           : { underline: true })
     };
     spans.push({
+      textOrder: "visual",
       text: isControlText
         ? " ".repeat(TERMINAL_CELL_MEASURER.width(rowText.slice(start, end)))
         : rowText.slice(start, end),
@@ -332,207 +326,6 @@ function documentNodeForTerminalFocusTarget(
   return action?.node ?? null;
 }
 
-function radioAction(
-  controls: readonly DocumentChoiceControl[],
-  selectedId: string | undefined,
-  activeId: string,
-  transition: RadioGroupTransition
-): BrowserTuiMessage {
-  const options = controls.map((control) => ({
-    id: control.node,
-    label: control.label,
-    value: control.value,
-    disabled: control.disabled
-  }));
-  const initial = {
-    activeId,
-    selection: {
-      mode: "single" as const,
-      ...(selectedId === undefined ? {} : { selectedId })
-    }
-  };
-  const moved = radioGroupReducer(initial, transition, options);
-  const next = transition.kind === "moveActive" || transition.kind === "firstActive" || transition.kind === "lastActive"
-    ? radioGroupReducer(moved, { kind: "commitActive" }, options) : moved;
-  const nextId = next.selection.mode === "single" ? next.selection.selectedId : undefined;
-  const control = controls.find((entry) => entry.node === nextId) ?? controls[0];
-  if (!control) throw new Error("A radio group must contain at least one control.");
-  return {
-    kind: "formValues",
-    controlId: control.node,
-    values: nextId === undefined ? [] : [control.value],
-    focusTarget: control.node
-  };
-}
-
-function multiChoiceAction(
-  control: Extract<DocumentFormControl, { readonly kind: "select" }>,
-  transition: CheckboxGroupTransition
-): BrowserTuiMessage {
-  return { kind: "formCheckboxGroup", controlId: control.node, transition };
-}
-
-function inlineFormControl(
-  document: BrowserDocumentComponentModel,
-  control: DocumentFormControl,
-  formId: DocumentNodeRef | null
-): Element<BrowserTuiMessage> | null {
-  const values = controlValues(document.source, control);
-  if (control.kind === "hidden") return null;
-  if (control.kind === "unsupported") {
-    return text({ content: `${control.label}: ${control.reason}`, id: `${control.node}:unsupported` });
-  }
-  if (control.kind === "text") {
-    if (control.inputType === "number") {
-      const editor = numberEditor(document.source, control);
-      const numberOptions = {
-        id: control.node,
-        view: numberInputView(editor),
-        ...(control.placeholder === null ? {} : { placeholder: control.placeholder }),
-        required: control.required
-      };
-      const input = numberInput({
-        ...numberOptions,
-        disabled: control.disabled,
-        readOnly: control.readOnly,
-        onTransition: (transition): BrowserTuiMessage => ({
-          kind: "formNumber",
-          controlId: control.node,
-          transition
-        })
-      });
-      return input;
-    }
-    const inputState = textEditor(document.source, control);
-    const inputOptions = {
-      id: control.node,
-      state: inputState,
-      ...(control.placeholder === null ? {} : { placeholder: control.placeholder }),
-      required: control.required
-    };
-    const input = (control.inputType === "password" ? passwordInput : textInput)({
-      ...inputOptions,
-      disabled: control.disabled,
-      readOnly: control.readOnly,
-      onTransition: (transition): BrowserTuiMessage => ({ kind: "formText", controlId: control.node, transition })
-    });
-    return input;
-  }
-  if (control.kind === "textarea") {
-    const areaState = areaEditor(document.source, control);
-    const areaOptions = {
-      id: control.node,
-      state: areaState,
-      wrap: true
-    };
-    const area = textArea({
-      ...areaOptions,
-      disabled: control.disabled,
-      readOnly: control.readOnly,
-      onTransition: (
-        transition: Extract<BrowserTuiMessage, { readonly kind: "formArea" }>["transition"]
-      ): BrowserTuiMessage => ({ kind: "formArea", controlId: control.node, transition })
-    });
-    return area;
-  }
-  if (control.kind === "checkbox") {
-    const checkboxOptions = {
-      id: control.node,
-      label: "",
-      checked: values.includes(control.value),
-      required: control.required
-    };
-    return checkbox({
-      ...checkboxOptions,
-      disabled: control.disabled,
-      onTransition: (transition): BrowserTuiMessage => ({
-        kind: "formValues",
-        controlId: control.node,
-        values: transition.checked ? [control.value] : []
-      })
-    });
-  }
-  if (control.kind === "select") {
-    if (control.multiple) {
-      const groupOptions = {
-        id: control.node,
-        label: control.label,
-        labelVisibility: "hidden" as const,
-        options: controlOptions(control),
-        state: multiSelectEditor(document.source, control),
-        required: control.required
-      };
-      return checkboxGroup({
-        ...groupOptions,
-        disabled: control.disabled,
-        onTransition: (transition): BrowserTuiMessage => multiChoiceAction(control, transition)
-      });
-    }
-    const editor = selectEditor(document.source, control);
-    const selectOptions = {
-      id: control.node,
-      label: control.label,
-      labelVisibility: "hidden" as const,
-      collection: editor.collection,
-      optionsView: editor.optionsView,
-      required: control.required,
-      maxVisibleOptions: formComboboxPageSize
-    };
-    return combobox({
-      disabled: control.disabled,
-      ...selectOptions,
-      state: editor.state,
-      onTransition: (transition): BrowserTuiMessage => ({
-        kind: "formComboboxTransition",
-        controlId: control.node,
-        transition
-      }),
-      onCommit: (event): BrowserTuiMessage => ({
-        kind: "formComboboxCommit",
-        controlId: control.node,
-        event
-      })
-    });
-  }
-  if (control.kind === "submit") {
-    return button({
-      id: control.node,
-      label: control.caption,
-      tone: "primary",
-      disabled: control.disabled || formId === null,
-      onPress: () => formId === null ? ignoreMessage() : ({
-        kind: "submitForm",
-        formId,
-        submitterId: control.node
-      })
-    });
-  }
-  if (control.kind === "reset") {
-    return button({
-      id: control.node,
-      label: control.caption,
-      disabled: control.disabled || formId === null,
-      onPress: () => formId === null ? ignoreMessage() : ({
-        kind: "resetForm",
-        formId,
-        resetterId: control.node
-      })
-    });
-  }
-  if (control.kind === "button") {
-    const buttonOptions = {
-      id: control.node,
-      label: control.caption
-    };
-    return button({
-        ...buttonOptions,
-      disabled: control.disabled,
-      onPress: buttonAction({ kind: "activateButton", controlId: control.node })
-    });
-  }
-  return null;
-}
-
 function controlGeometry(document: BrowserDocumentComponentModel, node: DocumentNodeRef): TerminalControlGeometry {
   const geometry = document.terminalRender.controls.find((entry) => entry.node === node);
   if (geometry === undefined) throw new Error("A visible control requires layout-owned geometry.");
@@ -546,31 +339,12 @@ function inlineControlGroup(
   const first = group.controls[0];
   if (first === undefined) return null;
   if (first.kind === "hidden") return null;
-  if (first.kind !== "radio") {
-    const control = inlineFormControl(document, first, group.form);
-    return control === null
-      ? null
-      : labelledBrowserControl(first.node, first.node, first.label, control, controlGeometry(document, first.node));
-  }
-  const controls = document.source.snapshot.document.radioGroup(first.node);
-  const selected = controls.find((candidate) => controlValues(document.source, candidate).length > 0);
-  const control = radioGroup({
-    id: first.node,
-    label: first.label,
-    labelVisibility: "hidden",
-    options: [{ id: first.node, label: "", value: first.value, disabled: first.disabled }],
-    state: {
-      activeId: first.node,
-      selection: {
-        mode: "single",
-        ...(selected?.node === first.node ? { selectedId: first.node } : {})
-      }
-    },
-    disabled: first.disabled,
-    required: first.required,
-    onTransition: (transition): BrowserTuiMessage => radioAction(controls, selected?.node, first.node, transition)
-  });
-  return labelledBrowserControl(first.node, first.node, first.label, control, controlGeometry(document, first.node));
+  const geometry = controlGeometry(document, first.node);
+  const control = nativeFormControl({ ...document.source, document: document.source.snapshot.document }, first, group.form,
+    terminalStyle(geometry.style));
+  return control === null ? null : labelledBrowserControl(first.node, first.node, first.label, control, geometry,
+    first.kind === "text" && first.readOnly);
+
 }
 
 /** Projects document cells into the same clipped surface used for painting. */
@@ -656,7 +430,9 @@ const browserDocumentComponent = defineComponent<BrowserDocumentComponentOptions
       preferredWidth: bounds.width,
       preferredHeight: childBounds.reduce(
         (height, child) => Math.max(height, child.row - bounds.row + child.height),
-        terminalRender.documentRowCount
+        // The document extent owns scrolling; its canvas can still fill a
+        // taller physical viewport without enlarging any CSS element.
+        Math.max(terminalRender.documentRowCount, constraints.height)
       )
     };
   },
@@ -675,8 +451,9 @@ const browserDocumentComponent = defineComponent<BrowserDocumentComponentOptions
     const terminalRender = document.terminalRender;
     const contentBounds = documentContentBounds(bounds);
     const startIndex = Math.max(0, visibleBounds.row - contentBounds.row);
-    const endIndexExclusive = Math.min(terminalRender.documentRowCount,
-      visibleBounds.row + visibleBounds.height - contentBounds.row);
+    // Canvas underpaint is already bounded to the retained viewport window.
+    // It deliberately extends past the last semantic/document row.
+    const endIndexExclusive = visibleBounds.row + visibleBounds.height - contentBounds.row;
     for (const cellRow of terminalRender.cellBuffer.rows) {
       const rowIndex = cellRow.row;
       if (rowIndex < startIndex || rowIndex >= endIndexExclusive) continue;

@@ -1,7 +1,8 @@
+import { PackedRows } from "../../memory/packed.js";
 export interface TransformedText {
   readonly value: string;
   readonly sourceMapping: "identity" | "mapped";
-  readonly sourceUnits: readonly { readonly start: number; readonly end: number }[];
+  readonly sourceUnits: PackedRows;
 }
 
 export function transformTextWithSourceRanges(
@@ -9,10 +10,10 @@ export function transformTextWithSourceRanges(
   transform: "none" | "uppercase" | "lowercase" | "capitalize"
 ): TransformedText {
   if (transform === "none") {
-    return Object.freeze({ value, sourceMapping: "identity", sourceUnits: Object.freeze([]) });
+    return Object.freeze({ value, sourceMapping: "identity", sourceUnits: new PackedRows(2).seal() });
   }
   let output = "";
-  const sourceUnits: { readonly start: number; readonly end: number }[] = [];
+  const sourceUnits = new PackedRows(2);
   let sourceOffset = 0;
   let capitalizeNext = true;
   for (const codePoint of value) {
@@ -25,11 +26,11 @@ export function transformTextWithSourceRanges(
     }
     output += transformed;
     for (let index = 0; index < transformed.length; index += 1) {
-      sourceUnits.push({ start: sourceOffset, end: sourceOffset + codePoint.length });
+      sourceUnits.push(sourceOffset, sourceOffset + codePoint.length);
     }
     sourceOffset += codePoint.length;
   }
-  return Object.freeze({ value: output, sourceMapping: "mapped", sourceUnits: Object.freeze(sourceUnits) });
+  return Object.freeze({ value: output, sourceMapping: "mapped", sourceUnits: sourceUnits.seal() });
 }
 
 export function transformedSourceRange(
@@ -38,7 +39,6 @@ export function transformedSourceRange(
   end: number
 ): readonly [number, number] {
   if (transformed.sourceMapping === "identity") return [start, end];
-  const first = transformed.sourceUnits[start];
-  const last = transformed.sourceUnits[end - 1];
-  return first === undefined || last === undefined ? [start, end] : [first.start, last.end];
+  return start < 0 || end > transformed.sourceUnits.length || end <= start ? [start, end]
+    : [transformed.sourceUnits.get(start, 0), transformed.sourceUnits.get(end - 1, 1)];
 }

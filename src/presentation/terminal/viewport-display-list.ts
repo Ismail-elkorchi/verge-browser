@@ -103,7 +103,16 @@ export function buildViewportDisplayList(input: BuildViewportDisplayListInput): 
     projection,
     viewportRect: viewport,
     windowRect,
-    commands: queried.commands,
+    commands: input.documentDisplayList.canvasBackground === null ? queried.commands : Object.freeze([
+      Object.freeze({
+        id: "terminal-paint:canvas", kind: "background" as const,
+        layoutFragment: layout.root, formattingNode: layout.fragment(layout.root).formattingNode,
+        documentNode: null, sourceRange: null, contentStartCodeUnit: null, contentEndCodeUnit: null,
+        rect: windowRect, clipRect: windowRect, paintOrder: 0, action: null, semantic: null,
+        style: input.documentDisplayList.canvasBackground.style,
+      }),
+      ...queried.commands,
+    ]),
     spatialQuery: queried.metrics,
     outcome: input.documentDisplayList.outcome,
   });

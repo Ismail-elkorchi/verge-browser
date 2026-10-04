@@ -1,3 +1,5 @@
+import { createLayoutPaintResolver } from "../layout/paint-style.js";
+import { cssRect, cssMin } from "../layout/index.js";
 import type { DocumentNodeRef } from "../../document/index.js";
 import type { CssRect, LayoutFragmentId } from "../layout/index.js";
 import type {
@@ -385,24 +387,52 @@ export function buildViewportTerminalResult(input: BuildViewportTerminalResultIn
     }));
   }
   const controls: TerminalControlGeometry[] = [];
+  const paintStyle = createLayoutPaintResolver(layout, input.displayList.documentDisplayList.styles);
   const controlCandidates = new Set(candidateWindows.flatMap(([owner, window]) =>
     input.documentGeometry.controlsIntersecting(window, input.signal, owner)));
+  const cellWidth = input.displayList.context.cellWidthCssPx;
+  const rowHeight = input.displayList.context.rowHeightCssPx;
   for (const control of controlCandidates) {
-    const allocation = input.displayList.projection.rect(control.fragment, control.rect);
-    const clipped = input.displayList.projection.visible(control.fragment, control.rect);
-    const visible = cssRectsToCellRects([clipped], input.displayList)[0];
-    if (visible === undefined) continue;
-    const column = Math.floor(allocation.x / input.displayList.context.cellWidthCssPx);
-    const row = Math.floor(allocation.y / input.displayList.context.rowHeightCssPx);
-    controls.push(Object.freeze({
-      node: control.node,
-      layoutFragment: control.fragment,
-      allocation: Object.freeze({
-        column, row,
-        width: Math.ceil((allocation.x + allocation.width) / input.displayList.context.cellWidthCssPx) - column,
-        height: Math.ceil((allocation.y + allocation.height) / input.displayList.context.rowHeightCssPx) - row,
-      }),
-      visible,
+    const fragment = layout.fragment(control.fragment);
+    if (fragment.kind !== "control" || fragment.nativeControlMetrics === undefined) continue;
+    const source = layout.formatting.document.control(control.node);
+    const multiline = source?.kind === "textarea" || (source?.kind === "select" && source.multiple);
+    const nativeRect = cssRect(fragment.contentRect.x, fragment.contentRect.y, fragment.contentRect.width,
+      multiline ? fragment.contentRect.height : cssMin(fragment.contentRect.height, fragment.nativeControlMetrics.height));
+    const native = input.displayList.projection.rect(control.fragment, nativeRect);
+    const clipped = input.displayList.projection.visible(control.fragment, nativeRect);
+    // A text origin owns its cell until the next origin. Outward border rounding
+    // instead claims a neighbour's first cell at fractional CSS coordinates.
+    const column = Math.floor(native.x / cellWidth);
+    const row = Math.floor(native.y / rowHeight);
+    const allocation = Object.freeze({ column, row,
+      width: Math.max(0, Math.floor((native.x + native.width) / cellWidth) - column),
+      height: Math.max(0, Math.floor((native.y + native.height) / rowHeight) - row),
+    });
+    const window = input.displayList.windowRect;
+    const left = Math.max(column, Math.ceil(clipped.x / cellWidth), Math.floor(window.x / cellWidth));
+    const top = Math.max(row, Math.ceil(clipped.y / rowHeight), Math.floor(window.y / rowHeight));
+    // The native origin's own partial cell is writable, but clipping an origin
+    // from outside cannot grant a new partially visible cell to the widget.
+    const visibleColumn = clipped.x === native.x ? Math.max(column, Math.floor(window.x / cellWidth)) : left;
+    const visibleRow = clipped.y === native.y ? Math.max(row, Math.floor(window.y / rowHeight)) : top;
+    const right = Math.min(column + allocation.width, Math.floor((clipped.x + clipped.width) / cellWidth),
+      Math.floor((window.x + window.width) / cellWidth));
+    const bottom = Math.min(row + allocation.height, Math.floor((clipped.y + clipped.height) / rowHeight),
+      Math.floor((window.y + window.height) / rowHeight));
+    if (right <= visibleColumn || bottom <= visibleRow) continue;
+    const current = paintStyle(fragment);
+    const under = input.cellBuffer.rows.find((entry) => entry.row === visibleRow)?.cells
+      .find((cell) => cell.column <= visibleColumn && cell.column + cell.width > visibleColumn)?.style;
+    const background = under?.background ?? current.background;
+    const foreground = current.foreground ?? under?.foreground ?? (background === null ? null
+      : { r: 0, g: 0, b: 0, a: 1 });
+    controls.push(Object.freeze({ node: control.node, layoutFragment: control.fragment, allocation,
+      visible: Object.freeze({ column: visibleColumn, row: visibleRow, width: right - visibleColumn, height: bottom - visibleRow }),
+      outer: input.displayList.projection.rect(control.fragment, fragment.borderRect),
+      content: input.displayList.projection.rect(control.fragment, fragment.contentRect),
+      style: Object.freeze({ foreground, background, bold: current.bold, italic: current.italic,
+        underline: current.underline, strikethrough: current.strikethrough }),
     }));
   }
   return Object.freeze({

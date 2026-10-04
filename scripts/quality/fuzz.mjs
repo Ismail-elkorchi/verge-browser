@@ -10,7 +10,7 @@ import {
   cssPx,
   cssRect
 } from "../../dist/presentation/layout/index.js";
-import { terminalCellMeasurer, terminalCssTextMeasurer } from "../../dist/ui/terminal-measure.js";
+import { terminalCellMeasurer, terminalCssTextMeasurer, terminalCssControlMeasurer } from "../../dist/ui/terminal-measure.js";
 
 const PROFILES = Object.freeze({
   ci: Object.freeze({ firstSeed: 20260226, caseCount: 128, maxDepth: 5, sectionCount: 8 }),
@@ -220,6 +220,7 @@ function evaluate(html) {
     },
     layoutContext: {
       viewport: { width: viewportWidth, height: viewportHeight },
+      controlMeasurer: terminalCssControlMeasurer(),
       textMeasurer: CSS_TEXT_MEASURER,
       initialContainingBlock: cssRect(
         cssCoordinate(cssPx(0)), cssCoordinate(cssPx(0)), viewportWidth, viewportHeight

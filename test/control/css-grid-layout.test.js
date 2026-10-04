@@ -26,7 +26,7 @@ import {
   buildViewportTerminalResult,
   rasterizeViewportDisplayList
 } from "../../dist/presentation/terminal/index.js";
-import { terminalCellMeasurer, terminalCssTextMeasurer } from "../../dist/ui/terminal-measure.js";
+import { terminalCellMeasurer, terminalCssTextMeasurer, terminalCssControlMeasurer } from "../../dist/ui/terminal-measure.js";
 
 const CELL_WIDTH = cssPx(8);
 const ROW_HEIGHT = cssPx(16);
@@ -64,6 +64,7 @@ function render(html, columns = 80, rows = 40, layoutBudgets) {
       viewport: { width: viewportWidth, height: viewportHeight },
       initialContainingBlock: viewport,
       scrollport: viewport,
+      controlMeasurer: terminalCssControlMeasurer(),
       textMeasurer: terminalCssTextMeasurer(CELL_WIDTH, ROW_HEIGHT),
       ...(layoutBudgets === undefined ? {} : { budgets: layoutBudgets })
     }
@@ -78,7 +79,7 @@ function render(html, columns = 80, rows = 40, layoutBudgets) {
     colorDepth: 24,
     cellMeasurer: terminalCellMeasurer()
   };
-  const displayList = buildDocumentDisplayList({ layout, context: terminalContext });
+  const displayList = buildDocumentDisplayList({ styles: layout.formatting.styles, layout, context: terminalContext });
   const viewportDisplayList = buildViewportDisplayList({
     documentDisplayList: displayList,
     spatialIndex: buildDisplayListSpatialIndex(displayList),

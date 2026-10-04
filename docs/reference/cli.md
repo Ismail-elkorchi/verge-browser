@@ -16,6 +16,14 @@ verge [initial-target] [--once]
 The interactive CLI is a Node.js npm distribution. Deno and Bun support applies
 to the package’s library primitives.
 
+Interactive startup requires a terminal host that can establish explicit
+visual-cell presentation: Verge orders page and editor text, and the terminal
+must preserve that order. Unknown or unsupported state fails startup rather
+than guessing from `TERM`. The full-screen session acquires a fresh owned screen
+and restores its original known mode on exit. `--once` does not acquire terminal
+modes. See [Unicode text layout](../architecture/unicode-text.md) for the host
+contract.
+
 ## Browser keys
 
 | Key | Action |
@@ -36,6 +44,11 @@ to the package’s library primitives.
 | `?` | Help |
 | `Esc` | Close the current transient UI |
 | `q`, `Ctrl+C` | Quit |
+
+Enter in a supported single-line form input attempts HTML implicit submission.
+The first associated submit button is the default; a disabled default does not
+fall through to a later button. With no submit button, only a form with at most
+one blocking input submits. Enter in a textarea remains an editing action.
 
 ## Action palette
 

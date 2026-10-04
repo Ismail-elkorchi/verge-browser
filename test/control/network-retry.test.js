@@ -71,7 +71,7 @@ test("fetchPage does not retry transient POST failures", async () => {
           return false;
         }
         return (
-          error.networkOutcome.kind === "unknown"
+          error.networkOutcome.kind === "transport"
           && error.networkOutcome.detailCode === "NETWORK_FAILURE"
         );
       }

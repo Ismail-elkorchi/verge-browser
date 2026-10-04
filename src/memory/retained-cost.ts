@@ -16,6 +16,24 @@ export function registerRetainedOwner(
   retainedOwners.set(owner, registrations);
 }
 
+// Closed numeric owners have no externally shared internal allocations. The production
+// path charges their measured capacity once; the recount still walks every backing buffer.
+const capacityOwners = new WeakMap<object, () => number>();
+export function registerRetainedCapacity(owner: object, bytesExcludingOwner: () => number): void {
+  capacityOwners.set(owner, bytesExcludingOwner);
+}
+
+interface RetainedAllocationObserver {
+  observes(owner: object): boolean;
+  adopted(owner: object): void;
+}
+let allocationObserver: RetainedAllocationObserver | undefined;
+/** Construction reservations are exchanged only after immutable ownership commits. */
+export function withRetainedAllocationObserver<T>(observer: RetainedAllocationObserver, operation: () => T): T {
+  const previous = allocationObserver; allocationObserver = observer;
+  try { return operation(); } finally { allocationObserver = previous; }
+}
+
 /** Revisioned side caches remain mutable even when their phase wrapper is frozen. */
 export class RetainedCacheMap<K, V> extends Map<K, V> {
   #revision = 0;
@@ -69,6 +87,7 @@ function measureAllocations(
   roots: readonly unknown[],
   signal: Pick<AbortSignal, "throwIfAborted"> | undefined,
   discover: (value: object) => boolean,
+  recount = false,
 ): number {
   const strings = new Set<string>();
   const pending: object[] = [];
@@ -88,7 +107,9 @@ function measureAllocations(
     if ((checkpoints++ & 1023) === 0) signal?.throwIfAborted();
     const value = pending.pop();
     if (value === undefined) continue;
-    for (const owner of retainedOwners.get(value) ?? []) {
+    const capacity = recount ? undefined : capacityOwners.get(value);
+    if (capacity !== undefined) bytes += capacity();
+    else for (const owner of retainedOwners.get(value) ?? []) {
       for (const root of typeof owner.roots === "function" ? owner.roots() : owner.roots) charge(root);
       bytes += owner.opaqueBytes();
     }
@@ -123,7 +144,7 @@ export function estimatedRetainedCost(roots: readonly unknown[], signal?: Pick<A
     if (seen.has(value)) return false;
     seen.add(value);
     return true;
-  });
+  }, true);
 }
 
 export class RenderBudgetExceededError extends Error {
@@ -186,6 +207,8 @@ export class RetainedCostAccounting {
     const dependencies = new Set<RetainedCostOwner>();
     const owner = { bytes: 0, dependencies: [] as RetainedCostOwner[] };
     let allocationCount = 0;
+    const observer = retainAllocations ? allocationObserver : undefined;
+    const adopted: object[] = [];
     // Only reentrant measurements can replace another active traversal's entries.
     let displaced: Map<object, RetainedCostOwner> | undefined;
     let committed = false;
@@ -208,6 +231,7 @@ export class RetainedCostAccounting {
         }
         this.#allocations.set(value, owner);
         allocationCount += 1;
+        if (observer?.observes(value) === true) adopted.push(value);
         return true;
       });
       owner.bytes += metadataBytes;
@@ -216,6 +240,7 @@ export class RetainedCostAccounting {
       Object.freeze(owner);
       this.#measuredAllocations += allocationCount;
       committed = retainAllocations;
+      for (const value of adopted) observer?.adopted(value);
       return { owner };
     } finally {
       this.#activeOwners.delete(owner);

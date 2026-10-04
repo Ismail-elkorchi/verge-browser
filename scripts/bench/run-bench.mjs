@@ -58,7 +58,7 @@ import {
   resolveBidiText,
   segmentGraphemeClusters
 } from "../../dist/unicode/index.js";
-import { terminalCellMeasurer, terminalCssTextMeasurer } from "../../dist/ui/terminal-measure.js";
+import { terminalCellMeasurer, terminalCssTextMeasurer, terminalCssControlMeasurer } from "../../dist/ui/terminal-measure.js";
 
 const SAMPLE_CASES = 60;
 const PERCENTILE_SAMPLE_COUNT = 21;
@@ -490,6 +490,7 @@ function layoutContext(columns, rows = 24) {
   const height = cssLengthFromFixed(rows * ROW_HEIGHT);
   return {
     viewport: { width, height },
+    controlMeasurer: terminalCssControlMeasurer(),
     textMeasurer: CSS_TEXT_MEASURER,
     initialContainingBlock: cssRect(cssCoordinate(cssPx(0)), cssCoordinate(cssPx(0)), width, height),
     scrollport: cssRect(cssCoordinate(cssPx(0)), cssCoordinate(cssPx(0)), width, height)
@@ -539,7 +540,7 @@ function layoutFragments(formatting, columns, streams = inlineItemStreams(format
 }
 
 function displayList(layout, columns) {
-  return buildDocumentDisplayList({ layout, context: terminalContext(columns) });
+  return buildDocumentDisplayList({ layout, styles: layout.formatting.styles, context: terminalContext(columns) });
 }
 
 function viewportDisplayList(list, scrollRow = 0) {

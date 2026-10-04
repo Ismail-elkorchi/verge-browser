@@ -5,7 +5,7 @@ import { buildFormattingTree } from "../../dist/presentation/formatting/index.js
 import { buildLayoutFragmentTree, cssCoordinate, cssPixels, cssPx, cssRect } from "../../dist/presentation/layout/index.js";
 import { compileStylesheetProgram, embeddedStylesheetSources, resolveStyles } from "../../dist/presentation/style/index.js";
 import { buildInlineItemStreamSet } from "../../dist/presentation/text/index.js";
-import { terminalCssTextMeasurer } from "../../dist/ui/terminal-measure.js";
+import { terminalCssTextMeasurer, terminalCssControlMeasurer } from "../../dist/ui/terminal-measure.js";
 
 const context = { requestUrl: "https://dimensions.test/", finalUrl: "https://dimensions.test/" };
 
@@ -35,6 +35,7 @@ test("SVG intrinsic dimensions flow through formatting while CSS sizing takes pr
     const rect = cssRect(cssCoordinate(cssPx(0)), cssCoordinate(cssPx(0)), cssPx(640), cssPx(384));
     const layout = buildLayoutFragmentTree({ formatting, inlineItemStreams, context: {
       viewport: { width: rect.width, height: rect.height }, initialContainingBlock: rect, scrollport: rect,
+      controlMeasurer: terminalCssControlMeasurer(),
       textMeasurer: terminalCssTextMeasurer(cssPx(8), cssPx(16)),
     } });
     assert.equal(layout.outcome.status, "complete");

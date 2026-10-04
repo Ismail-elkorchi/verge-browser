@@ -7,6 +7,7 @@ import { MEDIUM_BORDER, LOGICAL_BORDER_PROPERTIES, borderPropertySupported, bord
   borderShorthandValue, borderSideCandidates, borderSideComponents, borderInheritedSide, isBorderShorthand } from "./border-values.js";
 import { SelectorResultCache } from "./selector-cache.js";
 import { normalizedOverflow } from "./overflow.js";
+import { parseListStyle, parseListStylePosition, parseListStyleType } from "./list-style.js";
 import { DiagnosticCollector, diagnosticIdentity } from "./diagnostics.js";
 import { EMPTY_NAMESPACES, bindSelectorNamespaces } from "./namespaces.js";
 import { isValidMediaEnvironment, mediaApplies } from "./media.js";
@@ -116,7 +117,7 @@ const SUPPORTED_PROPERTIES = new Set([
   "font", "font-weight", "font-style", "text-decoration", "text-decoration-line", "text-transform",
   "font-size", "line-height", "vertical-align", "direction", "unicode-bidi", "text-align", "text-indent",
   "line-break", "word-break", "overflow-wrap", "hyphens", "tab-size",
-  "list-style", "list-style-type", "margin", "margin-top", "margin-right",
+  "list-style", "list-style-type", "list-style-position", "margin", "margin-top", "margin-right",
   "margin-bottom", "margin-left", "margin-block", "margin-block-start", "margin-block-end",
   "margin-inline", "margin-inline-start", "margin-inline-end", "padding", "padding-top",
   "padding-right", "padding-bottom", "padding-left", "padding-block", "padding-block-start",
@@ -143,7 +144,7 @@ const SUPPORTED_PROPERTIES = new Set([
 const INHERITED_PROPERTIES = new Set([
   "visibility", "white-space", "color", "font-weight", "font-style", "font-size", "line-height", "text-transform",
   "direction", "text-align", "text-indent", "line-break", "word-break", "overflow-wrap", "hyphens", "tab-size",
-  "list-style", "list-style-type", "border-collapse", "border-spacing", "caption-side", "empty-cells"
+  "list-style", "list-style-type", "list-style-position", "border-collapse", "border-spacing", "caption-side", "empty-cells"
 ]);
 
 const ASCII_INSENSITIVE_ATTRIBUTES = new Set([
@@ -619,6 +620,9 @@ function mergeCandidateMaps(target: CandidateMap, source: CandidateMap): void {
 }
 
 function valueFamilySupported(property: string, components: readonly ComponentValue[]): boolean | null {
+  if (property === "list-style") return parseListStyle(components) !== null;
+  if (property === "list-style-type") return parseListStyleType(components) !== null;
+  if (property === "list-style-position") return parseListStylePosition(components) !== null;
   if (property === "content") return parseContent(components) !== undefined;
   if (property === "counter-reset" || property === "counter-increment" || property === "counter-set") {
     return parseCounterOperations(components, property) !== undefined;
@@ -680,10 +684,6 @@ function implementationSupportsDeclaration(source: string): boolean {
     case "overflow-wrap": return keyword("normal", "anywhere", "break-word");
     case "hyphens": return keyword("none", "manual");
     case "tab-size": return nonNegativeCssNumber(value) !== null;
-    case "list-style":
-    case "list-style-type": return splitTopLevel(value, "space")?.some((part) => [
-      "none", "disc", "circle", "square", "decimal", "decimal-leading-zero", "lower-alpha", "upper-alpha"
-    ].includes(part)) === true;
     case "margin": return lengths(true, true);
     case "margin-block":
     case "margin-inline": return (splitTopLevel(value, "space") ?? []).every((part) => parseLength(part, true, true) !== null)
@@ -1403,6 +1403,7 @@ function initialStyle(parent: ComputedStyle | null, replaced: boolean, htmlDirec
     display: initialDisplay(replaced),
     visibility: parent?.visibility ?? "visible",
     listStyleType: parent?.listStyleType ?? "disc",
+    listStylePosition: parent?.listStylePosition ?? "outside",
     text: {
       color: parent?.text.color ?? null,
       background: null,
@@ -1574,20 +1575,15 @@ function absoluteFontSize(
 ): CssLength | null {
   if (value.kind === "zero") return value;
   if (value.kind === "auto" || value.kind === "none") return null;
-  const pixels = value.kind === "calculation"
-    ? evaluateCssMath(
-        value.calculation.expression, parentPx, parentPx, rootPx,
-        environment.viewportWidthCssPx, environment.viewportHeightCssPx
-      )
-    : value.unit === "px" ? value.value
-      : value.unit === "em" || value.unit === "%" ? parentPx * value.value / (value.unit === "%" ? 100 : 1)
-        : value.unit === "rem" ? rootPx * value.value
-          : value.unit === "ch" ? parentPx * 0.5 * value.value
-            : value.unit === "vw" ? environment.viewportWidthCssPx * value.value / 100
-              : environment.viewportHeightCssPx * value.value / 100;
-  return pixels === null || !Number.isFinite(pixels) || pixels < 0
+  const expression = value.kind === "calculation" ? value.calculation.expression
+    : { kind: "value" as const, value: value.value, unit: value.unit };
+  const pixels = evaluateCssMath(
+    expression, parentPx, parentPx, rootPx,
+    environment.viewportWidthCssPx, environment.viewportHeightCssPx
+  );
+  return pixels === null || !Number.isFinite(pixels) || (pixels < 0 && value.kind !== "calculation")
     ? null
-    : Object.freeze({ kind: "length", value: pixels, unit: "px" });
+    : Object.freeze({ kind: "length", value: Math.max(0, pixels), unit: "px" });
 }
 
 function fontSizePixels(style: ComputedStyle | null): number {
@@ -1909,15 +1905,29 @@ function computeStyle(
   }
   const listStyle = value(["list-style-type", "list-style"]);
   if (listStyle !== null) {
-    const supported = ["none", "disc", "circle", "square", "decimal", "decimal-leading-zero", "lower-alpha", "upper-alpha"] as const;
     const wide = cssWide(listStyle.value);
     const marker = wide === "inherit" || wide === "unset"
       ? parent?.listStyleType ?? "disc"
       : wide === "initial"
         ? "disc"
-        : listStyle.value.split(/\s+/u).find((part) => supported.includes(part as typeof supported[number]));
-    if (marker === undefined) unsupported(listStyle);
-    else style = { ...style, listStyleType: marker as ComputedStyle["listStyleType"] };
+        : listStyle.property === "list-style"
+          ? parseListStyle(listStyle.components)?.type ?? null
+          : parseListStyleType(listStyle.components);
+    if (marker === null) unsupported(listStyle);
+    else style = { ...style, listStyleType: marker };
+  }
+  const listPosition = value(["list-style-position", "list-style"]);
+  if (listPosition !== null) {
+    const wide = cssWide(listPosition.value);
+    const position = wide === "inherit" || wide === "unset"
+      ? parent?.listStylePosition ?? "outside"
+      : wide === "initial"
+        ? "outside"
+        : listPosition.property === "list-style"
+          ? parseListStyle(listPosition.components)?.position ?? null
+          : parseListStylePosition(listPosition.components);
+    if (position === null) unsupported(listPosition);
+    else style = { ...style, listStylePosition: position };
   }
   const color = value("color");
   if (color !== null) {
@@ -2617,7 +2627,7 @@ class ImmutableStyleSnapshot implements StyleSnapshot {
     omittedDiagnosticCount = 0,
   ) {
     const textDependency = ([identity, style]: readonly [string, ComputedStyle]): readonly unknown[] => [
-      identity, style.display, style.visibility, style.listStyleType, style.generatedContent,
+      identity, style.display, style.visibility, style.listStyleType, style.listStylePosition, style.generatedContent,
       style.counterReset, style.counterIncrement, style.counterSet,
       style.text.whiteSpace, style.text.textTransform, style.box.position, style.box.float,
     ];
@@ -2702,7 +2712,8 @@ export function compareStyleSnapshots(previous: StyleSnapshot, next: StyleSnapsh
         || (right.box.emptyCells === "hide" && right.display.box === "principal" && right.display.internal === "table-cell")) changes.backgroundOnly = false;
       if (left === right) continue;
       const sameOther = sameComputedDisplay(left.display, right.display) && left.visibility === right.visibility
-        && left.listStyleType === right.listStyleType && generatedContentEqual(left.generatedContent, right.generatedContent)
+        && left.listStyleType === right.listStyleType && left.listStylePosition === right.listStylePosition
+        && generatedContentEqual(left.generatedContent, right.generatedContent)
         && counterOperationsEqual(left.counterReset, right.counterReset) && counterOperationsEqual(left.counterSet, right.counterSet)
         && counterOperationsEqual(left.counterIncrement, right.counterIncrement)
         && sameComputedBoxStyle(left.box, right.box) && sameEnvironment(left.customProperties, right.customProperties);
@@ -2881,6 +2892,10 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
       pseudos.delete(styleKey(ref, pseudo));
       const pseudoCandidates = candidates.get(styleKey(ref, pseudo));
       if (pseudoCandidates === undefined) continue;
+      // The universal UA marker defaults need a style only when a marker can
+      // exist. Preserve author pseudo evaluation and its diagnostics as usual.
+      if (pseudo === "marker" && !(style.display.box === "principal" && style.display.listItem)
+        && [...pseudoCandidates.values()].every((entries) => entries.every((entry) => entry.origin === "user-agent"))) continue;
       let pseudoStyle = computeStyle(
         input.program.document,
         input.state,

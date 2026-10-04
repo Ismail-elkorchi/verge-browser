@@ -39,14 +39,21 @@ export function compareOracleCase(fixture, variant, native, chromium) {
       for (const target of targets) compare("accessible-name", target.key, chromium.accessibleNames.byKey[target.key]?.name ?? null, target.name);
     }
   }
-  // Only controlled boxes opt into numeric geometry comparisons. Terminal
-  // cells and Chromium fonts intentionally have different text metrics.
+  // Only controlled boxes opt into numeric geometry comparisons. A reference
+  // subtracts the same property within each engine, so owned edges and paired
+  // intrinsic/ex expressions can be checked without equating font metrics.
   for (const assertion of fixture.oracle?.geometry ?? []) {
     for (const property of assertion.properties) {
-      const actual = native.byId[assertion.id]?.rectangle?.[property];
-      const expected = chromium.byId[assertion.id]?.rectangle?.[property];
-      if (actual === undefined || expected === undefined || Math.abs(actual - expected) > (assertion.tolerance ?? 1)) {
-        failures.push({ kind: "controlled-geometry", target: `${assertion.id}.${property}`, expected: expected ?? null, actual: actual ?? null });
+      const measure = (inspection) => {
+        const value = inspection.byId[assertion.id]?.rectangle?.[property];
+        const reference = assertion.referenceId === undefined ? 0 : inspection.byId[assertion.referenceId]?.rectangle?.[property];
+        return Number.isFinite(value) && Number.isFinite(reference) ? value - reference : null;
+      };
+      const actual = measure(native);
+      const expected = measure(chromium);
+      if (actual === null || expected === null || Math.abs(actual - expected) > (assertion.tolerance ?? 1)) {
+        const target = `${assertion.id}.${property}${assertion.referenceId === undefined ? "" : ` - ${assertion.referenceId}.${property}`}`;
+        failures.push({ kind: "controlled-geometry", target, expected, actual });
       }
     }
   }

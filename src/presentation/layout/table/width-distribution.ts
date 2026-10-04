@@ -14,7 +14,7 @@ import {
 import type {
   TableColumnMeasure,
   TableColumnMeasures,
-  TableLayoutHost,
+  TableSizingHost,
   TableLengthConstraint,
   TableWidthResult,
   UsedTableColumn,
@@ -29,7 +29,7 @@ function sum(values: readonly CssPixelLength[]): CssPixelLength {
 }
 
 function resolveConstraint(
-  host: TableLayoutHost,
+  host: TableSizingHost,
   value: TableLengthConstraint,
   basis: CssPixelLength | null,
 ): CssNonNegativeLength | null {
@@ -58,7 +58,7 @@ function activeIndexes(measures: readonly TableColumnMeasure[]): number[] {
 }
 
 function distributeWeighted(
-  host: TableLayoutHost,
+  host: TableSizingHost,
   sizes: CssNonNegativeLength[],
   indexes: readonly number[],
   extra: CssPixelLength,
@@ -82,7 +82,7 @@ function distributeWeighted(
 }
 
 function distributeEqual(
-  host: TableLayoutHost,
+  host: TableSizingHost,
   sizes: CssNonNegativeLength[],
   indexes: readonly number[],
   extra: CssPixelLength,
@@ -91,7 +91,7 @@ function distributeEqual(
 }
 
 function distributeCombinedConstraint(
-  host: TableLayoutHost,
+  host: TableSizingHost,
   sizes: CssNonNegativeLength[],
   measures: readonly TableColumnMeasure[],
   constraint: TableLengthConstraint,
@@ -142,7 +142,7 @@ function usedColumns(
 }
 
 function tableWidthTarget(
-  host: TableLayoutHost,
+  host: TableSizingHost,
   style: ComputedStyle,
   availableInlineSize: CssNonNegativeLength,
   minimum: CssNonNegativeLength,
@@ -163,7 +163,7 @@ function tableWidthTarget(
 }
 
 function percentageTrackRequests(
-  host: TableLayoutHost,
+  host: TableSizingHost,
   measurements: TableColumnMeasures,
   basis: CssNonNegativeLength,
   spacing: CssNonNegativeLength,
@@ -224,7 +224,7 @@ function percentageTrackRequests(
 }
 
 function interpolateGuesses(
-  host: TableLayoutHost,
+  host: TableSizingHost,
   lower: readonly CssNonNegativeLength[],
   upper: readonly CssNonNegativeLength[],
   target: CssNonNegativeLength,
@@ -253,7 +253,7 @@ function interpolateGuesses(
 }
 
 function automaticWidths(
-  host: TableLayoutHost,
+  host: TableSizingHost,
   style: ComputedStyle,
   measurements: TableColumnMeasures,
   availableInlineSize: CssNonNegativeLength,
@@ -336,7 +336,7 @@ function automaticWidths(
 }
 
 function fixedWidths(
-  host: TableLayoutHost,
+  host: TableSizingHost,
   style: ComputedStyle,
   measurements: TableColumnMeasures,
   availableInlineSize: CssNonNegativeLength,
@@ -424,7 +424,7 @@ function fixedWidths(
 
 /** Dispatch to the sole fixed or automatic horizontal table-width algorithm. */
 export function distributeTableWidth(
-  host: TableLayoutHost,
+  host: TableSizingHost,
   style: ComputedStyle,
   measurements: TableColumnMeasures,
   availableInlineSize: CssNonNegativeLength,

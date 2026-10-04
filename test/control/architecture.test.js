@@ -72,10 +72,14 @@ test("rendering internals use precise domain contracts rather than generic alias
 
 test("layout, display-list, and cell-rasterizer boundaries are explicit", async () => {
   const displayList = await source("src/presentation/terminal/display-list.ts");
+  const paintCommands = await source("src/presentation/terminal/paint-commands.ts");
   const rasterizer = await source("src/presentation/terminal/rasterizer.ts");
   const terminalFiles = await readdir(resolve(root, "src/presentation/terminal"));
   assert.match(displayList, /LayoutFragment/u);
-  assert.match(displayList, /inlineContinuations/u);
+  assert.match(displayList, /import \{ PaintCommandBuilder \} from "\.\/paint-commands\.js"/u);
+  assert.match(displayList, /new PaintCommandBuilder\(\)/u);
+  assert.match(displayList, /commands\.append\(fragment,/u);
+  assert.match(paintCommands, /inlineContinuations/u);
   assert.match(displayList, /buildDocumentDisplayList/u);
   assert.match(displayList, /input\.layout\.fragment\(childId\)/u);
   assert.match(displayList, /input\.layout\.stacking\(/u);

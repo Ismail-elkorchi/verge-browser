@@ -24,7 +24,7 @@ import type {
 } from "./types.js";
 
 type RasterizationDisplayList = Pick<DocumentDisplayList,
-  "layout" | "context" | "fragmentPaintOrder" | "commands" | "outcome">;
+  "layout" | "context" | "fragmentPaintOrder" | "outcome"> & { readonly commands: readonly TerminalPaintCommand[] };
 
 interface PaintUnit {
   readonly command: TerminalPaintCommand;

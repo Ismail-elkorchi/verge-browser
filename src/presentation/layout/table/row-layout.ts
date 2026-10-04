@@ -10,7 +10,7 @@ import {
   type CssPixelLength,
 } from "../fixed.js";
 import type {
-  TableLayoutHost,
+  TableSizingHost,
   TableRowSizingResult,
   TableSlotGrid,
   UsedTableColumn,
@@ -38,7 +38,7 @@ function spanInlineSize(
 }
 
 function weightedPlan(
-  host: Pick<TableLayoutHost, "signal" | "consume">,
+  host: Pick<TableSizingHost, "signal" | "consume">,
   current: readonly CssNonNegativeLength[],
   indexes: readonly number[],
   deficit: CssPixelLength,
@@ -63,7 +63,7 @@ function weightedPlan(
 
 /** Apply order-independent rowspan increases from one snapshot per span group. */
 export function applyRowspanPlans(
-  host: Pick<TableLayoutHost, "signal" | "consume">,
+  host: Pick<TableSizingHost, "signal" | "consume">,
   grid: TableSlotGrid,
   sizes: CssNonNegativeLength[],
   entries: readonly {
@@ -108,7 +108,7 @@ export function applyRowspanPlans(
 }
 
 function distributeTableHeight(
-  host: TableLayoutHost,
+  host: TableSizingHost,
   grid: TableSlotGrid,
   base: readonly CssNonNegativeLength[],
   reference: readonly CssNonNegativeLength[],
@@ -151,7 +151,7 @@ function distributeTableHeight(
 
 /** Resolve row base/reference sizes and rowspan constraints after column sizing. */
 export function sizeTableRows(
-  host: TableLayoutHost,
+  host: TableSizingHost,
   grid: TableSlotGrid,
   columns: readonly UsedTableColumn[],
   horizontalSpacing: CssNonNegativeLength,

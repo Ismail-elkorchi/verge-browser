@@ -5,7 +5,7 @@ import { createDocumentState, parseWebDocument } from "../../dist/document/index
 import { cssCoordinate, cssPx, cssRect } from "../../dist/presentation/layout/index.js";
 import { RenderArtifactStore } from "../../dist/presentation/renderer/index.js";
 import { embeddedStylesheetSources, inspectStylesheetText } from "../../dist/presentation/style/index.js";
-import { terminalCellMeasurer, terminalCssTextMeasurer } from "../../dist/ui/terminal-measure.js";
+import { terminalCellMeasurer, terminalCssTextMeasurer, terminalCssControlMeasurer } from "../../dist/ui/terminal-measure.js";
 
 function contexts(columns = 80, rows = 24) {
   const width = cssPx(columns * 8);
@@ -15,6 +15,7 @@ function contexts(columns = 80, rows = 24) {
     mediaEnvironment: { viewportWidthCssPx: columns * 8, viewportHeightCssPx: rows * 16,
       mediaType: "screen", prefersColorScheme: "dark", reducedMotion: false, hover: "hover", pointer: "fine" },
     layoutContext: { viewport: { width, height }, initialContainingBlock: rect, scrollport: rect,
+      controlMeasurer: terminalCssControlMeasurer(),
       textMeasurer: terminalCssTextMeasurer() },
     terminalContext: { columns, rows, cellWidthCssPx: cssPx(8), rowHeightCssPx: cssPx(16), unicode: true,
       ambiguousWidth: 1, colorDepth: 24, cellMeasurer: terminalCellMeasurer() },
@@ -54,7 +55,7 @@ function comparable({ artifacts, viewport }) {
     diagnostics: artifacts.computedStyles.diagnostics,
     omittedDiagnostics: artifacts.computedStyles.omittedDiagnosticCount,
     styleOutcome: artifacts.computedStyles.outcome,
-    fragments, lines: layout.lineBoxes, commands: artifacts.documentDisplayList.commands,
+    fragments, lines: layout.lineBoxes, commands: [...artifacts.documentDisplayList.commands],
     cells: viewport.terminal.cellBuffer, actions: viewport.terminal.hitTestIndex.regions,
     focus: viewport.terminal.focusMap.targets, accessibility: viewport.terminal.accessibilityBounds,
     controls: viewport.terminal.controls, anchors: viewport.scrollAnchors,

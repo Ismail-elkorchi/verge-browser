@@ -8,11 +8,11 @@ const selectOptions = new WeakMap<SelectControl, Pick<SelectEditor, "collection"
 
 type TextControl = Extract<DocumentFormControl, { readonly kind: "text" }>;
 
-export function controlValues(document: BrowserDocumentState, control: DocumentFormControl): readonly string[] {
+export function controlValues(document: Pick<BrowserDocumentState, "documentState" | "formEditors">, control: DocumentFormControl): readonly string[] {
   return documentControlValues(document.documentState, control);
 }
 
-export function controlSelections(document: BrowserDocumentState, control: SelectControl): readonly DocumentNodeRef[] {
+export function controlSelections(document: Pick<BrowserDocumentState, "documentState" | "formEditors">, control: SelectControl): readonly DocumentNodeRef[] {
   return documentControlSelections(document.documentState, control);
 }
 
@@ -25,13 +25,13 @@ export function controlOptions(control: SelectControl) {
   }));
 }
 
-export function textEditor(document: BrowserDocumentState, control: DocumentFormControl) {
+export function textEditor(document: Pick<BrowserDocumentState, "documentState" | "formEditors">, control: DocumentFormControl) {
   const current = document.formEditors[control.node];
   const value = controlValues(document, control)[0] ?? "";
   return current?.kind === "text" ? current.state : { text: value, cursor: value.length };
 }
 
-export function numberEditor(document: BrowserDocumentState, control: TextControl) {
+export function numberEditor(document: Pick<BrowserDocumentState, "documentState" | "formEditors">, control: TextControl) {
   const current = document.formEditors[control.node];
   if (current?.kind === "number") return current.state;
   const value = controlValues(document, control)[0] ?? "";
@@ -45,7 +45,7 @@ export function numberEditor(document: BrowserDocumentState, control: TextContro
   };
 }
 
-export function areaEditor(document: BrowserDocumentState, control: DocumentFormControl) {
+export function areaEditor(document: Pick<BrowserDocumentState, "documentState" | "formEditors">, control: DocumentFormControl) {
   const current = document.formEditors[control.node];
   return current?.kind === "textarea" ? current.state : createTextAreaState({
     value: controlValues(document, control)[0] ?? "",
@@ -53,7 +53,7 @@ export function areaEditor(document: BrowserDocumentState, control: DocumentForm
   });
 }
 
-export function selectEditor(document: BrowserDocumentState, control: SelectControl): SelectEditor {
+export function selectEditor(document: Pick<BrowserDocumentState, "documentState" | "formEditors">, control: SelectControl): SelectEditor {
   const current = document.formEditors[control.node];
   if (current?.kind === "combobox") return current;
   let options = selectOptions.get(control);
@@ -83,7 +83,7 @@ export function selectEditor(document: BrowserDocumentState, control: SelectCont
   };
 }
 
-export function multiSelectEditor(document: BrowserDocumentState, control: SelectControl) {
+export function multiSelectEditor(document: Pick<BrowserDocumentState, "documentState" | "formEditors">, control: SelectControl) {
   const current = document.formEditors[control.node];
   if (current?.kind === "checkboxGroup") return current.state;
   const selected = new Set(controlSelections(document, control));

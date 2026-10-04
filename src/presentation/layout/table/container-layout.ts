@@ -10,7 +10,6 @@ import {
   cssDivide,
   cssIntersection,
   cssMax,
-  cssMin,
   cssNegate,
   cssNonNegativeLength,
   cssPx,
@@ -21,11 +20,6 @@ import {
   type CssPixelLength,
   type CssRect,
 } from "../fixed.js";
-import { captionInlineSizes, groupTableCaptions } from "./captions.js";
-import { measureTableColumns } from "./column-measures.js";
-import { resolveCollapsedTableBorders } from "./collapsed-borders.js";
-import { sizeTableRows } from "./row-layout.js";
-import { usedTableBorderSpacing } from "./separated-borders.js";
 import type {
   TableCollapsedBorderWinner,
   TableLayoutHost,
@@ -34,7 +28,7 @@ import type {
   UsedTableColumn,
   UsedTableRow,
 } from "./types.js";
-import { distributeTableWidth } from "./width-distribution.js";
+import { resolveTableSizing } from "./sizing.js";
 import type { LayoutTableCollapsedBorderSegment } from "../types.js";
 
 const ZERO = cssNonNegativeLength(cssPx(0));
@@ -390,52 +384,8 @@ export function layoutTableContainer(
       const empty = cssRect(input.x, input.y, ZERO, ZERO);
       return host.container(input.wrapper, empty, empty, empty, empty, input.clip, [], []);
     }
-    const grid = host.tableSlotGrid(table);
-    const collapsedWinners = style.box.borderCollapse === "collapse"
-      ? resolveCollapsedTableBorders(
-          host,
-          grid,
-          table,
-          input.width,
-        )
-      : Object.freeze([]);
-    const initialDimensions = host.dimensions(table, input.width, null, null);
-    const spacing = usedTableBorderSpacing(host, style, initialDimensions.contentWidth);
-    const fixedLayout = style.box.tableLayout === "fixed" && host.usedLength(style.box.width, input.width, style) !== null;
-    const measures = measureTableColumns(
-      host,
-      grid,
-      initialDimensions.contentWidth,
-      fixedLayout,
-      spacing.horizontal,
-    );
-    const captions = groupTableCaptions(host, grid);
-    const captionMinimum = captionInlineSizes(
-      host,
-      [...captions.top, ...captions.bottom],
-      initialDimensions.contentWidth,
-    ).minimum;
-    const widthResult = distributeTableWidth(
-      host,
-      style,
-      measures,
-      cssNonNegativeLength(initialDimensions.contentWidth),
-      spacing.horizontal,
-      captionMinimum,
-    );
-    const dimensions = host.dimensions(table, input.width, null, widthResult.usedGridWidth);
-    let tableBlockSize = cssMax(initialDimensions.specifiedHeight ?? ZERO, initialDimensions.minHeight);
-    if (initialDimensions.maxHeight !== null) tableBlockSize = cssMin(tableBlockSize, initialDimensions.maxHeight);
-    const rows = sizeTableRows(
-      host,
-      grid,
-      widthResult.columns,
-      spacing.horizontal,
-      spacing.vertical,
-      initialDimensions.specifiedHeight === null && initialDimensions.minHeight === 0
-        ? null
-        : cssNonNegativeLength(tableBlockSize),
-    );
+    const { grid, collapsedWinners, spacing, captions, widthResult, dimensions, rows, contentHeight } =
+      resolveTableSizing(host, table, style, input.width);
     const hasActiveColumns = widthResult.columns.some((column) => !column.collapsed);
     const hasActiveRows = rows.rows.some((row) => !row.collapsed);
     const outerX = point(input.x, dimensions.marginLeft);
@@ -449,10 +399,7 @@ export function layoutTableContainer(
     const paddingY = point(borderY, dimensions.border.top);
     const contentX = point(paddingX, dimensions.padding.left);
     const contentY = point(paddingY, dimensions.padding.top);
-    let contentHeight = cssMax(rows.usedGridHeight, dimensions.specifiedHeight ?? ZERO, dimensions.minHeight);
-    if (dimensions.maxHeight !== null) contentHeight = cssMin(contentHeight, dimensions.maxHeight);
-    const constrainedContentHeight = cssNonNegativeLength(contentHeight);
-    const contentRect = cssRect(contentX, contentY, widthResult.usedGridWidth, constrainedContentHeight);
+    const contentRect = cssRect(contentX, contentY, widthResult.usedGridWidth, contentHeight);
     const paddingRect = cssRect(
       paddingX,
       paddingY,

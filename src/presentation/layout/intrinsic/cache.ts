@@ -1,7 +1,7 @@
 import type { IntrinsicContributionRequest, IntrinsicContributionOutcome } from "./types.js";
 
 function key(request: IntrinsicContributionRequest): string {
-  return `${request.formattingNode}:${request.availableInlineSize === null ? "indefinite" : String(request.availableInlineSize)}`;
+  return `${request.formattingNode}:${request.availableInlineSize === null ? "indefinite" : String(request.availableInlineSize)}:${request.inlineSizing}`;
 }
 
 export class IntrinsicContributionCache {
@@ -22,7 +22,7 @@ export class IntrinsicContributionCache {
     const cached = this.#entries.get(identity);
     if (cached !== undefined) return cached;
     if (this.#active.has(identity)) return Object.freeze({ status: "cycle" });
-    if (this.#entries.size >= this.#limit) return Object.freeze({ status: "truncated", limit: this.#limit });
+    if (this.#entries.size + this.#active.size >= this.#limit) return Object.freeze({ status: "truncated", limit: this.#limit });
     this.#active.add(identity);
     try {
       const result = calculate();

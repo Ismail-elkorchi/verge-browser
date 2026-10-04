@@ -42,6 +42,7 @@ html|li { display: list-item; }
 html|summary { display: list-item; }
 html|ol { list-style-type: decimal; }
 html|ul { list-style-type: disc; }
+::marker { unicode-bidi: isolate; white-space: pre; }
 
 html|table { display: table; }
 html|caption { display: table-caption; }

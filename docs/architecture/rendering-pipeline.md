@@ -142,12 +142,18 @@ viewport width  = terminal columns × cell width in CSS pixels
 viewport height = terminal rows × row height in CSS pixels
 ```
 
-`LayoutContext` carries that viewport, the initial containing block, the
-CSS-pixel text measurer, and layout budgets. Layout asks the measurer for font
+`LayoutContext` carries that viewport, the initial containing block, CSS-pixel
+text and native-control measurers, and layout budgets. The output adapter measures
+controls through the same component factory used to mount them; layout consumes
+only CSS-pixel sizes and the measurer's dependency identity. Layout asks the text
+measurer for font
 metrics (including ascent, descent, baseline, x-height, line gap, and `ch`
 advance) after style resolution. The terminal measurer supplies realizable
 fixed-cell advances and normal line metrics rather than scaling physical glyphs
-with CSS font size. Computed font sizes still determine font-relative lengths. The root
+with CSS font size. Used `ex` lengths use x-height independently of `ch` advance.
+In computed font-size/line-height values and media queries, `ex` and `ch` use the
+`0.5em` fallback where selected-font metrics are unavailable. Scalar and math
+lengths share these rules. The root
 element resolves `rem` in its own `font-size` against the initial font size;
 descendants resolve `rem` against that computed root size. One minimal
 cancellation contract is passed through style resolution, box generation,
@@ -183,6 +189,15 @@ short-lived composition for an operation, not a retained cache root. Reuse
 returns only the requested phase, so retaining formatting cannot retain an
 obsolete layout through a composite analysis.
 
+Canonical logical-text units, bidi items and levels, search segments, layout
+cluster selections, and paint descriptors use compact indexed storage. Decoded
+records are temporary views rather than retained object copies. Layout clusters
+refer to canonical logical source identities; paint descriptors refer to layout
+fragments and paint-specific selections. Fixed-size numeric pages are charged
+before allocation, including spare capacity and owner metadata, and participate
+in cancellation, rollback, and independent retained-cost recounting. This changes
+storage, not source offsets, text ordering, or rendering admission limits.
+
 Retention is cost-bounded (512 MiB by default), uses phase-ordered eviction with
 least-recently-used eligible resources, and bounds style environments, logical
 queries, and layout search
@@ -204,9 +219,11 @@ qualification. Verified stylesheet syntax sharing is registered at its actual
 ownership boundaries rather than through dense descendant aliases. External
 parser sessions expose counts, so their index/validation costs remain estimates.
 
-Before replacement construction, the store pins reusable requested phases,
-reserves estimated replacement capacity, and retires eligible obsolete
-layout/display/spatial/geometry resources and layout-specific search projections.
+Before replacement construction, the store pins reusable requested phases and
+retires eligible obsolete layout/display/spatial/geometry resources and
+layout-specific search projections. Packed construction reserves each new page
+and its metadata before allocation, then exchanges that reservation for committed
+phase ownership; it does not reserve a second estimated copy of the old layout.
 It preserves reusable upstream work and authoritative state. Reservations and
 rollback bookkeeping do not hold retired analyses. Failure may leave derived
 phases nonresident for later rebuilding; pins and reservations are released on
@@ -381,6 +398,14 @@ URL-encoding and CR/LF normalization occur at serialization. Unsupported
 contributing controls and incomplete indexing reject submission rather than
 silently sending partial data. File/multipart submission remains unsupported.
 
+Enter in a supported single-line input resolves implicit submission from the
+same indexed form owner. The first submit button in document order is the default,
+including externally associated controls; a disabled default is not skipped.
+Without a submit button, submission requires at most one input that blocks
+implicit submission. An unsupported default image submitter or incomplete
+indexing is reported rather than replaced with another submitter. Textareas keep
+Enter for editing.
+
 Generated content is an immutable program distinguishing `normal`, `none`, empty
 text, ordered visual items, and optional alternative text. The supported items
 are decoded strings, `attr(name)`, `counter(name[, style])`, and
@@ -398,6 +423,15 @@ are bounded. The suffix-free formatter supports decimal, decimal-leading-zero,
 lower/upper-alpha (including Latin aliases), disc, circle, square, and none;
 zero/negative alpha falls back to decimal and signed padding is explicit. Custom
 counter styles, counter images, and quote-depth handling remain unsupported.
+
+`list-style-position` belongs to the originating list item. Inside markers enter
+its leading inline flow and intrinsic contributions; outside markers own a
+separate text stream and do not enlarge the principal content width or height.
+After content layout, an outside marker aligns with the first content baseline
+at the LTR/RTL inline start, with a line-strut fallback for an empty item. The
+supported `list-style` shorthand resets both type and position; unsupported image
+or extra tokens reject the declaration. Built-in markers own their suffix, while
+custom `::marker` content receives none.
 
 The `font` shorthand competes with longhands through the ordinary cascade,
 resets omitted modeled weight/style/line-height values, and resolves size before
@@ -440,15 +474,25 @@ separately because terminal output cost depends on the terminal host.
 
 ## Layout fragment and line-box contracts
 
+Intrinsic sizing consumes canonical CSS-processed text across inline boundaries,
+using the same grapheme, white-space, tab, and line-break rules as line layout.
+Block, flex, Grid, and table contributions compose those runs with atomic boxes
+and their own edges. The cache distinguishes ordinary constrained contributions
+from flex content bases, which ignore the item's own preferred/min/max inline
+size. Eligible width-independent text analysis survives resize; width-dependent
+edges, atomic contributions, and changed text metrics require fresh analysis.
+
 Each layout fragment records its stable fragment ID, formatting node, document
 node, pseudo-element identity, content/padding/border/margin rectangles,
 overflow and clip rectangles, child fragments, source ranges, used font metrics,
-baseline, intrinsic contributions, visual order, paint order, action identity,
+baseline, visual order, paint order, action identity,
 and semantic identity. One formatting box may produce several fragments.
 
 Each immutable line box records its CSS rectangle, baseline, ascent, descent,
-logical item range, break cause, source-linked text fragments, resolved
-embedding levels, bidi runs, and visual runs. Each inline formatting context
+logical item range, break cause, fragment identities, visual order, and visual
+runs. Canonical text analysis owns bidi items and embedding levels; source,
+action, and semantic identities remain on the referenced fragments rather than
+being copied onto every line. Each inline formatting context
 owns an immutable inline-item stream across ordinary inline box boundaries;
 atomic inline boxes own independent inner streams, so their trailing white-space
 state cannot affect the containing context. CSS white-space processing and UAX #29
@@ -501,11 +545,10 @@ column-group, column, row-group, row, cell, border, and content phases without
 moving sizing or span logic into terminal code. The detailed contract and work
 limits are documented in [HTML/CSS table layout](./css-tables.md).
 
-Sticky positioning is currently constrained only against the root terminal
-scrollport and the sticky box's containing block. Nested scrolling boxes remain
-unsupported; values such as `overflow:auto` and `overflow:scroll` therefore
-produce the existing typed unsupported-value diagnostic rather than creating a
-second scroll container.
+Sticky positioning uses its containing scroll owner and the sticky box's
+containing block. Nested `overflow:auto`, `scroll`, and `hidden` boxes retain
+independent scroll ownership; paint, controls, hit testing, and reveal use the
+shared [scroll geometry projection](./scroll-geometry.md).
 
 Computed display is blockified before box generation for floats, absolute and
 fixed positioning, and principal flex/grid items. Absolute and fixed children
@@ -525,12 +568,23 @@ are shortened.
 ## Terminal contracts
 
 `DocumentDisplayList` contains ordered background-fill, border-side, and text
-paint commands. A box's background and supported border sides precede its
-in-flow descendants; later siblings retain source order. Commands retain
-clipping, source ranges, styles, action and semantic identities, and
-formatting/document/layout-fragment identities. Border sides keep their actual
+paint commands as packed references to canonical fragments, continuations, and
+current paint styles. Spatial indexes retain numeric command IDs and decode
+selected viewport commands; they do not retain a second command graph. A box's
+background and supported border sides precede its in-flow descendants; later
+siblings retain source order. Decoded commands expose clipping, source ranges,
+styles, action and semantic identities, and formatting/document/layout-fragment
+identities. Border sides keep their actual
 box-edge coordinates before clipping, so a saturated or far-offscreen side is
 never moved onto the retained cell-buffer boundary.
+
+Canvas background selection uses current root styles, or the eligible HTML
+body background when the root is transparent. `display:none` and paint
+containment on the root or body prevent body propagation. The selected color fills the viewport
+window independently of element geometry, scrolling, and hit testing; its source
+element does not paint that background a second time. Canvas paint consumes the
+ordinary command budget and refreshes during background-only style transitions
+without stretching the body or rebuilding layout.
 
 `ViewportCellBuffer` contains the requested viewport rows, bounded overscan,
 the complete document row count, its document-row origin, grapheme-owning
@@ -545,9 +599,17 @@ color-depth quantization.
 
 Every text paint command carries layout-established grapheme clusters with
 their logical content range and document source range. The cell rasterizer does
-not segment, line-break, or run the bidi algorithm. Terminal emulators remain
-responsible for glyph shaping; correct Arabic bidi order does not imply that
-Verge implements an Arabic shaping engine.
+not segment, line-break, or run the bidi algorithm. A session-owned
+`TextPresentation` adapter uses the same Unicode resolver for browser chrome and
+native control text, retaining logical editor offsets while mapping visual cells.
+Interactive startup and resume require explicit visual-cell presentation so the
+terminal cannot reorder already ordered cells a second time. The TUI establishes
+a fresh owned screen after acquiring that state and restores the original mode
+on release; an unknown initial state is not guessed from `TERM`. See the
+[Unicode text contract](./unicode-text.md) for the host boundary and control
+direction limits. Terminal emulators remain responsible for glyph shaping;
+correct Arabic bidi order does not imply that Verge implements an Arabic
+shaping engine.
 
 Viewport paint admission checks replacement cost before removing earlier cell
 owners, preserving the painted prefix when a new unit exceeds its budget.

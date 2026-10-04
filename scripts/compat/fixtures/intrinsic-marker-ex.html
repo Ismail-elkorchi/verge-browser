@@ -1,0 +1,18 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Intrinsic edges, markers and ex</title><style>
+html,body,p,ul{margin:0;padding:0}body{font:16px/16px monospace}main{padding:32px}.row{height:32px}.float{float:left}.edge{display:block;padding:0 14px}.grid{display:grid;grid-template-columns:max-content}#grid-split-row{grid-template-columns:min-content}ul{list-style:outside square}li::marker{content:"X"}#marker-inside{list-style-position:inside}#ex-scalar,#ex-math{height:16px;background:#123456}#ex-scalar{width:4ex}#ex-math{width:calc(2ex + 2ex)}
+</style></head><body><main>
+<section class="row"><div id="float-edges" class="float"><a class="edge" href="#grid-edges"><span id="float-text">Float</span></a></div></section>
+<section class="row grid"><div id="grid-edges"><a class="edge" href="#float-edges"><span id="grid-text">Grid</span></a></div></section>
+<section class="row"><div id="float-unsplit" class="float">HomeDocumentation</div></section>
+<section class="row"><div id="float-split" class="float"><span>Home</span><span>Documentation</span></div></section>
+<section class="row grid"><div id="grid-unsplit">HomeDocumentation</div></section>
+<section class="row grid" id="grid-split-row"><div id="grid-split"><span>Home</span><span>Documentation</span></div></section>
+<ul class="row"><li id="marker-outside" class="float"><p>Item</p></li></ul>
+<ul class="row"><li id="marker-inside" class="float">Item</li></ul>
+<section class="row"><div id="inside-reference" class="float">XItem</div></section>
+<section class="row"><div id="outside-reference" class="float">Item</div></section>
+<!-- ex is font-dependent: compare equivalent expressions within each engine,
+     never Chromium's x-height to the terminal's documented 0.5em fallback. -->
+<section class="row"><div id="ex-scalar"></div></section>
+<section class="row"><div id="ex-math"></div></section>
+</main></body></html>

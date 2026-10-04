@@ -16,7 +16,7 @@ import type {
   CssTranslation
 } from "./types.js";
 
-const LENGTH_UNITS = new Set<CssLengthUnit>(["px", "em", "rem", "ch", "%", "vw", "vh"]);
+const LENGTH_UNITS = new Set<CssLengthUnit>(["px", "em", "rem", "ex", "ch", "%", "vw", "vh"]);
 
 const ABSOLUTE_UNITS: Readonly<Record<string, number>> = Object.freeze({ in: 96, cm: 96 / 2.54, mm: 96 / 25.4, q: 96 / 101.6, pt: 96 / 72, pc: 16 });
 function dimensionLength(value: number, unit: string): { value: number; unit: CssLengthUnit } | null {
@@ -475,13 +475,18 @@ export function evaluateCssMath(
 ): number | null {
   if (expression.kind === "value") {
     if (!Number.isFinite(expression.value)) return null;
-    if (expression.unit === "px") return expression.value;
-    if (expression.unit === "%") return basis * expression.value / 100;
-    if (expression.unit === "em") return parentPx * expression.value;
-    if (expression.unit === "rem") return rootPx * expression.value;
-    if (expression.unit === "ch") return parentPx * 0.5 * expression.value;
-    if (expression.unit === "vw") return viewportWidth * expression.value / 100;
-    return viewportHeight * expression.value / 100;
+    switch (expression.unit) {
+      case "px": return expression.value;
+      case "%": return basis * expression.value / 100;
+      case "em": return parentPx * expression.value;
+      case "rem": return rootPx * expression.value;
+      // Computed values have no selected-font metrics; use the 0.5em fallback.
+      // Used lengths instead resolve ex/ch from their distinct font metrics.
+      case "ex":
+      case "ch": return parentPx * 0.5 * expression.value;
+      case "vw": return viewportWidth * expression.value / 100;
+      case "vh": return viewportHeight * expression.value / 100;
+    }
   }
   if (expression.kind === "negate") {
     const result = evaluateCssMath(expression.value, basis, parentPx, rootPx, viewportWidth, viewportHeight);

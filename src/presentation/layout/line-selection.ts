@@ -1,8 +1,10 @@
+import type { ValueSequence } from "../../memory/packed.js";
 import type { BreakOpportunityKind } from "../../unicode/index.js";
 import { cssAdd, cssPx, cssSubtract, type CssPixelLength } from "./fixed.js";
 
 export interface LogicalLineSelectionItem {
   readonly logicalIndex: number;
+  /** Signed inline advance: text is nonnegative, while box margins may be negative. */
   readonly advance: CssPixelLength;
   readonly tabInterval: CssPixelLength | null;
   readonly breakBefore: BreakOpportunityKind;
@@ -40,7 +42,7 @@ function result(
 
 /** Greedy CSS line selection over precomputed Unicode/CSS break opportunities. */
 export function selectLogicalLines(
-  items: readonly LogicalLineSelectionItem[],
+  items: readonly LogicalLineSelectionItem[] | ValueSequence<LogicalLineSelectionItem>,
   firstAvailableInlineSize: CssPixelLength,
   continuationAvailableInlineSize: CssPixelLength,
   budgets: Partial<LogicalLineSelectionBudgets> = {},
@@ -55,7 +57,7 @@ export function selectLogicalLines(
     return result(new Set(), new Set(), 0, new Map(), { status: "rejected", reason: "invalid-size" });
   }
   for (const [position, item] of items.entries()) {
-    if (item.logicalIndex !== position || !Number.isSafeInteger(item.advance) || item.advance < 0
+    if (item.logicalIndex !== position || !Number.isSafeInteger(item.advance)
       || item.tabInterval !== null && (!Number.isSafeInteger(item.tabInterval) || item.tabInterval < 0)) {
       return result(new Set(), new Set(), 0, new Map(), { status: "rejected", reason: "invalid-item" });
     }
@@ -71,9 +73,9 @@ export function selectLogicalLines(
   }));
   for (let index = items.length - 1; index >= 0; index -= 1) {
     signal?.throwIfAborted();
-    const item = items[index];
+    const item = items.at(index);
     if (item === undefined || item.forcedBreak) continue;
-    const next = items[index + 1];
+    const next = items.at(index + 1);
     for (const run of runs) {
       const continues = next !== undefined && !next.forcedBreak && !canBreakBefore(next, run.includeEmergency);
       const remainder = continues ? run.advances[index + 1] ?? zero : zero;
@@ -89,7 +91,7 @@ export function selectLogicalLines(
   const suppressTrailingSpaces = (beforeIndex: number): void => {
     for (let index = beforeIndex - 1; index >= 0; index -= 1) {
       signal?.throwIfAborted();
-      if (items[index]?.collapsibleSpace !== true) break;
+      if (items.at(index)?.collapsibleSpace !== true) break;
       suppressed.add(index);
     }
   };
@@ -124,7 +126,7 @@ export function selectLogicalLines(
     const advanceAt = (candidate: LogicalLineSelectionItem, current: CssPixelLength): CssPixelLength => {
       if (candidate.tabInterval === null) return candidate.advance;
       if (candidate.tabInterval === 0) return zero;
-      const remainder = current % candidate.tabInterval;
+      const remainder = (current % candidate.tabInterval + candidate.tabInterval) % candidate.tabInterval;
       return (remainder === 0 ? candidate.tabInterval : candidate.tabInterval - remainder) as CssPixelLength;
     };
     const unbreakableAdvance = (): CssPixelLength => {
@@ -138,7 +140,7 @@ export function selectLogicalLines(
       let trailingCollapsibleAdvance: CssPixelLength = zero;
       for (let index = item.logicalIndex; index < items.length; index += 1) {
         signal?.throwIfAborted();
-        const candidate = items[index];
+        const candidate = items.at(index);
         if (candidate === undefined || candidate.forcedBreak) break;
         if (index > item.logicalIndex && canBreakBefore(candidate, run.includeEmergency)) break;
         const used = advanceAt(candidate, cssAdd(lineAdvance, advance));

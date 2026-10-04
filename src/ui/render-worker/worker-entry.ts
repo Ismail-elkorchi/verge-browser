@@ -18,7 +18,7 @@ import {
 } from "../../presentation/layout/index.js";
 import type { DocumentStateDependencyChange } from "../../presentation/renderer/index.js";
 import { documentActionId } from "../../presentation/formatting/index.js";
-import { terminalCellMeasurer, terminalCssTextMeasurer } from "../terminal-measure.js";
+import { terminalCellMeasurer, terminalCssTextMeasurer, terminalCssControlMeasurer } from "../terminal-measure.js";
 import { hydrateRenderDocument, hydrateRenderStylesheets } from "./document-transfer.js";
 import {
   hydrateDocumentState,
@@ -103,6 +103,7 @@ function context(parameters: Extract<RenderWorkerRequest, { readonly kind: "requ
         width: cssNonNegativeLength(width),
         height: cssNonNegativeLength(height),
       }),
+      controlMeasurer: terminalCssControlMeasurer(CELL_WIDTH, ROW_HEIGHT, parameters.preferences.ambiguousWidth),
       textMeasurer: terminalCssTextMeasurer(
         CELL_WIDTH,
         ROW_HEIGHT,

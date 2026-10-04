@@ -9,7 +9,7 @@ import { parseContent, parseCounterOperations } from "../../dist/presentation/st
 import { buildReaderDocument } from "../../dist/reader/index.js";
 import { RenderArtifactStore } from "../../dist/presentation/renderer/index.js";
 import { cssCoordinate, cssPx, cssRect } from "../../dist/presentation/layout/index.js";
-import { terminalCellMeasurer, terminalCssTextMeasurer } from "../../dist/ui/terminal-measure.js";
+import { terminalCellMeasurer, terminalCssTextMeasurer, terminalCssControlMeasurer } from "../../dist/ui/terminal-measure.js";
 
 const environment = { viewportWidthCssPx: 800, viewportHeightCssPx: 600, mediaType: "screen",
   prefersColorScheme: "dark", reducedMotion: true, hover: "hover", pointer: "fine" };
@@ -130,13 +130,13 @@ test("HTML start, reversed, and value feed CSS counters and reader markers witho
   const html = `<ol start=4><li>A<li value=-2>B<li>C<ol reversed><li>D<li>E<li>F</ol><li>G</ol>
     <ol reversed start=9><li>H<li value=3>I<li>J</ol>`;
   const { document, formatting } = fixture(html);
-  assert.deepEqual(markerTexts(formatting), ["4.", "-2.", "-1.", "3.", "2.", "1.", "0.", "9.", "3.", "2."]);
+  assert.deepEqual(markerTexts(formatting), ["4. ", "-2. ", "-1. ", "3. ", "2. ", "1. ", "0. ", "9. ", "3. ", "2. "]);
   assert.deepEqual(buildReaderDocument(document).blocks.filter((block) => block.kind === "list-item").map((block) => block.marker), markerTexts(formatting));
   const overridden = fixture(`<style>ol{counter-reset:list-item 20}li{counter-increment:list-item 2;counter-set:list-item 7}li::marker{content:counter(list-item)}</style><ol start=4><li value=99>A<li>B</ol>`);
   assert.deepEqual(markerTexts(overridden.formatting), ["7", "7"]);
   const wrappers = fixture(`<style>.contents{display:contents}.hidden{display:none}</style>
     <ol reversed><div class=contents><li>A</li></div><div class=hidden><li>Hidden</li></div><li>B<ol><li>Nested</li></ol></li></ol>`);
-  assert.deepEqual(markerTexts(wrappers.formatting), ["2.", "1.", "1."]);
+  assert.deepEqual(markerTexts(wrappers.formatting), ["2. ", "1. ", "1. "]);
 });
 
 test("HTML list defaults yield to CSS none/unset, and hidden items do not consume counters", () => {
@@ -145,7 +145,7 @@ test("HTML list defaults yield to CSS none/unset, and hidden items do not consum
     <ol start=8><li>A<li class=hidden>Hidden<li class=keep>B<li>C</ol>
     <ol reversed><li>D<li hidden>Hidden<li>E</ol>
     <ol start=90 class=unset><li>F</ol><ol start=90 class=invalid><li>G</ol>`);
-  assert.deepEqual(markerTexts(result.formatting), ["8.", "8.", "9.", "2.", "1.", "0.", "-1."]);
+  assert.deepEqual(markerTexts(result.formatting), ["8. ", "8. ", "9. ", "2. ", "1. ", "0. ", "-1. "]);
 });
 
 test("empty generated pseudos still execute counters, and marker instructions share the same list-item state", () => {
@@ -208,7 +208,7 @@ function contexts(columns) {
   const rect = cssRect(cssCoordinate(cssPx(0)), cssCoordinate(cssPx(0)), width, height);
   return { documentId: "page", documentRevision: 1,
     mediaEnvironment: { ...environment, viewportWidthCssPx: columns * 8, viewportHeightCssPx: 640 },
-    layoutContext: { viewport: { width, height }, initialContainingBlock: rect, scrollport: rect, textMeasurer: terminalCssTextMeasurer() },
+    layoutContext: { viewport: { width, height }, initialContainingBlock: rect, scrollport: rect, controlMeasurer: terminalCssControlMeasurer(), textMeasurer: terminalCssTextMeasurer() },
     terminalContext: { columns, rows: 40, cellWidthCssPx: cssPx(8), rowHeightCssPx: cssPx(16), unicode: true,
       ambiguousWidth: 1, colorDepth: 24, cellMeasurer: terminalCellMeasurer() } };
 }
@@ -235,7 +235,7 @@ test("all 21 captured Wikipedia return-link labels retain destinations and text/
     const viewport = store.renderViewport({ ...request, viewportRevision: 1, window: { scrollRow: 0, viewportRows: 40, overscanBefore: 0, overscanAfter: 0 } });
     for (const [id, label, destination] of expected) {
       const ref = document.elementById(id);
-      const paint = artifacts.documentDisplayList.commands.filter((command) => command.kind === "text" && command.action?.node === ref);
+      const paint = [...artifacts.documentDisplayList.commands].filter((command) => command.kind === "text" && command.action?.node === ref);
       assert.equal(paint.map((command) => command.text).join(""), label);
       assert.ok(paint.every((command) => command.action.destination === destination));
       const focus = artifacts.documentGeometry.focusForNode(ref);

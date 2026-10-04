@@ -1,6 +1,7 @@
 export {
   bidiItemsFromText,
   bidiVisualOrderForLine,
+  bidiLineTrailingResetStart,
   mirroredBidiText,
   resolveBidiParagraph,
   resolveBidiParagraphs,
@@ -26,3 +27,5 @@ export {
   UNICODE_VERSION
 } from "./properties.js";
 export type * from "./properties.js";
+
+export { BidiItems, BidiItemsBuilder, BidiLevels, BidiOrderIndices } from "./bidi-items.js";

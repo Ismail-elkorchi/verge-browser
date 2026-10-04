@@ -22,7 +22,7 @@ import {
   buildViewportTerminalResult,
   rasterizeViewportDisplayList
 } from "../../dist/presentation/terminal/index.js";
-import { terminalCellMeasurer, terminalCssTextMeasurer } from "../../dist/ui/terminal-measure.js";
+import { terminalCellMeasurer, terminalCssTextMeasurer, terminalCssControlMeasurer } from "../../dist/ui/terminal-measure.js";
 
 const CELL_WIDTH = cssPx(8);
 const ROW_HEIGHT = cssPx(16);
@@ -79,6 +79,7 @@ function render(html, columns = 80, rows = 24, options = {}) {
       viewport: { width: viewportWidth, height: viewportHeight },
       initialContainingBlock: viewportRect,
       scrollport: viewportRect,
+      controlMeasurer: terminalCssControlMeasurer(),
       textMeasurer: terminalCssTextMeasurer(CELL_WIDTH, ROW_HEIGHT),
       ...(options.budgets === undefined ? {} : { budgets: options.budgets })
     },
@@ -86,8 +87,7 @@ function render(html, columns = 80, rows = 24, options = {}) {
   });
   assert.ok(layout.outcome.status === "complete" || (options.budgets !== undefined && layout.outcome.status === "truncated"),
     JSON.stringify(layout.outcome));
-  const displayList = buildDocumentDisplayList({
-    layout,
+  const displayList = buildDocumentDisplayList({ styles: layout.formatting.styles, layout,
     context: {
       columns,
       rows,
@@ -177,8 +177,8 @@ test("sequential and nested translations compose exactly once through ordinary a
   assertTranslation(fragment(baseline, "ordinary"), fragment(shifted, "ordinary"), 8, 48);
   assertTranslation(fragment(baseline, "inner"), fragment(shifted, "inner"), 28, 32);
   assertTranslation(fragment(baseline, "leaf"), fragment(shifted, "leaf"), 28, 32);
-  const before = baseline.displayList.commands.find((command) => command.kind === "text" && command.text === "nested");
-  const after = shifted.displayList.commands.find((command) => command.kind === "text" && command.text === "nested");
+  const before = [...baseline.displayList.commands].find((command) => command.kind === "text" && command.text === "nested");
+  const after = [...shifted.displayList.commands].find((command) => command.kind === "text" && command.text === "nested");
   assert.ok(before && after);
   assert.deepEqual(rectangle(after.rect), { ...rectangle(before.rect), x: cssPixels(before.rect.x) + 28, y: cssPixels(before.rect.y) + 32 });
 });
@@ -228,8 +228,8 @@ for (const display of ["inline-block", "inline-flex", "inline-grid"]) {
       const after = fragment(shifted, id);
       assert.equal(after.borderRect.width, before.borderRect.width, `${id} width`);
       assert.equal(after.borderRect.height, before.borderRect.height, `${id} height`);
-      assert.equal(after.minContentContribution, before.minContentContribution, `${id} min-content`);
-      assert.equal(after.maxContentContribution, before.maxContentContribution, `${id} max-content`);
+      assert.equal(after.contentRect.width, before.contentRect.width, `${id} content width`);
+      assert.equal(after.paddingRect.width, before.paddingRect.width, `${id} padding width`);
     }
     assertTranslation(fragment(baseline, "moving"), fragment(shifted, "moving"), cssPixels(fragment(baseline, "moving").borderRect.width) * 2, 96);
   });
@@ -381,7 +381,7 @@ test("aligned fixed static positions retain viewport paint and interaction geome
     const scrolled = viewport(result, scrollRow);
     const fixed = node(result, "fixed");
     const expected = { row: scrollRow + 4, column: 10, width: 1, height: 1 };
-    const command = scrolled.displayList.commands.find((value) => value.kind === "text" && value.text === "F");
+    const command = [...scrolled.displayList.commands].find((value) => value.kind === "text" && value.text === "F");
     assert.ok(command);
     assert.equal(cssPixels(command.rect.y), expected.row * 16);
     assert.equal(scrolled.terminal.hitTestIndex.at(expected.row, expected.column)?.action.node, fixed);
@@ -396,7 +396,7 @@ test("transformed contexts contain high z-index descendants below a higher sibli
       <div id="nested" style="position:relative;z-index:99;background:red">nested</div></div>
     <div id="sibling" style="position:relative;z-index:1;background:blue">sibling</div>`;
   const paintOrder = (result, id) => {
-    const command = result.displayList.commands.find((candidate) => candidate.kind === "background" && candidate.documentNode === node(result, id));
+    const command = [...result.displayList.commands].find((candidate) => candidate.kind === "background" && candidate.documentNode === node(result, id));
     assert.ok(command);
     return command.paintOrder;
   };
@@ -446,11 +446,11 @@ test("fixed descendants under transforms scroll with the document while viewport
   const free = node(result, "free");
   for (const scrollRow of [3, 6]) {
     const scrolled = viewport(result, scrollRow);
-    const freeCommand = scrolled.displayList.commands.find((command) => command.kind === "text" && command.text === "free");
+    const freeCommand = [...scrolled.displayList.commands].find((command) => command.kind === "text" && command.text === "free");
     assert.ok(freeCommand);
     assert.equal(cssPixels(freeCommand.rect.y), scrollRow * 16);
     assert.equal(scrolled.terminal.hitTestIndex.at(scrollRow, 20)?.action.node, free);
-    const trappedCommand = scrolled.displayList.commands.find((command) => command.kind === "text" && command.text === "trapped");
+    const trappedCommand = [...scrolled.displayList.commands].find((command) => command.kind === "text" && command.text === "trapped");
     if (scrollRow === 3) {
       assert.ok(trappedCommand);
       assert.equal(cssPixels(trappedCommand.rect.y), 80);
@@ -559,7 +559,7 @@ test("fixed descendants of a transform do not inherit an intervening sticky ance
   const fixed = fragment(result, "fixed");
   assert.equal(cssPixels(fixed.borderRect.y), 160);
   const scrolled = viewport(result, 8);
-  const painted = scrolled.displayList.commands.find((command) => command.kind === "text" && command.text === "F");
+  const painted = [...scrolled.displayList.commands].find((command) => command.kind === "text" && command.text === "F");
   assert.ok(painted);
   assert.equal(painted.rect.y, fixed.borderRect.y);
   assert.equal(scrolled.terminal.hitTestIndex.at(10, 2)?.action.node, node(result, "fixed"));
@@ -728,8 +728,9 @@ test("nested scroll projection moves unclipped content while retaining control a
   const control = terminal.controls.find((entry) => entry.node === node(result, "field"));
   assert.ok(control, "offscreen unpainted controls are discovered after inner scrolling");
   assert.equal(control.allocation.row, 0);
-  assert.equal(control.allocation.height, 2);
-  assert.equal(control.visible.height, 2);
+  assert.equal(control.allocation.height, 1);
+  assert.equal(control.visible.height, 1);
+  assert.equal(control.content.height, cssPx(32), "CSS height remains independent of the native single-line footprint");
   assert.equal(fragment(result, "article").borderRect.y, cssPx(32));
   assert.ok(terminal.cellBuffer.rows.find((row) => row.row === 2)?.text.includes("ARTICLE"));
   assert.ok(terminal.focusMap.forNode(node(result, "field")));
@@ -741,8 +742,8 @@ test("textarea fallback retains separate bidi paragraphs and original value offs
   assert.deepEqual(control.controlLines.map(line=>line.text),["first","","third"]);
   assert.deepEqual(control.controlLines.map(line=>cssPixels(line.blockOffset)),[0,16,32]);
   assert.equal(control.visualClusters.length,0);
-  assert.equal(control.controlLines[2].clusters[0].contentStartCodeUnit,7);
-  const commands = result.displayList.commands.filter(command=>command.kind==="text" && command.layoutFragment===control.id);
+  assert.equal(control.controlLines[2].clusters.at(0).contentStartCodeUnit,7);
+  const commands = [...result.displayList.commands].filter(command=>command.kind==="text" && command.layoutFragment===control.id);
   assert.deepEqual(commands.map(command=>command.text),["first","third"]);
   assert.equal(cssPixels(commands[1].rect.y-commands[0].rect.y),32);
 });
@@ -798,7 +799,7 @@ test("nested sticky descendants remain queried after the outer sticky leaves nor
 });
 
 test("two-axis nested reveal shares paint, focus and full versus clipped control geometry", () => {
-  const result=render(`<div id=outer style="width:64px;height:64px;overflow:auto"><div id=inner style="width:128px;height:128px;overflow:auto"><div style="position:relative;left:192px;top:192px;width:32px;height:32px"><input id=target value=XY style="width:32px;height:32px"></div></div></div><p id=after>AFTER</p>`);
+  const result=render(`<div id=outer style="width:64px;height:64px;overflow:auto"><div id=inner style="width:128px;height:128px;overflow:auto"><div style="position:relative;left:192px;top:192px;width:32px;height:32px"><textarea id=target style="width:32px;height:32px">XY</textarea></div></div></div><p id=after>AFTER</p>`);
   const shown=projected(result,[],{node:node(result,"target"),blockAlign:"nearest"});
   const offsets=shown.list.window.scrollOffsets;
   assert.equal(offsets.length,2);
@@ -821,7 +822,7 @@ test("scroll and containment clips do not cut their own border chrome", () => {
     const result=render(`<div id=box style="${policy};width:64px;height:32px;border:8px solid;background:red">TEXT</div>`);
     const shown=projected(result);
     const box=fragment(result,"box");
-    const border=shown.list.commands.find(command=>command.layoutFragment===box.id&&command.kind==="border-side");
+    const border=[...shown.list.commands].find(command=>command.layoutFragment===box.id&&command.kind==="border-side");
     assert.ok(border);
     assert.ok(border.clipRect.x<=box.borderRect.x);
     assert.ok(border.clipRect.y<=box.borderRect.y);
@@ -987,7 +988,7 @@ test("block-start reveal preserves inline position when oversized targets span r
   assert.deepEqual(revealed.list.window.scrollOffsets, [{ ...offset, block: 0 }]);
 });
 
-test("source-owned reveal ignores generated marker and pseudo boxes before the principal fragment", async () => {
+test("source-owned reveal ignores generated marker and pseudo boxes regardless of allocation order", async () => {
   const { revealDocumentNode } = await import("../../dist/presentation/terminal/viewport-geometry.js");
   for (const html of [
     `<ol style="margin:0;padding-left:64px"><li id=target style="height:32px">SOURCE</li></ol>`,
@@ -999,7 +1000,11 @@ test("source-owned reveal ignores generated marker and pseudo boxes before the p
     const principal = fragments.find((entry) => entry.kind !== "text" && entry.pseudoElement === null
       && result.formatting.node(entry.formattingNode).appliesBoxStyle);
     assert.ok(principal);
-    assert.notEqual(fragments.find((entry) => entry.kind !== "text"), principal, "generated fragment precedes source box");
+    const generated = fragments.find((entry) => entry.kind !== "text" && entry.pseudoElement !== null);
+    assert.ok(generated, "source identity also owns generated geometry");
+    assert.notDeepEqual(generated.borderRect, principal.borderRect);
+    if (generated.pseudoElement === "before")
+      assert.notEqual(fragments.find((entry) => entry.kind !== "text"), principal, "pseudo box is allocated before source box");
     const revealed = revealDocumentNode(result.layout, result.layout.context.scrollport, [], target, "start");
     assert.deepEqual(revealed.rect, principal.borderRect);
     assert.equal(projected(result, [], { node: target, blockAlign: "start" }).list.window.scrollColumn, 0);

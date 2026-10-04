@@ -16,7 +16,7 @@ import {
   cssPx,
   cssRect
 } from "../../dist/presentation/layout/index.js";
-import { terminalCellMeasurer, terminalCssTextMeasurer } from "../../dist/ui/terminal-measure.js";
+import { terminalCellMeasurer, terminalCssTextMeasurer, terminalCssControlMeasurer } from "../../dist/ui/terminal-measure.js";
 import { phrasePaintCoverage } from "./paint-coverage.mjs";
 import { CELL_WIDTH_CSS_PX, ROW_HEIGHT_CSS_PX, DEFAULT_VARIANTS, fixtureRequestUrl, fixtureResources, mediaEnvironment } from "./environment.mjs";
 
@@ -149,6 +149,7 @@ export function renderSnapshot(snapshot, variant, expectedText) {
     mediaEnvironment: mediaEnvironment(variant),
     layoutContext: {
       viewport: { width: viewportWidth, height: viewportHeight },
+      controlMeasurer: terminalCssControlMeasurer(),
       textMeasurer: terminalCssTextMeasurer(CELL_WIDTH, ROW_HEIGHT),
       initialContainingBlock: cssRect(
         cssCoordinate(cssPx(0)), cssCoordinate(cssPx(0)), viewportWidth, viewportHeight

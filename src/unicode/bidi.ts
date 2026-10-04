@@ -1,3 +1,5 @@
+import { BidiItems, BidiItemsBuilder, BidiLevels, BidiOrderIndices } from "./bidi-items.js";
+export { BidiItems, BidiItemsBuilder } from "./bidi-items.js";
 import {
   bidiClass,
   bidiMirroringGlyph,
@@ -26,11 +28,11 @@ export interface BidiRun {
   readonly logicalEnd: number;
   readonly level: BidiLevel;
   readonly direction: "ltr" | "rtl";
-  readonly itemIndices: readonly number[];
 }
 
+
 export interface VisualRunOrder {
-  readonly itemIndices: readonly number[];
+  readonly itemIndices: BidiOrderIndices;
   readonly runs: readonly BidiRun[];
 }
 
@@ -53,11 +55,10 @@ export type BidiOutcome =
   | { readonly status: "rejected"; readonly reason: "invalid-budget" | "invalid-item" };
 
 export interface BidiParagraph<TIdentity = unknown> {
-  readonly items: readonly BidiItem<TIdentity>[];
+  readonly items: BidiItems<TIdentity>;
   readonly baseLevel: BidiLevel;
   /** Null marks an explicit-formatting item removed by UAX #9 rule X9. */
-  readonly embeddingLevels: readonly (BidiLevel | null)[];
-  readonly resolvedClasses: readonly BidiClass[];
+  readonly embeddingLevels: BidiLevels;
   readonly visualOrder: VisualRunOrder;
   readonly outcome: BidiOutcome;
 }
@@ -69,7 +70,7 @@ export interface BidiParagraphSlice<TIdentity = unknown> {
 }
 
 export interface BidiParagraphCollection<TIdentity = unknown> {
-  readonly items: readonly BidiItem<TIdentity>[];
+  readonly items: BidiItems<TIdentity>;
   readonly paragraphs: readonly BidiParagraphSlice<TIdentity>[];
 }
 
@@ -209,7 +210,7 @@ function resolveSequence(
   levels: readonly number[],
   types: BidiClass[],
   original: readonly BidiClass[],
-  items: readonly BidiItem[],
+  items: BidiItems<unknown>,
   sos: "L" | "R",
   eos: "L" | "R",
   signal: AbortSignal | undefined
@@ -314,7 +315,7 @@ function resolveSequence(
   for (let position = 0; position < sequence.length; position += 1) {
     checkCancellation(signal, position);
     const index = sequence[position];
-    const item = index === undefined ? undefined : items[index];
+    const item = index === undefined ? undefined : items.at(index);
     if (index === undefined || item?.codePoint === null || item === undefined || types[index] !== "ON") continue;
     const bracket = bidiPairedBracket(item.codePoint);
     if (bracket?.kind === "open") {
@@ -456,7 +457,7 @@ function visualRuns(
       && (indices[end] ?? 0) === (indices[end - 1] ?? 0) + step) end += 1;
     if (runs.length >= maxRuns) {
       return {
-        order: Object.freeze({ itemIndices: Object.freeze(indices.slice(0, start)), runs: Object.freeze(runs) }),
+        order: Object.freeze({ itemIndices: new BidiOrderIndices(runs), runs: Object.freeze(runs) }),
         truncated: true
       };
     }
@@ -472,19 +473,30 @@ function visualRuns(
       logicalEnd: logicalEnd + 1,
       level: level as BidiLevel,
       direction: (level & 1) === 0 ? "ltr" : "rtl",
-      itemIndices
     }));
     start = end;
   }
   return {
-    order: Object.freeze({ itemIndices: Object.freeze(indices), runs: Object.freeze(runs) }),
+    order: Object.freeze({ itemIndices: new BidiOrderIndices(runs), runs: Object.freeze(runs) }),
     truncated: false
   };
 }
 
+/** Start of the trailing L1 reset range; explicit X9 controls remain removed. */
+export function bidiLineTrailingResetStart(paragraph: Pick<BidiParagraph, "items">, start: number, end: number): number {
+  let reset = end;
+  for (let index = end - 1; index >= start; index -= 1) {
+    const item = paragraph.items.at(index);
+    if (item === undefined || X9_CLASSES.has(item.bidiClass)) continue;
+    if (!TRAILING_CLASSES.has(item.bidiClass)) break;
+    reset = index;
+  }
+  return reset;
+}
+
 /** Applies UAX #9 rules L1 and L2 to one selected line of an already resolved paragraph. */
 export function bidiVisualOrderForLine(
-  paragraph: BidiParagraph,
+  paragraph: Pick<BidiParagraph, "items" | "embeddingLevels" | "baseLevel">,
   itemStart: number,
   itemEnd: number,
   maxRuns = 250_000,
@@ -493,39 +505,31 @@ export function bidiVisualOrderForLine(
   const start = Math.max(0, Math.min(paragraph.items.length, itemStart));
   const end = Math.max(start, Math.min(paragraph.items.length, itemEnd));
   const levels: (number | null)[] = [];
-  for (let index = start; index < end; index += 1) levels.push(paragraph.embeddingLevels[index] ?? null);
-  for (let index = end - 1; index >= start; index -= 1) {
-    const item = paragraph.items[index];
-    if (item === undefined || X9_CLASSES.has(item.bidiClass)) continue;
-    if (!TRAILING_CLASSES.has(item.bidiClass)) break;
-    levels[index - start] = paragraph.baseLevel;
+  for (let index = start; index < end; index += 1) levels.push(paragraph.embeddingLevels.at(index) ?? null);
+  const resetStart = bidiLineTrailingResetStart(paragraph, start, end);
+  for (let index = resetStart; index < end; index += 1) {
+    if (levels[index - start] !== null) levels[index - start] = paragraph.baseLevel;
   }
   const order = visualRuns(levels, maxRuns, signal).order;
-  return Object.freeze({
-    itemIndices: Object.freeze(order.itemIndices.map((index) => index + start)),
-    runs: Object.freeze(order.runs.map((run) => Object.freeze({
-      ...run,
-      logicalStart: run.logicalStart + start,
-      logicalEnd: run.logicalEnd + start,
-      itemIndices: Object.freeze(run.itemIndices.map((index) => index + start))
-    })))
-  });
+  const runs = Object.freeze(order.runs.map((run) => Object.freeze({
+    ...run, logicalStart: run.logicalStart + start, logicalEnd: run.logicalEnd + start,
+  })));
+  return Object.freeze({ itemIndices: new BidiOrderIndices(runs), runs });
 }
 
 /** Resolves one complete UAX #9 bidi paragraph through rule L2. */
 export function resolveBidiParagraph<TIdentity>(
-  inputItems: readonly BidiItem<TIdentity>[],
+  inputItems: readonly BidiItem<TIdentity>[] | BidiItems<TIdentity>,
   direction: BidiParagraphDirection = "auto",
   budgetOverrides: Partial<BidiBudgets> = {},
   signal?: AbortSignal
 ): BidiParagraph<TIdentity> {
   const budgets = normalizedBudgets(budgetOverrides);
   if (budgets === null) return Object.freeze({
-    items: Object.freeze([]),
+    items: BidiItems.from<TIdentity>([]),
     baseLevel: 0 as BidiLevel,
-    embeddingLevels: Object.freeze([]),
-    resolvedClasses: Object.freeze([]),
-    visualOrder: Object.freeze({ itemIndices: Object.freeze([]), runs: Object.freeze([]) }),
+    embeddingLevels: BidiLevels.from([]),
+    visualOrder: Object.freeze({ itemIndices: new BidiOrderIndices([]), runs: Object.freeze([]) }),
     outcome: Object.freeze({ status: "rejected", reason: "invalid-budget" })
   });
   let truncation: "maxCodePointsPerParagraph" | "maxBidiItems" | "maxEmbeddingDepth" | null = null;
@@ -538,7 +542,7 @@ export function resolveBidiParagraph<TIdentity>(
       truncation = "maxBidiItems";
       break;
     }
-    if (inputItems[index]?.kind === "code-point") {
+    if (inputItems.at(index)?.kind === "code-point") {
       if (codePoints >= budgets.maxCodePointsPerParagraph) {
         itemLimit = index;
         truncation = "maxCodePointsPerParagraph";
@@ -547,21 +551,20 @@ export function resolveBidiParagraph<TIdentity>(
       codePoints += 1;
     }
   }
-  const items = Object.freeze(inputItems.slice(0, itemLimit));
-  for (let index = 0; index < items.length; index += 1) {
+  for (let index = 0; index < itemLimit; index += 1) {
     checkCancellation(signal, index);
-    const item = items[index];
+    const item = inputItems.at(index);
     if (item === undefined || !Number.isSafeInteger(item.sourceStartCodeUnit)
       || !Number.isSafeInteger(item.sourceEndCodeUnit) || item.sourceStartCodeUnit < 0
       || item.sourceEndCodeUnit < item.sourceStartCodeUnit) {
       return Object.freeze({
-        items: Object.freeze([]), baseLevel: 0 as BidiLevel, embeddingLevels: Object.freeze([]),
-        resolvedClasses: Object.freeze([]),
-        visualOrder: Object.freeze({ itemIndices: Object.freeze([]), runs: Object.freeze([]) }),
+        items: BidiItems.from<TIdentity>([]), baseLevel: 0 as BidiLevel, embeddingLevels: BidiLevels.from([]),
+            visualOrder: Object.freeze({ itemIndices: new BidiOrderIndices([]), runs: Object.freeze([]) }),
         outcome: Object.freeze({ status: "rejected", reason: "invalid-item" })
       });
     }
   }
+  const items = BidiItems.from(inputItems.slice(0, itemLimit));
   const original = items.map((item) => item.bidiClass);
   const types = [...original];
   const isolateMatches = matchingIsolates(original, signal);
@@ -743,8 +746,7 @@ export function resolveBidiParagraph<TIdentity>(
   return Object.freeze({
     items,
     baseLevel: base as BidiLevel,
-    embeddingLevels: Object.freeze(publicLevels),
-    resolvedClasses: Object.freeze(types),
+    embeddingLevels: BidiLevels.from(publicLevels),
     visualOrder: visual.order,
     outcome: Object.freeze(outcome)
   });
@@ -755,8 +757,8 @@ function bidiItemsFromTextBounded<TIdentity>(
   identity: (startCodeUnit: number, endCodeUnit: number, codePoint: number) => TIdentity,
   maximumItems: number,
   signal?: AbortSignal
-): readonly BidiItem<TIdentity>[] {
-  const items: BidiItem<TIdentity>[] = [];
+): BidiItems<TIdentity> {
+  const items = new BidiItemsBuilder<TIdentity>(Math.min(value.length, maximumItems));
   let offset = 0;
   for (const character of value) {
     if (items.length >= maximumItems) break;
@@ -775,20 +777,20 @@ function bidiItemsFromTextBounded<TIdentity>(
     }));
     offset = end;
   }
-  return Object.freeze(items);
+  return items.finish();
 }
 
 export function bidiItemsFromText<TIdentity>(
   value: string,
   identity: (startCodeUnit: number, endCodeUnit: number, codePoint: number) => TIdentity,
   signal?: AbortSignal
-): readonly BidiItem<TIdentity>[] {
+): BidiItems<TIdentity> {
   return bidiItemsFromTextBounded(value, identity, Number.MAX_SAFE_INTEGER, signal);
 }
 
 /** Splits UAX #9 paragraphs at Bidi_Class=B while retaining global item ranges. */
 export function resolveBidiParagraphs<TIdentity>(
-  inputItems: readonly BidiItem<TIdentity>[],
+  inputItems: readonly BidiItem<TIdentity>[] | BidiItems<TIdentity>,
   directionInput: BidiParagraphDirectionInput = "auto",
   budgets: Partial<BidiBudgets> = {},
   signal?: AbortSignal
@@ -799,7 +801,7 @@ export function resolveBidiParagraphs<TIdentity>(
   let start = 0;
   for (let index = 0; index <= inputItems.length; index += 1) {
     signal?.throwIfAborted();
-    if (index < inputItems.length && inputItems[index]?.bidiClass !== "B") continue;
+    if (index < inputItems.length && inputItems.at(index)?.bidiClass !== "B") continue;
     const end = index < inputItems.length ? index + 1 : index;
     if (end > start || inputItems.length === 0) {
       const local = inputItems.slice(start, end);
@@ -821,7 +823,7 @@ export function resolveBidiParagraphs<TIdentity>(
     }
     start = end;
   }
-  return Object.freeze({ items: Object.freeze([...inputItems]), paragraphs: Object.freeze(slices) });
+  return Object.freeze({ items: BidiItems.from(inputItems), paragraphs: Object.freeze(slices) });
 }
 
 export function resolveBidiText(
@@ -842,9 +844,9 @@ export function resolveBidiText(
   );
 }
 
-export function mirroredBidiText(paragraph: BidiParagraph, itemIndex: number): string {
-  const item = paragraph.items[itemIndex];
-  const level = paragraph.embeddingLevels[itemIndex];
+export function mirroredBidiText(paragraph: Pick<BidiParagraph, "items" | "embeddingLevels">, itemIndex: number): string {
+  const item = paragraph.items.at(itemIndex);
+  const level = paragraph.embeddingLevels.at(itemIndex);
   if (item?.codePoint === null || item === undefined || level === null || level === undefined || (level & 1) === 0) {
     return item?.text ?? "";
   }

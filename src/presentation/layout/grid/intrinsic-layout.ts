@@ -48,8 +48,7 @@ export interface GridIntrinsicSizingHost {
   intrinsicOuterBlockSize(
     id: FormattingNodeId,
     availableInlineSize: CssPixelLength,
-    depth: number,
-    itemStyle: boolean
+    depth: number
   ): CssNonNegativeLength;
   withGridBudget<T>(operation: () => T): T;
 }
@@ -301,8 +300,7 @@ export function intrinsicGridBlockSize(
       const block = host.intrinsicOuterBlockSize(
         item.formattingNode,
         areaInlineSize(item.columnStart, item.columnEnd, sizedColumns.tracks),
-        depth,
-        true
+        depth
       );
       return Object.freeze({
         formattingNode: item.formattingNode,

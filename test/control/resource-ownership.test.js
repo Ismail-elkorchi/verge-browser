@@ -6,7 +6,7 @@ import { estimatedRetainedCost, registerRetainedOwner, RetainedCostAccounting } 
 import { RenderArtifactStore, RenderStageMetrics } from "../../dist/presentation/renderer/index.js";
 import { embeddedStylesheetSources } from "../../dist/presentation/style/index.js";
 import { cssCoordinate, cssNonNegativeLength, cssPx, cssRect } from "../../dist/presentation/layout/index.js";
-import { terminalCellMeasurer, terminalCssTextMeasurer } from "../../dist/ui/terminal-measure.js";
+import { terminalCellMeasurer, terminalCssTextMeasurer, terminalCssControlMeasurer } from "../../dist/ui/terminal-measure.js";
 import { hydrateRenderDocument, hydrateRenderStylesheets, renderDocumentAttachment } from "../../dist/ui/render-worker/document-transfer.js";
 
 const url = "https://ownership.test/";
@@ -17,7 +17,7 @@ function request(columns = 80) {
     mediaEnvironment: { viewportWidthCssPx: columns * 8, viewportHeightCssPx: 384,
       mediaType: "screen", prefersColorScheme: "dark", reducedMotion: false, hover: "none", pointer: "none" },
     layoutContext: { viewport: { width: cssNonNegativeLength(viewport.width), height: cssNonNegativeLength(viewport.height) },
-      initialContainingBlock: viewport, scrollport: viewport, textMeasurer: terminalCssTextMeasurer(cssPx(8), cssPx(16), 1) },
+      initialContainingBlock: viewport, scrollport: viewport, controlMeasurer: terminalCssControlMeasurer(), textMeasurer: terminalCssTextMeasurer(cssPx(8), cssPx(16), 1) },
     terminalContext: { columns, rows: 24, cellWidthCssPx: cssPx(8), rowHeightCssPx: cssPx(16),
       unicode: true, ambiguousWidth: 1, colorDepth: 24, cellMeasurer: terminalCellMeasurer() },
   };

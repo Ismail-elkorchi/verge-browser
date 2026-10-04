@@ -20,6 +20,7 @@ import type {
   FormattingColumnNode,
   FormattingContainerNode,
   FormattingFormControlNode,
+  FormattingMarkerNode,
   FormattingNode,
   FormattingNodeId,
   FormattingOutcome,
@@ -31,6 +32,7 @@ import type {
 import { fixTableChildren, type TableBoxFixupHost } from "./table/index.js";
 import { FormattingCounters, type CounterBudget } from "./counters.js";
 import { formatListMarker } from "./counter-number.js";
+import { isInlineFormattingNode } from "./inline-structure.js";
 
 const DEFAULT_FORMATTING_BUDGETS: FormattingBudgets = Object.freeze({
   maxFormattingNodes: 150_000,
@@ -66,14 +68,6 @@ function internalKind(display: ComputedDisplay): FormattingNode["kind"] | null {
     "table-caption": "table-caption"
   };
   return kinds[display.internal];
-}
-
-function inlineLevel(node: FormattingNode): boolean {
-  return node.outer === "inline"
-    || node.kind === "text-sequence"
-    || node.kind === "marker"
-    || node.kind === "forced-line-break"
-    || node.kind === "line-break-opportunity";
 }
 
 function collapsesEntireTextRun(node: FormattingNode): boolean {
@@ -357,7 +351,8 @@ class FormattingBuilder {
     source: DocumentNodeRef | null,
     styleNode: DocumentNodeRef,
     text: string,
-    pseudo: PseudoElementIdentity | null = null
+    pseudo: PseudoElementIdentity | null = null,
+    markerPlacement: FormattingMarkerNode["markerPlacement"] = "outside"
   ): FormattingTextNode | null {
     const remaining = this.#budgets.maxTextCodeUnits - this.#textCodeUnits - this.#alternativeCodeUnits;
     if (remaining <= 0) {
@@ -381,7 +376,7 @@ class FormattingBuilder {
       : this.#styles.pseudo(styleNode, pseudo) ?? this.#styles.style(styleNode);
     return this.#store({
       id: this.#id(source, kind, pseudo),
-      kind,
+      ...(kind === "marker" ? { kind, markerPlacement } : { kind }),
       source,
       styleNode,
       pseudo,
@@ -535,7 +530,7 @@ class FormattingBuilder {
   }
 
   #mixedFlow(children: readonly FormattingNode[], styleNode: DocumentNodeRef): readonly FormattingNodeId[] {
-    const hasBlock = children.some((child) => !inlineLevel(child));
+    const hasBlock = children.some((child) => !isInlineFormattingNode(child));
     if (!hasBlock) return children.map((child) => child.id);
     const output: FormattingNodeId[] = [];
     let inlineRun: FormattingNodeId[] = [];
@@ -547,7 +542,7 @@ class FormattingBuilder {
       inlineRun = [];
     };
     for (const child of children) {
-      if (inlineLevel(child)) inlineRun.push(child.id);
+      if (isInlineFormattingNode(child)) inlineRun.push(child.id);
       else {
         flush();
         output.push(child.id);
@@ -571,7 +566,7 @@ class FormattingBuilder {
       inlineRun = [];
     };
     for (const child of children) {
-      if (inlineLevel(child)) inlineRun.push(child.id);
+      if (isInlineFormattingNode(child)) inlineRun.push(child.id);
       else {
         flush();
         segments.push({ kind: "block", node: child });
@@ -706,13 +701,14 @@ class FormattingBuilder {
             }
             this.#recordGeneratedName(source, "marker", semanticText);
           }
-          marker = this.#text("marker", source, source, text, "marker");
+          marker = this.#text("marker", source, source, text, "marker", style.listStylePosition);
         }
       } catch (error) {
         if (!(error instanceof FormattingBudgetExhausted)) throw error;
       }
     }
     const rawChildren = this.#contentStopped ? [] : this.#rawChildren(source, depth);
+    if (marker?.kind === "marker" && marker.markerPlacement === "inside") rawChildren.unshift(marker);
     let children = this.#transformConnectedPrefix(rawChildren, (retained) => {
       if (kind === "flex-container" || kind === "grid-container") {
         return this.#formattingContextItems(
@@ -728,7 +724,7 @@ class FormattingBuilder {
         .map((id) => this.#nodes.get(id))
         .filter((node): node is FormattingNode => node !== undefined);
       if (kind === "inline-container" && display.inner === "flow"
-        && fixedChildren.some((child) => !inlineLevel(child))) {
+        && fixedChildren.some((child) => !isInlineFormattingNode(child))) {
         return this.#inlineContinuations(source, fixedChildren, open).map((node) => node.id);
       }
       return this.#mixedFlow(fixedChildren, source);
@@ -739,7 +735,7 @@ class FormattingBuilder {
         .map((id) => this.#nodes.get(id))
         .filter((node): node is FormattingNode => node !== undefined);
     }
-    if (marker !== null) children = [marker.id, ...children];
+    if (marker?.kind === "marker" && marker.markerPlacement === "outside") children = [marker.id, ...children];
 
     const container = this.#finalizeContainer(open, children);
     if (kind !== "table") return [container];

@@ -1,6 +1,6 @@
 import type { ComputedStyle } from "../../style/index.js";
 import { cssMax, cssNonNegativeLength, cssPx, type CssNonNegativeLength, type CssPixelLength } from "../fixed.js";
-import type { TableLayoutHost } from "./types.js";
+import type { TableSizingHost } from "./types.js";
 
 const ZERO = cssNonNegativeLength(cssPx(0));
 
@@ -10,7 +10,7 @@ export interface UsedTableBorderSpacing {
 }
 
 export function usedTableBorderSpacing(
-  host: TableLayoutHost,
+  host: TableSizingHost,
   style: ComputedStyle,
   inlineBasis: CssPixelLength,
 ): UsedTableBorderSpacing {

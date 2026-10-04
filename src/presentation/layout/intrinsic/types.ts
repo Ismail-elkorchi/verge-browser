@@ -26,6 +26,8 @@ export interface IntrinsicSizeContributions {
 export interface IntrinsicContributionRequest {
   readonly formattingNode: FormattingNodeId;
   readonly availableInlineSize: CssPixelLength | null;
+  /** Flex content bases ignore the item's own preferred/min/max inline size. */
+  readonly inlineSizing: "contribution" | "content";
 }
 
 export type IntrinsicContributionOutcome =

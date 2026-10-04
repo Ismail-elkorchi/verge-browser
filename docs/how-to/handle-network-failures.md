@@ -2,7 +2,7 @@
 
 ## Goal
 See how deterministic fetch failures surface so callers can branch on structured
- network outcomes instead of string-matching raw errors.
+network outcomes instead of string-matching raw errors.
 
 ## Prerequisites
 - `@ismail-elkorchi/verge-browser` installed
@@ -30,7 +30,13 @@ dns
 DNS_ERROR
 ```
 
-The Node fetch client exposes stable transport-level detail codes.
+The Node fetch client exposes structured detail codes. DNS, TLS, and timeout
+failures remain distinct from `kind: "transport"` with
+`detailCode: "NETWORK_FAILURE"`. A transport summary may include a recognized
+underlying code such as `ECONNREFUSED`; branch on the structured fields rather
+than parsing that summary. The original error is retained as `cause`, which may
+contain private request data and should not be copied blindly into user-visible
+logs.
 
 ## Common failure modes
 - Code branches on raw exception message text instead of `networkOutcome.kind`.

@@ -67,7 +67,7 @@ async function fixture(overrides = {}) {
     }),
   };
   const prepared = await prepareBrowserTui(url, options);
-  const runtime = createTuiRuntime({ app: prepared.app, host: createMemoryTerminalHost({ terminalSize: overrides.terminalSize ?? terminalSize }) });
+  const runtime = createTuiRuntime({ app: prepared.app, textPresentation: prepared.textPresentation, host: createMemoryTerminalHost({ terminalSize: overrides.terminalSize ?? terminalSize }) });
   await runtime.start();
   await waitUntil(runtime, () => ["ready", "failed"].includes(runtime.state().documents[0]?.rendering?.status));
   assert.equal(runtime.state().documents[0]?.rendering?.status, "ready", runtime.state().documents[0]?.rendering?.error ?? "Initial viewport did not render");

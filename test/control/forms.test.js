@@ -10,7 +10,8 @@ import {
 } from "../../dist/document/index.js";
 import {
   buildFormSubmissionRequest,
-  formEntries
+  formEntries,
+  resolveImplicitSubmission
 } from "../../dist/app/forms.js";
 
 function documentWithForm(html) {
@@ -372,4 +373,39 @@ test("enumerated form and input keywords do not treat surrounding whitespace as 
   assert.equal(form.controls[0].inputType, "text");
   assert.equal(form.controls[1].kind, "submit");
   assert.equal(createDocumentState(document).controls.get(form.controls[0].node).value, "invalid");
+});
+
+test("implicit submission resolves the first default submitter, including external owners", () => {
+  const document = documentWithForm(`<button id=first form=f name=intent value=external>External</button>
+    <form id=f action=/search><input id=q name=q><button id=second>Second</button></form>`);
+  assert.deepEqual(resolveImplicitSubmission(document, document.elementById("q")), {
+    kind: "submit", formId: document.elementById("f"), submitterId: document.elementById("first")
+  });
+  const disabled = documentWithForm(`<form><input id=q><button disabled>First</button><button>Second</button></form>`);
+  assert.deepEqual(resolveImplicitSubmission(disabled, disabled.elementById("q")), { kind: "none" });
+  const image = documentWithForm(`<form><input id=q><input type=image><button>Second</button></form>`);
+  assert.equal(resolveImplicitSubmission(image, image.elementById("q")).kind, "unsupported");
+  const disabledImage = documentWithForm(`<form><input id=q><input type=image disabled><button>Second</button></form>`);
+  assert.deepEqual(resolveImplicitSubmission(disabledImage, disabledImage.elementById("q")), { kind: "none" });
+});
+
+test("implicit submission counts blocking inputs independently of successful entries", () => {
+  for (const type of ["text", "search", "url", "tel", "email", "password", "date", "month", "week", "time", "datetime-local", "number"]) {
+    for (const attribute of ["", "disabled", "readonly"]) {
+      const document = documentWithForm(`<form><input id=q><input type=${type} ${attribute}></form>`);
+      assert.deepEqual(resolveImplicitSubmission(document, document.elementById("q")), { kind: "none" }, `${type} ${attribute}`);
+    }
+  }
+  for (const other of ["<input type=hidden>", "<textarea></textarea>", "<select><option>One</option></select>", "<input type=checkbox>"]) {
+    const document = documentWithForm(`<form id=f><input id=q readonly>${other}</form>`);
+    assert.deepEqual(resolveImplicitSubmission(document, document.elementById("q")), { kind: "submit", formId: document.elementById("f") });
+  }
+});
+
+test("implicit submission ignores ineligible or unowned controls", () => {
+  for (const html of ["<input id=q>", "<form><textarea id=q></textarea></form>", "<form><input id=q disabled></form>",
+    "<form><input id=q type=checkbox></form>", "<form><datalist><input id=q></datalist></form>"]) {
+    const document = documentWithForm(html);
+    assert.deepEqual(resolveImplicitSubmission(document, document.elementById("q")), { kind: "none" });
+  }
 });

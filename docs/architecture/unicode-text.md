@@ -31,6 +31,9 @@ owns the computed `direction`, `unicode-bidi`, logical `text-align`,
 construction. Layout consumes those streams directly for line selection and
 visual-run geometry; `TextSearchIndex` independently consumes the same streams.
 Terminal code only paints and snaps the already resolved visual clusters.
+Logical units, bidi items/levels, search segments, and visual cluster selections
+use compact indexed storage. Source offsets remain canonical; decoding a record
+does not create a second retained text model.
 
 HTML `dir=auto` is recalculated from current input and textarea values during
 style resolution. `pre[dir=auto]`, text controls, and textareas use
@@ -38,6 +41,34 @@ style resolution. `pre[dir=auto]`, text controls, and textareas use
 direction. Preserved tabs remain logical text units; line selection resolves
 their used advances against inherited CSS `tab-size` before line boxes are
 constructed.
+
+Browser chrome and mounted native controls use one session-owned
+`TextPresentation` adapter backed by the same pinned Unicode resolver. It resolves
+the full logical paragraph with automatic base direction, then maps the supplied
+grapheme range for each wrapped line. Logical offsets remain authoritative for
+editing, selection, and copied text, including zero-width directional controls.
+Mirrored glyph substitution preserves the active width profile: a mirror with a
+different cell width keeps the original glyph rather than changing editor geometry.
+This adapter does not receive arbitrary CSS `direction` or `unicode-bidi`
+overrides; document layout's CSS direction support is not a claim that native
+editors implement those overrides.
+
+Interactive startup and resume require explicit visual-cell presentation from
+the terminal host, paired with that text adapter. Standard ECMA-48 mode 8 is
+queried separately from DEC private modes. A mutable, known implicit mode is
+changed only with readback confirming explicit mode. Missing or unrecognized
+state fails closed without changing an unknown baseline; a host may instead
+supply independently qualified explicit initial state, recorded as assumed
+rather than observed. `TERM` names do not establish this capability.
+
+After successful acquisition, the full-screen TUI clears its owned surface once
+at startup or resume so existing terminal paragraph attributes do not retain
+implicit ordering. The low-level mode operation itself is non-destructive, and
+ordinary partial frame updates do not clear the screen. Session release restores
+the original known mode and raw-input state, including failure, cancellation,
+and suspension. One-shot plain output uses the same text adapter without
+acquiring or changing terminal modes. These contracts do not imply native
+qualification across all terminal emulators, fonts, or transports.
 
 The Unicode generator is `scripts/unicode/generate-unicode-data.mjs`.
 `npm run unicode:generate` downloads only the versioned official sources,

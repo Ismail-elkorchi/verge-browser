@@ -88,11 +88,22 @@ export interface FormattingContainerNode extends FormattingNodeBase {
     | "grid-item";
 }
 
-export interface FormattingTextNode extends FormattingNodeBase {
-  readonly kind: "text-sequence" | "generated-text" | "marker";
+interface FormattingTextNodeBase extends FormattingNodeBase {
   readonly text: string;
   readonly whiteSpace: ComputedWhiteSpace;
 }
+
+export interface FormattingContentTextNode extends FormattingTextNodeBase {
+  readonly kind: "text-sequence" | "generated-text";
+}
+
+export interface FormattingMarkerNode extends FormattingTextNodeBase {
+  readonly kind: "marker";
+  /** Placement belongs to the originating list item, independently of pseudo styling. */
+  readonly markerPlacement: "inside" | "outside";
+}
+
+export type FormattingTextNode = FormattingContentTextNode | FormattingMarkerNode;
 
 export interface FormattingBreakNode extends FormattingNodeBase {
   readonly kind: "forced-line-break" | "line-break-opportunity";

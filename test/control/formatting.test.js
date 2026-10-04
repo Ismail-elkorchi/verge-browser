@@ -258,7 +258,7 @@ test("lists generate marker boxes tied to their source item", () => {
   const items = nodes(formatting).filter((node) => node.kind === "list-item");
   const markers = nodes(formatting).filter((node) => node.kind === "marker");
   assert.equal(items.length, 2);
-  assert.deepEqual(markers.map((node) => node.text), ["1.", "2."]);
+  assert.deepEqual(markers.map((node) => node.text), ["1. ", "2. "]);
   assert.deepEqual(markers.map((node) => node.source), document.children(sourceNamed(document, "ol")).map((node) => node.ref));
 });
 
