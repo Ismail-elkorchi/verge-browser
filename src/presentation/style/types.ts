@@ -1,3 +1,4 @@
+import type { CounterOperation, GeneratedContentProgram } from "./generated-content.js";
 import type { SelectorResultCache } from "./selector-cache.js";
 export type CssOverflow = "visible" | "hidden" | "clip" | "auto" | "scroll";
 
@@ -223,8 +224,11 @@ export interface ComputedStyle {
     | "upper-alpha";
   readonly text: ComputedTextStyle;
   readonly box: ComputedBoxStyle;
-  /** Computed `content` for this pseudo-element; null on principal styles. */
-  readonly generatedContent: string | null;
+  /** Immutable computed content; evaluation belongs to formatting counter order. */
+  readonly generatedContent: GeneratedContentProgram;
+  readonly counterReset: readonly CounterOperation[];
+  readonly counterIncrement: readonly CounterOperation[];
+  readonly counterSet: readonly CounterOperation[];
   readonly customProperties: ReadonlyMap<string, string>;
 }
 

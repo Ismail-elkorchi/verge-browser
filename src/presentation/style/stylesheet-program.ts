@@ -473,3 +473,21 @@ export function compileStylesheetProgram(input: CompileStylesheetProgramInput): 
   });
   return program;
 }
+
+/** Only AST boundaries actually shared by compilation are aliased, never every token/allocation. */
+export function stylesheetOwnershipRoots(stylesheet: StylesheetProgramSource["stylesheet"], signal?: AbortSignal): readonly object[] {
+  const roots: object[] = [];
+  const pending: CssBlockItem[] = [...stylesheet.rules];
+  while (pending.length > 0) {
+    signal?.throwIfAborted();
+    const item = pending.pop();
+    if (item === undefined) continue;
+    roots.push(item);
+    if (item.kind === "declaration") roots.push(item.value);
+    else {
+      roots.push(item.prelude);
+      if (item.block !== null) pending.push(...item.block.items);
+    }
+  }
+  return roots;
+}

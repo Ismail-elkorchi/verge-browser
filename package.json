@@ -63,9 +63,9 @@
   },
   "dependencies": {
     "@ismail-elkorchi/css-parser": "github:Ismail-elkorchi/css-parser#bb3c03409a299681075c809290b8bd9888f58abf",
-    "@ismail-elkorchi/html-parser": "git+https://github.com/Ismail-elkorchi/html-parser.git#994a5d8e070285bcb0a91b6a62c488b3657f6445",
+    "@ismail-elkorchi/html-parser": "git+https://github.com/Ismail-elkorchi/html-parser.git#f52548202a9fed8f2d9f59f67732fe339922462b",
     "@ismail-elkorchi/http-client": "0.1.1",
-    "@ismail-elkorchi/terminal-ui": "github:Ismail-elkorchi/terminal-ui#dbedb6d5b4c4224d31ad97125672f8254a08a06e",
+    "@ismail-elkorchi/terminal-ui": "github:Ismail-elkorchi/terminal-ui#8f4c1fca74bc7227aa2429f0695ac70955951648",
     "tough-cookie": "6.0.2"
   },
   "devDependencies": {

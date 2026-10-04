@@ -1,4 +1,8 @@
-import type { DocumentNodeRef, WebDocumentNode, IndexedWebDocumentSnapshot } from "../document/index.js";
+import { FormattingCounters } from "../presentation/formatting/counters.js";
+import { formatListMarker } from "../presentation/formatting/counter-number.js";
+import type { ComputedStyle } from "../presentation/style/index.js";
+import { htmlCounterDefaults, NO_COUNTER_OPERATIONS } from "../presentation/style/generated-content.js";
+import type { DocumentNodeRef, IndexedWebDocumentSnapshot } from "../document/index.js";
 import type {
   ReaderBlock,
   ReaderBudgets,
@@ -6,6 +10,8 @@ import type {
   ReaderTableCell,
   ReaderTableRow
 } from "./types.js";
+
+class ReaderCounterBudgetExhausted extends Error {}
 
 const DEFAULT_READER_BUDGETS: ReaderBudgets = Object.freeze({
   maxNodes: 100_000,
@@ -24,10 +30,6 @@ function budgets(overrides: Partial<ReaderBudgets> | undefined): ReaderBudgets {
 
 function text(document: IndexedWebDocumentSnapshot, ref: DocumentNodeRef, remaining: number): string {
   return document.text(ref, remaining).replace(/\s+/gu, " ").trim();
-}
-
-function elementChildren(document: IndexedWebDocumentSnapshot, node: WebDocumentNode): readonly WebDocumentNode[] {
-  return node.children.map((ref) => document.node(ref)).filter((child) => child.kind === "element");
 }
 
 function listItemText(document: IndexedWebDocumentSnapshot, ref: DocumentNodeRef, maxCodeUnits: number): string {
@@ -63,7 +65,16 @@ export function buildReaderDocument(
   let retainedText = 0;
   let tableCells = 0;
   let truncated = false;
-  const listOrdinals = new Map<DocumentNodeRef, ReadonlyMap<DocumentNodeRef, number>>();
+  let counterWork = 0;
+  let counterStates = 0;
+  const counters = new FormattingCounters(document, (budget, amount = 1) => {
+    if (budget === "maxCounterOperations") counterWork += amount;
+    if (budget === "maxCounterStates") counterStates += amount;
+    if (counterWork > limits.maxNodes * 8 || counterStates > limits.maxNodes) {
+      truncated = true;
+      throw new ReaderCounterBudgetExhausted();
+    }
+  }, options.signal);
   const boundaryCache = new Map<DocumentNodeRef, boolean>();
   const chargedNodes = new Set<DocumentNodeRef>();
 
@@ -129,7 +140,25 @@ export function buildReaderDocument(
     return boundaryCache.get(ref) ?? false;
   };
 
+  const counterStyle = (ref: DocumentNodeRef): Pick<ComputedStyle, "display" | "counterReset" | "counterIncrement" | "counterSet"> | null => {
+    if (document.node(ref).kind !== "element" || document.semantic(ref)?.accessibilityHidden === true) return null;
+    return {
+      display: { box: "principal", outer: "block", inner: "flow", internal: null,
+        listItem: document.semantic(ref)?.role === "listitem", replaced: false },
+      ...htmlCounterDefaults(document, ref), counterIncrement: NO_COUNTER_OPERATIONS,
+    };
+  };
+
   const visit = (ref: DocumentNodeRef, listDepth: number): void => {
+    const style = counterStyle(ref);
+    if (style === null) return;
+    counters.element(ref, style, counterStyle);
+    counters.enterChildren();
+    try { visitContents(ref, listDepth); }
+    finally { counters.leaveChildren(); }
+  };
+
+  const visitContents = (ref: DocumentNodeRef, listDepth: number): void => {
     options.signal?.throwIfAborted();
     if (blocks.length >= limits.maxBlocks) {
       truncated = true;
@@ -164,18 +193,7 @@ export function buildReaderDocument(
     }
     if (semantic?.role === "listitem") {
       const parent = document.parent(ref);
-      let ordinals = parent === null ? undefined : listOrdinals.get(parent.ref);
-      if (parent !== null && ordinals === undefined) {
-        let ordinal = 0;
-        const indexed = new Map<DocumentNodeRef, number>();
-        for (const child of elementChildren(document, parent)) {
-          if (document.semantic(child.ref)?.role !== "listitem") continue;
-          indexed.set(child.ref, ++ordinal);
-        }
-        ordinals = indexed;
-        listOrdinals.set(parent.ref, indexed);
-      }
-      const ordinal = ordinals?.get(ref) ?? 1;
+      const ordinal = counters.value("list-item");
       const ordered = parent?.kind === "element" && parent.name === "ol";
       const retained = retain(listItemText(document, ref, limits.maxTextCodeUnits - retainedText));
       if (retained.length > 0) {
@@ -183,7 +201,7 @@ export function buildReaderDocument(
           kind: "list-item",
           source: ref,
           depth: listDepth,
-          marker: ordered ? `${String(ordinal)}.` : "•",
+          marker: formatListMarker(ordinal, ordered ? "decimal" : "disc"),
           text: retained
         }));
       }
@@ -268,7 +286,8 @@ export function buildReaderDocument(
   };
 
   for (const child of document.node(document.body ?? document.documentElement ?? document.root).children) {
-    visit(child, 0);
+    try { visit(child, 0); }
+    catch (error) { if (!(error instanceof ReaderCounterBudgetExhausted)) throw error; break; }
   }
   return Object.freeze({
     document,

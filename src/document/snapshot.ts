@@ -1,3 +1,5 @@
+import { computeTextEquivalent, semanticNameFromContents } from "./text-equivalent.js";
+import { parseHtmlInteger } from "./html-integer.js";
 import { registerRetainedOwner } from "../memory/retained-cost.js";
 import {
   HTML_NAMESPACE_URI,
@@ -147,9 +149,8 @@ function cleanText(value: string): string {
 
 /** HTML non-negative integer parsing, with invalid/zero dimensions using defaults. */
 function controlDimension(value: string | null, fallback: number): number {
-  const digits = value?.match(/^[\t\n\f\r ]*\+?([0-9]+)/u)?.[1];
-  const parsed = digits === undefined ? NaN : Number(digits);
-  return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= 2_147_483_647 ? parsed : fallback;
+  const parsed = parseHtmlInteger(value);
+  return parsed !== null && parsed > 0 && parsed <= 2_147_483_647 ? parsed : fallback;
 }
 
 function finiteNumber(value: string | null): number | null {
@@ -159,12 +160,12 @@ function finiteNumber(value: string | null): number | null {
 }
 
 function normalizeMethod(value: string | null): "get" | "post" | "dialog" {
-  const normalized = value?.trim().toLowerCase();
+  const normalized = value?.toLowerCase();
   return normalized === "post" || normalized === "dialog" ? normalized : "get";
 }
 
 function normalizeEncoding(value: string | null): "application/x-www-form-urlencoded" | "multipart/form-data" | "text/plain" {
-  const normalized = value?.trim().toLowerCase();
+  const normalized = value?.toLowerCase();
   return normalized === "multipart/form-data" || normalized === "text/plain"
     ? normalized
     : "application/x-www-form-urlencoded";
@@ -226,7 +227,7 @@ function htmlRole(node: WebElementNode, attribute: (name: string) => string | nu
     const type = (attribute("type") ?? "text").toLowerCase();
     if (type === "checkbox") return "checkbox";
     if (type === "radio") return "radio";
-    if (type === "submit" || type === "reset" || type === "button") return "button";
+    if (type === "submit" || type === "reset" || type === "button" || type === "image") return "button";
     return "textbox";
   }
   if (node.name === "textarea") return "textbox";
@@ -288,7 +289,6 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
   readonly #semantics: ReadonlyMap<DocumentNodeRef, DocumentSemanticEntry>;
   readonly #elementsById: ReadonlyMap<string, DocumentNodeRef>;
   readonly #forms: ReadonlyMap<DocumentNodeRef, DocumentForm>;
-  readonly #formOwners: ReadonlyMap<DocumentNodeRef, DocumentNodeRef>;
   readonly #controls: ReadonlyMap<DocumentNodeRef, DocumentFormControl>;
   readonly #radioGroups: ReadonlyMap<DocumentNodeRef, readonly DocumentChoiceControl[]>;
   readonly #options: ReadonlyMap<DocumentNodeRef, DocumentSelectOption>;
@@ -315,6 +315,7 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
       outcome: { status: "complete", indexedNodes: 0 }
     };
     const nodes = new Map<DocumentNodeRef, WebDocumentNode>();
+    const parserRefs = new Map<HtmlNode["id"], DocumentNodeRef>();
     let sequence = 0;
 
     this.root = nodeRef(++sequence);
@@ -324,6 +325,7 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
     }[] = [];
     const cloneNode = (node: HtmlNode, parent: DocumentNodeRef): DocumentNodeRef => {
       const ref = nodeRef(++sequence);
+      parserRefs.set(node.id, ref);
       const children: DocumentNodeRef[] = [];
       const range = node.kind === "templateContent"
         ? null
@@ -530,7 +532,7 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
     const elementByHtmlId = new Map<string, DocumentNodeRef>();
     for (const element of elements) {
       const id = attribute(element.ref, "id");
-      if (id !== null && !elementByHtmlId.has(id)) elementByHtmlId.set(id, element.ref);
+      if (id !== null && id.length > 0 && !elementByHtmlId.has(id)) elementByHtmlId.set(id, element.ref);
     }
     this.#elementsById = elementByHtmlId;
     const tableMetadata = buildHtmlTableMetadata({
@@ -570,20 +572,51 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
       ? this.finalUrl
       : resolveUrl(attribute(baseElement.ref, "href") ?? "", this.finalUrl);
 
-    const labels: DocumentLabel[] = [];
     const labelTextByTarget = new Map<DocumentNodeRef, string>();
+    const textEquivalent = (root: DocumentNodeRef, name = true, includeContents = true): string => computeTextEquivalent({
+      node: (ref) => nodes.get(ref),
+      attribute,
+      elementById: (id) => elementByHtmlId.get(id) ?? null,
+      labelText: (ref) => labelTextByTarget.get(ref),
+      hidden: (ref) => accessibilityHidden.get(ref) ?? false,
+    }, root, { name, includeContents, maxWork: limits.maxIndexedNodes, maxText: Math.min(32_768, limits.maxTextCodeUnits) });
+    const optionText = (root: DocumentNodeRef): string => {
+      const parts: string[] = [];
+      const pending = [root];
+      let remaining = limits.maxTextCodeUnits;
+      let work = 0;
+      while (pending.length > 0 && remaining > 0 && work++ < limits.maxIndexedNodes) {
+        const ref = pending.pop();
+        const node = ref === undefined ? undefined : nodes.get(ref);
+        if (node?.kind === "text") {
+          const value = node.value.slice(0, remaining); parts.push(value); remaining -= value.length;
+        } else if (node?.kind === "element" && !["script", "template"].includes(node.name)) {
+          for (let index = node.children.length - 1; index >= 0; index--) {
+            const child = node.children[index]; if (child !== undefined) pending.push(child);
+          }
+        }
+      }
+      return parts.join("").replace(/[\t\n\f\r ]+/gu, " ").replace(/^ | $/gu, "");
+    };
+    const labelable = (ref: DocumentNodeRef): boolean => {
+      const node = nodes.get(ref);
+      return node?.kind === "element" && node.namespace === HTML_NAMESPACE_URI
+        && ["input", "textarea", "select", "button", "meter", "output", "progress"].includes(node.name)
+        && !(node.name === "input" && attribute(ref, "type")?.toLowerCase() === "hidden");
+    };
+    const labels: DocumentLabel[] = [];
     for (const element of elements) {
       if (element.namespace !== HTML_NAMESPACE_URI || element.name !== "label") continue;
-      const labelText = cleanText(text(element.ref));
-      if (labelText.length === 0) continue;
+      const labelText = textEquivalent(element.ref);
       const explicitTarget = attribute(element.ref, "for");
       let target = explicitTarget === null ? null : elementByHtmlId.get(explicitTarget) ?? null;
-      if (target === null) {
+      if (target !== null && !labelable(target)) target = null;
+      if (explicitTarget === null) {
         const descendants = [...element.children].reverse();
         while (descendants.length > 0 && target === null) {
           const descendant = descendants.pop();
           const child = descendant === undefined ? undefined : nodes.get(descendant);
-          if (child?.kind === "element" && ["input", "textarea", "select", "button"].includes(child.name)) {
+          if (child?.kind === "element" && labelable(child.ref)) {
             target = child.ref;
           } else if (child !== undefined) {
             for (let index = child.children.length - 1; index >= 0; index -= 1) {
@@ -596,7 +629,7 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
       if (target !== null) {
         const entry = Object.freeze({ node: element.ref, target, text: labelText });
         labels.push(entry);
-        labelTextByTarget.set(target, [labelTextByTarget.get(target), labelText].filter(Boolean).join(" "));
+        if (labelText.length > 0) labelTextByTarget.set(target, [labelTextByTarget.get(target), labelText].filter(Boolean).join(" "));
       }
     }
     this.labels = Object.freeze(labels);
@@ -607,27 +640,7 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
       const cacheKey = `${element.ref}:${includeContents ? "contents" : "explicit"}`;
       const cached = accessibleNames.get(cacheKey);
       if (cached !== undefined) return cached;
-      const labelledBy = attribute(element.ref, "aria-labelledby");
-      if (labelledBy !== null) {
-        const value = labelledBy.split(/\s+/u)
-          .map((id) => elementByHtmlId.get(id))
-          .filter((ref): ref is DocumentNodeRef => ref !== undefined)
-          .map((ref) => cleanText(text(ref)))
-          .filter(Boolean)
-          .join(" ");
-        if (value.length > 0) {
-          accessibleNames.set(cacheKey, value);
-          return value;
-        }
-      }
-      const value = cleanText(
-        attribute(element.ref, "aria-label")
-        ?? labelTextByTarget.get(element.ref)
-        ?? attribute(element.ref, "alt")
-        ?? attribute(element.ref, "title")
-        ?? attribute(element.ref, "placeholder")
-        ?? (includeContents ? text(element.ref) : "")
-      );
+      const value = textEquivalent(element.ref, true, includeContents);
       accessibleNames.set(cacheKey, value);
       return value;
     };
@@ -637,17 +650,13 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
       return describedBy.split(/\s+/u)
         .map((id) => elementByHtmlId.get(id))
         .filter((ref): ref is DocumentNodeRef => ref !== undefined)
-        .map((ref) => cleanText(text(ref)))
+        .map((ref) => textEquivalent(ref))
         .filter(Boolean)
         .join(" ");
     };
 
     const semantics = new Map<DocumentNodeRef, DocumentSemanticEntry>();
     const landmarks: DocumentSemanticEntry[] = [];
-    const nameFromContents = new Set<DocumentSemanticRole>([
-      "heading", "link", "button", "listitem", "term", "definition", "cell",
-      "columnheader", "rowheader", "figure", "paragraph", "blockquote", "code", "article"
-    ]);
     for (const element of elements.slice(0, limits.maxIndexedNodes)) {
       const get = (name: string): string | null => attribute(element.ref, name);
       const isControl = element.namespace === HTML_NAMESPACE_URI
@@ -659,7 +668,7 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
       const role = get("role") === null && tableCell?.headerRole !== null && tableCell?.headerRole !== undefined
         ? tableCell.headerRole === "row" ? "rowheader" : "columnheader"
         : defaultRole;
-      const explicitName = accessibleName(element, nameFromContents.has(role));
+      const explicitName = accessibleName(element, semanticNameFromContents(role));
       const table = tableMetadata.tables.get(element.ref);
       const caption = table?.captions[0];
       const name = role === "table" && explicitName.length === 0 && caption !== undefined
@@ -811,50 +820,17 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
       markTruncated(mutableOutcome, "maxForms", limits.maxForms, totalNodes);
     }
     const indexedForms = new Set(formElements.map((form) => form.ref));
-    const allForms = new Set(allFormElements.map((form) => form.ref));
-    const formOwners = new Map<DocumentNodeRef, DocumentNodeRef>();
-    const treeFormOwners = new Map<DocumentNodeRef, DocumentNodeRef>();
-    const ownerPending: { readonly ref: DocumentNodeRef; readonly owner: DocumentNodeRef | null }[] = [
-      { ref: this.root, owner: null }
-    ];
-    let ownerNodes = 0;
-    while (ownerPending.length > 0 && ownerNodes < limits.maxIndexedNodes) {
-      const current = ownerPending.pop();
-      if (current === undefined) continue;
-      ownerNodes += 1;
-      const node = nodes.get(current.ref);
-      if (node === undefined) continue;
-      const owner = allForms.has(node.ref) ? node.ref : current.owner;
-      if (owner !== null) {
-        treeFormOwners.set(node.ref, owner);
-        if (indexedForms.has(owner)) formOwners.set(node.ref, owner);
-      }
-      for (let index = node.children.length - 1; index >= 0; index -= 1) {
-        const child = node.children[index];
-        if (child !== undefined) ownerPending.push({ ref: child, owner });
-      }
-    }
-    const formByHtmlId = new Map<string, DocumentNodeRef>();
-    for (const form of allFormElements) {
-      const id = attribute(form.ref, "id");
-      if (id !== null && !formByHtmlId.has(id)) formByHtmlId.set(id, form.ref);
-    }
     const controlElements = elements.filter((element) =>
       element.namespace === HTML_NAMESPACE_URI && ["input", "textarea", "select", "button"].includes(element.name)
     );
     const controlOwner = new Map<DocumentNodeRef, DocumentNodeRef>();
     const controlsWithUnindexedOwner = new Set<DocumentNodeRef>();
-    for (const control of controlElements) {
-      const explicitForm = attribute(control.ref, "form");
-      const owner = explicitForm === null
-        ? treeFormOwners.get(control.ref) ?? null
-        : formByHtmlId.get(explicitForm) ?? null;
-      if (owner !== null) {
-        if (indexedForms.has(owner)) {
-          controlOwner.set(control.ref, owner);
-          formOwners.set(control.ref, owner);
-        } else controlsWithUnindexedOwner.add(control.ref);
-      }
+    for (const association of parsed.formAssociations) {
+      const control = parserRefs.get(association.elementId);
+      const owner = parserRefs.get(association.formId);
+      if (control === undefined || owner === undefined) throw new TypeError("Detached parser form association");
+      if (indexedForms.has(owner)) controlOwner.set(control, owner);
+      else controlsWithUnindexedOwner.add(control);
     }
     const controlsByForm = new Map<DocumentNodeRef, DocumentFormControl[]>();
     const controlIndex = new Map<DocumentNodeRef, DocumentFormControl>();
@@ -873,7 +849,7 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
         node: element.ref,
         form: owner,
         name: attribute(element.ref, "name") ?? "",
-        label: accessibleName(element) || "Unnamed control",
+        label: accessibleName(element, element.name === "button"),
         disabled: disabledByFieldset.get(element.ref) === true || attribute(element.ref, "disabled") !== null,
         required: attribute(element.ref, "required") !== null
       };
@@ -912,6 +888,7 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
           const current = optionPending.pop();
           const node = current === undefined ? undefined : nodes.get(current.ref);
           if (node?.kind !== "element") continue;
+          if (node.namespace === HTML_NAMESPACE_URI && ["datalist", "select", "template"].includes(node.name)) continue;
           if (node.namespace === HTML_NAMESPACE_URI && node.name === "option") {
             options.push({ element: node, disabledByGroup: current?.disabledByGroup ?? false });
             continue;
@@ -927,29 +904,28 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
           markTruncated(mutableOutcome, "maxOptionsPerSelect", limits.maxOptionsPerSelect, totalNodes);
         }
         const multiple = attribute(element.ref, "multiple") !== null;
-        const hasSelected = options.some(({ element: option }) => attribute(option.ref, "selected") !== null);
-        const mappedOptions = options.map(({ element: option, disabledByGroup }, index) => Object.freeze({
+        const mappedOptions = options.map(({ element: option, disabledByGroup }) => Object.freeze({
           node: option.ref,
           select: element.ref,
-          value: attribute(option.ref, "value") ?? text(option.ref, limits.maxTextCodeUnits),
-          label: attribute(option.ref, "label") || cleanText(text(option.ref, limits.maxTextCodeUnits)),
-          defaultSelected: attribute(option.ref, "selected") !== null || (!multiple && !hasSelected && index === 0),
+          value: attribute(option.ref, "value") ?? optionText(option.ref),
+          label: attribute(option.ref, "label") || optionText(option.ref),
+          defaultSelected: attribute(option.ref, "selected") !== null,
           disabled: disabledByGroup || attribute(option.ref, "disabled") !== null
         }));
         for (const option of mappedOptions) optionIndex.set(option.node, option);
-        control = Object.freeze({ ...common, kind: "select", multiple, options: Object.freeze(mappedOptions) });
+        control = Object.freeze({ ...common, kind: "select", multiple, displaySize: controlDimension(attribute(element.ref, "size"), multiple ? 4 : 1), options: Object.freeze(mappedOptions) });
       } else if (element.name === "button") {
-        const rawType = (attribute(element.ref, "type") ?? "submit").trim().toLowerCase();
+        const rawType = (attribute(element.ref, "type") ?? "submit").toLowerCase();
         const type = rawType === "reset" || rawType === "button" ? rawType : "submit";
         control = Object.freeze({
           ...common,
           kind: type,
-          label: cleanText(text(element.ref)) || common.label,
+          caption: textEquivalent(element.ref, false),
           value: attribute(element.ref, "value") ?? "",
           ...submitterMetadata()
         });
       } else {
-        const rawInputType = (attribute(element.ref, "type") ?? "text").trim().toLowerCase();
+        const rawInputType = (attribute(element.ref, "type") ?? "text").toLowerCase();
         const inputType = KNOWN_INPUT_TYPES.has(rawInputType) ? rawInputType : "text";
         const defaultValue = attribute(element.ref, "value") ?? (inputType === "checkbox" || inputType === "radio" ? "on" : "");
         if (inputType === "hidden") {
@@ -962,10 +938,11 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
             ...common, kind: inputType, value: defaultValue,
             defaultChecked: attribute(element.ref, "checked") !== null
           });
-        } else if (inputType === "submit" || inputType === "reset") {
+        } else if (inputType === "submit" || inputType === "reset" || inputType === "button") {
           control = Object.freeze({
             ...common, kind: inputType,
-            value: defaultValue || (inputType === "submit" ? "Submit" : "Reset"),
+            value: attribute(element.ref, "value") ?? (inputType === "submit" ? "Submit" : inputType === "reset" ? "Reset" : ""),
+            caption: attribute(element.ref, "value") ?? (inputType === "submit" ? "Submit" : inputType === "reset" ? "Reset" : ""),
             ...submitterMetadata()
           });
         } else if (["text", "search", "email", "url", "tel", "password", "number"].includes(inputType)) {
@@ -976,6 +953,7 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
           control = Object.freeze({
             ...common,
             kind: "text",
+            multiple: attribute(element.ref, "multiple") !== null,
             size: controlDimension(attribute(element.ref, "size"), 20),
             inputType: inputType as "text" | "search" | "email" | "url" | "tel" | "password" | "number",
             defaultValue,
@@ -1019,7 +997,7 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
         attribute(element.ref, "aria-label")
         ?? attribute(element.ref, "title")
         ?? (legendRef === undefined ? "" : text(legendRef))
-      ) || (search?.kind === "text" ? search.label : `Form ${String(forms.length + 1)}`);
+      ) || (search?.kind === "text" ? search.label : "") || `Form ${String(forms.length + 1)}`;
       const rawAction = attribute(element.ref, "action");
       const form = Object.freeze({
         node: element.ref,
@@ -1039,7 +1017,6 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
     }
     this.forms = Object.freeze(forms);
     this.#forms = new Map(forms.map((form) => [form.node, form]));
-    this.#formOwners = formOwners;
     this.#controls = controlIndex;
     this.controls = Object.freeze([...controlIndex.values()]);
     this.#options = optionIndex;
@@ -1090,7 +1067,7 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
           const width = finiteNumber(attribute(element.ref, "width"));
           const height = finiteNumber(attribute(element.ref, "height"));
           replaced.push(Object.freeze({
-            node: element.ref, kind: "svg", source: null,
+            node: element.ref, kind: "svg", source: null, alternativeText: null,
             fallbackText: accessibleName(element) || "SVG image",
             width: width !== null && width >= 0 ? width : null,
             height: height !== null && height >= 0 ? height : null
@@ -1102,7 +1079,7 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
         if (element.parent === null || nodes.get(element.parent)?.kind !== "element"
           || (nodes.get(element.parent) as WebElementNode).namespace !== element.namespace) {
           replaced.push(Object.freeze({
-            node: element.ref, kind: "mathml", source: null,
+            node: element.ref, kind: "mathml", source: null, alternativeText: null,
             fallbackText: cleanText(text(element.ref)) || "Mathematical expression", width: null, height: null
           }));
         }
@@ -1112,23 +1089,23 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
       if (element.name === "img") {
         const src = attribute(element.ref, "src");
         replaced.push(Object.freeze({
-          node: element.ref, kind: "image",
+          node: element.ref, kind: "image", alternativeText: attribute(element.ref, "alt"),
           source: src === null ? null : resolveUrl(src, this.baseUrl),
-          fallbackText: accessibleName(element) || "Image",
+          fallbackText: accessibleName(element) || (attribute(element.ref, "alt") === null ? "Image" : ""),
           width: finiteNumber(attribute(element.ref, "width")),
           height: finiteNumber(attribute(element.ref, "height"))
         }));
       } else if (element.name === "audio" || element.name === "video") {
         const src = attribute(element.ref, "src");
         replaced.push(Object.freeze({
-          node: element.ref, kind: "media",
+          node: element.ref, kind: "media", alternativeText: null,
           source: src === null ? null : resolveUrl(src, this.baseUrl),
           fallbackText: accessibleName(element) || `${element.name} content`, width: null, height: null
         }));
       } else if (element.name === "iframe" || element.name === "embed" || element.name === "object") {
         const source = attribute(element.ref, element.name === "object" ? "data" : "src");
         replaced.push(Object.freeze({
-          node: element.ref, kind: "embedded",
+          node: element.ref, kind: "embedded", alternativeText: null,
           source: source === null ? null : resolveUrl(source, this.baseUrl),
           fallbackText: accessibleName(element) || "Embedded content", width: null, height: null
         }));
@@ -1273,7 +1250,7 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
     });
     this.indexOutcome = Object.freeze(mutableOutcome.outcome);
     Object.freeze(this);
-    registerRetainedOwner(this, () => [this.#nodes, this.#semantics, this.#elementsById, this.#forms, this.#formOwners, this.#controls, this.#radioGroups, this.#options, this.#labelsByNode, this.#links, this.#headings, this.#replaced, this.#disclosures, this.#directionalities, this.#htmlTables, this.#htmlTableCells, this.#htmlTableColumns, this.#htmlTableColumnGroups, this.#textRanges, this.#directTextSourceMappings, this.#documentText]);
+    registerRetainedOwner(this, () => [this.#nodes, this.#semantics, this.#elementsById, this.#forms, this.#controls, this.#radioGroups, this.#options, this.#labelsByNode, this.#links, this.#headings, this.#replaced, this.#disclosures, this.#directionalities, this.#htmlTables, this.#htmlTableCells, this.#htmlTableColumns, this.#htmlTableColumnGroups, this.#textRanges, this.#directTextSourceMappings, this.#documentText]);
   }
 
   public node(ref: DocumentNodeRef): WebDocumentNode {
@@ -1344,10 +1321,6 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
     return this.#forms.get(ref) ?? null;
   }
 
-  public formOwner(ref: DocumentNodeRef): DocumentNodeRef | null {
-    this.node(ref);
-    return this.#formOwners.get(ref) ?? null;
-  }
 
   public control(ref: DocumentNodeRef): DocumentFormControl | null {
     return this.#controls.get(ref) ?? null;

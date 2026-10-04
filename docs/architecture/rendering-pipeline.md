@@ -42,7 +42,9 @@ layout model.
 ## Ownership
 
 - `src/document/` alone imports the HTML parser. It owns node identities,
-  source ranges, semantics, indexes, document state, and typed document actions.
+  source ranges, semantics, indexes, canonical control state, and typed document
+  actions. Parser-produced form associations are translated during indexing;
+  absence means no owner, with no ancestor or form-ID fallback.
 - `src/presentation/style/` alone imports the CSS parser. It owns the user-agent
   stylesheet, cascade, media evaluation, computed values, diagnostics, and style
   budgets. `MediaEnvironment` supplies CSS viewport and user preferences.
@@ -173,29 +175,49 @@ second inverse-video focus style over authored cells.
 
 ## Artifact lifetimes and worker protocol
 
-`RenderArtifactStore` retains one authoritative analysis for each explicit
-document, stylesheet-program, media, state, viewport-size, and text-metric
-dependency key. It reuses upstream artifacts when only a downstream key changes.
-Scroll, search query, active match, and terminal color depth are not document
-analysis keys. Retention is cost-bounded (512 MiB by default), uses
-least-recently-used analysis eviction, bounds logical query caches and search
-projections per document,
-and releases document-owned programs, selector sessions, substitution caches,
-analyses, and searches on navigation replacement, tab release, or worker
-disposal. It retains no scroll-keyed complete render result. Attachments are
-charged before analysis. Private allocation roots are registered by their owning
-subsystem through weak ownership metadata. Shared objects are visited once;
-truncated styles, formatting trees, and layout prefixes are charged for their
-actual retained roots. Estimates include documents, syntax, programs, selector
-indexes and match sets, computed snapshots, validation and substitution caches,
-inline streams, logical queries, fragments, commands, and spatial/semantic
-indexes. External parser sessions expose counts rather than private allocations;
-their index and validation costs are explicit estimates, not exact heap sizes.
+`RenderArtifactStore` retains narrow, independently owned phase resources for
+computed styles, formatting, inline/bidi analysis, logical search, layout,
+display commands, spatial indexes, and semantic geometry. Source and stylesheet
+programs belong to the attachment. A `DocumentRenderArtifacts` value is a
+short-lived composition for an operation, not a retained cache root. Reuse
+returns only the requested phase, so retaining formatting cannot retain an
+obsolete layout through a composite analysis.
 
-Admission has no exemption for the newest analysis. If eviction cannot satisfy
-the retention budget, it returns a typed `RenderBudgetExceededError`. Eviction
-clears the associated program caches so they cannot keep an evicted computed
-snapshot alive. Cleanup has reserved queue and transfer capacity ahead of ordinary work.
+Retention is cost-bounded (512 MiB by default), uses phase-ordered eviction with
+least-recently-used eligible resources, and bounds style environments, logical
+queries, and layout search
+projections. Scroll, search query, active match, and terminal color depth are not
+normal-flow analysis dependencies. There is no scroll-keyed complete render
+result. Replacing a source, releasing a tab, or disposing the worker releases its
+programs, selector sessions, substitution caches, resources, and searches.
+Attachments are charged before analysis.
+
+Private allocation roots are registered through weak ownership metadata.
+Immutable shared allocations are charged through explicit owner dependencies;
+unknown sharing is counted conservatively. Mutable formatting action/paint/semantic
+caches and stream bidi caches are separately owned and remeasured after growth,
+clear, or rollback, even when their containing wrapper is frozen. The construction
+visit ledger uses weak allocation keys; numeric accounting records do not keep
+retired object graphs alive. Metadata is charged, string deduplication is scoped
+to measurement, and an independent uncached graph recount remains available for
+qualification. Verified stylesheet syntax sharing is registered at its actual
+ownership boundaries rather than through dense descendant aliases. External
+parser sessions expose counts, so their index/validation costs remain estimates.
+
+Before replacement construction, the store pins reusable requested phases,
+reserves estimated replacement capacity, and retires eligible obsolete
+layout/display/spatial/geometry resources and layout-specific search projections.
+It preserves reusable upstream work and authoritative state. Reservations and
+rollback bookkeeping do not hold retired analyses. Failure may leave derived
+phases nonresident for later rebuilding; pins and reservations are released on
+every exit. The same pressure path trims optional program caches, including the
+selector runtime's computed-style baseline. Viewport composition and summary
+extraction share one pinned internal operation.
+
+Admission has no exemption for the newest resource set. If eviction cannot satisfy
+the retention budget, it returns a typed `RenderBudgetExceededError`. Pressure
+clears optional program caches before resource eviction so they cannot keep an
+evicted computed snapshot alive. Cleanup has reserved queue and transfer capacity ahead of ordinary work.
 The client separately bounds pending transfer allocations,
 delivered viewports, committed viewports, and summaries to 64 MiB. The default
 worker working-set budget is 1 GiB, observed as heap plus external allocations at cancellation checkpoints with a
@@ -203,9 +225,12 @@ Node worker heap limit as an additional termination boundary. Allocation peaks
 and retained heap after forced GC are reported separately. A rejected analysis
 preserves the last committed viewport; it does not reduce HTML/CSS support.
 
-The UI attaches decoded HTML source, verified stylesheet syntax, immutable
-resource metadata, and document state once per document revision. Subsequent
-messages carry document, state, and viewport revisions plus request IDs. The UI
+The UI keeps one resident worker source family per tab. It attaches decoded HTML,
+verified stylesheet syntax, immutable resource metadata, and document state when
+the live source changes, is absent, or the worker restarts. A same-source
+activation advances the document-revision fence through `update-document-state`
+without HTML hydration or stylesheet parsing/compilation. Subsequent messages
+carry document, state, and viewport revisions plus request IDs. The UI
 rejects stale completions; viewport generations are latest-request-wins. Heavy
 style, box, text, layout, display-list, geometry, and raster artifacts stay in
 the worker. Only compact document extent, focus, and anchor summaries plus the
@@ -281,10 +306,20 @@ document snapshot. Only document-specific operations consult readiness.
 
 ### Dependency invalidation
 
-Artifact keys record the document revision, admitted stylesheet fingerprints,
-media features actually consumed by the stylesheet program, dynamic selector
-state, CSS viewport dimensions actually consumed by style or layout, and the
-terminal text-metric profile. Scroll position, search query, active search
+Document/state revisions fence requests; reusable phase identities record actual
+semantic dependencies. Cascade evaluation compares effective element/pseudo
+styles and private custom-property environments separately from diagnostics and
+truncation. A true no-op advances the selector-state baseline and evaluation
+freshness without rebuilding formatting, inline text, logical search, layout,
+display/spatial indexes, or semantic geometry. Freshness is tracked per retained
+media/viewport environment; evaluating one width cannot validate another.
+Reporting-only changes receive a new summary identity without new geometry.
+Control content, selectedness, and disclosure state independently invalidate
+formatting even if CSS is unchanged.
+
+Dependencies include admitted stylesheet fingerprints, consumed media features,
+CSS viewport dimensions actually consumed by style or layout, and the terminal
+text-metric profile. Scroll position, search query, active search
 match, and terminal color depth are viewport dependencies and never invalidate
 normal-flow layout. Media-query dependencies belong to the stylesheet program.
 Computed-value dependencies are recorded from evaluated typed values, after
@@ -297,8 +332,17 @@ Used-value dependencies are separate: containing sizes, viewport units, fixed
 positioning, and sticky constraints belong to layout. Unresolved containing-block
 percentage dependence is conservative. A height change reuses immutable layout
 when neither computed nor used values depend on it. Dynamic selectors that change
-custom properties invalidate the affected computed values and downstream geometry. Ambiguous-width changes invalidate text measurement
-and layout, while color-depth changes begin at cell rasterization.
+custom properties are reevaluated before semantic phase invalidation.
+Ambiguous-width changes invalidate text measurement and layout, while color-depth
+changes begin at cell rasterization.
+
+An audited background-color-only change preserves formatting, logical text,
+layout, and semantic geometry while rebuilding display/spatial paint data from
+current computed styles through the shared paint resolver. Layout-specific search
+projections depend on logical-text and layout identities, not paint identity.
+Visibility, generated content, font metrics, border width/style, structural changes,
+and unaudited dependencies (including `empty-cells:hide`) take the canonical
+invalidation path.
 
 Stylesheet resources retain verified parser syntax and dependency-graph
 metadata rather than transport bytes. `StylesheetProgram` compiles selectors,
@@ -308,7 +352,60 @@ Custom properties use persistent parent-linked environments; substituted
 component values are materialized as a syntax tree with fresh tree-local parser
 identities before validation. Validation is bounded by each program and uses
 the css-parser validation session rather than reconstructing declaration
-strings.
+strings. Winning content/counter, font, and border candidates retain validated
+component values through evaluation; unsupported literals and invalid substituted
+winners keep their distinct cascade behavior.
+
+Complete immutable computed box/text and resolved paint records are shared within
+bounded construction transactions using typed field comparisons. Trusted unchanged
+subrecords survive without cloning. The lookup is discarded afterward; there is
+no permanent intern pool, whole-model JSON comparison, or shared mutable
+node-specific counter state.
+
+## Controls, generated content, and supported CSS values
+
+Initialization, editing, reset, `:checked`, formatting, and submission consume one
+document-domain control state. Authored defaults remain separate; select state
+stores option identities rather than duplicated values. Default selection follows
+display size and enabled options, and option-derived values collapse only ASCII
+whitespace. Supported input sanitization is shared across initialization, edits,
+and reset. Accessible names, visible captions, and submitted values are distinct;
+a bounded text-equivalent implementation supplies supported labels, image alt,
+and ARIA references. Worker hydration reproduces the same form associations and
+control identities.
+
+`app/forms.ts` constructs one ordered successful-entry list from those owners,
+canonical state, and the selected submitter. Eligibility, duplicate names, empty
+values, `_charset_`, and supported `dirname` behavior are handled there; UTF-8
+URL-encoding and CR/LF normalization occur at serialization. Unsupported
+contributing controls and incomplete indexing reject submission rather than
+silently sending partial data. File/multipart submission remains unsupported.
+
+Generated content is an immutable program distinguishing `normal`, `none`, empty
+text, ordered visual items, and optional alternative text. The supported items
+are decoded strings, `attr(name)`, `counter(name[, style])`, and
+`counters(name, separator[, style])`. Visual items enter ordinary formatting,
+logical search, layout, and painting with source/pseudo provenance. Alternative
+text contributes to semantic names under DOM/ARIA precedence, without entering
+visual search or painting.
+
+One construction-local scoped counter owner handles `counter-reset`,
+`counter-increment`, and `counter-set` in source/pseudo order. HTML list `start`,
+`reversed`, and item `value` feed that owner. Absent and suppressed boxes/pseudos
+and `display:contents` follow the supported participation rules; no full counter
+map is retained per element. Work, live counter state, output size, and cancellation
+are bounded. The suffix-free formatter supports decimal, decimal-leading-zero,
+lower/upper-alpha (including Latin aliases), disc, circle, square, and none;
+zero/negative alpha falls back to decimal and signed padding is explicit. Custom
+counter styles, counter images, and quote-depth handling remain unsupported.
+
+The `font` shorthand competes with longhands through the ordinary cascade,
+resets omitted modeled weight/style/line-height values, and resolves size before
+dependent line height. Family syntax is validated but cannot select terminal
+fonts; system-font keywords, variant/stretch effects, and angled oblique are
+outside this subset. Logical block/inline border shorthands and width/style/color
+longhands join physical-side ranked candidates after horizontal LTR/RTL direction
+mapping and before winner selection. Vertical writing remains unsupported.
 
 ## Performance qualification
 
@@ -332,9 +429,10 @@ generation; released artifact graphs must be unreachable after forced garbage
 collection. Timing gates apply only to the deterministic fixture: warm worker
 viewport p95 is bounded at 100 ms, browser-view construction at 33 ms,
 input-to-state update at 50 ms, main event-loop delay p95 at 16 ms, and shell
-creation at 500 ms. The full 2,000-section latency fixture uses explicit 1 GiB retention and 2 GiB
-working-set bounds: measurement found about 569 MB retained after GC, exceeding
-the default 512 MiB admission budget. The default rejection is tested separately;
+creation at 500 ms. The historical PR #136 measurement of the full 2,000-section
+latency fixture used explicit 1 GiB retention and 2 GiB working-set bounds and
+found about 569 MB retained after GC, exceeding the default 512 MiB admission
+budget. The default rejection is tested separately;
 no timing threshold or content limit is relaxed. Qualification also reports
 input-to-visible-frame, tab-switch-to-usable-frame, and quit-to-complete-disposal
 (the latter has a 1,000 ms gate). Full terminal frame-commit timing remains reported
@@ -455,8 +553,9 @@ Viewport paint admission checks replacement cost before removing earlier cell
 owners, preserving the painted prefix when a new unit exceeds its budget.
 
 Weak action-identity, paint-style, semantic-ancestor, and inline-analysis caches
-register independent retained roots on their formatting tree or inline stream.
-Multiple registrations preserve each owner; shared allocations are visited once.
+register independent, revisioned mutable roots associated with their formatting
+tree or inline stream. Growth and clear refresh costs; shared immutable
+allocations are charged once through their owners.
 
 Layout retains linked clip-owner chains. Clip translation follows the owning
 fragment's attachment rather than rectangle containment; ancestor clips remain
@@ -502,11 +601,12 @@ prefixes.
 - Search consumes logical text; line placement and painting consume visual
   runs. No reordered search string or row-based search path exists.
 - Physical and logical box properties compete in the cascade; horizontal
-  logical sides map only after the element's computed `direction` is known.
+  logical sides map after computed `direction` is known and before physical
+  winner selection.
 - Parser component-value trees—not whitespace or function regular expressions—
   drive custom-property substitution, CSS math, length-percentage values,
-  colors, Grid grammar, and the supported layout shorthands. Used-value math remains in
-  layout.
+  colors, generated content/counters, Grid grammar, font/border values, and the
+  supported layout shorthands. Used-value math remains in layout.
 - Unicode property lookup is pinned to Unicode 17.0.0 and never depends on the
   host ICU or operating-system Unicode version.
 - Budget, cancellation, unsupported, rejected, and truncated behavior is typed;

@@ -1,7 +1,7 @@
 import { registerRetainedOwner } from "../../memory/retained-cost.js";
 import {
-  cssCoordinateFromFixed, cssIntersection, cssLengthFromFixed, cssRect,
-  type CssRect, type LayoutFragmentId, type LayoutFragmentTree, type LayoutScrollOwner, type LayoutScrollAttachment,
+  cssCoordinateFromFixed, cssIntersection, cssLengthFromFixed, cssRect, cssUnion,
+  type CssRect, type InlineContinuationGeometry, type LayoutFragment, type LayoutFragmentId, type LayoutFragmentTree, type LayoutScrollOwner, type LayoutScrollAttachment,
 } from "../layout/index.js";
 import type { DocumentNodeRef } from "../../document/index.js";
 
@@ -222,14 +222,62 @@ export function revealDocumentNode(
   viewport: CssRect,
   offsets: readonly DocumentScrollOffset[],
   target: DocumentNodeRef,
-  align: "start" | "nearest",
+  blockAlign: "start" | "nearest",
+  signal?: AbortSignal,
 ): { readonly offsets: readonly DocumentScrollOffset[]; readonly rect: CssRect | null } {
-  const fragments = layout.forDocumentNode(target);
-  const fragment = fragments.find((entry) => entry.kind !== "text" && entry.style.visible)
-    ?? fragments.find((entry) => entry.style.visible);
-  if (fragment === undefined) return { offsets, rect: null };
-  const targetRect = fragment.borderRect;
-  return revealLayoutRect(layout, viewport, offsets, fragment.id, targetRect, align);
+  const fragment = documentRevealFragment(layout, target, signal);
+  if (fragment === null) return { offsets, rect: null };
+  const targetRect = fragment.kind !== "text" && fragment.inlineContinuations !== undefined
+    ? cssUnion(revealContinuationRects(fragment.inlineContinuations, signal), fragment.borderRect)
+    : fragment.borderRect;
+  return revealLayoutRect(layout, viewport, offsets, fragment.id, targetRect, blockAlign);
+}
+
+function* revealContinuationRects(continuations: readonly InlineContinuationGeometry[], signal?: AbortSignal): Iterable<CssRect> {
+  for (let index = 0; index < continuations.length; index += 1) {
+    if ((index & 255) === 0) signal?.throwIfAborted();
+    const continuation = continuations[index];
+    if (continuation !== undefined) yield continuation.borderRect;
+  }
+}
+
+/** Generated boxes share source identities but never replace the element's own box. */
+function documentRevealFragment(layout: LayoutFragmentTree, target: DocumentNodeRef, signal?: AbortSignal): LayoutFragment | null {
+  const pending = [target];
+  while (pending.length > 0) {
+    signal?.throwIfAborted();
+    const source = pending.pop();
+    if (source === undefined) continue;
+    const sourceNode = layout.formatting.document.node(source);
+    if (sourceNode.kind === "element" && layout.formatting.styles.style(source).display.box === "none") continue;
+    let principal: LayoutFragment | undefined;
+    let sourceBox: LayoutFragment | undefined;
+    let first: LayoutFragment | undefined;
+    const fragments = layout.forDocumentNode(source);
+    for (let index = 0; index < fragments.length; index += 1) {
+      if ((index & 255) === 0) signal?.throwIfAborted();
+      const fragment = fragments[index];
+      if (fragment === undefined || !fragment.style.visible || fragment.pseudoElement !== null) continue;
+      const formatting = layout.formatting.node(fragment.formattingNode);
+      if (formatting.kind === "marker") continue;
+      first ??= fragment;
+      if (fragment.kind === "text") continue;
+      if (formatting.kind === "table-wrapper") return fragment;
+      if (formatting.appliesBoxStyle) principal ??= fragment;
+      sourceBox ??= fragment;
+    }
+    const fragment = principal ?? sourceBox ?? first;
+    // Empty anchors retain their source-owned zero-area origin. Boxless elements use
+    // their first rendered descendant, retaining its actual scroll-owner ancestry.
+    if (fragment !== undefined) return fragment;
+    const children = sourceNode.children;
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      if ((index & 255) === 0) signal?.throwIfAborted();
+      const child = children[index];
+      if (child !== undefined) pending.push(child);
+    }
+  }
+  return null;
 }
 
 export function viewportInlineRange(layout:LayoutFragmentTree, viewportWidth:number): {readonly minInline:number;readonly maxInline:number} {
@@ -255,7 +303,7 @@ export function revealLayoutRect(
   offsets: readonly DocumentScrollOffset[],
   fragment: LayoutFragmentId,
   targetRect: CssRect,
-  align: "start" | "nearest",
+  blockAlign: "start" | "nearest",
 ): {readonly offsets: readonly DocumentScrollOffset[]; readonly rect: CssRect} {
   const retained = new Map(offsets.map((entry) => [entry.node, entry]));
   let owner = layout.scrollAncestor(fragment);
@@ -265,8 +313,8 @@ export function revealLayoutRect(
     const port = projection.rect(owner.fragment, owner.scrollport);
     const [inline, block] = projection.offset(owner);
     retained.set(owner.documentNode, Object.freeze({ node: owner.documentNode,
-      inline: Math.max(owner.minInline, Math.min(owner.maxInline, inline + scrollRevealDelta(rect.x, rect.width, port.x, port.width, align))),
-      block: Math.max(owner.minBlock, Math.min(owner.maxBlock, block + scrollRevealDelta(rect.y, rect.height, port.y, port.height, align))),
+      inline: Math.max(owner.minInline, Math.min(owner.maxInline, inline + scrollRevealDelta(rect.x, rect.width, port.x, port.width, "nearest"))),
+      block: Math.max(owner.minBlock, Math.min(owner.maxBlock, block + scrollRevealDelta(rect.y, rect.height, port.y, port.height, blockAlign))),
     }));
     owner = owner.parent === null ? null : layout.scrollContainer(owner.parent);
   }

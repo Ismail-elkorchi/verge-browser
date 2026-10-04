@@ -457,10 +457,10 @@ export function buildDocumentGeometryIndex(
         layoutFragments: Object.freeze(focusValue.fragments),
         rects: Object.freeze(focusValue.rects),
         rectFragments: Object.freeze(focusValue.rectFragments),
-        label: document.semantic(node)?.accessibleName || "Action",
+        label: list.layout.formatting.semantic(node)?.accessibleName || "Action",
       }));
     }
-    const semantic = document.semantic(node);
+    const semantic = list.layout.formatting.semantic(node);
     if (semantic === null || semantic.accessibilityHidden || value === undefined) continue;
     if (retainedAccessibilityRectangles >= budgets.maxRetainedAccessibilityRectangles) {
       truncated("maxRetainedAccessibilityRectangles", budgets.maxRetainedAccessibilityRectangles);

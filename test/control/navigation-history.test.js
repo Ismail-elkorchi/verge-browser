@@ -40,7 +40,7 @@ function edit(document, value, scroll) {
     scrollAnchor: { source: document.snapshot.document.body, rowOffset: scroll },
   };
 }
-function value(document) { return document.documentState.controls.get(document.snapshot.document.controls[0].node).values[0]; }
+function value(document) { return document.documentState.controls.get(document.snapshot.document.controls[0].node).value; }
 
 test("equal URL visits retain distinct entry/document identities and forms, caret, scroll", async () => {
   const f = await fixture();
@@ -241,3 +241,57 @@ test("root inline offset belongs to each history entry and survives reopen", asy
     assert.equal(doc.scrollColumn,-20);
   } finally {await f.acquisition.close();}
 });
+
+test("same-source activations retain an explicitly previous display without rewriting accepted revisions", async () => {
+  const f = await fixture();
+  try {
+    const viewport = Object.freeze({ documentId: f.document.id, documentRevision: 1, stateRevision: 1, viewportRevision: 7 });
+    let document = { ...f.document, rendering: { ...emptyRendering(), status: "ready", viewport,
+      summary: { identity: "accepted" }, committedViewportRevision: 7 } };
+    const live = currentEntry(document.navigation).documentId;
+    document = acceptNavigation(document, fragmentSnapshot(document.snapshot, `${A}#first`), "push", { kind: "direct" }, live);
+    assert.equal(document.documentRevision, 2);
+    assert.equal(document.rendering.viewport, null);
+    assert.equal(document.rendering.summary, null);
+    assert.equal(document.rendering.previousViewport, viewport);
+    assert.equal(document.rendering.previousViewport.documentRevision, 1);
+    assert.equal(document.rendering.previousViewport.viewportRevision, 7);
+    document = activateHistory(document, traverseHistory(document.navigation, "back"));
+    assert.equal(document.documentRevision, 3);
+    assert.equal(document.rendering.previousViewport, viewport, "rapid activation preserves only the last accepted display");
+    assert.equal(resumeDocument(document).rendering.previousViewport, viewport);
+    document = acceptNavigation(document, await f.acquisition.acquire(A), "push", { kind: "direct" });
+    assert.equal(document.rendering.previousViewport, null, "equal URLs with new sources do not inherit a display");
+  } finally { await f.acquisition.close(); }
+});
+
+for (const failure of ["write", "effect admission"]) {
+  test(`rejected same-source ${failure} leaves accepted activation and its display untouched`, async () => {
+    const f = await fixture();
+    const viewport = Object.freeze({ documentRevision: 1, stateRevision: 1, viewportRevision: 1 });
+    const accepted = { ...f.document, rendering: { ...emptyRendering(), status: "ready", viewport } };
+    const live = currentEntry(accepted.navigation).documentId;
+    let preparations = 0;
+    const app = defineTui({ id: `same-source-${failure}`, init: () => ({ state: accepted }),
+      update: (document) => ({ state: acceptNavigation(document, fragmentSnapshot(document.snapshot, `${A}#first`), "push", { kind: "direct" }, live),
+        effects: ["prepare", ...(failure === "effect admission" ? ["persist"] : [])].map((id) => ({ id,
+          run: () => { preparations += 1; return Promise.resolve({ kind: "none" }); } })) }),
+      view: (document) => text({ content: document.snapshot.finalUrl }),
+    });
+    const host = createMemoryTerminalHost();
+    const runtime = createTuiRuntime({ app, host, ...(failure === "effect admission" ? { effectPolicy: {
+      maxOwned: 1, maxActive: 1, maxActivePerId: 1, maxQueued: 1, maxQueuedPerId: 1, replacementGracePeriodMs: 1,
+    } } : {}) });
+    await runtime.start();
+    const write = host.write.bind(host);
+    if (failure === "write") host.write = () => Promise.reject(new Error("rejected same-source write"));
+    try {
+      await runtime.dispatch({ kind: "go" }).catch(() => undefined);
+      assert.equal(runtime.state(), accepted);
+      assert.equal(runtime.state().documentRevision, 1);
+      assert.equal(runtime.state().rendering.viewport, viewport);
+      assert.equal(runtime.state().rendering.previousViewport, null);
+      assert.equal(preparations, 0);
+    } finally { host.write = write; await runtime.dispose(); await f.acquisition.close(); }
+  });
+}

@@ -22,7 +22,7 @@ import {
 import { prepareBrowserTui, renderBrowserOnce } from "../../dist/ui/run.js";
 import { acceptNavigation } from "../../dist/ui/navigation-state.js";
 import { updateBrowser } from "../../dist/ui/app.js";
-import { selectEditor } from "../../dist/ui/form-editors.js";
+import { controlValues, selectEditor } from "../../dist/ui/form-editors.js";
 
 function response(requestUrl, html) {
   return {
@@ -334,7 +334,7 @@ test("outline document nodes resolve through layout-fragment geometry", async ()
     const heading = document.snapshot.document.headings.find((entry) => entry.text === "Forms");
     assert.ok(heading);
     const anchored = scrollToSource(document, heading.node);
-    assert.deepEqual(anchored.rendering.pendingReveal, { node: heading.node, align: "start" });
+    assert.deepEqual(anchored.rendering.pendingReveal, { node: heading.node, blockAlign: "start" });
     await runtime.dispatch({ kind: "pickerSelect", value: { kind: "outline", index: 0, node: heading.node } });
     await waitUntil(runtime, () => runtime.state().documents[0].rendering.pendingReveal === null
       && runtime.state().documents[0].rendering.status === "ready");
@@ -522,8 +522,8 @@ test("terminal-ui form controls update document state and submit through semanti
       controlId: query.node,
       transition: { kind: "edit", operation: { kind: "insert", text: "Z" } }
     });
-    await runtime.dispatch({ kind: "formValues", controlId: language.node, values: ["fr"] });
-    assert.equal(runtime.state().documents[0].documentState.controls.get(query.node).values[0], "alphaZ");
+    await runtime.dispatch({ kind: "formValues", controlId: language.node, values: ["fr"], selectedOptions: [language.options.find((option) => option.value === "fr").node] });
+    assert.equal(runtime.state().documents[0].documentState.controls.get(query.node).value, "alphaZ");
     await runtime.dispatch({ kind: "submitForm", formId: form.node, submitterId: submit.node });
     await waitUntil(runtime, () => runtime.state().documents[0].snapshot.document.title === "Results");
   } finally {
@@ -576,7 +576,7 @@ test("standalone controls use the same terminal-ui editing path without inventin
       controlId: control.node,
       transition: { kind: "edit", operation: { kind: "insert", text: "Z" } }
     });
-    assert.equal(runtime.state().documents[0].documentState.controls.get(control.node).values[0], "alphaZ");
+    assert.equal(runtime.state().documents[0].documentState.controls.get(control.node).value, "alphaZ");
   } finally {
     await runtime.dispose();
     await prepared.controller.close();
@@ -956,10 +956,10 @@ test("HTML editors share initialization, retain edits, and reset to document def
     const edited = runtime.state().documents[0];
     assert.equal(edited.formEditors[choice.node].collection, select.collection);
     assert.equal(edited.formEditors[choice.node].optionsView, select.optionsView);
-    assert.equal(edited.documentState.controls.get(quantity.node).values[0], "4");
-    assert.equal(edited.documentState.controls.get(notes.node).values[0].includes("X"), true);
+    assert.equal(edited.documentState.controls.get(quantity.node).value, "4");
+    assert.equal(edited.documentState.controls.get(notes.node).value.includes("X"), true);
     assert.deepEqual(edited.documentState.controls.get(choice.node).selected, [choice.options[0].node]);
-    assert.deepEqual(edited.documentState.controls.get(many.node).values, ["a", "b"]);
+    assert.deepEqual(controlValues(edited, many), ["a", "b"]);
     await runtime.resize({ columns: 80, rows: 24 });
     assert.equal(runtime.state().documents[0].formEditors[quantity.node].state.input.text, "4");
     assert.equal(runtime.state().documents[0].formEditors[choice.node].collection, select.collection);
@@ -967,8 +967,8 @@ test("HTML editors share initialization, retain edits, and reset to document def
     await runtime.dispatch({ kind: "resetForm", formId: form.node });
     const reset = runtime.state().documents[0];
     assert.deepEqual(reset.formEditors, {});
-    assert.equal(reset.documentState.controls.get(quantity.node).values[0], "2");
-    assert.equal(reset.documentState.controls.get(notes.node).values[0], "initial");
+    assert.equal(reset.documentState.controls.get(quantity.node).value, "2");
+    assert.equal(reset.documentState.controls.get(notes.node).value, "initial");
     assert.deepEqual(reset.documentState.controls.get(choice.node).selected, [choice.options[1].node]);
     const resetSelect = selectEditor(reset, choice);
     assert.equal(resetSelect.collection, select.collection);
@@ -1091,7 +1091,7 @@ test("native controls retain layout allocations, selected labels, and separated 
     await runtime.dispatch({ kind: "formComboboxTransition", controlId: choice.node, transition: { kind: "open" } });
     await runtime.dispatch({ kind: "formComboboxCommit", controlId: choice.node, event: { kind: "commit", id: `${choice.node}:0` } });
     await waitUntil(runtime, () => renderFramePlain(runtime.frame()).includes("First"));
-    assert.deepEqual(runtime.state().documents[0].documentState.controls.get(choice.node).values, ["42"]);
+    assert.deepEqual(controlValues(runtime.state().documents[0], choice), ["42"]);
     await runtime.dispatch({ kind: "formComboboxTransition", controlId: choice.node, transition: { kind: "open" } });
     await runtime.dispatch({ kind: "formComboboxTransition", controlId: choice.node, transition: { kind: "dismiss", reason: "escape" } });
     assert.deepEqual(runtime.state().documents[0].documentState.controls.get(choice.node).selected, [choice.options[0].node]);
@@ -1099,8 +1099,8 @@ test("native controls retain layout allocations, selected labels, and separated 
     await waitUntil(runtime, () => runtime.frame().focusPath?.includes(radios[0].node));
     await runtime.handleInput(key("arrowDown"));
     await waitUntil(runtime, () => runtime.frame().focusPath?.includes(radios[1].node));
-    assert.deepEqual(runtime.state().documents[0].documentState.controls.get(radios[1].node).values, ["b"]);
-    assert.deepEqual(runtime.state().documents[0].documentState.controls.get(radios[0].node).values, []);
+    assert.deepEqual(controlValues(runtime.state().documents[0], radios[1]), ["b"]);
+    assert.deepEqual(controlValues(runtime.state().documents[0], radios[0]), []);
   } finally { await runtime.dispose(); await prepared.controller.close(); }
 });
 
@@ -1118,14 +1118,14 @@ test("partly clipped textarea keeps full editor geometry and caret through resiz
     await runtime.handleInput(key("end"));
     await runtime.handleInput({ kind: "text", text: "X", paste: false });
     const edited = runtime.state().documents[0].formEditors[area.node].state;
-    const accepted = runtime.state().documents[0].documentState.controls.get(area.node).values[0];
+    const accepted = runtime.state().documents[0].documentState.controls.get(area.node).value;
     assert.ok(accepted.includes("X"));
     await runtime.resize({ columns: 48, rows: 24 });
     await waitUntil(runtime, () => runtime.state().documents[0].rendering.status === "ready");
     assert.equal(runtime.state().documents[0].formEditors[area.node].state, edited);
     assert.ok(runtime.frame().focusPath?.includes(area.node));
     await runtime.handleInput({ kind: "text", text: "Y", paste: false });
-    assert.ok(runtime.state().documents[0].documentState.controls.get(area.node).values[0].includes("XY"));
+    assert.ok(runtime.state().documents[0].documentState.controls.get(area.node).value.includes("XY"));
     const resized = runtime.state().documents[0].rendering.viewport.controls.find((entry) => entry.node === area.node);
     assert.equal(resized.allocation.height, 4);
     assert.equal(resized.visible.height, 2);
@@ -1176,7 +1176,7 @@ test("radio keyboard navigation reveals a separated offscreen peer", async () =>
     await runtime.handleInput(key("arrowDown"));
     await waitUntil(runtime, () => runtime.frame().focusPath?.includes(controls[1].node));
     assert.ok(documentScrollRow(runtime.state().documents[0]) > 0);
-    assert.deepEqual(runtime.state().documents[0].documentState.controls.get(controls[1].node).values, ["b"]);
+    assert.deepEqual(controlValues(runtime.state().documents[0], controls[1]), ["b"]);
   } finally { await runtime.dispose(); await prepared.controller.close(); }
 });
 
@@ -1206,24 +1206,25 @@ test("duplicate URL entries restore independent live forms and scroll without re
     await runtime.dispatch({ kind: "navigate", operation: "back" }); await waitUntil(runtime, ready);
     current = runtime.state().documents[0];
     assert.equal(current.snapshot.document, first.snapshot.document);
-    assert.equal(current.documentState.controls.get(control.node).values[0], "alphaFIRST");
+    assert.equal(current.documentState.controls.get(control.node).value, "alphaFIRST");
     assert.equal(current.formEditors[control.node].state.cursor, "alphaFIRST".length);
     assert.equal(documentScrollRow(current), firstScroll);
     await runtime.dispatch({ kind: "navigate", operation: "forward" }); await waitUntil(runtime, ready);
     await runtime.dispatch({ kind: "navigate", operation: "forward" }); await waitUntil(runtime, ready);
     current = runtime.state().documents[0];
-    assert.equal(current.documentState.controls.get(secondControl.node).values[0], "alphaSECOND");
+    assert.equal(current.documentState.controls.get(secondControl.node).value, "alphaSECOND");
     assert.equal(loads, 3);
   } finally { await runtime.dispose(); await prepared.controller.close(); }
 });
 
 test("fragment navigation uses accepted target geometry and shares latest live form edits", async () => {
   let loads = 0;
-  const source = `<input name="edit" value="live"><a href="#target">Jump</a>${"<p>Paragraph</p>".repeat(35)}<h2 id="target">Target</h2>${"<p>After</p>".repeat(30)}`;
+  const source = `<style>:target { color: inherit }</style><input name="edit" value="live"><a href="#target">Jump</a>${"<p>Paragraph</p>".repeat(35)}<h2 id="target">Target</h2>${"<p>After</p>".repeat(30)}`;
   const { runtime, prepared } = await preparedFixture({ loader: async (url) => { loads += 1; return response(url, source); } });
   const ready = () => runtime.state().documents[0].rendering.status === "ready";
   try {
     const first = runtime.state().documents[0];
+    const coldMetrics = await prepared.controller.renderingMetrics();
     const control = first.snapshot.document.controls[0];
     await runtime.dispatch({ kind: "omniboxSubmit", value: "https://example.test/#target" });
     await waitUntil(runtime, () => ready() && runtime.state().documents[0].rendering.pendingReveal === null);
@@ -1236,8 +1237,20 @@ test("fragment navigation uses accepted target geometry and shares latest live f
     await runtime.dispatch({ kind: "navigate", operation: "back" }); await waitUntil(runtime, ready);
     current = runtime.state().documents[0];
     assert.equal(current.snapshot.finalUrl, "https://example.test/");
-    assert.equal(current.documentState.controls.get(control.node).values[0], "liveLATEST");
+    assert.equal(current.documentState.controls.get(control.node).value, "liveLATEST");
     assert.equal(current.documentState.urlTarget, null); assert.equal(documentScrollRow(current), 0);
+    await runtime.dispatch({ kind: "navigate", operation: "forward" }); await waitUntil(runtime, ready);
+    current = runtime.state().documents[0];
+    assert.equal(current.snapshot.document, first.snapshot.document);
+    assert.ok(current.documentRevision > first.documentRevision);
+    assert.ok(documentScrollRow(current) > 20);
+    assert.equal(current.rendering.previousViewport, null);
+    const warmMetrics = await prepared.controller.renderingMetrics();
+    for (const stage of ["attachment-serialization", "document-hydration", "stylesheet-hydration", "stylesheet-syntax-parsing", "stylesheet-program-compilation"]) {
+      const count = (metrics) => metrics.stages.find((entry) => entry.stage === stage)?.invocations ?? 0;
+      assert.equal(count(warmMetrics), count(coldMetrics), `${stage} must not repeat for warm fragment/Back/Forward`);
+    }
+    assert.equal(warmMetrics.attachedDocuments, 1);
     assert.equal(loads, 1);
   } finally { await runtime.dispose(); await prepared.controller.close(); }
 });
@@ -1274,7 +1287,7 @@ test("Stop keeps the accepted entry and edits made during acquisition after a la
     await new Promise((resolve) => setTimeout(resolve, 30));
     let current = runtime.state().documents[0];
     assert.equal(current.snapshot, initial.snapshot); assert.equal(current.navigation.entries.length, 1);
-    assert.equal(current.loading, false); assert.equal(current.documentState.controls.get(control.node).values[0], "alphaKEPT");
+    assert.equal(current.loading, false); assert.equal(current.documentState.controls.get(control.node).value, "alphaKEPT");
     await runtime.dispatch({ kind: "navigate", operation: "reload" });
     await waitUntil(runtime, () => runtime.state().documents[0].snapshot !== initial.snapshot && !runtime.state().documents[0].loading);
     current = runtime.state().documents[0];
@@ -1309,7 +1322,7 @@ test("partly clipped select popup escapes crop and preserves pointer, keyboard, 
     await click(french.bounds.row, french.bounds.column);
     assert.equal(runtime.state().documents[0].formEditors[select.node].state.interaction.activeId, `${select.node}:1`);
     await click(french.bounds.row, french.bounds.column);
-    assert.deepEqual(runtime.state().documents[0].documentState.controls.get(select.node).values, ["fr"]);
+    assert.deepEqual(controlValues(runtime.state().documents[0], select), ["fr"]);
     assert.equal(runtime.state().documents[0].formEditors[select.node].state.open, false);
     await runtime.handleInput(key("enter"));
     await click(20, 50);
@@ -1317,11 +1330,11 @@ test("partly clipped select popup escapes crop and preserves pointer, keyboard, 
     await runtime.handleInput(key("enter"));
     await runtime.handleInput(key("arrowUp"));
     await runtime.handleInput(key("enter"));
-    assert.deepEqual(runtime.state().documents[0].documentState.controls.get(select.node).values, ["en"]);
+    assert.deepEqual(controlValues(runtime.state().documents[0], select), ["en"]);
     await runtime.handleInput(key("enter"));
     await runtime.handleInput(key("arrowDown"));
     await runtime.handleInput(key("enter"));
-    assert.deepEqual(runtime.state().documents[0].documentState.controls.get(select.node).values, ["fr"]);
+    assert.deepEqual(controlValues(runtime.state().documents[0], select), ["fr"]);
     assert.ok(renderFramePlain(runtime.frame()).includes("French"));
   } finally { await runtime.dispose(); await prepared.controller.close(); }
 });
@@ -1345,14 +1358,14 @@ test("root horizontal window projects native controls, links, and pointer target
     assert.equal(link.bounds.column,11);
     for(const action of ["press","release"]) await runtime.handleInput({kind:"mouse",sequence:"",encoding:"sgr",action,button:"left",row:editor.bounds.row,column:editor.bounds.column,rawCode:0,modifiers:{shift:false,alt:false,ctrl:false}});
     await runtime.handleInput({kind:"text",text:"Z",paste:false});
-    assert.ok(runtime.state().documents[0].documentState.controls.get(control.node).values[0].includes("Z"));
+    assert.ok(runtime.state().documents[0].documentState.controls.get(control.node).value.includes("Z"));
     await runtime.handleInput({kind:"mouse",sequence:"",encoding:"sgr",action:"wheel",button:"wheelRight",row:10,column:50,rawCode:67,modifiers:{shift:false,alt:false,ctrl:false},deltaRows:0,deltaColumns:1});
     await waitUntil(runtime,()=>runtime.state().documents[0].rendering.viewport.cellBuffer.windowStartColumn===103);
     await runtime.dispatch({kind:"movePageFocus",direction:"next",currentActionId:`control:${control.node}`});
     await waitUntil(runtime,()=>runtime.frame().focusPath?.at(-1)?.startsWith("link:"));
     await runtime.handleInput(key("arrowLeft"));
     await waitUntil(runtime,()=>runtime.state().documents[0].rendering.viewport.cellBuffer.windowStartColumn===102);
-    assert.ok(runtime.state().documents[0].documentState.controls.get(control.node).values[0].includes("Z"));
+    assert.ok(runtime.state().documents[0].documentState.controls.get(control.node).value.includes("Z"));
   } finally {await runtime.dispose();await prepared.controller.close();}
 });
 
@@ -1390,6 +1403,72 @@ test("native editor focus and caret survive becoming fully visible after resize"
     assert.equal(runtime.state().documents[0].formEditors[control.node],editor);
     assert.ok(runtime.frame().focusPath?.includes(control.node));
     await runtime.handleInput({kind:"text",text:"Y",paste:false});
-    assert.equal(runtime.state().documents[0].documentState.controls.get(control.node).values[0],"alphaXY");
+    assert.equal(runtime.state().documents[0].documentState.controls.get(control.node).value,"alphaXY");
   } finally {await runtime.dispose();await prepared.controller.close();}
+});
+
+test("same-source preparation displays the unchanged accepted viewport until its new activation commits", async () => {
+  const { runtime, prepared } = await preparedFixture({ loader: async (url) => response(url,
+    `<p>Previous display stays visible</p>${"<p>Between</p>".repeat(25)}<h2 id="target">New target</h2>`) });
+  const renderViewport = prepared.controller.renderViewport.bind(prepared.controller);
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  prepared.controller.renderViewport = async (...args) => { await gate; return renderViewport(...args); };
+  try {
+    const accepted = runtime.state().documents[0].rendering.viewport;
+    await runtime.dispatch({ kind: "omniboxSubmit", value: "https://example.test/#target" });
+    const pending = runtime.state().documents[0];
+    assert.ok(pending.documentRevision > accepted.documentRevision);
+    assert.equal(pending.rendering.viewport, null);
+    assert.equal(pending.rendering.previousViewport, accepted);
+    assert.ok(renderFramePlain(runtime.frame()).includes("Previous display stays visible"));
+    assert.ok(renderFramePlain(runtime.frame()).includes(`1/${accepted.cellBuffer.documentRowCount}`),
+      "pending position describes the displayed viewport rather than inventing a one-row document");
+    assert.equal(renderFramePlain(runtime.frame()).includes("Rendering page…"), false);
+    await runtime.dispatch({ kind: "viewportReady", payload: accepted });
+    assert.equal(runtime.state().documents[0].rendering.previousViewport, accepted);
+    assert.equal(runtime.state().documents[0].rendering.viewport, null, "previous activation cannot satisfy the new request");
+    release();
+    await waitUntil(runtime, () => runtime.state().documents[0].rendering.status === "ready");
+    const current = runtime.state().documents[0];
+    assert.equal(current.rendering.previousViewport, null);
+    assert.equal(current.rendering.viewport.documentRevision, current.documentRevision);
+    assert.ok(documentScrollRow(current) > 10);
+  } finally { release(); prepared.controller.renderViewport = renderViewport; await runtime.dispose(); await prepared.controller.close(); }
+});
+
+test("indented citation fragment, Back, Forward, and search retain the unpanned root viewport", async () => {
+  const source = `<style>html,body,p,ol{margin:0}ol{padding-left:64px}li{height:32px}:target{background:#e8eeff}</style><p>layout</p><div style="width:1600px;height:16px">WIDE</div><div style="height:640px">TOP</div><ol><li id=citation>Retrieved reference</li></ol><div style="height:1600px">END</div>`;
+  const { runtime, prepared } = await preparedFixture({ loader: async (url) => response(url, source) });
+  const current = () => runtime.state().documents[0];
+  const ready = () => current().rendering.status === "ready" && !current().loading && current().rendering.pendingReveal === null;
+  const assertUnpanned = () => {
+    assert.equal(current().scrollColumn, 0);
+    assert.equal(current().rendering.viewport.scrollColumn, 0);
+    assert.equal(current().rendering.viewport.cellBuffer.windowStartColumn, 0);
+  };
+  try {
+    assertUnpanned();
+    await runtime.dispatch({ kind: "omniboxSubmit", value: "https://example.test/#citation" });
+    await waitUntil(runtime, ready);
+    const citationRow = documentScrollRow(current());
+    assert.ok(citationRow > 30);
+    assertUnpanned();
+    assert.match(renderFramePlain(runtime.frame()), /Retrieved reference/);
+    await runtime.dispatch({ kind: "navigate", operation: "back" });
+    await waitUntil(runtime, ready);
+    assert.equal(documentScrollRow(current()), 0);
+    assertUnpanned();
+    await runtime.dispatch({ kind: "navigate", operation: "forward" });
+    await waitUntil(runtime, ready);
+    assert.equal(documentScrollRow(current()), citationRow);
+    assertUnpanned();
+    await runtime.dispatch({ kind: "openFind" });
+    await runtime.dispatch({ kind: "findAction", transition: { kind: "edit", operation: { kind: "insert", text: "layout" } } });
+    await waitUntil(runtime, () => ready() && current().search?.query === "layout"
+      && current().rendering.viewport.search?.matches.length === 1);
+    assert.equal(documentScrollRow(current()), 0);
+    assertUnpanned();
+    assert.match(renderFramePlain(runtime.frame()), /layout/);
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
 });

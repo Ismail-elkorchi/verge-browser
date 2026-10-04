@@ -579,7 +579,7 @@ function moveSearch(
   if (match === undefined) return document;
   const updated = { ...document, search: { ...search, activeMatchIndex } };
   return { ...updated, rendering: { ...updated.rendering,
-    pendingReveal: { query: search.query, match: match.id, align: "nearest" }, pendingFocus: null } };
+    pendingReveal: { query: search.query, match: match.id, blockAlign: "nearest" }, pendingFocus: null } };
 }
 
 function controlById(
@@ -611,7 +611,7 @@ function updateFormControl(
         ? applyDocumentAction(focused.snapshot.document, focused.documentState, {
           kind: "set-selected-options",
           target: control.node,
-          options: selectedOptions ?? control.options.filter((option) => values.includes(option.value)).map((option) => option.node)
+          options: selectedOptions ?? []
         })
         : applyDocumentAction(focused.snapshot.document, focused.documentState, {
           kind: "set-control-value",
@@ -906,7 +906,7 @@ function reduceBrowser(
             ...tab.rendering,
             ...(tab.search === null ? {} : { pendingSearch: null, searchRequestGeneration: tab.rendering.searchRequestGeneration + 1 }),
             ...(focused === undefined ? {} : {
-              pendingReveal: { node: focused.node, align: "nearest" as const },
+              pendingReveal: { node: focused.node, blockAlign: "nearest" as const },
               pendingFocus: { node: focused.node, actionId: focused.actionId, formControl: focused.actionKind === "form-control" },
             }),
           },
@@ -927,7 +927,7 @@ function reduceBrowser(
         const committed = {
           ...entry, scrollColumn: payload.scrollColumn ?? 0, scrollOffsets: payload.scrollOffsets,
           rendering: { ...entry.rendering, status: "ready" as const, committedViewportRevision: payload.viewportRevision,
-            viewport: payload, summary: payload.summary, pendingReveal: null, pendingFocus: null, error: null },
+            viewport: payload, previousViewport: null, summary: payload.summary, pendingReveal: null, pendingFocus: null, error: null },
         };
         const restoreAnchor = entry.rendering.summary === null && entry.rendering.pendingReveal === null;
         const preserveAnchor = entry.rendering.pendingReveal === null && (restoreAnchor || payload.scrollRow === documentScrollRow(entry));
@@ -993,7 +993,7 @@ function reduceBrowser(
       const match = search.matches[activeMatchIndex];
       const withSearch = { ...current, search, rendering: { ...current.rendering, pendingSearch: null } };
       const updated = match === undefined ? withSearch : { ...withSearch, rendering: { ...withSearch.rendering,
-        pendingReveal: { query: search.query, match: match.id, align: "nearest" as const }, pendingFocus: null } };
+        pendingReveal: { query: search.query, match: match.id, blockAlign: "nearest" as const }, pendingFocus: null } };
       return result({
         ...updateDocument(state, current.id, () => updated),
         ...(current.id !== selectedTab.id ? {} : { status: match === undefined
@@ -1431,7 +1431,7 @@ function reduceBrowser(
       if (target === undefined) return result(state);
       const visible = document.rendering.viewport?.focusTargets.some((entry) => entry.node === target.node) === true;
       const updated = documentWithFocus({ ...document, rendering: { ...document.rendering,
-        pendingReveal: { node: target.node, align: "nearest" },
+        pendingReveal: { node: target.node, blockAlign: "nearest" },
         pendingFocus: { node: target.node, actionId: target.actionId, formControl: target.actionKind === "form-control" },
       } }, target.node);
       return result(updateDocument(state, document.id, () => updated), visible ? {
@@ -1741,7 +1741,7 @@ function reduceBrowser(
           return {
             ...focused,
             ...(reveal ? { rendering: { ...focused.rendering,
-              pendingReveal: { node: control.node, align: "nearest" as const },
+              pendingReveal: { node: control.node, blockAlign: "nearest" as const },
               pendingFocus: { node: control.node, actionId: `control:${control.node}`, formControl: true }
             } } : {}),
             documentState: [...groupNodes].reduce(
@@ -1755,7 +1755,8 @@ function reduceBrowser(
           };
         }), message.focusTarget === undefined || reveal ? {} : { focus: { kind: "element", elementId: message.focusTarget } });
       }
-      return result(updateFormControl(state, document, control, message.values));
+      if (control.kind === "select" && message.selectedOptions === undefined) return result(state);
+      return result(updateFormControl(state, document, control, message.values, undefined, message.selectedOptions));
     }
     case "activateButton": {
       const control = controlById(document, message.controlId);

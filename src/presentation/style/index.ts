@@ -1,4 +1,5 @@
 export {
+  compareStyleSnapshots,
   implementationSupportsCondition,
   resolveStyles,
   terminalMediaMayApply,
@@ -9,7 +10,7 @@ export {
   inspectStylesheetBytes,
   inspectStylesheetText
 } from "./stylesheet-dependencies.js";
-export { compileStylesheetProgram } from "./stylesheet-program.js";
+export { compileStylesheetProgram, stylesheetOwnershipRoots } from "./stylesheet-program.js";
 export { USER_AGENT_STYLESHEET, USER_AGENT_STYLESHEET_SOURCE } from "./user-agent.js";
 export type * from "./types.js";
 export * from "./table/index.js";

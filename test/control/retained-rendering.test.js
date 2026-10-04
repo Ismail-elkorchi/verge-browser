@@ -681,12 +681,15 @@ for (const phase of ["compilation", "layout", "admission", "rasterization"]) {
     const document = parseWebDocument('<style>p{color:red}</style>' + '<p>checkpoint words</p>'.repeat(100),
       { requestUrl: "https://checkpoint.test/", finalUrl: "https://checkpoint.test/" });
     let activePhase = "compilation";
+    // Admission can reuse every owner measurement; cancel at its first real
+    // checkpoint rather than depending on an obsolete number of graph walks.
+    const cancellationCheckpoint = phase === "admission" ? 1 : 20;
     let checkpoints = 0;
     const cancellation = new globalThis.AbortController();
     const signal = {
       get aborted() { return cancellation.signal.aborted; },
       throwIfAborted() {
-        if (activePhase === phase && ++checkpoints === 20) cancellation.abort();
+        if (activePhase === phase && ++checkpoints === cancellationCheckpoint) cancellation.abort();
         cancellation.signal.throwIfAborted();
       },
     };
@@ -703,7 +706,7 @@ for (const phase of ["compilation", "layout", "admission", "rasterization"]) {
         store.renderViewport({ documentId: "document", documentRevision: 1, viewportRevision: 1, ...contexts(80, 24),
           window: { scrollRow: 0, viewportRows: 24, overscanBefore: 2, overscanAfter: 3 }, signal, analysisSignal: signal });
       }, { name: "AbortError" });
-      assert.equal(checkpoints, 20);
+      assert.equal(checkpoints, cancellationCheckpoint);
       assert.equal(store.metrics().retainedAnalyses, phase === "rasterization" ? 1 : 0);
     } finally { store.dispose(); }
   });
@@ -864,7 +867,7 @@ for (const nested of [false, true]) {
       assert.equal(search.matches.length, 2);
       const last = search.matches[1];
       const revealed = render(store, 1, { columns: 10, rows: 24, overscanBefore: 0, overscanAfter: 0,
-        searchQuery: "needle", reveal: { query: "needle", match: last.id, align: "nearest" } });
+        searchQuery: "needle", reveal: { query: "needle", match: last.id, blockAlign: "nearest" } });
       assert.ok(revealed.terminal.search.matches.some((match) => match.id === last.id), "selected occurrence is painted inside actual viewport");
       if (nested) {
         assert.equal(revealed.displayList.window.scrollRow, 0);
@@ -872,7 +875,7 @@ for (const nested of [false, true]) {
       } else assert.ok(revealed.displayList.window.scrollRow > 100);
       const first = render(store, 2, { columns: 10, rows: 24, overscanBefore: 0, overscanAfter: 0,
         scrollRow: revealed.displayList.window.scrollRow, scrollOffsets: revealed.displayList.window.scrollOffsets,
-        searchQuery: "needle", reveal: { query: "needle", match: search.matches[0].id, align: "nearest" } });
+        searchQuery: "needle", reveal: { query: "needle", match: search.matches[0].id, blockAlign: "nearest" } });
       assert.ok(first.terminal.search.matches.some((match) => match.id === search.matches[0].id));
       assert.equal(first.displayList.window.scrollRow, 0);
       assert.ok(first.displayList.window.scrollOffsets.every((offset) => offset.block === 0));
@@ -896,7 +899,7 @@ test("root horizontal viewport shares source columns across paint, hits, focus, 
   assert.ok(shifted.terminal.focusMap.targets.some(entry=>entry.node===target));
   assert.ok(shifted.terminal.controls.some(entry=>entry.node===fixture.document.elementById("field")));
   assert.ok(shifted.terminal.search.matches.length>0);
-  const revealed=render(fixture.store,3,{columns:40,rows:10,reveal:{node:target,align:"nearest"}});
+  const revealed=render(fixture.store,3,{columns:40,rows:10,reveal:{node:target,blockAlign:"nearest"}});
   assert.ok(revealed.displayList.window.scrollColumn>0);
   assert.match(revealed.terminal.cellBuffer.rows.map(row=>row.text).join("\n"),/horizontal-target/);
   const resized=render(fixture.store,4,{columns:120,rows:10,scrollColumn:10000});
@@ -911,9 +914,11 @@ test("RTL root viewport pans negative source columns and root reveal uses the sa
   assert.match(shifted.terminal.cellBuffer.rows.map(row=>row.text).join("\n"),/rtl-target/);
   assert.ok(shifted.terminal.cellBuffer.rows.flatMap(row=>row.cells).some(cell=>cell.column<0));
   assert.ok(shifted.terminal.focusMap.targets.some(entry=>entry.node===target));
-  const revealed=render(fixture.store,2,{columns:40,rows:10,reveal:{node:target,align:"nearest"}});
-  assert.ok(revealed.displayList.window.scrollColumn<0);
-  assert.match(revealed.terminal.cellBuffer.rows.map(row=>row.text).join("\n"),/rtl-target/);
+  for (const blockAlign of ["nearest", "start"]) {
+    const revealed=render(fixture.store,2,{columns:40,rows:10,reveal:{node:target,blockAlign}});
+    assert.ok(revealed.displayList.window.scrollColumn<0);
+    assert.match(revealed.terminal.cellBuffer.rows.map(row=>row.text).join("\n"),/rtl-target/);
+  }
   assert.equal(render(fixture.store,3,{columns:40,rows:10,scrollColumn:1000}).displayList.window.scrollColumn,0);
 });
 
@@ -944,4 +949,83 @@ test("worker root inline protocol returns clamped signed origin and reachable ex
     const resized=await client.renderViewport(browserDocument,2,{...parameters,columns:120,scrollColumn:-1000000});
     assert.equal(resized.scrollColumn,resized.minScrollColumn);
   } finally {await client.close();}
+});
+
+for (const [name, content, selector] of [
+  ["ordinary block", '<p id="target"><a href="/a">alpha beta</a></p>', '#target'],
+  ["pseudo element", '<p id="target">alpha beta</p>', '#target::before'],
+  ["anonymous boxes", '<div id="target">alpha<div>beta</div>gamma</div>', '#target'],
+  ["table cell", '<table><tr><td id="target"><a href="/a">alpha beta</a></td></tr></table>', '#target'],
+]) {
+  test(`background-only ${name} regenerates paint while preserving layout, geometry and search`, () => {
+    const active = selector.replace('#target', '#target:focus');
+    const html = `<style>body{margin:0}p{margin:0}#target::before{content:"prefix "}${selector}{background:transparent}${active}{background:red}</style>${content}`;
+    const retained = attachedStore(html);
+    const fresh = attachedStore(html);
+    try {
+      render(retained.store, 1, {searchQuery:"alpha"});
+      const before = analysis(retained.store, 80, 24);
+      for (const fixture of [retained, fresh]) fixture.store.updateState({
+        documentId: "document", documentRevision: 1, stateRevision: 2,
+        state: {...fixture.state, focus: fixture.document.elementById("target")}, changed: new Set(["focus"]),
+      });
+      const changed = render(retained.store, 2, {searchQuery:"alpha"});
+      const expected = render(fresh.store, 2, {searchQuery:"alpha"});
+      const after = analysis(retained.store, 80, 24);
+      const full = analysis(fresh.store, 80, 24);
+      assert.equal(after.documentLayout, before.documentLayout);
+      assert.equal(after.documentGeometry, before.documentGeometry);
+      assert.equal(after.textSearchIndex, before.textSearchIndex);
+      for (const stage of ["box-tree-construction", "inline-item-stream-construction", "logical-search-index-construction", "normal-flow-layout", "document-geometry-index-construction"]) assert.equal(invocation(changed, stage), 0, stage);
+      assert.equal(invocation(changed, "document-display-list-construction"), 1);
+      assert.deepEqual(after.documentDisplayList.commands, full.documentDisplayList.commands);
+      assert.ok(after.documentDisplayList.commands.some((command) => command.kind === "background" && command.style.background?.r === 255));
+      assert.deepEqual(changed.terminal.cellBuffer, expected.terminal.cellBuffer);
+      assert.deepEqual(changed.terminal.focusMap, expected.terminal.focusMap);
+      assert.deepEqual(changed.terminal.hitTestIndex, expected.terminal.hitTestIndex);
+      assert.deepEqual(changed.terminal.search, expected.terminal.search);
+      // Geometry changes later still use current paint while reusing valid upstream content.
+      const resized = render(retained.store, 3, {columns:40, searchQuery:"alpha"});
+      const resizedFresh = render(fresh.store, 3, {columns:40, searchQuery:"alpha"});
+      assert.deepEqual(resized.terminal.cellBuffer, resizedFresh.terminal.cellBuffer);
+    } finally { retained.store.dispose(); fresh.store.dispose(); }
+  });
+}
+
+test("background participation in hidden empty table cells uses canonical recomputation", () => {
+  const html = `<style>td{empty-cells:hide;border:1px solid red}#target:focus span{background:blue}</style><table><tr><td id="target"><span> </span></td></tr></table>`;
+  const retained = attachedStore(html);
+  const fresh = attachedStore(html);
+  try {
+    render(retained.store, 1);
+    for (const fixture of [retained, fresh]) fixture.store.updateState({documentId:"document",documentRevision:1,stateRevision:2,
+      state:{...fixture.state,focus:fixture.document.elementById("target")},changed:new Set(["focus"])});
+    const changed = render(retained.store, 2);
+    const expected = render(fresh.store, 2);
+    assert.equal(invocation(changed, "normal-flow-layout"), 1);
+    assert.deepEqual(changed.terminal.cellBuffer, expected.terminal.cellBuffer);
+    assert.deepEqual(analysis(retained.store,80,24).documentDisplayList.commands, analysis(fresh.store,80,24).documentDisplayList.commands);
+  } finally { retained.store.dispose(); fresh.store.dispose(); }
+});
+
+test("block-start search reveal keeps visible inline ranges and minimally exposes offscreen matches", () => {
+  for (const [nested, left, expectedInline] of [[false, 64, 0], [false, 480, 208], [true, 80, 0], [true, 240, 128]]) {
+    const fixture = attachedStore(`<style>html,body,p{margin:0}#owner{${nested ? "width:160px;height:64px;overflow:auto" : "width:1000px"}}p{position:relative;left:${left}px;width:80px;height:32px}</style><div id=owner><div style="height:640px">TOP</div><p>needle</p><div style="height:1600px">END</div></div>`);
+    try {
+      const search = fixture.store.search({ documentId: "document", documentRevision: 1, ...contexts(40, 24) }, "needle");
+      assert.equal(search.matches.length, 1);
+      const result = render(fixture.store, 1, { columns: 40, rows: 24, searchQuery: "needle",
+        reveal: { query: "needle", match: search.matches[0].id, blockAlign: "start" } });
+      if (nested) {
+        const offset = result.displayList.window.scrollOffsets.find((entry) => entry.node === fixture.document.elementById("owner"));
+        assert.equal(offset.inline, cssPx(expectedInline));
+        assert.equal(offset.block, cssPx(640));
+        assert.equal(result.displayList.window.scrollColumn, 0);
+      } else {
+        assert.equal(result.displayList.window.scrollColumn, expectedInline / 8);
+        assert.equal(result.displayList.window.scrollRow, 40);
+      }
+      assert.ok(result.terminal.search.matches.some((match) => match.id === search.matches[0].id));
+    } finally { fixture.store.dispose(); }
+  }
 });

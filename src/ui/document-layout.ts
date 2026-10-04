@@ -120,7 +120,7 @@ export function documentScrollRow(document: BrowserDocumentState): number {
 
 /** Row represented by the last committed viewport; pending requests keep that frame stationary. */
 export function committedDocumentScrollRow(document: BrowserDocumentState): number {
-  const buffer = document.rendering.viewport?.cellBuffer;
+  const buffer = (document.rendering.viewport ?? document.rendering.previousViewport)?.cellBuffer;
   return buffer === undefined
     ? documentScrollRow(document)
     : buffer.windowStartRow + buffer.overscanBefore;
@@ -208,5 +208,5 @@ export function scrollToSource(
   source: DocumentNodeRef | undefined
 ): BrowserDocumentState {
   return source === undefined ? document : { ...document, rendering: { ...document.rendering,
-    pendingReveal: { node: source, align: "start" }, pendingFocus: null } };
+    pendingReveal: { node: source, blockAlign: "start" }, pendingFocus: null } };
 }

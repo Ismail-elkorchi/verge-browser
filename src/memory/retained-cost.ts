@@ -16,6 +16,55 @@ export function registerRetainedOwner(
   retainedOwners.set(owner, registrations);
 }
 
+/** Revisioned side caches remain mutable even when their phase wrapper is frozen. */
+export class RetainedCacheMap<K, V> extends Map<K, V> {
+  #revision = 0;
+  readonly #owners = new Set<{ revision: number }>();
+  public constructor(entries?: Iterable<readonly [K, V]> | null) {
+    super();
+    registerRetainedOwner(this, () => [this.#owners]);
+    if (entries !== undefined && entries !== null) for (const [key, value] of entries) this.set(key, value);
+  }
+  public get revision(): number { return this.#revision; }
+  public registerCostRevision(owner: { revision: number }): void {
+    if (!this.#owners.has(owner)) { this.#owners.add(owner); this.#changed(); }
+  }
+  #changed(): void {
+    this.#revision += 1;
+    for (const owner of this.#owners) owner.revision += 1;
+  }
+  public override set(key: K, value: V): this {
+    if (!this.has(key) || this.get(key) !== value) { super.set(key, value); this.#changed(); }
+    return this;
+  }
+  public override delete(key: K): boolean {
+    const deleted = super.delete(key);
+    if (deleted) this.#changed();
+    return deleted;
+  }
+  public override clear(): void { if (this.size !== 0) { super.clear(); this.#changed(); } }
+}
+interface RetainedCacheCollection {
+  readonly caches: Set<RetainedCacheMap<unknown, unknown>>;
+  readonly token: { revision: number };
+}
+const retainedCaches = new WeakMap<object, RetainedCacheCollection>();
+export function registerRetainedCache(owner: object, cache: RetainedCacheMap<unknown, unknown>): void {
+  const collection = retainedCaches.get(owner) ?? { caches: new Set<RetainedCacheMap<unknown, unknown>>(), token: { revision: 0 } };
+  if (collection.caches.has(cache)) return;
+  collection.caches.add(cache);
+  collection.token.revision += 1;
+  cache.registerCostRevision(collection.token);
+  retainedCaches.set(owner, collection);
+  registerRetainedOwner(owner, [cache]);
+}
+export function retainedSideCaches(owner: object): Iterable<RetainedCacheMap<unknown, unknown>> {
+  return retainedCaches.get(owner)?.caches ?? [];
+}
+export function retainedSideCacheRevision(owner: object): number {
+  return retainedCaches.get(owner)?.token.revision ?? 0;
+}
+
 function measureAllocations(
   roots: readonly unknown[],
   signal: Pick<AbortSignal, "throwIfAborted"> | undefined,
@@ -99,7 +148,8 @@ export interface RetainedCostOwner {
 export class RetainedCostAccounting {
   readonly #owners = new WeakMap<object, RetainedCostOwner>();
   // Construction-local ownership is also the visit ledger; adoption needs no second identity table.
-  readonly #allocations = new Map<object, RetainedCostOwner>();
+  #allocations = new WeakMap<object, RetainedCostOwner>();
+  readonly #discardedOwners = new WeakSet<RetainedCostOwner>();
   readonly #activeOwners = new Set<RetainedCostOwner>();
   #measuredAllocations = 0;
 
@@ -109,14 +159,14 @@ export class RetainedCostAccounting {
     root: object,
     excluded: ReadonlySet<object> = new Set(),
     signal?: Pick<AbortSignal, "throwIfAborted">,
-    sharedResource = false,
+    sharedRoots: readonly object[] = [],
   ): RetainedCostOwner {
     const retained = this.#owners.get(root);
     if (retained !== undefined) return retained;
-    const { owner, allocations } = this.#measure(root, excluded, signal);
+    const { owner } = this.#measure(root, excluded, signal, true, sharedRoots.length * 48);
     // Commit only after cancellation checks. Committed owner records never strongly retain allocation graphs.
     this.#owners.set(root, owner);
-    if (sharedResource) for (const value of allocations) this.#owners.set(value, owner);
+    for (const value of sharedRoots) this.#owners.set(value, owner);
     return owner;
   }
 
@@ -129,58 +179,61 @@ export class RetainedCostAccounting {
     excluded: ReadonlySet<object>,
     signal?: Pick<AbortSignal, "throwIfAborted">,
     retainAllocations = true,
+    metadataBytes = 0,
   ): {
     readonly owner: RetainedCostOwner;
-    readonly allocations: readonly object[];
   } {
     const dependencies = new Set<RetainedCostOwner>();
     const owner = { bytes: 0, dependencies: [] as RetainedCostOwner[] };
-    const allocations: object[] = [];
+    let allocationCount = 0;
     // Only reentrant measurements can replace another active traversal's entries.
     let displaced: Map<object, RetainedCostOwner> | undefined;
     let committed = false;
     this.#activeOwners.add(owner);
     try {
       owner.bytes = measureAllocations([root], signal, (value) => {
-        if (excluded.has(value)) return false;
+        if (excluded.has(value) || (retainAllocations && value instanceof RetainedCacheMap)) return false;
         const allocated = this.#allocations.get(value);
         if (allocated === owner) return false;
         const retained = this.#owners.get(value)
-          ?? (allocated !== undefined && !this.#activeOwners.has(allocated) ? allocated : undefined);
+          ?? (allocated !== undefined && !this.#activeOwners.has(allocated)
+            && !this.#discardedOwners.has(allocated) ? allocated : undefined);
         if (retained !== undefined) {
           dependencies.add(retained);
           return false;
         }
-        if (allocated !== undefined) {
+        if (allocated !== undefined && this.#activeOwners.has(allocated)) {
           displaced ??= new Map();
           displaced.set(value, allocated);
         }
         this.#allocations.set(value, owner);
-        allocations.push(value);
+        allocationCount += 1;
         return true;
       });
+      owner.bytes += metadataBytes;
       owner.dependencies = [...dependencies];
       Object.freeze(owner.dependencies);
       Object.freeze(owner);
-      this.#measuredAllocations += allocations.length;
+      this.#measuredAllocations += allocationCount;
       committed = retainAllocations;
-      return { owner, allocations };
+      return { owner };
     } finally {
       this.#activeOwners.delete(owner);
       if (!committed) {
-        for (const value of allocations) {
+        // Invalidating a traversal token rolls back every provisional entry without
+        // keeping a second strong list of every visited allocation. Weak keys cannot
+        // keep retired phase graphs alive until the replacement is published.
+        this.#discardedOwners.add(owner);
+        for (const [value, previous] of displaced ?? []) {
           // A nested successful measurement owns its own committed entries.
-          if (this.#allocations.get(value) !== owner) continue;
-          const previous = displaced?.get(value);
-          if (previous === undefined) this.#allocations.delete(value);
-          else this.#allocations.set(value, previous);
+          if (this.#allocations.get(value) === owner) this.#allocations.set(value, previous);
         }
       }
     }
   }
 
   /** Discards construction-local sharing; later versions cannot retain unrelated retired owners. */
-  public endBatch(): void { this.#allocations.clear(); }
+  public endBatch(): void { this.#allocations = new WeakMap(); }
 
   public total(owners: Iterable<RetainedCostOwner>): number {
     const seen = new Set<RetainedCostOwner>();
@@ -190,7 +243,7 @@ export class RetainedCostAccounting {
       const owner = pending.pop();
       if (owner === undefined || seen.has(owner)) continue;
       seen.add(owner);
-      bytes += owner.bytes;
+      bytes += owner.bytes + 128 + owner.dependencies.length * 8;
       pending.push(...owner.dependencies);
     }
     return bytes;

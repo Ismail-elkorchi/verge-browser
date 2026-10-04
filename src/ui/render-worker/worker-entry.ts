@@ -159,6 +159,7 @@ function receive(message: RenderWorkerRequest): void {
     }
     if (message.kind === "update-document-state") {
       store.updateState({
+        ...(message.previousDocumentRevision === undefined ? {} : { previousDocumentRevision: message.previousDocumentRevision }),
         documentId: message.documentId,
         documentRevision: message.documentRevision,
         stateRevision: message.stateRevision,
@@ -246,7 +247,7 @@ function receive(message: RenderWorkerRequest): void {
     );
     cancellationSignals.push(viewportSignal);
     viewportRequests += 1;
-    const result = store.renderViewport({
+    store.withViewportArtifacts({
       documentId: message.documentId,
       documentRevision: message.documentRevision,
       viewportRevision: message.viewportRevision,
@@ -263,86 +264,81 @@ function receive(message: RenderWorkerRequest): void {
       searchQuery: message.parameters.searchQuery,
       analysisSignal: documentSignal,
       signal: viewportSignal,
-    });
-    completedViewportRequests += 1;
-    const summaryKey = [message.documentId, message.documentRevision, result.artifactKey.documentLayout].join("\u0000");
-    const includeSummary = message.heldSummaryIdentity !== summaryKey;
-    const artifacts = store.analyze({
-      documentId: message.documentId,
-      documentRevision: message.documentRevision,
-      ...renderContext,
-      signal: documentSignal,
-    });
-    const inlineRange = viewportInlineRange(artifacts.documentLayout, message.parameters.columns * CELL_WIDTH);
-    const payload: TransferredViewportRenderPayload = Object.freeze({
-      viewportOverflow: artifacts.documentLayout.viewportOverflow,
-      cellInline: renderContext.terminalContext.cellWidthCssPx,
-      cellBlock: renderContext.terminalContext.rowHeightCssPx,
-      scrollRow: result.displayList.window.scrollRow,
-      scrollColumn: result.displayList.window.scrollColumn ?? 0,
-      minScrollColumn: Math.floor(inlineRange.minInline / CELL_WIDTH),
-      maxScrollColumn: Math.ceil(inlineRange.maxInline / CELL_WIDTH),
-      scrollOffsets: result.displayList.window.scrollOffsets ?? [],
-      summaryIdentity: summaryKey,
-      layoutRevision: result.artifactKey.documentLayout,
-      documentId: result.documentId,
-      documentRevision: result.documentRevision,
-      stateRevision: result.stateRevision,
-      viewportRevision: result.viewportRevision,
-      cellBuffer: result.terminal.cellBuffer,
-      spatialQuery: result.displayList.spatialQuery,
-      hitRegions: result.terminal.hitTestIndex.regions,
-      focusTargets: result.terminal.focusMap.targets,
-      accessibilityBounds: result.terminal.accessibilityBounds,
-      search: result.terminal.search,
-      controls: result.terminal.controls,
-      scrollPorts: result.terminal.scrollPorts,
-      summary: includeSummary ? Object.freeze({
-        identity: summaryKey,
-        documentRowCount: result.documentExtentRows,
-        incomplete: incompleteRenderingLabels(artifacts),
-        styleOutcome: artifacts.computedStyles.outcome,
-        styleDiagnostics: artifacts.computedStyles.diagnostics,
-        omittedStyleDiagnosticCount: artifacts.computedStyles.omittedDiagnosticCount,
-        scrollAnchors: Object.freeze(result.scrollAnchors.map((anchor) => Object.freeze({
-          documentNode: anchor.documentNode,
-          row: Math.max(0, Math.floor(
-            anchor.blockOffsetCssPx / renderContext.terminalContext.rowHeightCssPx,
-          )),
-        }))),
-        focusOrder: Object.freeze(result.focusOrder.map((target) => {
-          let topRow = Number.MAX_SAFE_INTEGER;
-          let bottomRow = Number.MIN_SAFE_INTEGER;
-          for (const rect of target.rects) {
-            topRow = Math.min(
+    }, (result, artifacts) => {
+      completedViewportRequests += 1;
+      const summaryKey = [message.documentId, message.documentRevision, result.artifactKey.documentLayout, result.artifactKey.reporting].join("\u0000");
+      const includeSummary = message.heldSummaryIdentity !== summaryKey;
+      const inlineRange = viewportInlineRange(artifacts.documentLayout, message.parameters.columns * CELL_WIDTH);
+      const payload: TransferredViewportRenderPayload = Object.freeze({
+        viewportOverflow: artifacts.documentLayout.viewportOverflow,
+        cellInline: renderContext.terminalContext.cellWidthCssPx,
+        cellBlock: renderContext.terminalContext.rowHeightCssPx,
+        scrollRow: result.displayList.window.scrollRow,
+        scrollColumn: result.displayList.window.scrollColumn ?? 0,
+        minScrollColumn: Math.floor(inlineRange.minInline / CELL_WIDTH),
+        maxScrollColumn: Math.ceil(inlineRange.maxInline / CELL_WIDTH),
+        scrollOffsets: result.displayList.window.scrollOffsets ?? [],
+        summaryIdentity: summaryKey,
+        layoutRevision: result.artifactKey.documentLayout,
+        documentId: result.documentId,
+        documentRevision: result.documentRevision,
+        stateRevision: result.stateRevision,
+        viewportRevision: result.viewportRevision,
+        cellBuffer: result.terminal.cellBuffer,
+        spatialQuery: result.displayList.spatialQuery,
+        hitRegions: result.terminal.hitTestIndex.regions,
+        focusTargets: result.terminal.focusMap.targets,
+        accessibilityBounds: result.terminal.accessibilityBounds,
+        search: result.terminal.search,
+        controls: result.terminal.controls,
+        scrollPorts: result.terminal.scrollPorts,
+        summary: includeSummary ? Object.freeze({
+          identity: summaryKey,
+          documentRowCount: result.documentExtentRows,
+          incomplete: incompleteRenderingLabels(artifacts),
+          styleOutcome: artifacts.computedStyles.outcome,
+          styleDiagnostics: artifacts.computedStyles.diagnostics,
+          omittedStyleDiagnosticCount: artifacts.computedStyles.omittedDiagnosticCount,
+          scrollAnchors: Object.freeze(result.scrollAnchors.map((anchor) => Object.freeze({
+            documentNode: anchor.documentNode,
+            row: Math.max(0, Math.floor(
+              anchor.blockOffsetCssPx / renderContext.terminalContext.rowHeightCssPx,
+            )),
+          }))),
+          focusOrder: Object.freeze(result.focusOrder.map((target) => {
+            let topRow = Number.MAX_SAFE_INTEGER;
+            let bottomRow = Number.MIN_SAFE_INTEGER;
+            for (const rect of target.rects) {
+              topRow = Math.min(
+                topRow,
+                Math.floor(rect.y / renderContext.terminalContext.rowHeightCssPx),
+              );
+              bottomRow = Math.max(
+                bottomRow,
+                Math.ceil((rect.y + rect.height) / renderContext.terminalContext.rowHeightCssPx),
+              );
+            }
+            if (topRow === Number.MAX_SAFE_INTEGER) {
+              const anchor = artifacts.documentGeometry.anchorForNode(target.node);
+              topRow = Math.floor((anchor?.blockOffsetCssPx ?? 0) / renderContext.terminalContext.rowHeightCssPx);
+              bottomRow = topRow + 1;
+            }
+            return Object.freeze({
+              node: target.node,
+              scrollOwner: target.scrollOwner,
+              actionId: documentActionId(target.action),
+              actionKind: target.action.kind,
               topRow,
-              Math.floor(rect.y / renderContext.terminalContext.rowHeightCssPx),
-            );
-            bottomRow = Math.max(
               bottomRow,
-              Math.ceil((rect.y + rect.height) / renderContext.terminalContext.rowHeightCssPx),
-            );
-          }
-          if (topRow === Number.MAX_SAFE_INTEGER) {
-            const anchor = artifacts.documentGeometry.anchorForNode(target.node);
-            topRow = Math.floor((anchor?.blockOffsetCssPx ?? 0) / renderContext.terminalContext.rowHeightCssPx);
-            bottomRow = topRow + 1;
-          }
-          return Object.freeze({
-            node: target.node,
-            scrollOwner: target.scrollOwner,
-            actionId: documentActionId(target.action),
-            actionKind: target.action.kind,
-            topRow,
-            bottomRow,
-          });
-        })),
-        authorStateDependencies: Object.freeze([...artifacts.stylesheetProgram.authorStateDependencies]),
-      }) : null,
-      stageMetrics: result.stageMetrics,
+            });
+          })),
+          authorStateDependencies: Object.freeze([...artifacts.stylesheetProgram.authorStateDependencies]),
+        }) : null,
+        stageMetrics: result.stageMetrics,
+      });
+      workingSetCheckpoint();
+      post({ kind: "viewport-ready", requestId: message.requestId, payload });
     });
-    workingSetCheckpoint();
-    post({ kind: "viewport-ready", requestId: message.requestId, payload });
   } catch (error) {
     if (error instanceof RenderBudgetExceededError) {
       post({ kind: "budget-exceeded", requestId: message.requestId, budget: error.budget,

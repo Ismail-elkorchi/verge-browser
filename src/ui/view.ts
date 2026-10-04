@@ -497,7 +497,7 @@ function inlineFormControl(
   if (control.kind === "submit") {
     return button({
       id: control.node,
-      label: control.label || control.value || "Submit",
+      label: control.caption,
       tone: "primary",
       disabled: control.disabled || formId === null,
       onPress: () => formId === null ? ignoreMessage() : ({
@@ -510,7 +510,7 @@ function inlineFormControl(
   if (control.kind === "reset") {
     return button({
       id: control.node,
-      label: control.label || "Reset",
+      label: control.caption,
       disabled: control.disabled || formId === null,
       onPress: () => formId === null ? ignoreMessage() : ({
         kind: "resetForm",
@@ -522,7 +522,7 @@ function inlineFormControl(
   if (control.kind === "button") {
     const buttonOptions = {
       id: control.node,
-      label: control.label || control.value || "Button"
+      label: control.caption
     };
     return button({
         ...buttonOptions,
@@ -853,7 +853,7 @@ function browserDocument(
 }
 
 function committedBrowserViewport(document: BrowserDocumentState): BrowserViewportTerminal | null {
-  const payload = document.rendering.viewport;
+  const payload = document.rendering.viewport ?? document.rendering.previousViewport ?? null;
   if (payload === null) return null;
   // Render payload geometry stays in source coordinates. Project only this TUI
   // adapter into the committed horizontal window; row text/code-unit ranges
@@ -1336,7 +1336,8 @@ function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMe
         id: "position",
         kind: "text",
         text: selected.kind === "ready"
-          ? `${String(committedDocumentScrollRow(selected) + 1)}/${String(Math.max(1, selected.rendering.summary?.documentRowCount ?? 1))}`
+          ? `${String(committedDocumentScrollRow(selected) + 1)}/${String(Math.max(1, selected.rendering.summary?.documentRowCount
+            ?? (selected.rendering.viewport ?? selected.rendering.previousViewport)?.cellBuffer.documentRowCount ?? 1))}`
           : "…"
       }]
     })

@@ -1,5 +1,5 @@
 import type { FormattingFormControlNode, FormattingTree } from "./types.js";
-import type { DocumentDirection } from "../../document/index.js";
+import { controlValues, controlChecked, controlSelections, type DocumentDirection } from "../../document/index.js";
 
 export interface ControlDisplayTextSegment {
   readonly kind: "control-decoration" | "control-value" | "label" | "placeholder";
@@ -19,7 +19,6 @@ export interface ControlDisplayText {
 /** Serializes document control state for its atomic inline box. */
 export function controlDisplayText(node: FormattingFormControlNode, tree: FormattingTree): ControlDisplayText {
   const control = node.control;
-  const state = tree.state.controls.get(control.node);
   const indexedDirection = (kind: ControlDisplayTextSegment["kind"], value: string): DocumentDirection => {
     const renderedKind = kind === "control-decoration" ? null : kind;
     const indexed = renderedKind === null ? undefined : tree.document.directionality(control.node).renderedText
@@ -47,21 +46,20 @@ export function controlDisplayText(node: FormattingFormControlNode, tree: Format
     return Object.freeze({ label, value, text: segments.map((segment) => segment.text).join(""), segments: Object.freeze(segments) });
   };
   if (control.kind === "text" || control.kind === "textarea") {
-    const value = state?.values[0] ?? control.defaultValue;
+    const value = controlValues(tree.state, control)[0] ?? "";
     const visibleValue = value || control.placeholder || "";
     return result(control.label, value, [
       { kind: value.length > 0 ? "control-value" : "placeholder", text: visibleValue }
     ]);
   }
   if (control.kind === "checkbox" || control.kind === "radio") {
-    const checked = state?.checked ?? control.defaultChecked;
+    const checked = controlChecked(tree.state, control);
     return result(control.label, checked ? control.value : "", [
       { kind: "control-decoration", text: control.kind === "radio" ? (checked ? "(●)" : "( )") : (checked ? "[x]" : "[ ]") }
     ]);
   }
   if (control.kind === "select") {
-    const selected = new Set(state?.selected ?? control.options
-      .filter((option) => option.defaultSelected).map((option) => option.node));
+    const selected = new Set(controlSelections(tree.state, control));
     const options = control.options.filter((option) => selected.has(option.node));
     const value = options.map((option) => option.value).join(", ");
     return result(control.label, value, [
@@ -70,14 +68,14 @@ export function controlDisplayText(node: FormattingFormControlNode, tree: Format
     ]);
   }
   if (control.kind === "submit" || control.kind === "reset" || control.kind === "button") {
-    const label = control.label || control.value;
+    const label = control.caption;
     return result(control.label, control.value, [
       { kind: "control-decoration", text: "[" },
       { kind: "label", text: label },
       { kind: "control-decoration", text: "]" }
     ]);
   }
-  if (control.kind === "hidden") return result("", control.defaultValue, []);
+  if (control.kind === "hidden") return result("", controlValues(tree.state, control)[0] ?? "", []);
   return result(control.label, "", [
     { kind: "control-decoration", text: "unsupported control" }
   ]);

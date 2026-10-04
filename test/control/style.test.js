@@ -858,8 +858,8 @@ test("selector lists retain distinct generated pseudo-element identities", () =>
   </style><h1>Heading</h1><p>Paragraph</p>`);
   for (const name of ["h1", "p"]) {
     const ref = named(document, name);
-    assert.equal(styles.pseudo(ref, "before")?.generatedContent, "prefix");
-    assert.equal(styles.pseudo(ref, "after")?.generatedContent, "suffix");
+    assert.deepEqual(styles.pseudo(ref, "before")?.generatedContent, { kind: "items", visual: [{ kind: "text", value: "prefix" }], alternative: null });
+    assert.deepEqual(styles.pseudo(ref, "after")?.generatedContent, { kind: "items", visual: [{ kind: "text", value: "suffix" }], alternative: null });
   }
 });
 

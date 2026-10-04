@@ -57,11 +57,61 @@ class ImmutableSet<Value> implements ReadonlySet<Value> {
 }
 
 function immutableControlState(state: DocumentControlState): DocumentControlState {
-  return Object.freeze({
-    values: Object.freeze([...state.values]),
-    checked: state.checked,
-    selected: Object.freeze([...state.selected])
-  });
+  return Object.freeze(state.kind === "selected"
+    ? { ...state, selected: Object.freeze([...state.selected]) }
+    : { ...state });
+}
+
+/** Canonical state is required: consumers must never reconstruct authored defaults. */
+export function controlState(state: DocumentState, node: DocumentNodeRef): DocumentControlState {
+  const value = state.controls.get(node);
+  if (value === undefined) throw new RangeError(`Missing document control state: ${node}`);
+  return value;
+}
+
+export function controlChecked(state: DocumentState, control: DocumentFormControl): boolean {
+  const current = controlState(state, control.node);
+  if (current.kind !== "checked") throw new TypeError("Checked state requires a checkbox or radio control");
+  return current.checked;
+}
+
+export function controlSelections(state: DocumentState, control: DocumentFormControl): readonly DocumentNodeRef[] {
+  const current = controlState(state, control.node);
+  if (current.kind !== "selected") throw new TypeError("Selected state requires a select control");
+  return current.selected;
+}
+
+/** Values are derived from option identity and checkedness, never stored twice. */
+export function controlValues(state: DocumentState, control: DocumentFormControl): readonly string[] {
+  const current = controlState(state, control.node);
+  if (current.kind === "value") return [current.value];
+  if (control.kind === "select" && current.kind === "selected") {
+    const selected = new Set(current.selected);
+    return control.options.filter((option) => selected.has(option.node)).map((option) => option.value);
+  }
+  if ((control.kind === "checkbox" || control.kind === "radio") && current.kind === "checked") {
+    return current.checked ? [control.value] : [];
+  }
+  if (control.kind === "submit" || control.kind === "reset" || control.kind === "button") return [control.value];
+  return [];
+}
+
+const ASCII_WHITESPACE = /^[\t\n\f\r ]+|[\t\n\f\r ]+$/gu;
+
+/** The supported input value-sanitization algorithms, shared by initialization, edits and reset. */
+function sanitizedValue(control: DocumentFormControl, value: string): string {
+  if (control.kind === "textarea") return value.replace(/\r\n?/gu, "\n");
+  if (control.kind !== "text") return value;
+  if (control.inputType === "number") {
+    return /^-?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$/u.test(value)
+      && Number.isFinite(Number(value)) ? value : "";
+  }
+  const singleLine = value.replace(/[\r\n]/gu, "");
+  if (control.inputType === "email" && control.multiple) {
+    return singleLine.split(",").map((part) => part.replace(ASCII_WHITESPACE, "")).join(",");
+  }
+  return control.inputType === "email" || control.inputType === "url"
+    ? singleLine.replace(ASCII_WHITESPACE, "") : singleLine;
 }
 
 function immutableControls(
@@ -85,34 +135,20 @@ export function snapshotDocumentState(state: DocumentState): DocumentState {
 }
 
 function initialControlState(control: DocumentFormControl): DocumentControlState {
-  if (control.kind === "text" || control.kind === "textarea") {
-    return { values: [control.defaultValue], checked: null, selected: [] };
-  }
-  if (control.kind === "hidden") {
-    return { values: [control.defaultValue], checked: null, selected: [] };
+  if (control.kind === "text" || control.kind === "textarea" || control.kind === "hidden") {
+    return { kind: "value", value: sanitizedValue(control, control.defaultValue) };
   }
   if (control.kind === "checkbox" || control.kind === "radio") {
-    return {
-      values: control.defaultChecked ? [control.value] : [],
-      checked: control.defaultChecked,
-      selected: []
-    };
+    return { kind: "checked", checked: control.defaultChecked };
   }
   if (control.kind === "select") {
     const defaults = control.options.filter((option) => option.defaultSelected);
-    const selectedOptions = control.multiple
-      ? defaults
-      : [defaults.at(-1) ?? control.options[0]].filter((option) => option !== undefined);
-    return {
-      values: selectedOptions.map((option) => option.value),
-      checked: null,
-      selected: selectedOptions.map((option) => option.node)
-    };
+    const last = defaults.at(-1);
+    const fallback = control.displaySize === 1 ? control.options.find((option) => !option.disabled) : undefined;
+    const selected = control.multiple ? defaults : last !== undefined ? [last] : fallback === undefined ? [] : [fallback];
+    return { kind: "selected", selected: selected.map((option) => option.node) };
   }
-  if (control.kind === "submit" || control.kind === "reset" || control.kind === "button") {
-    return { values: [control.value], checked: null, selected: [] };
-  }
-  return { values: [], checked: null, selected: [] };
+  return { kind: "none" };
 }
 
 function defaultControlStates(
@@ -123,12 +159,12 @@ function defaultControlStates(
   for (const control of controls) {
     const initial = initialControlState(control);
     states.set(control.node, initial);
-    if (control.kind !== "radio" || control.name.length === 0 || !initial.checked) continue;
+    if (control.kind !== "radio" || control.name.length === 0 || initial.kind !== "checked" || !initial.checked) continue;
     const group = `${control.form ?? "document"}\u0000${control.name}`;
     const previous = checkedRadioByGroup.get(group);
     if (previous !== undefined) {
       const previousState = states.get(previous);
-      if (previousState !== undefined) states.set(previous, { ...previousState, checked: false, values: [] });
+      if (previousState !== undefined) states.set(previous, { kind: "checked", checked: false });
     }
     checkedRadioByGroup.set(group, control.node);
   }
@@ -184,7 +220,7 @@ export function applyDocumentAction(
   const control = document.control(action.target);
   if (control === null) throw new RangeError("Document control action requires a control target");
   const controls = new Map(state.controls);
-  const current = controls.get(action.target) ?? { values: [], checked: null, selected: [] };
+  controlState(state, action.target);
   if (action.kind === "set-checked") {
     if (control.kind !== "checkbox" && control.kind !== "radio") {
       throw new TypeError("Checked state requires a checkbox or radio control");
@@ -192,14 +228,11 @@ export function applyDocumentAction(
     if (control.kind === "radio" && action.checked && control.name.length > 0) {
       for (const peer of document.radioGroup(control.node)) {
         if (peer.node === control.node) continue;
-        const peerState = controls.get(peer.node) ?? initialControlState(peer);
-        controls.set(peer.node, { ...peerState, checked: false, values: [] });
+        controls.set(peer.node, { kind: "checked", checked: false });
       }
     }
     controls.set(action.target, {
-      ...current,
-      checked: action.checked,
-      values: action.checked ? [control.value] : []
+      kind: "checked", checked: action.checked
     });
   } else if (action.kind === "set-selected-options") {
     if (control.kind !== "select") throw new TypeError("Selected options require a select control");
@@ -208,15 +241,13 @@ export function applyDocumentAction(
       .filter((option) => requested.has(option.node) && !option.disabled)
       .slice(0, control.multiple ? control.options.length : 1);
     controls.set(action.target, {
-      ...current,
-      selected: selected.map((option) => option.node),
-      values: selected.map((option) => option.value)
+      kind: "selected", selected: selected.map((option) => option.node)
     });
   } else {
     if (control.kind !== "text" && control.kind !== "textarea" && control.kind !== "hidden") {
       throw new TypeError("Text value state requires a text, textarea, or hidden control");
     }
-    controls.set(action.target, { ...current, values: [action.value] });
+    controls.set(action.target, { kind: "value", value: sanitizedValue(control, action.value) });
   }
   return Object.freeze({ ...state, controls: immutableControls(controls) });
 }

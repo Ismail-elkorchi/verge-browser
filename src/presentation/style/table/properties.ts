@@ -3,7 +3,6 @@ import { parseCssLength } from "../css-values.js";
 import type {
   CssBorderCollapse,
   CssBorderSpacing,
-  CssBorderStyle,
   CssCaptionSide,
   CssEmptyCells,
   CssTableLayout,
@@ -22,7 +21,6 @@ export const parseTableLayout = (source: string): CssTableLayout | null => oneKe
 export const parseBorderCollapse = (source: string): CssBorderCollapse | null => oneKeyword(source, ["separate", "collapse"]);
 export const parseCaptionSide = (source: string): CssCaptionSide | null => oneKeyword(source, ["top", "bottom"]);
 export const parseEmptyCells = (source: string): CssEmptyCells | null => oneKeyword(source, ["show", "hide"]);
-export const parseTableBorderStyle = (source: string): CssBorderStyle | null => oneKeyword(source, ["none", "hidden", "solid"]);
 
 function isLengthWithoutPercentage(value: ReturnType<typeof parseCssLength>): boolean {
   if (value === null || value.kind === "auto" || value.kind === "none") return false;

@@ -763,7 +763,7 @@ function projected(result, offsets = [], reveal) {
 
 test("semantic reveal traverses hidden inner and auto outer scroll owners", () => {
   const result = render(`<div id=outer style="height:64px;width:160px;overflow:auto"><div style="height:64px">OUTER TOP</div><div id=inner style="height:32px;overflow:hidden"><div style="height:64px">INNER TOP</div><input id=target style="width:80px;height:16px"></div><div style="height:32px">END</div></div><p id=article>ARTICLE</p>`);
-  const reveal=projected(result,[],{node:node(result,"target"),align:"nearest"});
+  const reveal=projected(result,[],{node:node(result,"target"),blockAlign:"nearest"});
   assert.equal(reveal.list.window.scrollOffsets.length,2);
   const target=reveal.terminal.controls.find(control=>control.node===node(result,"target"));
   assert.ok(target);
@@ -784,7 +784,7 @@ test("nested sticky stays at its scrollport while viewport fixed escapes clippin
 
 test("empty named anchor reveal retains its layout origin", () => {
   const result=render(`<div id=owner style="height:32px;overflow:auto"><div style="height:64px">top</div><a id=empty name=empty></a><div style="height:16px">end</div></div>`);
-  const revealed=projected(result,[],{node:node(result,"empty"),align:"start"});
+  const revealed=projected(result,[],{node:node(result,"empty"),blockAlign:"start"});
   assert.ok(revealed.list.window.scrollOffsets.length>0);
 });
 
@@ -799,7 +799,7 @@ test("nested sticky descendants remain queried after the outer sticky leaves nor
 
 test("two-axis nested reveal shares paint, focus and full versus clipped control geometry", () => {
   const result=render(`<div id=outer style="width:64px;height:64px;overflow:auto"><div id=inner style="width:128px;height:128px;overflow:auto"><div style="position:relative;left:192px;top:192px;width:32px;height:32px"><input id=target value=XY style="width:32px;height:32px"></div></div></div><p id=after>AFTER</p>`);
-  const shown=projected(result,[],{node:node(result,"target"),align:"nearest"});
+  const shown=projected(result,[],{node:node(result,"target"),blockAlign:"nearest"});
   const offsets=shown.list.window.scrollOffsets;
   assert.equal(offsets.length,2);
   assert.ok(offsets.every(offset=>offset.inline>0&&offset.block>0));
@@ -878,7 +878,7 @@ test("containment on html or body disables body overflow propagation",()=>{
 test("nearest reveal does not move an oversized target already spanning the scrollport",()=>{
   const result=render(`<div id=owner style="height:64px;overflow:auto"><div id=large style="height:192px">LARGE</div></div>`);
   const offset={node:node(result,"owner"),inline:0,block:cssPx(64)};
-  const revealed=projected(result,[offset],{node:node(result,"large"),align:"nearest"});
+  const revealed=projected(result,[offset],{node:node(result,"large"),blockAlign:"nearest"});
   assert.deepEqual(revealed.list.window.scrollOffsets,[offset]);
 });
 
@@ -950,3 +950,115 @@ for (const [label,fixture,expectedOwner] of [
     }
   });
 }
+
+test("block-start root reveal keeps visible indentation and minimally reveals offscreen targets", () => {
+  for (const [left, expectedColumn] of [[64, 0], [480, 30]]) {
+    const result = render(`<main style="width:1000px;height:1600px"><div id=target style="position:absolute;left:${left}px;top:640px;width:80px;height:32px">TARGET</div></main>`, 40, 24);
+    const shown = projected(result, [], { node: node(result, "target"), blockAlign: "start" });
+    assert.equal(shown.list.window.scrollRow, 40);
+    assert.equal(shown.list.window.scrollColumn, expectedColumn);
+    assert.match(shown.terminal.cellBuffer.rows.map((row) => row.text).join("\n"), /TARGET/);
+  }
+});
+
+test("block-start nested reveal uses inline nearest for visible, offscreen, and RTL targets", () => {
+  for (const [direction, left, expectedInline] of [["ltr", 80, 0], ["ltr", 240, 128], ["rtl", -160, -160]]) {
+    const result = render(`<div id=owner style="direction:${direction};margin-left:32px;width:160px;height:64px;overflow:auto"><div style="height:64px">TOP</div><div id=target style="position:relative;left:${left}px;width:48px;height:32px">TARGET</div><div style="height:128px">END</div></div>`);
+    const shown = projected(result, [], { node: node(result, "target"), blockAlign: "start" });
+    const offset = shown.list.window.scrollOffsets.find((entry) => entry.node === node(result, "owner"));
+    assert.ok(offset);
+    assert.equal(cssPixels(offset.inline), expectedInline, direction);
+    assert.equal(cssPixels(offset.block), 64, direction);
+    assert.equal(shown.list.window.scrollColumn, 0, direction);
+  }
+});
+
+test("block-start reveal preserves inline position when oversized targets span root or nested ports", () => {
+  const root = render(`<div id=target style="width:800px;height:640px">WIDE</div>`, 40, 24);
+  const shown = buildViewportDisplayList({ documentDisplayList: root.displayList,
+    spatialIndex: buildDisplayListSpatialIndex(root.displayList), context: root.displayList.context,
+    window: { scrollRow: 5, scrollColumn: 10, viewportRows: 24, overscanBefore: 0, overscanAfter: 0,
+      reveal: { node: node(root, "target"), blockAlign: "start" } } });
+  assert.equal(shown.window.scrollColumn, 10);
+  assert.equal(shown.window.scrollRow, 0);
+  const nested = render(`<div id=owner style="width:160px;height:64px;overflow:auto"><div id=target style="width:480px;height:320px">WIDE</div></div>`);
+  const offset = { node: node(nested, "owner"), inline: cssPx(80), block: cssPx(64) };
+  const revealed = projected(nested, [offset], { node: node(nested, "target"), blockAlign: "start" });
+  assert.deepEqual(revealed.list.window.scrollOffsets, [{ ...offset, block: 0 }]);
+});
+
+test("source-owned reveal ignores generated marker and pseudo boxes before the principal fragment", async () => {
+  const { revealDocumentNode } = await import("../../dist/presentation/terminal/viewport-geometry.js");
+  for (const html of [
+    `<ol style="margin:0;padding-left:64px"><li id=target style="height:32px">SOURCE</li></ol>`,
+    `<style>#target::before{content:'GENERATED';display:block;position:relative;left:480px;top:64px;width:80px;height:32px}</style><div id=target style="margin-left:64px;width:160px;height:96px">SOURCE</div>`,
+  ]) {
+    const result = render(html, 40, 24);
+    const target = node(result, "target");
+    const fragments = result.layout.forDocumentNode(target);
+    const principal = fragments.find((entry) => entry.kind !== "text" && entry.pseudoElement === null
+      && result.formatting.node(entry.formattingNode).appliesBoxStyle);
+    assert.ok(principal);
+    assert.notEqual(fragments.find((entry) => entry.kind !== "text"), principal, "generated fragment precedes source box");
+    const revealed = revealDocumentNode(result.layout, result.layout.context.scrollport, [], target, "start");
+    assert.deepEqual(revealed.rect, principal.borderRect);
+    assert.equal(projected(result, [], { node: target, blockAlign: "start" }).list.window.scrollColumn, 0);
+  }
+});
+
+test("boxless reveal follows rendered descendants and inline reveal retains continuation bounds", async () => {
+  const { revealDocumentNode } = await import("../../dist/presentation/terminal/viewport-geometry.js");
+  const contents = render(`<div id=owner style="height:64px;overflow:auto"><div style="height:96px">TOP</div><div id=contents style="display:contents"><span hidden>HIDDEN</span><a id=child href=/child style="display:block;height:32px">CHILD</a></div><div style="height:160px">END</div></div>`);
+  const shown = projected(contents, [], { node: node(contents, "contents"), blockAlign: "start" });
+  assert.equal(cssPixels(shown.list.window.scrollOffsets[0].block), 96);
+  assert.ok(shown.terminal.focusMap.forNode(node(contents, "child")));
+  const inline = render(`<p style="width:48px"><a id=inline href=/target>abcd efgh ijkl</a></p>`);
+  const source = fragment(inline, "inline");
+  assert.ok(source.inlineContinuations.length > 1);
+  const revealed = revealDocumentNode(inline.layout, inline.layout.context.scrollport, [], node(inline, "inline"), "start");
+  assert.deepEqual(revealed.rect, source.borderRect);
+});
+
+test("fractional block-start reveal retains the first painted target line", () => {
+  const result = render(`<main style="height:1600px"><div id=target style="position:absolute;left:64px;top:640.25px;width:128px;height:32px">FIRST LINE</div></main>`, 40, 24);
+  const shown = projected(result, [], { node: node(result, "target"), blockAlign: "start" });
+  assert.equal(shown.list.window.scrollRow, 40);
+  assert.equal(shown.list.window.scrollColumn, 0);
+  const first = shown.terminal.cellBuffer.rows.find((row) => row.row === shown.list.window.scrollRow);
+  assert.match(first?.text ?? "", /FIRST LINE/);
+  assert.ok(shown.list.viewportRect.y <= fragment(result, "target").borderRect.y);
+});
+
+test("document reveal cancellation covers boxless descent and large inline continuation bounds", async () => {
+  const { revealDocumentNode } = await import("../../dist/presentation/terminal/viewport-geometry.js");
+  const hidden = render(`<div id=target style="display:contents;visibility:hidden">${"<span>hidden</span>".repeat(600)}<span style="visibility:visible">VISIBLE</span></div>`);
+  const aborted = new globalThis.DOMException("reveal cancelled", "AbortError");
+  let traversals = 0;
+  const signal = { throwIfAborted() { traversals += 1; if (traversals === 200) throw aborted; } };
+  assert.throws(() => buildViewportDisplayList({ documentDisplayList: hidden.displayList,
+    spatialIndex: buildDisplayListSpatialIndex(hidden.displayList), context: hidden.displayList.context, signal,
+    window: { scrollRow: 0, viewportRows: 24, overscanBefore: 0, overscanAfter: 0,
+      reveal: { node: node(hidden, "target"), blockAlign: "start" } } }), (error) => error === aborted);
+  assert.equal(traversals, 200);
+
+  const inline = render(`<p style="width:16px"><a id=target href=/target>${"ab ".repeat(600)}</a></p>`);
+  assert.ok(fragment(inline, "target").inlineContinuations.length > 512);
+  let checks = 0;
+  revealDocumentNode(inline.layout, inline.layout.context.scrollport, [], node(inline, "target"), "start",
+    { throwIfAborted() { checks += 1; } });
+  assert.ok(checks >= 5);
+  let cancelledChecks = 0;
+  assert.throws(() => revealDocumentNode(inline.layout, inline.layout.context.scrollport, [], node(inline, "target"), "start",
+    { throwIfAborted() { cancelledChecks += 1; if (cancelledChecks === checks) throw aborted; } }), (error) => error === aborted);
+  assert.equal(cancelledChecks, checks, "late continuation accumulation remains cancellable");
+});
+
+test("boxless reveal skips display-none subtrees but retains visible descendants of hidden ancestors", async () => {
+  const { revealDocumentNode } = await import("../../dist/presentation/terminal/viewport-geometry.js");
+  const result = render(`<div id=target style="display:contents;visibility:hidden"><div style="display:none">${"<span>suppressed</span>".repeat(600)}</div><span id=visible style="visibility:visible">VISIBLE</span></div>`);
+  let checks = 0;
+  const revealed = revealDocumentNode(result.layout, result.layout.context.scrollport, [], node(result, "target"), "start",
+    { throwIfAborted() { checks += 1; } });
+  assert.ok(checks < 20, "display:none descendants are skipped as a subtree");
+  assert.deepEqual(revealed.rect, fragment(result, "visible").borderRect);
+});

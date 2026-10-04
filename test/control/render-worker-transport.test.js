@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { setImmediate } from "node:timers";
 import { performance } from "node:perf_hooks";
+import { commitNavigation, emptyHistory } from "../../dist/app/navigation-history.js";
 import { BrowserController } from "../../dist/ui/browser-controller.js";
 import { EventEmitter } from "node:events";
 import test from "node:test";
@@ -36,9 +37,11 @@ function fixture(options = {}) {
   const worker = new ControlledWorker();
   const client = new RenderWorkerClient({ transport: worker, shutdownDeadlineMilliseconds: 10, ...options });
   const document = parseWebDocument("<p>worker transport</p>", { requestUrl: "https://example.test/", finalUrl: "https://example.test/" });
+  const snapshot = { document, requestUrl: document.requestUrl, finalUrl: document.finalUrl, stylesheets: [], styleDiagnostics: [], diagnostics: { parseMode: "text" } };
   return { worker, client, document: {
+    navigation: commitNavigation(emptyHistory(), snapshot, "push", { kind: "direct" }),
     id: "A", documentRevision: 1, stateRevision: 1, documentState: createDocumentState(document),
-    snapshot: { document, requestUrl: document.requestUrl, finalUrl: document.finalUrl, stylesheets: [], styleDiagnostics: [] },
+    snapshot,
   } };
 }
 
@@ -484,4 +487,166 @@ test("a cancelled search consumer leaves blocked restart attachment without dela
     assert.equal((await successor).query, "valid");
     assert.equal(workers[1].requests.filter((entry) => entry.kind === "search-document").length, 1);
   } finally { await controller.close(); }
+});
+
+function activation(document, revision) {
+  return { ...document, documentRevision: revision, stateRevision: revision };
+}
+
+async function finishPreparedViewport(f, after, identity = "layout-1") {
+  const request = await f.worker.nextRequest("request-viewport", after);
+  f.worker.respond(viewport(request, identity, { ...summary, identity }));
+  return request;
+}
+
+test("warm activations update the resident source using the previous activation fence", async () => {
+  const f = controllerFixture();
+  try {
+    await controllerViewport(f, f.document);
+    for (const revision of [2, 3, 4]) {
+      const after = f.worker.requests.at(-1).requestId;
+      const next = activation(f.document, revision);
+      const pending = f.controller.renderViewport(next, 1, parameters);
+      const update = await f.worker.nextRequest("update-document-state", after);
+      assert.equal(update.previousDocumentRevision, revision - 1);
+      assert.equal(update.documentRevision, revision);
+      acknowledge(f.worker, update);
+      await finishPreparedViewport(f, update.requestId);
+      assert.equal((await pending).documentRevision, revision);
+    }
+    assert.equal(f.worker.requests.filter((request) => request.kind === "attach-document").length, 1);
+    await assert.rejects(f.controller.renderViewport(activation(f.document, 2), 1, parameters), { name: "AbortError" });
+  } finally { await f.controller.close(); }
+});
+
+test("rapid activation supersession records atomic updates before preparing the newest fence", async () => {
+  const f = controllerFixture();
+  try {
+    await controllerViewport(f, f.document);
+    const second = f.controller.renderViewport(activation(f.document, 2), 1, parameters);
+    const secondRejected = assert.rejects(second, { name: "AbortError" });
+    const update = await f.worker.nextRequest("update-document-state");
+    const third = f.controller.renderViewport(activation(f.document, 3), 1, parameters);
+    const thirdRejected = assert.rejects(third, { name: "AbortError" });
+    const fourth = f.controller.renderViewport(activation(f.document, 4), 1, parameters);
+    acknowledge(f.worker, update);
+    const latest = await f.worker.nextRequest("update-document-state", update.requestId);
+    assert.equal(latest.previousDocumentRevision, 2);
+    assert.equal(latest.documentRevision, 4);
+    acknowledge(f.worker, latest);
+    await finishPreparedViewport(f, latest.requestId);
+    assert.equal((await fourth).documentRevision, 4);
+    await Promise.all([secondRejected, thirdRejected]);
+    assert.equal(f.worker.requests.filter((request) => request.kind === "attach-document").length, 1);
+    assert.equal(f.worker.requests.filter((request) => request.kind === "update-document-state").length, 2);
+  } finally { await f.controller.close(); }
+});
+
+test("activation cancels an in-flight search without accepting its late result", async () => {
+  const f = controllerFixture();
+  try {
+    await controllerViewport(f, f.document);
+    const search = f.controller.searchDocument(f.document, "old", parameters, 1);
+    const rejected = assert.rejects(search, { name: "AbortError" });
+    const searchRequest = await f.worker.nextRequest("search-document");
+    const next = activation(f.document, 2);
+    const pending = f.controller.renderViewport(next, 1, parameters);
+    f.worker.respond({ kind: "search-ready", requestId: searchRequest.requestId, result: { query: "old" } });
+    const update = await f.worker.nextRequest("update-document-state", searchRequest.requestId);
+    acknowledge(f.worker, update);
+    await finishPreparedViewport(f, update.requestId);
+    assert.equal((await pending).documentRevision, 2);
+    await rejected;
+    assert.equal(f.worker.requests.filter((request) => request.kind === "attach-document").length, 1);
+  } finally { await f.controller.close(); }
+});
+
+test("failed activation admission retries from the last acknowledged resident revision", async () => {
+  const f = controllerFixture();
+  try {
+    await controllerViewport(f, f.document);
+    const next = activation(f.document, 2);
+    const failed = f.controller.renderViewport(next, 1, parameters);
+    const update = await f.worker.nextRequest("update-document-state");
+    f.worker.respond({ kind: "budget-exceeded", requestId: update.requestId, budget: "retained-cost", estimatedBytes: 2, limit: 1, owner: "activation" });
+    await assert.rejects(failed, { name: "RenderBudgetExceededError" });
+    const retry = f.controller.renderViewport(next, 2, parameters);
+    const repeated = await f.worker.nextRequest("update-document-state", update.requestId);
+    assert.equal(repeated.previousDocumentRevision, 1);
+    acknowledge(f.worker, repeated);
+    await finishPreparedViewport(f, repeated.requestId);
+    assert.equal((await retry).documentRevision, 2);
+    assert.equal(f.worker.requests.filter((request) => request.kind === "attach-document").length, 1);
+  } finally { await f.controller.close(); }
+});
+
+test("equal URLs with distinct live sources replace the one resident source", async () => {
+  const f = controllerFixture();
+  try {
+    await controllerViewport(f, f.document);
+    const next = { ...activation(f.document, 2), navigation: commitNavigation(f.document.navigation,
+      f.document.snapshot, "push", { kind: "direct" }) };
+    const rendered = await controllerViewport(f, next);
+    assert.equal(rendered.documentRevision, 2);
+    assert.equal(f.worker.requests.filter((request) => request.kind === "attach-document").length, 2);
+    assert.equal(f.worker.requests.filter((request) => request.kind === "update-document-state").length, 0);
+  } finally { await f.controller.close(); }
+});
+
+test("a superseded source replacement cannot make an uncertain old source look resident", async () => {
+  const f = controllerFixture();
+  try {
+    await controllerViewport(f, f.document);
+    const after = f.worker.requests.at(-1).requestId;
+    const next = { ...activation(f.document, 2), navigation: commitNavigation(f.document.navigation,
+      f.document.snapshot, "push", { kind: "direct" }) };
+    const replacing = f.controller.renderViewport(next, 1, parameters);
+    const rejected = assert.rejects(replacing, { name: "AbortError" });
+    const replacement = await f.worker.nextRequest("attach-document", after);
+    const restored = f.controller.renderViewport(activation(f.document, 3), 1, parameters);
+    acknowledge(f.worker, replacement);
+    const attachment = await f.worker.nextRequest("attach-document", replacement.requestId);
+    assert.equal(attachment.attachment.documentRevision, 3);
+    acknowledge(f.worker, attachment);
+    await finishPreparedViewport(f, attachment.requestId);
+    assert.equal((await restored).documentRevision, 3);
+    await rejected;
+    assert.equal(f.worker.requests.filter((request) => request.kind === "update-document-state").length, 0);
+  } finally { await f.controller.close(); }
+});
+
+test("closing during atomic activation settles its acknowledgement without delaying disposal", async () => {
+  const f = controllerFixture();
+  await controllerViewport(f, f.document);
+  const pending = f.controller.renderViewport(activation(f.document, 2), 1, parameters);
+  const rejected = assert.rejects(pending, { name: "AbortError" });
+  await f.worker.nextRequest("update-document-state");
+  const start = performance.now();
+  await f.controller.close();
+  await rejected;
+  assert.ok(performance.now() - start < 1000);
+  assert.equal(f.client.pendingRequestCount, 0);
+  assert.equal(f.worker.terminated, 1);
+});
+
+test("worker document hydration reproduces authoritative form associations and canonical control identity", async () => {
+  const { hydrateRenderDocument } = await import("../../dist/ui/render-worker/document-transfer.js");
+  const { transferDocumentState, hydrateDocumentState } = await import("../../dist/ui/render-worker/protocol.js");
+  const { formEntries } = await import("../../dist/app/forms.js");
+  const document = parseWebDocument(`<table><form id="owner"><tr><td><input name="q" value="a&#10;b"><select name="s"><option disabled>Blocked</option><option value="same">First</option><option value="same" selected>Second</option></select></td></tr></form></table><input name="no-owner" form="missing">`, {
+    requestUrl: "https://example.test/", finalUrl: "https://example.test/",
+  });
+  const state = createDocumentState(document);
+  const attachment = globalThis.structuredClone({
+    documentId: "form-parity", documentRevision: 1, stateRevision: 1,
+    sourceText: document.sourceText, documentMode: document.documentMode,
+    requestUrl: document.requestUrl, finalUrl: document.finalUrl,
+    state: transferDocumentState(state), stylesheetSources: [], stylesheets: [], styleDiagnostics: [],
+  });
+  const workerDocument = hydrateRenderDocument(attachment);
+  const workerState = hydrateDocumentState(attachment.state);
+  assert.deepEqual(workerDocument.controls, document.controls);
+  assert.deepEqual([...workerState.controls], [...state.controls]);
+  assert.deepEqual(workerDocument.forms.map((form) => form.controls.map((control) => control.node)), document.forms.map((form) => form.controls.map((control) => control.node)));
+  assert.deepEqual(formEntries(workerDocument, workerDocument.forms[0], workerState), formEntries(document, document.forms[0], state));
 });

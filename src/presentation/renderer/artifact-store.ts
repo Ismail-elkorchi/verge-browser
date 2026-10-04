@@ -1,4 +1,5 @@
-import { estimatedRetainedCost, RetainedCostAccounting, RenderBudgetExceededError, type RetainedCostOwner } from "../../memory/retained-cost.js";
+import { createLayoutPaintResolver } from "../layout/paint-style.js";
+import { retainedSideCacheRevision, retainedSideCaches, estimatedRetainedCost, RetainedCostAccounting, RenderBudgetExceededError, type RetainedCostOwner } from "../../memory/retained-cost.js";
 import { buildFormattingTree } from "../formatting/index.js";
 import {
   buildLayoutFragmentTree,
@@ -11,7 +12,7 @@ import {
   projectTextSearchToLayout,
   type TextSearchLayoutProjection,
 } from "../search/index.js";
-import { compileStylesheetProgram, resolveStyles, type SelectorStateDependency } from "../style/index.js";
+import { compareStyleSnapshots, compileStylesheetProgram, stylesheetOwnershipRoots, resolveStyles, type SelectorStateDependency } from "../style/index.js";
 import { isValidMediaEnvironment, mediaApplies } from "../style/media.js";
 import { clearTextSearchQueryCache, textSearchQueryCache } from "../search/text-search-index.js";
 import { buildInlineItemStreamSet } from "../text/index.js";
@@ -40,14 +41,34 @@ import type {
 
 const DEFAULT_MAX_RETAINED_ARTIFACT_BYTES = 512 * 1024 * 1024;
 
+type PhaseName = "computedStyles" | "boxTree" | "inlineItemStreams" | "textSearchIndex"
+  | "documentLayout" | "documentDisplayList" | "displayListSpatialIndex" | "documentGeometry";
+type PhaseResources = { [P in PhaseName]: Map<string, PhaseResource<DocumentRenderArtifacts[P]>> };
+interface PhaseResource<T extends object> {
+  readonly value: T;
+  readonly owner: RetainedCostOwner;
+  lastUsed: number;
+  pins: number;
+}
+interface StyleEvaluation {
+  readonly identity: string;
+  readonly formattingIdentity: string;
+  readonly reporting: string;
+  readonly snapshot: DocumentRenderArtifacts["computedStyles"];
+  readonly media: string;
+  readonly stateRevision: number;
+  lastUsed: number;
+}
 interface AttachedDocument {
   readonly documentId: string;
-  readonly documentRevision: number;
+  documentRevision: number;
   readonly program: ReturnType<typeof compileStylesheetProgram>;
   readonly budgets: AttachDocumentArtifactsInput["budgets"];
   readonly attachmentOwner: RetainedCostOwner;
   stateOwner: RetainedCostOwner;
   cacheOwners: readonly RetainedCostOwner[];
+  readonly sideCacheSources: Map<object, number>;
+  readonly mutableOwners: Map<object, { readonly owner: RetainedCostOwner; readonly revision: number }>;
   readonly queryOwners: Map<DocumentRenderArtifacts["textSearchIndex"], { readonly owner: RetainedCostOwner; readonly revision: number }>;
   state: AttachDocumentArtifactsInput["state"];
   stateRevision: number;
@@ -55,20 +76,24 @@ interface AttachedDocument {
   textStateRevision: number;
   logicalText: { readonly key: string; readonly stateRevision: number; readonly dependency: string;
     readonly index: DocumentRenderArtifacts["textSearchIndex"] } | null;
-  readonly analyses: Map<string, RetainedAnalysis>;
+  readonly styles: Map<string, StyleEvaluation>;
+  readonly resources: PhaseResources;
   readonly searches: Map<string, RetainedSearchProjection>;
 }
-
-interface RetainedAnalysis {
-  readonly artifacts: DocumentRenderArtifacts;
-  readonly owner: RetainedCostOwner;
-  lastUsed: number;
-}
-
 interface RetainedSearchProjection {
+  readonly logicalText: string;
+  readonly layout: string;
   readonly projection: TextSearchLayoutProjection;
   readonly owner: RetainedCostOwner;
   lastUsed: number;
+}
+const PHASES: readonly PhaseName[] = ["computedStyles", "boxTree", "inlineItemStreams", "textSearchIndex",
+  "documentLayout", "documentDisplayList", "displayListSpatialIndex", "documentGeometry"];
+const RETIREMENT_PHASES = Object.freeze([...PHASES].reverse());
+const GEOMETRY_PHASES: readonly PhaseName[] = ["documentLayout", "documentDisplayList", "displayListSpatialIndex", "documentGeometry"];
+function phaseResources(): PhaseResources {
+  return { computedStyles: new Map(), boxTree: new Map(), inlineItemStreams: new Map(), textSearchIndex: new Map(),
+    documentLayout: new Map(), documentDisplayList: new Map(), displayListSpatialIndex: new Map(), documentGeometry: new Map() };
 }
 
 const MAX_RETAINED_SEARCH_PROJECTIONS_PER_DOCUMENT = 32;
@@ -107,53 +132,25 @@ function textMetricsKey(request: DocumentAnalysisRequest): string {
   ].join(":");
 }
 
-function dependencyKey(document: AttachedDocument, request: DocumentAnalysisRequest, styles: DocumentRenderArtifacts["computedStyles"], media: string): ArtifactDependencyKey {
+function dependencyKey(document: AttachedDocument, request: DocumentAnalysisRequest, evaluation: StyleEvaluation): ArtifactDependencyKey {
+  const styles = evaluation.snapshot;
   const layoutViewport = layoutKey(styles, request);
   const textMetrics = textMetricsKey(request);
-  const computedStyleMap = [document.program.fingerprint, document.analysisStateRevision, media,
-    styles.valueDependencies.computedViewportInlineSize ? request.mediaEnvironment.viewportWidthCssPx : "-",
-    styles.valueDependencies.computedViewportBlockSize ? request.mediaEnvironment.viewportHeightCssPx : "-",
-  ].join(":");
-  const boxTree = [computedStyleMap, document.analysisStateRevision].join(":");
-  const inlineItemStreams = boxTree;
+  const computedStyleMap = evaluation.identity;
+  const boxTree = `${evaluation.formattingIdentity}:content:${String(document.textStateRevision)}`;
   const logicalTextIndex = document.logicalText?.stateRevision === document.textStateRevision
     && document.logicalText.dependency === styles.logicalTextDependency
     ? document.logicalText.key : `${computedStyleMap}:text:${String(document.textStateRevision)}`;
-  const documentLayout = [inlineItemStreams, layoutViewport, textMetrics].join(":");
-  const documentDisplayList = documentLayout;
+  const documentLayout = [boxTree, layoutViewport, textMetrics].join(":");
   return Object.freeze({
     documentRevision: document.documentRevision,
     stylesheetProgram: document.program.fingerprint,
-    stateRevision: document.analysisStateRevision,
-    media,
-    layoutViewport,
-    textMetrics,
-    computedStyleMap,
-    boxTree,
-    inlineItemStreams,
-    logicalTextIndex,
-    documentLayout,
-    documentDisplayList,
-    documentGeometry: documentDisplayList,
+    stateRevision: document.stateRevision,
+    media: evaluation.media, layoutViewport, textMetrics, computedStyleMap, boxTree,
+    inlineItemStreams: boxTree, logicalTextIndex, documentLayout,
+    documentDisplayList: `${documentLayout}:paint:${computedStyleMap}`, documentGeometry: documentLayout,
+    reporting: evaluation.reporting,
   });
-}
-
-function keyIdentity(key: ArtifactDependencyKey): string {
-  return [
-    key.documentRevision,
-    key.stylesheetProgram,
-    key.stateRevision,
-    key.media,
-    key.layoutViewport,
-    key.textMetrics,
-    key.computedStyleMap,
-    key.boxTree,
-    key.inlineItemStreams,
-    key.logicalTextIndex,
-    key.documentLayout,
-    key.documentDisplayList,
-    key.documentGeometry,
-  ].join("\u0000");
 }
 
 function changedSelectorDependency(change: DocumentStateDependencyChange): SelectorStateDependency | null {
@@ -168,10 +165,12 @@ export class RenderArtifactStore {
   readonly #documents = new Map<string, AttachedDocument>();
   readonly #accounting = new RetainedCostAccounting();
   readonly #maximumCost: number;
+  #reservedCost = 0;
   readonly #instrumentation: RenderArtifactStoreOptions["instrumentation"];
   #clock = 0;
   #evictions = 0;
   #retainedCost = 0;
+  #sideCacheScans = 0;
 
   public constructor(options: RenderArtifactStoreOptions = {}) {
     this.#maximumCost = options.maxRetainedArtifactBytes ?? DEFAULT_MAX_RETAINED_ARTIFACT_BYTES;
@@ -187,6 +186,17 @@ export class RenderArtifactStore {
 
   #attach(input: AttachDocumentArtifactsInput): void {
     input.signal?.throwIfAborted();
+    const previous = this.#documents.get(input.documentId);
+    if (previous !== undefined) {
+      for (const phase of PHASES) this.#retirePhase(previous, phase);
+      previous.styles.clear();
+      previous.logicalText = null;
+      previous.searches.clear();
+      previous.queryOwners.clear();
+      previous.mutableOwners.clear();
+      previous.sideCacheSources.clear();
+      this.#clearProgramCaches(previous);
+    }
     const program = measured(this.#instrumentation, "stylesheet-program-compilation", () =>
       compileStylesheetProgram({
         document: input.document,
@@ -199,7 +209,7 @@ export class RenderArtifactStore {
     const cacheRoots = [program.selectorRuntime, program.substitutedValues, program.propertyValidation];
     const attachmentOwner = measured(this.#instrumentation, "artifact-accounting", () => {
       this.#accounting.immutable(input.document, new Set(), input.signal);
-      for (const source of program.sources) this.#accounting.immutable(source.stylesheet, new Set(), input.signal, true);
+      for (const source of program.sources) this.#accounting.immutable(source.stylesheet, new Set(), input.signal, stylesheetOwnershipRoots(source.stylesheet, input.signal));
       return this.#accounting.immutable(program, new Set(cacheRoots), input.signal);
     });
     const attachment: AttachedDocument = {
@@ -207,6 +217,8 @@ export class RenderArtifactStore {
       stateOwner: this.#accounting.immutable(input.state, new Set(), input.signal),
       cacheOwners: cacheRoots.map((root) => this.#accounting.mutable(root, input.signal)),
       queryOwners: new Map(),
+      mutableOwners: new Map(),
+      sideCacheSources: new Map(),
       documentId: input.documentId,
       documentRevision: input.documentRevision,
       program,
@@ -216,11 +228,11 @@ export class RenderArtifactStore {
       analysisStateRevision: input.stateRevision,
       textStateRevision: input.stateRevision,
       logicalText: null,
-      analyses: new Map(),
+      styles: new Map(),
+      resources: phaseResources(),
       searches: new Map(),
     };
     this.#accounting.endBatch();
-    const previous = this.#documents.get(input.documentId);
     this.#documents.set(input.documentId, attachment);
     try { this.#admit(input.signal); }
     catch (error) {
@@ -232,30 +244,33 @@ export class RenderArtifactStore {
   }
 
   public updateState(input: UpdateDocumentArtifactsStateInput): void {
-    const document = this.#document(input.documentId, input.documentRevision);
-    if (input.stateRevision < document.stateRevision) throw new RangeError("Document state revision cannot regress.");
-    const previous = { state: document.state, stateOwner: document.stateOwner, stateRevision: document.stateRevision, analysisStateRevision: document.analysisStateRevision, textStateRevision: document.textStateRevision };
+    const document = this.#document(input.documentId, input.previousDocumentRevision ?? input.documentRevision);
+    if (input.previousDocumentRevision !== undefined && input.documentRevision <= input.previousDocumentRevision) {
+      throw new RangeError("Document activation revision must advance.");
+    }
+    if (input.previousDocumentRevision === undefined && input.stateRevision < document.stateRevision) {
+      throw new RangeError("Document state revision cannot regress.");
+    }
+    const previous = { state: document.state, stateOwner: document.stateOwner, documentRevision: document.documentRevision,
+      stateRevision: document.stateRevision, analysisStateRevision: document.analysisStateRevision, textStateRevision: document.textStateRevision };
     document.stateOwner = measured(this.#instrumentation, "artifact-accounting", () => this.#accounting.immutable(input.state));
     document.state = input.state;
+    document.documentRevision = input.documentRevision;
     document.stateRevision = input.stateRevision;
     const changesTextState = input.changed.has("control-content") || input.changed.has("checked-selected") || input.changed.has("disclosure-open");
-    if (changesTextState) document.textStateRevision = input.stateRevision;
+    // Internal semantic generations never reset on a new navigation activation.
+    if (changesTextState) document.textStateRevision = ++this.#clock;
     const invalidates = changesTextState || [...input.changed].some((change) => {
-      const selectorDependency = changedSelectorDependency(change);
-      if (selectorDependency === null || !document.program.stateDependencies.has(selectorDependency)) return false;
-      return true;
+      const dependency = changedSelectorDependency(change);
+      return dependency !== null && document.program.stateDependencies.has(dependency);
     });
-    if (invalidates) document.analysisStateRevision = input.stateRevision;
+    if (invalidates) document.analysisStateRevision = ++this.#clock;
     try { this.#admit(); }
-    catch (error) {
-      Object.assign(document, previous);
-      this.#measureRetainedCost();
-      throw error;
-    }
-    if (invalidates) {
-      document.analyses.clear();
+    catch (error) { Object.assign(document, previous); this.#measureRetainedCost(); throw error; }
+    if (changesTextState) {
+      document.logicalText = null;
+      for (const phase of PHASES) if (phase !== "computedStyles") this.#retirePhase(document, phase);
       document.searches.clear();
-      this.#refreshProgramCosts(document);
       this.#measureRetainedCost();
     }
   }
@@ -264,30 +279,45 @@ export class RenderArtifactStore {
     return this.#analyzeTransaction(request, this.#instrumentation);
   }
 
-  #reusable(
-    document: AttachedDocument,
-    dependency: keyof Pick<ArtifactDependencyKey,
-      "computedStyleMap" | "boxTree" | "inlineItemStreams" | "logicalTextIndex"
-      | "documentLayout" | "documentDisplayList" | "documentGeometry">,
-    identity: string,
-  ): DocumentRenderArtifacts | null {
-    let retained: RetainedAnalysis | null = null;
-    for (const candidate of document.analyses.values()) {
-      if (candidate.artifacts.key[dependency] !== identity) continue;
-      if (retained === null || candidate.lastUsed > retained.lastUsed) retained = candidate;
+  #resource<P extends PhaseName>(document: AttachedDocument, phase: P, identity: string): DocumentRenderArtifacts[P] | undefined {
+    const entry = document.resources[phase].get(identity);
+    if (entry !== undefined) entry.lastUsed = ++this.#clock;
+    return entry?.value;
+  }
+
+  #retain<P extends PhaseName>(document: AttachedDocument, phase: P, identity: string,
+    value: DocumentRenderArtifacts[P], signal?: AbortSignal): void {
+    if (document.resources[phase].has(identity)) return;
+    const excluded = phase === "textSearchIndex" ? new Set([textSearchQueryCache(value as DocumentRenderArtifacts["textSearchIndex"]).values]) : new Set<object>();
+    // Side-cache values own their allocations before downstream immutable geometry
+    // can encounter them. No mutable cache may acquire an obsolete layout owner.
+    this.#refreshSideCacheCosts(document, signal);
+    const owner = measured(this.#instrumentation, "artifact-accounting", () => this.#accounting.immutable(value, excluded, signal));
+    document.resources[phase].set(identity, { value, owner, lastUsed: ++this.#clock, pins: 0 });
+  }
+
+  #retirePhase(document: AttachedDocument, phase: PhaseName, keep?: string): void {
+    for (const [identity, entry] of document.resources[phase]) {
+      if (identity === keep || entry.pins !== 0) continue;
+      document.resources[phase].delete(identity);
+      if (phase === "documentLayout") for (const [searchKey, search] of document.searches) {
+        if (search.layout === identity) document.searches.delete(searchKey);
+      }
+      this.#evictions += 1;
     }
-    if (retained !== null) retained.lastUsed = ++this.#clock;
-    return retained?.artifacts ?? null;
   }
 
   #analyzeTransaction(
     request: DocumentAnalysisRequest,
     instrumentation: RenderArtifactStoreOptions["instrumentation"],
   ): DocumentRenderArtifacts {
+    const document = this.#document(request.documentId, request.documentRevision);
     try { return this.#analyze(request, instrumentation); }
     catch (error) {
-      const document = this.#documents.get(request.documentId);
-      if (document !== undefined) this.#clearProgramCaches(document);
+      this.#clearProgramCaches(document);
+      // Failed construction does not restore displaced phase residency.
+      document.styles.clear();
+      this.#retirePhase(document, "computedStyles");
       this.#measureRetainedCost();
       throw error;
     } finally { this.#accounting.endBatch(); }
@@ -307,138 +337,129 @@ export class RenderArtifactStore {
     const document = this.#document(request.documentId, request.documentRevision);
     request.signal?.throwIfAborted();
     const media = mediaKey(document, request);
-    const retainedStyles = [...document.analyses.values()].find(({ artifacts }) => {
-      const styles = artifacts.computedStyles;
-      return artifacts.key.stateRevision === document.analysisStateRevision
-        && artifacts.key.media === media
-        && (!styles.valueDependencies.computedViewportInlineSize
-          || styles.environment.viewportWidthCssPx === request.mediaEnvironment.viewportWidthCssPx)
-        && (!styles.valueDependencies.computedViewportBlockSize
-          || styles.environment.viewportHeightCssPx === request.mediaEnvironment.viewportHeightCssPx);
-    })?.artifacts;
-    const computedStyles = retainedStyles?.computedStyles ?? measured(instrumentation, "computed-style-resolution", () => resolveStyles({
-      program: document.program,
-      state: document.state,
-      environment: request.mediaEnvironment,
-      ...(instrumentation === undefined ? {} : {
-        instrumentation: {
-          record: (stage: "selector-matching" | "custom-property-substitution", elapsed: number) => {
-            instrumentation.record(stage, elapsed);
-          },
-        },
-      }),
-      ...(document.budgets?.style === undefined ? {} : { budgets: document.budgets.style }),
-      ...(request.signal === undefined ? {} : { signal: request.signal }),
-    }));
-    const key = dependencyKey(document, request, computedStyles, media);
-    const identity = keyIdentity(key);
-    const retained = document.analyses.get(identity);
-    if (retained !== undefined) {
-      retained.lastUsed = ++this.#clock;
-      this.#retainLogicalText(document, retained.artifacts);
-      return retained.artifacts;
-    }
-    const retainedBoxTree = this.#reusable(document, "boxTree", key.boxTree);
-    const boxTree = retainedBoxTree?.boxTree ?? measured(instrumentation, "box-tree-construction", () => buildFormattingTree({
-      document: document.program.document,
-      state: document.state,
-      styles: computedStyles,
-      ...(document.budgets?.formatting === undefined ? {} : { budgets: document.budgets.formatting }),
-      ...(request.signal === undefined ? {} : { signal: request.signal }),
-    }));
-    const retainedInlineItems = this.#reusable(document, "inlineItemStreams", key.inlineItemStreams);
-    const inlineItemStreams = retainedInlineItems?.inlineItemStreams ?? measured(instrumentation, "inline-item-stream-construction", () =>
-      buildInlineItemStreamSet(boxTree, request.signal)
-    );
-    const retainedSearchIndex = this.#reusable(document, "logicalTextIndex", key.logicalTextIndex);
-    const textSearchIndex = (document.logicalText?.key === key.logicalTextIndex ? document.logicalText.index : retainedSearchIndex?.textSearchIndex) ?? measured(instrumentation, "logical-search-index-construction", () =>
-      buildTextSearchIndex(boxTree, inlineItemStreams, request.signal)
-    );
-    const initial = request.layoutContext.initialContainingBlock;
-    const scrollIndependentContext = {
-      ...request.layoutContext,
-      scrollport: cssRect(
-        cssCoordinate(cssPx(0)),
-        cssCoordinate(cssPx(0)),
-        initial.width,
-        initial.height,
-      ),
-      ...(document.budgets?.layout === undefined ? {} : { budgets: document.budgets.layout }),
-    };
-    const retainedLayout = this.#reusable(document, "documentLayout", key.documentLayout);
-    const documentLayout = retainedLayout?.documentLayout ?? measured(instrumentation, "normal-flow-layout", () => buildLayoutFragmentTree({
-      formatting: boxTree,
-      inlineItemStreams,
-      context: scrollIndependentContext,
-      ...(request.signal === undefined ? {} : { signal: request.signal }),
-    }));
-    const retainedDisplayList = this.#reusable(document, "documentDisplayList", key.documentDisplayList);
-    const documentDisplayList = retainedDisplayList?.documentDisplayList ?? measured(instrumentation, "document-display-list-construction", () =>
-      buildDocumentDisplayList({
-        layout: documentLayout,
-        context: {
-          ...request.terminalContext,
-          colorDepth: 24,
-          ...(document.budgets?.terminal === undefined ? {} : { budgets: document.budgets.terminal }),
-        },
+    const environmentMatches = (entry: StyleEvaluation): boolean => entry.media === media
+      && (!entry.snapshot.valueDependencies.computedViewportInlineSize
+        || entry.snapshot.environment.viewportWidthCssPx === request.mediaEnvironment.viewportWidthCssPx)
+      && (!entry.snapshot.valueDependencies.computedViewportBlockSize
+        || entry.snapshot.environment.viewportHeightCssPx === request.mediaEnvironment.viewportHeightCssPx);
+    const previous = [...document.styles.values()].find(environmentMatches);
+    let evaluation = previous;
+    if (evaluation === undefined || evaluation.stateRevision !== document.analysisStateRevision) {
+      const snapshot = measured(instrumentation, "computed-style-resolution", () => resolveStyles({
+        program: document.program, state: document.state, environment: request.mediaEnvironment,
+        ...(instrumentation === undefined ? {} : { instrumentation: {
+          record: (stage: "selector-matching" | "custom-property-substitution", elapsed: number) => { instrumentation.record(stage, elapsed); },
+        } }),
+        ...(document.budgets?.style === undefined ? {} : { budgets: document.budgets.style }),
         ...(request.signal === undefined ? {} : { signal: request.signal }),
-      })
-    );
-    const retainedGeometry = this.#reusable(document, "documentGeometry", key.documentGeometry);
-    const displayListSpatialIndex = retainedDisplayList?.displayListSpatialIndex ?? measured(
-      instrumentation,
-      "display-list-spatial-index-construction",
-      () => buildDisplayListSpatialIndex(documentDisplayList),
-    );
-    const documentGeometry = retainedGeometry?.documentGeometry
-      ?? measured(instrumentation, "document-geometry-index-construction", () =>
-        buildDocumentGeometryIndex(documentDisplayList, request.signal)
-      );
-    const incomplete = {
-      key,
-      stylesheetProgram: document.program,
-      computedStyles,
-      boxTree,
-      inlineItemStreams,
-      textSearchIndex,
-      documentLayout,
-      documentDisplayList,
-      displayListSpatialIndex,
-      documentGeometry,
-    };
-    const artifactOwner = measured(instrumentation, "artifact-accounting", () => {
-      // Assign upstream immutable owners separately so resize shares only the resources it uses.
-      for (const root of [computedStyles, boxTree, inlineItemStreams, textSearchIndex,
-        documentLayout, documentDisplayList, displayListSpatialIndex, documentGeometry]) {
-        this.#accounting.immutable(root, new Set([textSearchQueryCache(textSearchIndex).values]), request.signal);
+      }));
+      const change = previous === undefined ? null : compareStyleSnapshots(previous.snapshot, snapshot);
+      const identity = previous !== undefined && change?.effectiveChanged === false ? previous.identity : `style:${String(++this.#clock)}`;
+      const reporting = previous !== undefined && change?.reportingChanged === false ? previous.reporting : `report:${String(++this.#clock)}`;
+      const formattingIdentity = previous !== undefined && (change?.effectiveChanged === false || change?.backgroundOnly === true)
+        ? previous.formattingIdentity : identity;
+      evaluation = { identity, formattingIdentity, reporting, snapshot, media, stateRevision: document.analysisStateRevision, lastUsed: ++this.#clock };
+      if (previous !== undefined) {
+        document.styles.delete(previous.identity);
+        document.resources.computedStyles.delete(previous.identity);
       }
+      document.styles.set(identity, evaluation);
+      // A style slot owns only its current reporting snapshot, never every state revision.
+      document.resources.computedStyles.delete(identity);
+      this.#retain(document, "computedStyles", identity, snapshot, request.signal);
       this.#refreshProgramCosts(document, request.signal);
-      return this.#accounting.immutable(incomplete, new Set(), request.signal);
-    });
-    const artifacts: DocumentRenderArtifacts = Object.freeze({
-      ...incomplete,
-      retainedCost: this.#accounting.total([artifactOwner, ...document.cacheOwners]),
-    });
-    request.signal?.throwIfAborted();
-    const previousLogicalText = document.logicalText;
-    this.#retainLogicalText(document, artifacts);
-    document.analyses.set(identity, { artifacts, owner: artifactOwner, lastUsed: ++this.#clock });
-    try { this.#admit(request.signal); }
-    catch (error) { document.analyses.delete(identity); document.logicalText = previousLogicalText; throw error; }
-    if (!document.analyses.has(identity)) {
-      throw new RenderBudgetExceededError("retained-cost", artifacts.retainedCost, this.#maximumCost);
+      while (document.styles.size > 4) {
+        const oldest = [...document.styles.values()].reduce((a, b) => a.lastUsed < b.lastUsed ? a : b);
+        document.styles.delete(oldest.identity);
+        document.resources.computedStyles.delete(oldest.identity);
+      }
     }
-    return artifacts;
-  }
-
-  #retainLogicalText(document: AttachedDocument, artifacts: DocumentRenderArtifacts): void {
-    if (document.logicalText?.key === artifacts.key.logicalTextIndex
-      && document.logicalText.stateRevision === document.textStateRevision) return;
-    document.logicalText = { key: artifacts.key.logicalTextIndex, stateRevision: document.textStateRevision,
-      dependency: artifacts.computedStyles.logicalTextDependency, index: artifacts.textSearchIndex };
+    evaluation.lastUsed = ++this.#clock;
+    const computedStyles = evaluation.snapshot;
+    const key = dependencyKey(document, request, evaluation);
+    const identities: Record<PhaseName, string> = { computedStyles: key.computedStyleMap, boxTree: key.boxTree,
+      inlineItemStreams: key.inlineItemStreams, textSearchIndex: key.logicalTextIndex, documentLayout: key.documentLayout,
+      documentDisplayList: key.documentDisplayList, displayListSpatialIndex: key.documentDisplayList, documentGeometry: key.documentGeometry };
+    const pinned: PhaseResource<object>[] = [];
+    for (const phase of PHASES) {
+      const entry = document.resources[phase].get(identities[phase]);
+      if (entry !== undefined) { entry.pins += 1; pinned.push(entry); }
+    }
+    const created: { phase: PhaseName; identity: string }[] = [];
+    const retain = <P extends PhaseName>(phase: P, value: DocumentRenderArtifacts[P]): DocumentRenderArtifacts[P] => {
+      const identity = identities[phase];
+      if (!document.resources[phase].has(identity)) {
+        this.#retain(document, phase, identity, value, request.signal);
+        const entry = document.resources[phase].get(identity);
+        if (entry === undefined) throw new Error("Missing newly retained phase resource.");
+        entry.pins += 1; pinned.push(entry);
+        created.push({ phase, identity });
+      }
+      return value;
+    };
+    let admitted = false;
+    try {
+      const replacesLayout = !document.resources.documentLayout.has(key.documentLayout);
+      const replacesPaint = !document.resources.documentDisplayList.has(key.documentDisplayList);
+      if (replacesLayout || replacesPaint) {
+        // Capture only a numeric estimate; no displaced artifacts survive retirement in a token or rollback list.
+        const phases = replacesLayout ? GEOMETRY_PHASES : ["documentDisplayList", "displayListSpatialIndex"] as const;
+        let estimate = 0;
+        for (const phase of phases) for (const [identity, entry] of document.resources[phase]) {
+          if (identity !== identities[phase] && entry.pins === 0) estimate += entry.owner.bytes;
+        }
+        for (const phase of phases) this.#retirePhase(document, phase, identities[phase]);
+        if (replacesLayout) for (const phase of ["boxTree", "inlineItemStreams", "textSearchIndex"] as const) this.#retirePhase(document, phase, identities[phase]);
+        this.#reservedCost = estimate;
+        this.#admit(request.signal);
+      }
+      const boxTree = this.#resource(document, "boxTree", key.boxTree) ?? retain("boxTree", measured(instrumentation, "box-tree-construction", () => buildFormattingTree({
+        document: document.program.document, state: document.state, styles: computedStyles,
+        ...(document.budgets?.formatting === undefined ? {} : { budgets: document.budgets.formatting }),
+        ...(request.signal === undefined ? {} : { signal: request.signal }),
+      })));
+      const inlineItemStreams = this.#resource(document, "inlineItemStreams", key.inlineItemStreams) ?? retain("inlineItemStreams",
+        measured(instrumentation, "inline-item-stream-construction", () => buildInlineItemStreamSet(boxTree, request.signal)));
+      const textSearchIndex = this.#resource(document, "textSearchIndex", key.logicalTextIndex) ?? retain("textSearchIndex",
+        document.logicalText?.key === key.logicalTextIndex ? document.logicalText.index : measured(instrumentation, "logical-search-index-construction", () => buildTextSearchIndex(boxTree, inlineItemStreams, request.signal)));
+      const initial = request.layoutContext.initialContainingBlock;
+      const documentLayout = this.#resource(document, "documentLayout", key.documentLayout) ?? retain("documentLayout",
+        measured(instrumentation, "normal-flow-layout", () => buildLayoutFragmentTree({ formatting: boxTree, inlineItemStreams,
+          context: { ...request.layoutContext, scrollport: cssRect(cssCoordinate(cssPx(0)), cssCoordinate(cssPx(0)), initial.width, initial.height),
+            ...(document.budgets?.layout === undefined ? {} : { budgets: document.budgets.layout }) },
+          ...(request.signal === undefined ? {} : { signal: request.signal }),
+        })));
+      const documentDisplayList = this.#resource(document, "documentDisplayList", key.documentDisplayList) ?? retain("documentDisplayList",
+        measured(instrumentation, "document-display-list-construction", () => buildDocumentDisplayList({ layout: documentLayout, paintStyle: createLayoutPaintResolver(documentLayout, computedStyles),
+          context: { ...request.terminalContext, colorDepth: 24, ...(document.budgets?.terminal === undefined ? {} : { budgets: document.budgets.terminal }) },
+          ...(request.signal === undefined ? {} : { signal: request.signal }),
+        })));
+      const displayListSpatialIndex = this.#resource(document, "displayListSpatialIndex", key.documentDisplayList) ?? retain("displayListSpatialIndex",
+        measured(instrumentation, "display-list-spatial-index-construction", () => buildDisplayListSpatialIndex(documentDisplayList)));
+      const documentGeometry = this.#resource(document, "documentGeometry", key.documentGeometry) ?? retain("documentGeometry",
+        measured(instrumentation, "document-geometry-index-construction", () => buildDocumentGeometryIndex(documentDisplayList, request.signal)));
+      this.#reservedCost = 0;
+      this.#admit(request.signal);
+      request.signal?.throwIfAborted();
+      document.logicalText = { key: key.logicalTextIndex, stateRevision: document.textStateRevision,
+        dependency: computedStyles.logicalTextDependency, index: textSearchIndex };
+      admitted = true;
+      return Object.freeze({ key, stylesheetProgram: document.program, computedStyles, boxTree, inlineItemStreams,
+        textSearchIndex, documentLayout, documentDisplayList, displayListSpatialIndex, documentGeometry, retainedCost: this.#retainedCost });
+    } finally {
+      this.#reservedCost = 0;
+      for (const entry of pinned) entry.pins -= 1;
+      if (!admitted) for (const { phase, identity } of created) document.resources[phase].delete(identity);
+    }
   }
 
   public renderViewport(request: ViewportRenderRequest): RetainedViewportRenderResult {
+    return this.withViewportArtifacts(request, (viewport) => viewport);
+  }
+
+  /** Compose and extract summaries while exactly the requested phase resources are pinned. */
+  public withViewportArtifacts<T>(request: ViewportRenderRequest,
+    operation: (viewport: RetainedViewportRenderResult, artifacts: DocumentRenderArtifacts) => T): T {
     const localMetrics = new RenderStageMetrics();
     const instrumentation = {
       record: (identity, elapsed) => {
@@ -450,64 +471,79 @@ export class RenderArtifactStore {
       ...request,
       ...(request.analysisSignal === undefined ? {} : { signal: request.analysisSignal }),
     }, instrumentation);
-    const terminalBudgets = this.#document(
-      request.documentId,
-      request.documentRevision,
-    ).budgets?.terminal;
-    const record = <T>(stage: Parameters<typeof measured>[1], operation: () => T): T => measured(
-      instrumentation,
-      stage,
-      operation,
-    );
-    const revealQuery = request.window.reveal !== undefined && "query" in request.window.reveal ? request.window.reveal.query : null;
-    const query = request.searchQuery ?? revealQuery;
-    const searchProjection = query === null ? null : this.#searchProjection(
-      this.#document(request.documentId, request.documentRevision), artifacts, query, 10_000, request.signal,
-    );
-    const displayList = record("viewport-display-list-construction", () => buildViewportDisplayList({
-      documentDisplayList: artifacts.documentDisplayList,
-      spatialIndex: artifacts.displayListSpatialIndex,
-      searchProjection,
-      context: {
-        ...request.terminalContext,
-        ...(terminalBudgets === undefined ? {} : { budgets: terminalBudgets }),
-      },
-      window: request.window,
-      instrumentation,
-      ...(request.signal === undefined ? {} : { signal: request.signal }),
-    }));
-    const cells = record("cell-rasterization", () => rasterizeViewportDisplayList({
-      displayList,
-      ...(request.signal === undefined ? {} : { signal: request.signal }),
-    }));
-    const terminal = record("terminal-index-construction", () => buildViewportTerminalResult({
-      displayList,
-      cellBuffer: cells.cellBuffer,
-      documentGeometry: artifacts.documentGeometry,
-      searchProjection,
-      truncations: cells.truncations,
-      ...(request.signal === undefined ? {} : { signal: request.signal }),
-    }));
-    const document = this.#document(request.documentId, request.documentRevision);
-    return Object.freeze({
-      documentId: request.documentId,
-      documentRevision: request.documentRevision,
-      stateRevision: document.stateRevision,
-      viewportRevision: request.viewportRevision,
-      artifactKey: artifacts.key,
-      displayList,
-      terminal,
-      documentExtentRows: Math.max(
-        1,
-        Math.ceil(
-          (artifacts.documentGeometry.documentExtent.y + artifacts.documentGeometry.documentExtent.height)
-          / request.terminalContext.rowHeightCssPx,
+    const unpin = this.#pinArtifacts(this.#document(request.documentId, request.documentRevision), artifacts);
+    try {
+      const terminalBudgets = this.#document(
+        request.documentId,
+        request.documentRevision,
+      ).budgets?.terminal;
+      const record = <T>(stage: Parameters<typeof measured>[1], operation: () => T): T => measured(
+        instrumentation,
+        stage,
+        operation,
+      );
+      const revealQuery = request.window.reveal !== undefined && "query" in request.window.reveal ? request.window.reveal.query : null;
+      const query = request.searchQuery ?? revealQuery;
+      const searchProjection = query === null ? null : this.#searchProjection(
+        this.#document(request.documentId, request.documentRevision), artifacts, query, 10_000, request.signal,
+      );
+      const displayList = record("viewport-display-list-construction", () => buildViewportDisplayList({
+        documentDisplayList: artifacts.documentDisplayList,
+        spatialIndex: artifacts.displayListSpatialIndex,
+        searchProjection,
+        context: {
+          ...request.terminalContext,
+          ...(terminalBudgets === undefined ? {} : { budgets: terminalBudgets }),
+        },
+        window: request.window,
+        instrumentation,
+        ...(request.signal === undefined ? {} : { signal: request.signal }),
+      }));
+      const cells = record("cell-rasterization", () => rasterizeViewportDisplayList({
+        displayList,
+        ...(request.signal === undefined ? {} : { signal: request.signal }),
+      }));
+      const terminal = record("terminal-index-construction", () => buildViewportTerminalResult({
+        displayList,
+        cellBuffer: cells.cellBuffer,
+        documentGeometry: artifacts.documentGeometry,
+        searchProjection,
+        truncations: cells.truncations,
+        ...(request.signal === undefined ? {} : { signal: request.signal }),
+      }));
+      const document = this.#document(request.documentId, request.documentRevision);
+      const viewport = Object.freeze({
+        documentId: request.documentId,
+        documentRevision: request.documentRevision,
+        stateRevision: document.stateRevision,
+        viewportRevision: request.viewportRevision,
+        artifactKey: artifacts.key,
+        displayList,
+        terminal,
+        documentExtentRows: Math.max(
+          1,
+          Math.ceil(
+            (artifacts.documentGeometry.documentExtent.y + artifacts.documentGeometry.documentExtent.height)
+            / request.terminalContext.rowHeightCssPx,
+          ),
         ),
-      ),
-      scrollAnchors: artifacts.documentGeometry.scrollAnchors,
-      focusOrder: artifacts.documentGeometry.focusOrder,
-      stageMetrics: localMetrics.snapshot(),
-    });
+        scrollAnchors: artifacts.documentGeometry.scrollAnchors,
+        focusOrder: artifacts.documentGeometry.focusOrder,
+        stageMetrics: localMetrics.snapshot(),
+      });
+      return operation(viewport, artifacts);
+    } finally {
+      unpin();
+      this.#measureRetainedCost();
+    }
+  }
+
+  #pinArtifacts(document: AttachedDocument, artifacts: DocumentRenderArtifacts): () => void {
+    const pins: PhaseResource<object>[] = [];
+    for (const phase of PHASES) for (const entry of document.resources[phase].values()) {
+      if (entry.value === artifacts[phase]) { entry.pins += 1; pins.push(entry); }
+    }
+    return () => { for (const entry of pins) entry.pins -= 1; };
   }
 
   /** Queries the retained logical text index and maps stable matches to document-space anchors. */
@@ -519,6 +555,8 @@ export class RenderArtifactStore {
   ): DocumentSearchGeometryResult {
     const bounded = query.slice(0, 1_024);
     const artifacts = this.analyze(request);
+    const unpin = this.#pinArtifacts(this.#document(request.documentId, request.documentRevision), artifacts);
+    try {
     const projection = this.#searchProjection(
       this.#document(request.documentId, request.documentRevision),
       artifacts,
@@ -556,6 +594,7 @@ export class RenderArtifactStore {
       })),
       truncated: logical.truncated,
     });
+    } finally { unpin(); }
   }
 
   public release(documentId: string): void {
@@ -564,7 +603,10 @@ export class RenderArtifactStore {
     document.program.propertyValidation.clear();
     document.program.substitutedValues.clear();
     document.program.selectorRuntime.clear();
-    document.analyses.clear();
+    for (const phase of PHASES) document.resources[phase].clear();
+    document.styles.clear();
+    document.mutableOwners.clear();
+    document.sideCacheSources.clear();
     document.searches.clear();
     document.logicalText = null;
     document.queryOwners.clear();
@@ -579,10 +621,22 @@ export class RenderArtifactStore {
   public metrics(): RenderArtifactStoreMetrics {
     this.#measureRetainedCost();
     let retainedAnalyses = 0;
-    for (const document of this.#documents.values()) retainedAnalyses += document.analyses.size;
+    let retainedResources = 0;
+    let pinnedResources = 0;
+    for (const document of this.#documents.values()) {
+      retainedAnalyses += document.resources.documentLayout.size;
+      for (const phase of PHASES) for (const resource of document.resources[phase].values()) {
+        retainedResources += 1;
+        if (resource.pins > 0) pinnedResources += 1;
+      }
+    }
     return Object.freeze({
       attachedDocuments: this.#documents.size,
       retainedAnalyses,
+      retainedResources,
+      pinnedResources,
+      reservedCost: this.#reservedCost,
+      sideCacheScans: this.#sideCacheScans,
       retainedCost: this.#retainedCost,
       evictions: this.#evictions,
       accountedAllocations: this.#accounting.measuredAllocations,
@@ -606,9 +660,9 @@ export class RenderArtifactStore {
   ): TextSearchLayoutProjection {
     signal?.throwIfAborted();
     const bounded = query.slice(0, 1_024);
-    const identity = `${keyIdentity(artifacts.key)}\u0000${String(limit)}\u0000${bounded}`;
-    const retained = document.searches.get(identity) ?? [...document.searches].find(([key, value]) =>
-      key.startsWith(`${keyIdentity(artifacts.key)}\u0000`) && value.projection.query === bounded
+    const identity = `${artifacts.key.logicalTextIndex}\u0000${artifacts.key.documentLayout}\u0000${String(limit)}\u0000${bounded}`;
+    const retained = document.searches.get(identity) ?? [...document.searches].find(([, value]) =>
+      value.logicalText === artifacts.key.logicalTextIndex && value.layout === artifacts.key.documentLayout && value.projection.query === bounded
         && !value.projection.truncated && value.projection.matches.length <= limit)?.[1];
     if (retained !== undefined) {
       retained.lastUsed = ++this.#clock;
@@ -623,7 +677,7 @@ export class RenderArtifactStore {
         return this.#accounting.immutable(projection, new Set(), signal);
       });
       signal?.throwIfAborted();
-      document.searches.set(identity, { projection, owner, lastUsed: ++this.#clock });
+      document.searches.set(identity, { projection, owner, logicalText: artifacts.key.logicalTextIndex, layout: artifacts.key.documentLayout, lastUsed: ++this.#clock });
       while (document.searches.size > MAX_RETAINED_SEARCH_PROJECTIONS_PER_DOCUMENT) {
         let oldest: { readonly identity: string; readonly lastUsed: number } | null = null;
         for (const [searchIdentity, search] of document.searches) {
@@ -653,14 +707,35 @@ export class RenderArtifactStore {
   #refreshQueryCosts(document: AttachedDocument, index: DocumentRenderArtifacts["textSearchIndex"], signal?: AbortSignal): void {
     const cache = textSearchQueryCache(index);
     if (document.queryOwners.get(index)?.revision === cache.revision) return;
-    for (const result of cache.values.values()) this.#accounting.immutable(result, new Set(), signal, true);
+    for (const result of cache.values.values()) this.#accounting.immutable(result, new Set(), signal);
     document.queryOwners.set(index, {
       owner: this.#accounting.mutable(cache.values, signal), revision: cache.revision,
     });
   }
 
+  #refreshSideCacheCosts(document: AttachedDocument, signal?: AbortSignal): void {
+    const roots: object[] = [...document.resources.boxTree.values()].map(({ value }) => value);
+    for (const { value } of document.resources.inlineItemStreams.values()) roots.push(value);
+    if (roots.length === document.sideCacheSources.size
+      && roots.every((root) => document.sideCacheSources.get(root) === retainedSideCacheRevision(root))) return;
+    this.#sideCacheScans += 1;
+    const active = new Set<object>();
+    for (const root of roots) for (const cache of retainedSideCaches(root)) {
+      signal?.throwIfAborted();
+      active.add(cache);
+      if (document.mutableOwners.get(cache)?.revision === cache.revision) continue;
+      for (const value of cache.values()) {
+        if (value !== null && typeof value === "object") this.#accounting.immutable(value, new Set(), signal);
+      }
+      document.mutableOwners.set(cache, { owner: this.#accounting.mutable(cache, signal), revision: cache.revision });
+    }
+    for (const cache of document.mutableOwners.keys()) if (!active.has(cache)) document.mutableOwners.delete(cache);
+    document.sideCacheSources.clear();
+    for (const root of roots) document.sideCacheSources.set(root, retainedSideCacheRevision(root));
+  }
+
   #pruneQueryOwners(document: AttachedDocument): void {
-    const retained = new Set([...document.analyses.values()].map(({ artifacts }) => artifacts.textSearchIndex));
+    const retained = new Set([...document.resources.textSearchIndex.values()].map(({ value }) => value));
     if (document.logicalText !== null) retained.add(document.logicalText.index);
     for (const index of document.queryOwners.keys()) if (!retained.has(index)) document.queryOwners.delete(index);
   }
@@ -671,17 +746,20 @@ export class RenderArtifactStore {
     let bookkeeping = 0;
     for (const document of this.#documents.values()) {
       this.#pruneQueryOwners(document);
-      const indexes = new Set([...document.analyses.values()].map(({ artifacts }) => artifacts.textSearchIndex));
+      this.#refreshSideCacheCosts(document, signal);
+      const indexes = new Set([...document.resources.textSearchIndex.values()].map(({ value }) => value));
       if (document.logicalText !== null) indexes.add(document.logicalText.index);
       for (const index of indexes) this.#refreshQueryCosts(document, index, signal);
       owners.push(document.attachmentOwner, document.stateOwner, ...document.cacheOwners,
         ...[...document.queryOwners.values()].map((entry) => entry.owner));
       if (document.logicalText !== null) owners.push(this.#accounting.immutable(document.logicalText.index));
-      for (const analysis of document.analyses.values()) owners.push(analysis.owner);
+      for (const phase of PHASES) for (const entry of document.resources[phase].values()) owners.push(entry.owner);
+      owners.push(...[...document.mutableOwners.values()].map((entry) => entry.owner));
       for (const search of document.searches.values()) owners.push(search.owner);
       // Covers store records, dependency keys, map entries and owner ledger records conservatively.
       bookkeeping += 2048 + document.documentId.length * 2;
-      for (const identity of document.analyses.keys()) bookkeeping += 2048 + identity.length * 2;
+      for (const phase of PHASES) for (const identity of document.resources[phase].keys()) bookkeeping += 2048 + identity.length * 2;
+      bookkeeping += document.styles.size * 1024 + document.mutableOwners.size * 256 + document.sideCacheSources.size * 128;
       for (const identity of document.searches.keys()) bookkeeping += 1024 + identity.length * 2;
     }
     this.#retainedCost = bookkeeping + this.#accounting.total(owners);
@@ -694,7 +772,8 @@ export class RenderArtifactStore {
       program: document.program, state: document.state, budgets: document.budgets,
       logicalText: document.logicalText,
       queryIndexes: [...document.queryOwners.keys()],
-      analyses: [...document.analyses.values()].map(({ artifacts }) => artifacts),
+      styles: [...document.styles.values()],
+      resources: PHASES.flatMap((phase) => [...document.resources[phase].values()].map(({ value }) => value)),
       searches: [...document.searches.values()].map(({ projection }) => projection),
     })));
   }
@@ -705,21 +784,31 @@ export class RenderArtifactStore {
 
   #admitOwners(signal?: AbortSignal): void {
     this.#measureRetainedCost(signal);
-    while (this.#retainedCost > this.#maximumCost) {
-      let oldest: { document: AttachedDocument; identity: string; lastUsed: number } | null = null;
-      for (const document of this.#documents.values()) {
-        for (const [identity, analysis] of document.analyses) {
-          if (oldest === null || analysis.lastUsed < oldest.lastUsed) oldest = { document, identity, lastUsed: analysis.lastUsed };
+    let trimmed = false;
+    while (this.#retainedCost + this.#reservedCost > this.#maximumCost) {
+      if (!trimmed) {
+        // Accelerator pressure shares the same admission policy. Clearing the selector
+        // runtime also invalidates its computed-style incremental baseline.
+        for (const document of this.#documents.values()) this.#clearProgramCaches(document);
+        trimmed = true;
+        this.#measureRetainedCost(signal);
+        continue;
+      }
+      let oldest: { document: AttachedDocument; phase: PhaseName; identity: string; lastUsed: number } | null = null;
+      for (const phase of RETIREMENT_PHASES) {
+        for (const document of this.#documents.values()) for (const [identity, entry] of document.resources[phase]) {
+          if (entry.pins !== 0) continue;
+          if (oldest === null || (oldest.phase === phase && entry.lastUsed < oldest.lastUsed)) oldest = { document, phase, identity, lastUsed: entry.lastUsed };
         }
       }
-      if (oldest === null) throw new RenderBudgetExceededError("retained-cost", this.#retainedCost, this.#maximumCost);
-      const evicted = oldest.document.analyses.get(oldest.identity);
-      if (oldest.document.logicalText?.index === evicted?.artifacts.textSearchIndex) oldest.document.logicalText = null;
-      oldest.document.analyses.delete(oldest.identity);
-      for (const identity of oldest.document.searches.keys()) {
-        if (identity.startsWith(`${oldest.identity}\u0000`)) oldest.document.searches.delete(identity);
+      if (oldest === null) throw new RenderBudgetExceededError("retained-cost", this.#retainedCost + this.#reservedCost, this.#maximumCost);
+      oldest.document.resources[oldest.phase].delete(oldest.identity);
+      if (oldest.phase === "computedStyles") oldest.document.styles.delete(oldest.identity);
+      if (oldest.phase === "textSearchIndex" && oldest.document.logicalText?.key === oldest.identity) oldest.document.logicalText = null;
+      for (const [identity, search] of oldest.document.searches) {
+        if ((oldest.phase === "documentLayout" && search.layout === oldest.identity)
+          || (oldest.phase === "textSearchIndex" && search.logicalText === oldest.identity)) oldest.document.searches.delete(identity);
       }
-      this.#clearProgramCaches(oldest.document);
       this.#evictions += 1;
       this.#measureRetainedCost(signal);
     }

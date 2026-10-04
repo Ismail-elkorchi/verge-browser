@@ -26,6 +26,19 @@ export function compareOracleCase(fixture, variant, native, chromium) {
       compare("computed-style", `${assertion.id}.${property}`, chromium.byId[assertion.id]?.style[property] ?? null, native.byId[assertion.id]?.style[property] ?? null);
     }
   }
+  if (fixture.oracle?.formSemantics === true) {
+    compare("form-control-state", "document-order controls", chromium.formSemantics?.controls ?? null, native.formSemantics?.controls ?? null);
+    compare("form-entry-list", "document-order forms and submitters", chromium.formSemantics?.forms ?? null, native.formSemantics?.forms ?? null);
+  }
+  if (fixture.oracle?.accessibleNames === true) {
+    if (chromium.accessibleNames?.status !== "complete") {
+      failures.push({ kind: "accessible-name-oracle-unavailable", reason: chromium.accessibleNames?.reason ?? "missing CDP observation" });
+    } else {
+      const targets = native.formSemantics?.nameTargets ?? [];
+      compare("accessible-name-targets", "document-order positions", chromium.formSemantics?.nameTargets ?? [], targets.map((target) => target.key));
+      for (const target of targets) compare("accessible-name", target.key, chromium.accessibleNames.byKey[target.key]?.name ?? null, target.name);
+    }
+  }
   // Only controlled boxes opt into numeric geometry comparisons. Terminal
   // cells and Chromium fonts intentionally have different text metrics.
   for (const assertion of fixture.oracle?.geometry ?? []) {
