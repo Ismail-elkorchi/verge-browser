@@ -79,3 +79,22 @@ test("CSS line-break, word-break, overflow-wrap, and hyphens tailor Unicode oppo
   assert.deepEqual(allowedOffsets("ab\u00adcd", { hyphens: "manual" }), [3, 5]);
   assert.deepEqual(allowedOffsets("ab\u00adcd", { hyphens: "none" }), [5]);
 });
+
+test("overflow-wrap retains emergency priority and its min-content participation", () => {
+  for (const overflowWrap of ["break-word", "anywhere"]) {
+    const map = buildLineBreakMap("alpha beta", { overflowWrap, preserveGraphemeClusters: true });
+    assert.equal(map.atCodeUnit(1).kind, "emergency");
+    assert.equal(map.atCodeUnit(1).participatesInMinContent, overflowWrap === "anywhere");
+    assert.equal(map.atCodeUnit(6).kind, "allowed");
+    assert.equal(map.atCodeUnit(6).participatesInMinContent, true);
+    assert.equal(map.atCodeUnit(0).participatesInMinContent, false);
+    const grapheme = buildLineBreakMap("a\u0301bc", { overflowWrap, preserveGraphemeClusters: true });
+    assert.equal(grapheme.atCodeUnit(1).kind, "prohibited");
+    assert.equal(grapheme.atCodeUnit(1).participatesInMinContent, false);
+  }
+  for (const tailoring of [{ lineBreak: "anywhere" }, { wordBreak: "break-all" }]) {
+    const map = buildLineBreakMap("abcd", tailoring);
+    assert.equal(map.atCodeUnit(1).kind, "allowed");
+    assert.equal(map.atCodeUnit(1).participatesInMinContent, true);
+  }
+});

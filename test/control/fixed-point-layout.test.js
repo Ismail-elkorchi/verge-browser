@@ -2607,3 +2607,42 @@ test("explicit zero-sized atomic content is not expanded to a terminal cell", ()
   }
   assert.equal(normalizedPaintRows(result).join(""), "visible");
 });
+
+test("overflow-wrap keeps fitting words intact across inline nodes and only breaks overlong words", () => {
+  for (const overflowWrap of ["break-word", "anywhere"]) {
+    const style = `<style>body,p{margin:0}p{width:8ch;overflow-wrap:${overflowWrap}}</style>`;
+    for (const text of ["alpha beta gamma", "al<span>pha be</span>ta <b>gam</b>ma"]) {
+      const result = render(`${style}<p>${text}</p>`, 20);
+      assert.deepEqual(paintedRows(result).map((row) => row.text), ["alpha", "beta", "gamma"]);
+    }
+    const overlong = render(`${style}<p>ab abc<span>defghijk</span> tail</p>`, 20);
+    assert.deepEqual(paintedRows(overlong).map((row) => row.text), ["ab", "abcdefgh", "ijk tail"]);
+    const whitespace = render(`${style}<p>alpha   beta\n gamma</p>`, 20);
+    assert.deepEqual(paintedRows(whitespace).map((row) => row.text), ["alpha", "beta", "gamma"]);
+    for (const whiteSpace of ["nowrap", "pre"]) {
+      const unwrapped = render(`${style}<p style="white-space:${whiteSpace}">alpha beta gamma</p>`, 20);
+      assert.deepEqual(paintedRows(unwrapped).map((row) => row.text), ["alpha beta gamma"]);
+    }
+    const graphemes = render(`${style}<p style="width:2ch">a\u0301a\u0301👩🏽‍🚀🇯🇵z</p>`, 20);
+    assert.deepEqual(paintedRows(graphemes).map((row) => row.text), ["a\u0301a\u0301", "👩🏽‍🚀", "🇯🇵", "z"]);
+    const manual = render(`${style}<p style="width:3ch">ab\u00adcd<br>ef<wbr>gh</p>`, 20);
+    assert.deepEqual(paintedRows(manual).map((row) => row.text), ["ab-", "cd", "ef", "gh"]);
+  }
+});
+
+test("overflow-wrap:anywhere contributes emergency breaks to min-content while break-word does not", () => {
+  for (const [declaration, columns] of [
+    ["overflow-wrap:normal", 10],
+    ["overflow-wrap:break-word", 10],
+    ["overflow-wrap:anywhere", 1],
+    ["overflow-wrap:anywhere;white-space:nowrap", 10],
+    ["overflow-wrap:anywhere;white-space:pre", 10],
+    ["word-break:break-word;overflow-wrap:normal", 1],
+    ["word-break:break-all", 1],
+    ["line-break:anywhere", 1]
+  ]) {
+    const result = render(`<style>body{margin:0}#grid{display:grid;grid-template-columns:min-content}</style><div id="grid"><div id="text" style="${declaration}">abcdefghij</div></div>`, 20);
+    const box = principalFragment(result, elementById(result, "text"));
+    assert.equal(box.contentRect.width, cssPx(columns * 8), declaration);
+  }
+});

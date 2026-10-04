@@ -8,7 +8,7 @@ import {
   type LineBreakClass
 } from "./properties.js";
 
-export type BreakOpportunityKind = "prohibited" | "allowed" | "mandatory";
+export type BreakOpportunityKind = "prohibited" | "allowed" | "emergency" | "mandatory";
 export type CssLineBreak = "auto" | "normal" | "anywhere";
 export type CssWordBreak = "normal" | "break-all" | "keep-all";
 export type CssOverflowWrap = "normal" | "anywhere" | "break-word";
@@ -18,6 +18,8 @@ export interface BreakOpportunity {
   readonly codePointIndex: number;
   readonly codeUnitOffset: number;
   readonly kind: BreakOpportunityKind;
+  /** Whether this boundary separates min-content segments, independent of line-selection priority. */
+  readonly participatesInMinContent: boolean;
   readonly rule: string;
 }
 
@@ -208,7 +210,7 @@ function defaultOpportunity(
   units: readonly LineUnit[],
   boundary: number,
   context: LineBoundaryContext
-): Omit<BreakOpportunity, "codePointIndex" | "codeUnitOffset"> {
+): Pick<BreakOpportunity, "kind" | "rule"> {
   if (boundary === 0) return { kind: "prohibited", rule: "LB2" };
   if (boundary === units.length) return { kind: "mandatory", rule: "LB3" };
   const left = units[boundary - 1];
@@ -348,12 +350,12 @@ function defaultOpportunity(
 }
 
 function tailoredOpportunity(
-  base: Omit<BreakOpportunity, "codePointIndex" | "codeUnitOffset">,
+  base: Pick<BreakOpportunity, "kind" | "rule">,
   units: readonly LineUnit[],
   boundary: number,
   tailoring: LineBreakTailoring,
   graphemeBoundaries: { has(offset: number): boolean }
-): Omit<BreakOpportunity, "codePointIndex" | "codeUnitOffset"> {
+): Pick<BreakOpportunity, "kind" | "rule"> {
   if (base.kind === "mandatory" || boundary === 0 || boundary === units.length) return base;
   const right = units[boundary];
   const left = units[boundary - 1];
@@ -367,19 +369,18 @@ function tailoredOpportunity(
     && (LETTERS.has(right.effective) || right.effective === "NU")) {
     return { kind: "allowed", rule: "CSS-WORD-BREAK-BREAK-ALL" };
   }
-  if (tailoring.wordBreak === "keep-all" && (left.effective === "ID" || HANGUL.has(left.effective))
-    && (right.effective === "ID" || HANGUL.has(right.effective))) {
-    return { kind: "prohibited", rule: "CSS-WORD-BREAK-KEEP-ALL" };
-  }
+  const ordinary = tailoring.wordBreak === "keep-all" && (left.effective === "ID" || HANGUL.has(left.effective))
+    && (right.effective === "ID" || HANGUL.has(right.effective))
+    ? { kind: "prohibited" as const, rule: "CSS-WORD-BREAK-KEEP-ALL" } : base;
   if ((tailoring.overflowWrap === "anywhere" || tailoring.overflowWrap === "break-word")
-    && base.kind === "prohibited") {
+    && ordinary.kind === "prohibited") {
     return {
-      kind: "allowed",
+      kind: "emergency",
       rule: tailoring.overflowWrap === "anywhere"
         ? "CSS-OVERFLOW-WRAP-ANYWHERE" : "CSS-OVERFLOW-WRAP-BREAK-WORD"
     };
   }
-  return base;
+  return ordinary;
 }
 
 class ImmutableLineBreakMap implements LineBreakMap {
@@ -491,16 +492,19 @@ export function buildLineBreakMap(
     }
     const base = defaultOpportunity(units, boundary, context);
     const codeUnitOffset = boundary === units.length ? value.length : units[boundary]?.startCodeUnit ?? 0;
+    const tailoring = tailoringAt({ codePointIndex: boundary, codeUnitOffset });
     const resolved = tailoredOpportunity(
       base,
       units,
       boundary,
-      tailoringAt({ codePointIndex: boundary, codeUnitOffset }),
+      tailoring,
       { has: hasGraphemeBoundary }
     );
     opportunities.push(Object.freeze({
       codePointIndex: boundary,
       codeUnitOffset,
+      participatesInMinContent: resolved.kind === "allowed" || resolved.kind === "mandatory"
+        || resolved.kind === "emergency" && tailoring.overflowWrap === "anywhere",
       ...resolved
     }));
   }

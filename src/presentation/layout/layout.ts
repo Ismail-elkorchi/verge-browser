@@ -4182,7 +4182,9 @@ class LayoutBuilder {
             style?.text.wordBreak === "break-word"
               ? "normal"
               : (style?.text.wordBreak ?? "normal"),
-          overflowWrap: style?.text.overflowWrap ?? "normal",
+          overflowWrap: style?.text.wordBreak === "break-word"
+            ? "anywhere"
+            : (style?.text.overflowWrap ?? "normal"),
           hyphens: style?.text.hyphens ?? "manual",
           language: null,
           preserveGraphemeClusters: true,
@@ -4202,11 +4204,8 @@ class LayoutBuilder {
           unit.transformedStartCodeUnit === 0
             ? null
             : breaks.atCodeUnit(unit.transformedStartCodeUnit);
-        if (
-          opportunity?.kind === "allowed" ||
-          opportunity?.kind === "mandatory"
-        )
-          finishSegment();
+        if (opportunity?.kind === "mandatory" || opportunity?.participatesInMinContent === true
+          && style?.text.whiteSpace !== "nowrap" && style?.text.whiteSpace !== "pre") finishSegment();
         if (unit.kind === "forced-break") {
           finishSegment();
           continue;
