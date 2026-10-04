@@ -165,6 +165,18 @@ async function settleBrowserCleanup(
   if (errors.length > 1) throw new AggregateError(errors, message);
 }
 
+/** A render consumer can leave while shared attachment/state preparation is still running. */
+function waitForPreparation<T>(preparation: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal === undefined) return preparation;
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const abort = (): void => { signal.removeEventListener("abort", abort); reject(signal.reason instanceof Error ? signal.reason : new Error("Render preparation cancelled.", { cause: signal.reason })); };
+    signal.addEventListener("abort", abort, { once: true });
+    preparation.then((value) => { signal.removeEventListener("abort", abort); resolve(value); },
+      (error: unknown) => { signal.removeEventListener("abort", abort); reject(error instanceof Error ? error : new Error(String(error))); });
+  });
+}
+
 export interface AcquiredNavigation {
   readonly snapshot: IndexedPageSnapshot;
   readonly provenance: NavigationProvenance;
@@ -346,8 +358,11 @@ export class BrowserController {
     document: BrowserDocumentState,
     viewportRevision: number,
     parameters: ViewportRequestParameters,
+    signal?: AbortSignal,
   ): Promise<ViewportRenderPayload> {
-    const renderer = await this.#prepareRendering(document);
+    signal?.throwIfAborted();
+    const renderer = await waitForPreparation(this.#prepareRendering(document), signal);
+    signal?.throwIfAborted();
     return renderer.renderViewport(document, viewportRevision, parameters);
   }
 
@@ -363,8 +378,11 @@ export class BrowserController {
     query: string,
     parameters: ViewportRequestParameters,
     requestGeneration: number,
+    signal?: AbortSignal,
   ): ReturnType<RenderWorkerClient["search"]> {
-    const renderer = await this.#prepareRendering(document);
+    signal?.throwIfAborted();
+    const renderer = await waitForPreparation(this.#prepareRendering(document), signal);
+    signal?.throwIfAborted();
     return renderer.search(document, query, parameters, 2_000, requestGeneration);
   }
 

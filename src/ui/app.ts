@@ -378,7 +378,7 @@ function viewportEffect(
     const cancel = (): void => { controller.cancelViewport(document.id); };
     context.signal.addEventListener("abort", cancel, { once: true });
     try {
-      const payload = await controller.renderViewport(document, viewportRevision, parameters);
+      const payload = await controller.renderViewport(document, viewportRevision, parameters, context.signal);
       return {
         kind: "viewportReady",
         payload,
@@ -407,7 +407,7 @@ function searchEffect(
     const cancel = (): void => { controller.cancelSearch(document.id); };
     context.signal.addEventListener("abort", cancel, { once: true });
     try {
-      const result = await controller.searchDocument(document, query, parameters, document.rendering.searchRequestGeneration);
+      const result = await controller.searchDocument(document, query, parameters, document.rendering.searchRequestGeneration, context.signal);
       return {
         kind: "searchReady", documentId: document.id,
         documentRevision: result.documentRevision, stateRevision: result.stateRevision,

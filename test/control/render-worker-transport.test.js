@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { setImmediate } from "node:timers";
 import { performance } from "node:perf_hooks";
 import { BrowserController } from "../../dist/ui/browser-controller.js";
 import { EventEmitter } from "node:events";
@@ -391,4 +392,96 @@ test("document cleanup has reserved admission and priority in a saturated worker
     await settled;
     assert.equal(f.client.pendingRequestCount, 0);
   } finally { await f.client.close(); }
+});
+
+test("viewport cancellation settles its consumer before worker reply without releasing the active worker slot", async () => {
+  const f = fixture();
+  try {
+    await attach(f);
+    const first = f.client.renderViewport(f.document, 1, parameters);
+    let cancellation;
+    void first.catch((error) => { cancellation = error; });
+    const active = f.worker.requests.at(-1);
+    const documentGeneration = Atomics.load(new Int32Array(active.documentCancellation), 0);
+    f.client.cancelViewport(f.document.id);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(cancellation?.name, "AbortError", "consumer cancellation must not wait for shared analysis");
+    assert.equal(Atomics.load(new Int32Array(active.documentCancellation), 0), documentGeneration,
+      "a replaced viewport must not cancel reusable document analysis");
+    const second = f.client.renderViewport(f.document, 2, parameters);
+    assert.equal(f.worker.requests.at(-1), active, "active worker slot remains occupied until acknowledgment");
+    assert.equal(f.client.pendingRequestCount, 1, "only the successor owns a pending consumer");
+    f.worker.respond(viewport(active, "obsolete", { ...summary, identity: "obsolete" }));
+    const successor = f.worker.requests.at(-1);
+    assert.equal(successor.viewportRevision, 2);
+    assert.equal(successor.heldSummaryIdentity, null, "cancelled response cannot publish a stale summary");
+    f.worker.respond(viewport(successor, "layout-1", summary));
+    assert.equal((await second).viewportRevision, 2);
+  } finally { await f.client.close(); }
+});
+
+for (const phase of ["attachment", "state preparation"]) {
+  test(`aborted viewport consumer leaves shared ${phase} promptly and cannot enqueue a late viewport`, async () => {
+    const f = controllerFixture();
+    try {
+      if (phase === "state preparation") await controllerViewport(f, f.document);
+      const document = phase === "attachment" ? f.document
+        : { ...f.document, stateRevision: 2, documentState: { ...f.document.documentState, focus: "node" } };
+      const abort = new globalThis.AbortController();
+      const first = f.controller.renderViewport(document, 2, parameters, abort.signal);
+      let cancellation;
+      void first.catch((error) => { cancellation = error; });
+      const request = await f.worker.nextRequest(phase === "attachment" ? "attach-document" : "update-document-state");
+      abort.abort();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(cancellation?.name, "AbortError");
+      const successor = f.controller.renderViewport(document, 3, parameters);
+      assert.equal(f.worker.requests.at(-1), request);
+      acknowledge(f.worker, request);
+      const viewportRequest = await f.worker.nextRequest("request-viewport", request.requestId);
+      assert.equal(viewportRequest.viewportRevision, 3, "aborted caller cannot post work after preparation completes");
+      f.worker.respond(viewport(viewportRequest, "layout-1", summary));
+      await successor;
+    } finally { await f.controller.close(); }
+  });
+}
+
+test("a cancelled search consumer leaves blocked restart attachment without delaying or posting before its valid successor", async () => {
+  const workers = [];
+  let replacementCreated;
+  const restarted = new Promise((resolve) => { replacementCreated = resolve; });
+  const f = fixture();
+  await f.client.close();
+  const controller = new BrowserController({ store: { async flush() {} }, services: { async close() {} },
+    createAcquisition: () => { throw new Error("unexpected acquisition"); }, renderWorkerFactory: () => {
+      const worker = new ControlledWorker();
+      workers.push(worker);
+      const client = new RenderWorkerClient({ transport: worker, shutdownDeadlineMilliseconds: 10 });
+      if (workers.length === 2) replacementCreated();
+      return client;
+    } });
+  try {
+    const initial = controller.searchDocument(f.document, "initial", parameters, 1);
+    const failed = assert.rejects(initial, /exited/u);
+    await workers[0].nextRequest("attach-document");
+    workers[0].emit("exit", 1);
+    await failed;
+    const abort = new globalThis.AbortController();
+    const cancelled = controller.searchDocument(f.document, "obsolete", parameters, 2, abort.signal);
+    let cancellation;
+    void cancelled.catch((error) => { cancellation = error; });
+    await restarted;
+    const attachment = await workers[1].nextRequest("attach-document");
+    abort.abort();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(cancellation?.name, "AbortError");
+    const successor = controller.searchDocument(f.document, "valid", parameters, 3);
+    assert.equal(workers[1].requests.length, 1, "restart attachment remains the single shared producer");
+    acknowledge(workers[1], attachment);
+    const request = await workers[1].nextRequest("search-document", attachment.requestId);
+    assert.equal(request.query, "valid");
+    workers[1].respond({ kind: "search-ready", requestId: request.requestId, result: { query: "valid" } });
+    assert.equal((await successor).query, "valid");
+    assert.equal(workers[1].requests.filter((entry) => entry.kind === "search-document").length, 1);
+  } finally { await controller.close(); }
 });
