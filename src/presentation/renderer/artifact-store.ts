@@ -12,6 +12,7 @@ import {
   type TextSearchLayoutProjection,
 } from "../search/index.js";
 import { compileStylesheetProgram, resolveStyles, type SelectorStateDependency } from "../style/index.js";
+import { isValidMediaEnvironment, mediaApplies } from "../style/media.js";
 import { clearTextSearchQueryCache, textSearchQueryCache } from "../search/text-search-index.js";
 import { buildInlineItemStreamSet } from "../text/index.js";
 import {
@@ -74,15 +75,16 @@ const MAX_RETAINED_SEARCH_PROJECTIONS_PER_DOCUMENT = 32;
 
 function mediaKey(document: AttachedDocument, request: DocumentAnalysisRequest): string {
   const environment = request.mediaEnvironment;
-  const dependencies = document.program.dependencies;
-  return [environment.mediaType,
-    dependencies.mediaInlineSize ? environment.viewportWidthCssPx : "-",
-    dependencies.mediaBlockSize ? environment.viewportHeightCssPx : "-",
-    dependencies.mediaColorScheme ? environment.prefersColorScheme : "-",
-    dependencies.mediaReducedMotion ? (environment.reducedMotion ? 1 : 0) : "-",
-    dependencies.mediaHover ? environment.hover : "-",
-    dependencies.mediaPointer ? environment.pointer : "-",
-  ].join(":");
+  if (!isValidMediaEnvironment(environment)) return "invalid";
+  // Conditions, not the raw dimensions, determine cascade participation. Keep
+  // diagnostics too: comma-query short circuiting can change reporting even
+  // when the final boolean decision is unchanged. This does not publish them.
+  return JSON.stringify([environment.mediaType, ...document.program.mediaQueries.map((query) => {
+    request.signal?.throwIfAborted();
+    const diagnostics: string[] = [];
+    const applies = mediaApplies(query, environment, (_detail, identity) => { diagnostics.push(identity); });
+    return [applies, diagnostics];
+  })]);
 }
 
 function layoutKey(styles: DocumentRenderArtifacts["computedStyles"], request: DocumentAnalysisRequest): string {
@@ -105,8 +107,7 @@ function textMetricsKey(request: DocumentAnalysisRequest): string {
   ].join(":");
 }
 
-function dependencyKey(document: AttachedDocument, request: DocumentAnalysisRequest, styles: DocumentRenderArtifacts["computedStyles"]): ArtifactDependencyKey {
-  const media = mediaKey(document, request);
+function dependencyKey(document: AttachedDocument, request: DocumentAnalysisRequest, styles: DocumentRenderArtifacts["computedStyles"], media: string): ArtifactDependencyKey {
   const layoutViewport = layoutKey(styles, request);
   const textMetrics = textMetricsKey(request);
   const computedStyleMap = [document.program.fingerprint, document.analysisStateRevision, media,
@@ -305,10 +306,11 @@ export class RenderArtifactStore {
   ): DocumentRenderArtifacts {
     const document = this.#document(request.documentId, request.documentRevision);
     request.signal?.throwIfAborted();
+    const media = mediaKey(document, request);
     const retainedStyles = [...document.analyses.values()].find(({ artifacts }) => {
       const styles = artifacts.computedStyles;
       return artifacts.key.stateRevision === document.analysisStateRevision
-        && artifacts.key.media === mediaKey(document, request)
+        && artifacts.key.media === media
         && (!styles.valueDependencies.computedViewportInlineSize
           || styles.environment.viewportWidthCssPx === request.mediaEnvironment.viewportWidthCssPx)
         && (!styles.valueDependencies.computedViewportBlockSize
@@ -328,7 +330,7 @@ export class RenderArtifactStore {
       ...(document.budgets?.style === undefined ? {} : { budgets: document.budgets.style }),
       ...(request.signal === undefined ? {} : { signal: request.signal }),
     }));
-    const key = dependencyKey(document, request, computedStyles);
+    const key = dependencyKey(document, request, computedStyles, media);
     const identity = keyIdentity(key);
     const retained = document.analyses.get(identity);
     if (retained !== undefined) {

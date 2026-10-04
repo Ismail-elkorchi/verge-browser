@@ -391,7 +391,7 @@ export interface StylesheetProgramSource {
   readonly sourceUrl: string;
   readonly origin: "user-agent" | "author";
   readonly stylesheet: CssStylesheet;
-  readonly mediaConditions: readonly string[];
+  readonly mediaConditions: readonly CompiledMediaQuery[];
   readonly supportsConditions: readonly string[];
   readonly layer: CascadeLayerPath | null;
   readonly predeclaredLayers: readonly CascadeLayerPath[];
@@ -411,7 +411,8 @@ export interface StylesheetProgram {
   readonly totalNodes: number;
   readonly stateDependencies: ReadonlySet<SelectorStateDependency>;
   readonly authorStateDependencies: ReadonlySet<SelectorStateDependency>;
-  readonly dependencies: StylesheetProgramDependencies;
+  /** Authored media inputs in stable source order, sharing the compiled syntax. */
+  readonly mediaQueries: readonly CompiledMediaQuery[];
   readonly diagnostics: readonly StyleDiagnostic[];
   readonly omittedDiagnosticCount: number;
   readonly fingerprint: string;
@@ -434,14 +435,8 @@ export interface StylesheetSelectorRuntime {
   clear(): void;
 }
 
-export interface StylesheetProgramDependencies {
-  readonly mediaInlineSize: boolean;
-  readonly mediaBlockSize: boolean;
-  readonly mediaColorScheme: boolean;
-  readonly mediaReducedMotion: boolean;
-  readonly mediaHover: boolean;
-  readonly mediaPointer: boolean;
-}
+/** Null is unconditional; false is a source that failed media token parsing. */
+export type CompiledMediaQuery = readonly ComponentValue[] | null | false;
 
 export interface CustomPropertySubstitutionCache {
   readonly size: number;

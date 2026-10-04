@@ -1,7 +1,8 @@
 import { parseComponentValues, serializeCssComponentValues, type ComponentValue } from "@ismail-elkorchi/css-parser";
-import type { MediaEnvironment } from "./types.js";
+import type { CompiledMediaQuery, MediaEnvironment } from "./types.js";
 
 type Decision = boolean | null;
+type MediaDiagnosticSink = (detail: string, identity: string) => void;
 type Condition =
   | { readonly kind: "feature"; readonly values: readonly ComponentValue[] }
   | { readonly kind: "constant"; readonly value: boolean }
@@ -9,12 +10,34 @@ type Condition =
   | { readonly kind: "and"; readonly values: readonly Condition[] }
   | { readonly kind: "or"; readonly values: readonly Condition[] };
 
+/** The same admission contract applies before cascade evaluation or reuse. */
+export function isValidMediaEnvironment(environment: MediaEnvironment): boolean {
+  const mediaType: unknown = environment.mediaType;
+  const colorScheme: unknown = environment.prefersColorScheme;
+  const reducedMotion: unknown = environment.reducedMotion;
+  const hover: unknown = environment.hover;
+  const pointer: unknown = environment.pointer;
+  return Number.isFinite(environment.viewportWidthCssPx) && environment.viewportWidthCssPx > 0
+    && Number.isFinite(environment.viewportHeightCssPx) && environment.viewportHeightCssPx > 0
+    && mediaType === "screen"
+    && (colorScheme === "light" || colorScheme === "dark")
+    && typeof reducedMotion === "boolean"
+    && (hover === "none" || hover === "hover")
+    && (pointer === "none" || pointer === "coarse" || pointer === "fine");
+}
+
 const significant = (values: readonly ComponentValue[]): readonly ComponentValue[] => values.filter((value) => value.kind !== "whitespace");
 const ident = (value: ComponentValue | undefined): string | null => value?.kind === "ident" ? value.value.toLowerCase() : null;
 const negate = (value: Decision): Decision => value === null ? null : !value;
 const combine = (operator: "and" | "or", values: readonly Decision[]): Decision => operator === "and"
   ? values.includes(false) ? false : values.includes(null) ? null : true
   : values.includes(true) ? true : values.includes(null) ? null : false;
+
+// Stable positions in immutable media syntax identify diagnostic events without
+// copying potentially large authored values into retained artifact keys.
+function diagnosticIdentity(kind: string, values: readonly ComponentValue[]): string {
+  return `${kind}:${String(values[0]?.span.start.offset ?? 0)}:${String(values.at(-1)?.span.end.offset ?? 0)}`;
+}
 
 function inParens(value: ComponentValue | undefined): Condition | null {
   if (value?.kind === "function-block") return { kind: "feature", values: [value] };
@@ -42,7 +65,7 @@ function condition(values: readonly ComponentValue[], allowOr: boolean): Conditi
   return { kind: operator, values: children };
 }
 
-function query(values: readonly ComponentValue[], unsupported?: (detail: string) => void): Condition | null {
+function query(values: readonly ComponentValue[], unsupported?: MediaDiagnosticSink): Condition | null {
   const direct = condition(values, true);
   if (direct !== null) return direct;
   let index = 0;
@@ -50,7 +73,7 @@ function query(values: readonly ComponentValue[], unsupported?: (detail: string)
   if (modifier === "not" || modifier === "only") index += 1;
   const type = ident(values[index++]);
   if (type === null || ["not", "only", "and", "or", "layer"].includes(type)) return null;
-  if (!["screen", "all", "print"].includes(type)) unsupported?.(`Unsupported media type: ${type}`);
+  if (!["screen", "all", "print"].includes(type)) unsupported?.(`Unsupported media type: ${type}`, diagnosticIdentity("type", values));
   let result: Condition = { kind: "constant", value: type === "screen" || type === "all" };
   if (index < values.length) {
     if (ident(values[index++]) !== "and") return null;
@@ -138,30 +161,38 @@ function feature(values: readonly ComponentValue[], environment: MediaEnvironmen
   return null;
 }
 
-function evaluate(value: Condition, environment: MediaEnvironment | null, unsupported?: (detail: string) => void): Decision {
+function evaluate(value: Condition, environment: MediaEnvironment | null, unsupported?: MediaDiagnosticSink): Decision {
   if (value.kind === "constant") return value.value;
   if (value.kind === "not") return negate(evaluate(value.value, environment, unsupported));
   if (value.kind === "and" || value.kind === "or") return combine(value.kind, value.values.map((child) => evaluate(child, environment, unsupported)));
   if (environment === null) return null;
   const result = feature(value.values, environment);
-  if (result === null) unsupported?.(`Unsupported media feature: ${serializeCssComponentValues(value.values).trim()}`);
+  if (result === null) unsupported?.(`Unsupported media feature: ${serializeCssComponentValues(value.values).trim()}`, diagnosticIdentity("feature", value.values));
   return result;
 }
 
+/** Share parsed source conditions between cascade evaluation and invalidation. */
+export function compileMediaQuery(source: string | readonly ComponentValue[] | null): CompiledMediaQuery {
+  if (source === null || (typeof source === "string" && source.trim().length === 0)) return null;
+  if (typeof source !== "string") return source;
+  const parsed = parseComponentValues(source);
+  return parsed.ok ? parsed.value : false;
+}
+
 /** Parse operators, grouping and comma recovery before evaluating supported media features. */
-export function mediaApplies(source: string | readonly ComponentValue[] | null, environment: MediaEnvironment | null, unsupported?: (detail: string) => void): boolean {
-  if (source === null || (typeof source === "string" && source.trim().length === 0)) return true;
-  const parsed = typeof source === "string" ? parseComponentValues(source) : { ok: true as const, value: source };
-  if (!parsed.ok) return false;
+export function mediaApplies(source: string | CompiledMediaQuery, environment: MediaEnvironment | null, unsupported?: MediaDiagnosticSink): boolean {
+  const compiled = typeof source === "string" ? compileMediaQuery(source) : source;
+  if (compiled === null) return true;
+  if (compiled === false) return false;
   const groups: ComponentValue[][] = [[]];
-  for (const value of parsed.value) {
+  for (const value of compiled) {
     if (value.kind === "comma") groups.push([]);
     else if (value.kind !== "whitespace") groups.at(-1)?.push(value);
   }
   return groups.some((values) => {
     const expression = query(values, unsupported);
     if (expression === null) {
-      unsupported?.(`Invalid media query: ${serializeCssComponentValues(values).trim()}`);
+      unsupported?.(`Invalid media query: ${serializeCssComponentValues(values).trim()}`, diagnosticIdentity("invalid", values));
       return false;
     }
     const result = evaluate(expression, environment, unsupported);

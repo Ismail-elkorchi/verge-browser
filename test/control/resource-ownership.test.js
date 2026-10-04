@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { BrowserSession } from "../../dist/app/session.js";
 import { applyDocumentAction, createDocumentState, parseWebDocument } from "../../dist/document/index.js";
-import { estimatedRetainedCost, RetainedCostAccounting } from "../../dist/memory/retained-cost.js";
+import { estimatedRetainedCost, registerRetainedOwner, RetainedCostAccounting } from "../../dist/memory/retained-cost.js";
 import { RenderArtifactStore, RenderStageMetrics } from "../../dist/presentation/renderer/index.js";
 import { embeddedStylesheetSources } from "../../dist/presentation/style/index.js";
 import { cssCoordinate, cssNonNegativeLength, cssPx, cssRect } from "../../dist/presentation/layout/index.js";
@@ -48,6 +48,97 @@ test("owner accounting shares immutable allocations and commits no cancelled mea
   let checks = 0;
   assert.throws(() => accounting.immutable(root, new Set(), { throwIfAborted() { if (++checks === 2) throw new Error("cancelled"); } }), /cancelled/u);
   assert.ok(accounting.total([accounting.immutable(root)]) >= estimatedRetainedCost([root]));
+});
+
+test("construction-local adoption visits cyclic and shared allocations once", () => {
+  const accounting = new RetainedCostAccounting();
+  const shared = { values: new Set(["alpha", "beta"]), buffer: new Uint8Array(64) };
+  const first = { shared };
+  first.self = first;
+  const firstOwner = accounting.immutable(first);
+  const measured = accounting.measuredAllocations;
+  const second = { shared, first, again: shared };
+  const secondOwner = accounting.immutable(second);
+  assert.equal(accounting.measuredAllocations - measured, 1);
+  assert.deepEqual(secondOwner.dependencies, [firstOwner]);
+  assert.ok(!firstOwner.dependencies.includes(firstOwner));
+  assert.ok(accounting.total([firstOwner, secondOwner]) >= estimatedRetainedCost([first, second]));
+  accounting.endBatch();
+  assert.equal(accounting.immutable(first), firstOwner);
+  assert.equal(accounting.immutable(second), secondOwner);
+});
+
+test("aborted or throwing adoption removes provisional allocations before retry", () => {
+  for (const failure of ["cancelled", "owner callback"]) {
+    const accounting = new RetainedCostAccounting();
+    const shared = { stable: ["before"] };
+    const sharedOwner = accounting.immutable(shared);
+    const root = { shared, data: Array.from({ length: 3000 }, (_, index) => ({ index })) };
+    let shouldThrow = true;
+    if (failure === "owner callback") registerRetainedOwner(root.data[0], () => {
+      if (shouldThrow) throw new Error(failure);
+      return [];
+    });
+    let checks = 0;
+    const signal = failure === "cancelled" ? { throwIfAborted() {
+      if (shouldThrow && ++checks === 2) throw new Error(failure);
+    } } : undefined;
+    const before = accounting.measuredAllocations;
+    assert.throws(() => accounting.immutable(root, new Set(), signal), { message: failure });
+    assert.equal(accounting.measuredAllocations, before);
+    shouldThrow = false;
+    const owner = accounting.immutable(root);
+    assert.equal(accounting.measuredAllocations - before, 3002);
+    assert.deepEqual(owner.dependencies, [sharedOwner]);
+    assert.ok(accounting.total([owner]) >= estimatedRetainedCost([root]));
+  }
+});
+
+test("nested immutable and shared-resource adoption never depend on provisional owners", () => {
+  const accounting = new RetainedCostAccounting();
+  const shared = { values: ["shared"] };
+  const outer = { shared };
+  const inner = { outer, shared };
+  let innerOwner;
+  let entered = false;
+  registerRetainedOwner(outer, () => {
+    if (!entered) {
+      entered = true;
+      innerOwner = accounting.immutable(inner, new Set(), undefined, true);
+    }
+    return [];
+  });
+  const outerOwner = accounting.immutable(outer);
+  assert.ok(innerOwner);
+  function assertAcyclic(owner, ancestors = new Set()) {
+    assert.ok(!ancestors.has(owner), "committed owners must not contain dependency cycles");
+    assert.ok(Object.isFrozen(owner));
+    assert.ok(Object.isFrozen(owner.dependencies));
+    const next = new Set([...ancestors, owner]);
+    for (const dependency of owner.dependencies) assertAcyclic(dependency, next);
+  }
+  assertAcyclic(outerOwner);
+  assertAcyclic(innerOwner);
+  accounting.endBatch();
+  const before = accounting.measuredAllocations;
+  const another = accounting.immutable({ shared });
+  assert.equal(accounting.measuredAllocations - before, 1);
+  assert.ok(accounting.total([outerOwner, innerOwner, another]) >= estimatedRetainedCost([outer, inner, { shared }]));
+});
+
+test("mutable measurements discard their visit ledger and preserve immutable sharing", () => {
+  const accounting = new RetainedCostAccounting();
+  const shared = { values: ["stable"] };
+  const sharedOwner = accounting.immutable(shared);
+  const cache = new Map([["key", { shared }]]);
+  const first = accounting.mutable(cache);
+  const before = accounting.measuredAllocations;
+  const second = accounting.mutable(cache);
+  assert.equal(accounting.measuredAllocations - before, 2);
+  assert.equal(first.bytes, second.bytes);
+  assert.deepEqual(first.dependencies, [sharedOwner]);
+  assert.deepEqual(second.dependencies, [sharedOwner]);
+  assert.ok(accounting.total([second]) >= estimatedRetainedCost([cache]));
 });
 
 test("artifact owners conservatively cover cold, resize, search, state, rollback and release", () => {

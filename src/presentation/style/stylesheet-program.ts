@@ -3,6 +3,7 @@ import { DiagnosticCollector } from "./diagnostics.js";
 import { presentationalHints } from "./presentational-hints.js";
 import { EMPTY_NAMESPACES, stylesheetNamespaces, bindSelectorNamespaces } from "./namespaces.js";
 import { styleBudgets } from "./budgets.js";
+import { compileMediaQuery } from "./media.js";
 import { registerRetainedOwner } from "../../memory/retained-cost.js";
 import {
   parseBlockContents,
@@ -28,6 +29,7 @@ import type {
   CompileStylesheetProgramInput,
   CompiledSelectorProgram,
   CompiledDeclarationProgram,
+  CompiledMediaQuery,
   PseudoElementIdentity,
   SelectorStateDependency,
   StyleBudgets,
@@ -35,7 +37,6 @@ import type {
   StylesheetProgram,
   StylesheetProgramSource,
   StylesheetNamespaces,
-  StylesheetProgramDependencies,
   StylesheetSelectorRuntime,
   CustomPropertySubstitutionCache,
   SubstitutedCssValue,
@@ -276,39 +277,29 @@ function styleNodes(input: CompileStylesheetProgramInput): {
   return { elements: Object.freeze(elements), totalNodes };
 }
 
-function stylesheetDependencies(
+function stylesheetMediaQueries(
   sources: readonly StylesheetProgramSource[],
-): StylesheetProgramDependencies {
-  const dependency = {
-    mediaInlineSize: false,
-    mediaBlockSize: false,
-    mediaColorScheme: false,
-    mediaReducedMotion: false,
-    mediaHover: false,
-    mediaPointer: false,
-  };
-  const inspectMedia = (condition: string): void => {
-    const value = condition.toLowerCase();
-    if (/\b(?:min-|max-)?width\b|\borientation\b|\baspect-ratio\b/u.test(value)) dependency.mediaInlineSize = true;
-    if (/\b(?:min-|max-)?height\b|\borientation\b|\baspect-ratio\b/u.test(value)) dependency.mediaBlockSize = true;
-    if (/prefers-color-scheme/u.test(value)) dependency.mediaColorScheme = true;
-    if (/prefers-reduced-motion/u.test(value)) dependency.mediaReducedMotion = true;
-    if (/\bhover\b/u.test(value)) dependency.mediaHover = true;
-    if (/\bpointer\b/u.test(value)) dependency.mediaPointer = true;
-  };
+  signal?: AbortSignal,
+): StylesheetProgram["mediaQueries"] {
+  const mediaQueries: CompiledMediaQuery[] = [];
   const visit = (rules: readonly CssRule[]): void => {
     for (const rule of rules) {
+      signal?.throwIfAborted();
       if (rule.kind === "at-rule" && rule.name.toLowerCase() === "media") {
-        inspectMedia(serializeCssComponentValues(rule.prelude));
+        mediaQueries.push(rule.prelude);
       }
       if (rule.block !== null) visit(rule.block.items.filter((item): item is CssRule => item.kind !== "declaration"));
     }
   };
   for (const source of sources) {
-    for (const condition of source.mediaConditions) inspectMedia(condition);
+    signal?.throwIfAborted();
+    for (const condition of source.mediaConditions) {
+      signal?.throwIfAborted();
+      mediaQueries.push(condition);
+    }
     visit(source.stylesheet.rules);
   }
-  return Object.freeze(dependency);
+  return Object.freeze(mediaQueries);
 }
 
 /** Compiles immutable stylesheet selectors and inline declarations once per document snapshot. */
@@ -365,7 +356,10 @@ export function compileStylesheetProgram(input: CompileStylesheetProgramInput): 
       namespaces: stylesheetNamespaces(resource.syntax),
       origin: "author",
       stylesheet: resource.syntax,
-      mediaConditions: resource.mediaConditions,
+      mediaConditions: Object.freeze(resource.mediaConditions.map((condition) => {
+        input.signal?.throwIfAborted();
+        return compileMediaQuery(condition);
+      })),
       supportsConditions: resource.supportsConditions,
       layer: resource.importLayer,
       predeclaredLayers: resource.predeclaredLayers,
@@ -450,7 +444,7 @@ export function compileStylesheetProgram(input: CompileStylesheetProgramInput): 
     ...ordered.map((resource) => `${String(resource.rootOrder)}:${String(resource.dependencyOrder)}:${resource.contentFingerprint}`),
     `inline:${String(inlineBytes)}:${inlineFingerprint.toString(16).padStart(8, "0")}`,
   ].join("|");
-  const dependencies = stylesheetDependencies(sources);
+  const mediaQueries = stylesheetMediaQueries(sources, input.signal);
   const program: StylesheetProgram = Object.freeze({
     document: input.document,
     sources: Object.freeze(sources),
@@ -465,7 +459,7 @@ export function compileStylesheetProgram(input: CompileStylesheetProgramInput): 
     totalNodes: nodes.totalNodes,
     stateDependencies,
     authorStateDependencies,
-    dependencies,
+    mediaQueries,
     diagnostics: diagnostics.result(),
     omittedDiagnosticCount: diagnostics.omittedDiagnosticCount,
     fingerprint,

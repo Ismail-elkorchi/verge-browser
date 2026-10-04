@@ -65,6 +65,54 @@ test("custom-property component lookup preserves case, inheritance, cycles, fall
   assert.deepEqual(result.style("rollback").text.background, green);
 });
 
+test("literal custom properties retain immutable authored syntax and omit identical inherited resets", () => {
+  const result = setup(`<style>
+    * { --plain: 7px; --function: calc(2px + 3px); --string: "var(--lookalike)"; --absent: initial }
+  </style><main id=t><p id=child><span id=grandchild>x</span></p></main>`);
+  let substitutions = 0;
+  const styles = resolveStyles({ program: result.program, state: result.state, environment,
+    instrumentation: { record(stage) { if (stage === "custom-property-substitution") substitutions += 1; } },
+  });
+  const parent = styles.style(result.document.elementById("t")).customProperties;
+  assert.equal(styles.style(result.document.elementById("child")).customProperties, parent);
+  assert.equal(styles.style(result.document.elementById("grandchild")).customProperties, parent);
+  assert.equal(substitutions, 0);
+  assert.equal(parent.has("--absent"), false);
+  for (const name of ["--plain", "--function", "--string"]) {
+    const declaration = [...result.program.compiledDeclarations.values()].find((entry) => entry.property === name);
+    assert.equal(declaration.containsVariableReference, false);
+    assert.equal(parent.componentValues(name), declaration.value);
+    assert.equal(parent.componentValues(name)[0].span, declaration.value[0].span);
+  }
+  assert.equal(parent.get("--function").trim(), "calc(2px + 3px)");
+  assert.equal(parent.get("--string").trim(), '"var(--lookalike)"');
+});
+
+test("literal reset sharing preserves dependent variables, real overrides and media changes", () => {
+  const html = `<style>
+    * { --channel: 10; --size: calc(2px + 3px) }
+    main { --color: rgb(var(--channel) var(--channel) var(--channel)) }
+    #child { --channel: 20; --tone: var(--missing,var(--channel)); color:rgb(var(--tone) var(--tone) var(--tone)); width:var(--size) }
+    #reset { --channel:initial; color:rgb(var(--channel,30) var(--channel,30) var(--channel,30)) }
+    @media(width < 700px) { #child { --channel:40; --size:calc(3px + 4px) } }
+  </style><main id=t><p id=child>x<span id=reset>y</span></p></main>`;
+  const retained = setup(html);
+  const originalDeclarations = [...retained.program.compiledDeclarations.values()].map((entry) => entry.serializedValue);
+  assert.deepEqual(retained.style("child").text.color, { r: 20, g: 20, b: 20, a: 1 });
+  assert.deepEqual(retained.style("reset").text.color, { r: 30, g: 30, b: 30, a: 1 });
+  const resized = retained.resolve(retained.state, { ...environment, viewportWidthCssPx: 600 });
+  const fresh = setup(html);
+  const expected = fresh.resolve(fresh.state, { ...environment, viewportWidthCssPx: 600 });
+  for (const ref of retained.program.elementNodes) {
+    const actual = resized.style(ref);
+    const wanted = expected.style(ref);
+    assert.deepEqual({ ...actual, customProperties: [...actual.customProperties] },
+      { ...wanted, customProperties: [...wanted.customProperties] });
+  }
+  assert.deepEqual(resized.style(retained.document.elementById("child")).text.color, { r: 40, g: 40, b: 40, a: 1 });
+  assert.deepEqual([...retained.program.compiledDeclarations.values()].map((entry) => entry.serializedValue), originalDeclarations);
+});
+
 test("namespace bindings are declared, case-sensitive and confined to each stylesheet", () => {
   const result = setup(`<style>@namespace x url(http://www.w3.org/1999/xhtml);x|p{color:red}</style>
     <style>@namespace x "http://www.w3.org/2000/svg";x|p{color:blue}</style>
@@ -148,8 +196,6 @@ for (const [media, applies] of mediaCases) {
 
 test("height and width media conditions reevaluate on viewport changes", () => {
   const result = setup('<style>@media (height > 500px){#t{color:red}}@media (width < 700px){#t{background:blue}}</style><p id=t>x</p>');
-  assert.equal(result.program.dependencies.mediaBlockSize, true);
-  assert.equal(result.program.dependencies.mediaInlineSize, true);
   const resized = result.resolve(result.state, { ...environment, viewportWidthCssPx: 600, viewportHeightCssPx: 400 });
   assert.equal(resized.style(result.document.elementById("t")).text.color, null);
   assert.deepEqual(resized.style(result.document.elementById("t")).text.background, blue);

@@ -1,7 +1,7 @@
 import { DiagnosticCollector, diagnosticIdentity } from "./diagnostics.js";
 import { EMPTY_NAMESPACES, bindSelectorNamespaces } from "./namespaces.js";
 import { namedColor } from "./named-colors.js";
-import { mediaApplies } from "./media.js";
+import { isValidMediaEnvironment, mediaApplies } from "./media.js";
 export { terminalMediaMayApply } from "./media.js";
 import { styleBudgets } from "./budgets.js";
 import { layerNames, layerPath } from "./layers.js";
@@ -1198,6 +1198,7 @@ function customProperties(
     ? parent
     : ImmutableCustomPropertyEnvironment.fromSerialized(parent);
   const changes = new Map<string, readonly ComponentValue[] | null>();
+  const substitutions = new Set<string>();
   for (const [name, entries] of candidates ?? []) {
     if (!name.startsWith("--")) continue;
     const candidate = cascadedCandidate(entries);
@@ -1205,24 +1206,33 @@ function customProperties(
     const value = candidateValue(candidate);
     const wide = cssWide(value);
     if (wide === "initial") changes.set(name, null);
-    else if (wide === null) changes.set(name, candidate.program.value);
+    else if (wide === null) {
+      changes.set(name, candidate.program.value);
+      if (candidate.program.containsVariableReference) substitutions.add(name);
+    }
   }
   if (changes.size === 0) return inherited;
-  const unresolved = new ImmutableCustomPropertyEnvironment(inherited, changes);
+  const unresolved = substitutions.size === 0 ? inherited
+    : new ImmutableCustomPropertyEnvironment(inherited, changes);
   const resolvedChanges = new Map<string, readonly ComponentValue[] | null>();
   for (const [name, value] of changes) {
-    if (value === null) {
-      resolvedChanges.set(name, null);
-      continue;
+    // Compiled literal values are already immutable syntax. Only a variable
+    // expansion needs the resolver's materialized/rebased component-value tree.
+    let resolved = value;
+    if (value !== null && substitutions.has(name)) {
+      const started = instrumentation === undefined ? 0 : performance.now();
+      try {
+        resolved = resolveCssVariableValues(value, (name) => unresolved.componentValues(name));
+      } finally {
+        instrumentation?.record("custom-property-substitution", performance.now() - started);
+      }
     }
-    const started = instrumentation === undefined ? 0 : performance.now();
-    try {
-      resolvedChanges.set(name, resolveCssVariableValues(value, (name) => unresolved.componentValues(name)));
-    } finally {
-      instrumentation?.record("custom-property-substitution", performance.now() - started);
-    }
+    // Repeated universal resets often redeclare the exact inherited syntax.
+    // Keeping only effective overrides avoids duplicating inheritance layers.
+    if (resolved !== (inherited.componentValues(name) ?? null)) resolvedChanges.set(name, resolved);
   }
-  return new ImmutableCustomPropertyEnvironment(inherited, resolvedChanges);
+  return resolvedChanges.size === 0 ? inherited
+    : new ImmutableCustomPropertyEnvironment(inherited, resolvedChanges);
 }
 
 function validatedValue(
@@ -2758,18 +2768,7 @@ function styleEnvironmentIdentity(environment: MediaEnvironment): string {
 }
 
 export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
-  const mediaType: unknown = input.environment.mediaType;
-  const colorScheme: unknown = input.environment.prefersColorScheme;
-  const reducedMotion: unknown = input.environment.reducedMotion;
-  const hover: unknown = input.environment.hover;
-  const pointer: unknown = input.environment.pointer;
-  if (!Number.isFinite(input.environment.viewportWidthCssPx) || input.environment.viewportWidthCssPx <= 0
-    || !Number.isFinite(input.environment.viewportHeightCssPx) || input.environment.viewportHeightCssPx <= 0
-    || mediaType !== "screen"
-    || (colorScheme !== "light" && colorScheme !== "dark")
-    || typeof reducedMotion !== "boolean"
-    || (hover !== "none" && hover !== "hover")
-    || (pointer !== "none" && pointer !== "coarse" && pointer !== "fine")) {
+  if (!isValidMediaEnvironment(input.environment)) {
     return new ImmutableStyleSnapshot(input, new Map(), new Map(), new Map(), [], 0, {
       status: "rejected", reason: "invalid-environment"
     });
