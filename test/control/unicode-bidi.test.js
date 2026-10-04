@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   bidiItemsFromText,
   resolveBidiParagraph,
+  resolveBidiParagraphs,
   resolveBidiText
 } from "../../dist/unicode/index.js";
 
@@ -59,7 +60,6 @@ test("Unicode 17.0.0 BidiTest property-sequence conformance", async () => {
     if (classesText === undefined || bitsetText === undefined) continue;
     const classes = classesText.split(/\s+/u);
     const items = classes.map((bidiClass, logicalIndex) => Object.freeze({
-      logicalIndex,
       kind: "structural-control",
       text: "",
       codePoint: null,
@@ -114,4 +114,21 @@ test("bidi budgets and cancellation return deterministic complete-state prefixes
   const controller = new globalThis.AbortController();
   controller.abort();
   assert.throws(() => resolveBidiParagraph(items, "auto", {}, controller.signal), { name: "AbortError" });
+});
+
+
+test("paragraph collections share immutable items at global paragraph boundaries", () => {
+  const items = bidiItemsFromText("A😀\nאב\u2067ع\u2069", () => null);
+  const collection = resolveBidiParagraphs(items);
+  const unique = new Set(collection.items);
+  for (const slice of collection.paragraphs) {
+    for (const [local, item] of slice.paragraph.items.entries()) {
+      assert.equal(item, collection.items[slice.itemStart + local]);
+      assert.ok(Object.isFrozen(item));
+      assert.equal("logicalIndex" in item, false);
+      unique.add(item);
+    }
+  }
+  assert.equal(unique.size, items.length);
+  assert.equal(collection.paragraphs.length, 2);
 });

@@ -1,4 +1,9 @@
-import { controlValues, controlOptions, textEditor, numberEditor, areaEditor, selectEditor, multiSelectEditor } from "./form-editors.js";
+import { scrollDocument } from "./document-scroll.js";
+import { assertPageInitiatedNavigation } from "../app/security.js";
+import { currentEntry, traverseHistory, isSameDocumentNavigation, fragmentSnapshot, type NavigationProvenance } from "../app/navigation-history.js";
+import { acceptNavigation, activateHistory, resumeDocument } from "./navigation-state.js";
+import type { AcquiredNavigation } from "./browser-controller.js";
+import { controlValues, controlSelections, controlOptions, textEditor, numberEditor, areaEditor, selectEditor, multiSelectEditor } from "./form-editors.js";
 import {
   applyScrollRequest,
   checkboxGroupReducer,
@@ -41,7 +46,6 @@ import type { PageRequestOptions, IndexedPageSnapshot } from "../app/types.js";
 import { measured, type RenderInstrumentation } from "../presentation/renderer/index.js";
 import {
   applyDocumentAction,
-  createDocumentState,
   type DocumentButtonControl,
   type DocumentForm,
   type DocumentFormControl,
@@ -334,6 +338,9 @@ function viewportParameters(
     columns,
     rows,
     scrollRow: documentScrollRow(document),
+    scrollColumn: document.scrollColumn ?? 0,
+    scrollOffsets: document.scrollOffsets,
+    ...(document.rendering.pendingReveal === null ? {} : { reveal: document.rendering.pendingReveal }),
     overscanBefore: Math.min(6, rows),
     overscanAfter: Math.min(12, rows),
     preferences: browserRenderPreferences(),
@@ -351,10 +358,13 @@ function viewportRequestKey(
     parameters.columns,
     parameters.rows,
     parameters.scrollRow,
+    parameters.scrollColumn,
     parameters.overscanBefore,
     parameters.overscanAfter,
     JSON.stringify(parameters.preferences),
     parameters.searchQuery ?? "",
+    JSON.stringify(parameters.scrollOffsets),
+    JSON.stringify(parameters.reveal ?? null),
   ].join(":");
 }
 
@@ -418,6 +428,8 @@ function searchEffect(
 function scheduleTabRestorations(
   controller: BrowserController,
   state: BrowserTuiState,
+  previous: BrowserTabState,
+  initialize: boolean,
 ): {
   readonly state: BrowserTuiState;
   readonly effects: readonly TuiEffect<BrowserTuiMessage>[];
@@ -432,56 +444,15 @@ function scheduleTabRestorations(
     effects.push(restoreTabEffect(controller, loading));
   };
   const active = documents[state.activeDocumentIndex];
-  if (active !== undefined) controller.configureRestoration(active);
+  if (active !== undefined && (initialize || active.id !== previous.id || active.kind !== previous.kind
+    || (active.kind === "ready" && previous.kind === "ready" && active.rendering.status !== previous.rendering.status))) effects.push({ id: "restoration-priority", concurrency: "replace", run() {
+    controller.configureRestoration(active); return Promise.resolve({ kind: "none" });
+  } });
   begin(state.activeDocumentIndex);
   for (let index = 0; index < documents.length; index += 1) begin(index);
   return effects.length === 0
     ? { state, effects }
     : { state: { ...state, documents }, effects: Object.freeze(effects) };
-}
-
-function pageFromSnapshot(
-  document: BrowserDocumentState,
-  snapshot: IndexedPageSnapshot,
-  navigation: { readonly canGoBack: boolean; readonly canGoForward: boolean }
-): BrowserDocumentState {
-  const savedViews = {
-    ...document.savedViews,
-    [document.snapshot.finalUrl]: {
-      document: document.snapshot.document,
-      scrollAnchor: document.scrollAnchor,
-    }
-  };
-  const candidate = savedViews[snapshot.finalUrl];
-  const restored = candidate?.document === snapshot.document ? candidate : undefined;
-  return {
-    ...document,
-    documentRevision: document.documentRevision + 1,
-    stateRevision: document.stateRevision + 1,
-    snapshot,
-    scrollAnchor: restored?.scrollAnchor
-      ?? { source: snapshot.document.body ?? snapshot.document.documentElement, rowOffset: 0 },
-    search: null,
-    documentState: createDocumentState(snapshot.document),
-    rendering: {
-      status: "idle",
-      requestedViewportRevision: 0,
-      committedViewportRevision: 0,
-      requestKey: null,
-      pendingSearch: null, searchRequestGeneration: 0,
-      pendingFocus: null,
-      viewport: null,
-      summary: null,
-      error: null
-    },
-    formEditors: {},
-    savedViews,
-    loading: false,
-    pendingUrl: null,
-    canGoBack: navigation.canGoBack,
-    canGoForward: navigation.canGoForward,
-    error: null
-  };
 }
 
 function focusedControlActionId(
@@ -500,9 +471,8 @@ function pageText(document: BrowserDocumentState): string {
 }
 
 function navigationMessage(
-  controller: BrowserController,
   document: BrowserDocumentState,
-  snapshot: IndexedPageSnapshot,
+  acquired: AcquiredNavigation,
   label: string
 ): BrowserTuiMessage {
   return {
@@ -510,22 +480,20 @@ function navigationMessage(
     navigationGeneration: document.navigationGeneration + 1,
     documentRevision: document.documentRevision,
     documentId: document.id,
-    snapshot,
-    status: label,
-    ...controller.navigationAvailability(document)
+    ...acquired,
+    sourceEntryId: currentEntry(document.navigation)?.id ?? "",
+    status: label
   };
 }
 
 function navigationEffect(
   controller: BrowserController,
-  document: BrowserDocumentState,
-  operation: "back" | "forward" | "reload"
+  document: BrowserDocumentState
 ): TuiEffect<BrowserTuiMessage> {
   return effect(`navigation:${document.id}`, async (context) => navigationMessage(
-    controller,
     document,
-    await controller.traverse(document, operation, context.signal),
-    operation === "back" ? "Back" : operation === "forward" ? "Forward" : "Reloaded"
+    await controller.reload(document, context.signal),
+    "Reloaded"
   ), "replace", document);
 }
 
@@ -539,7 +507,6 @@ function loadEffect(
   } = {}
 ): TuiEffect<BrowserTuiMessage> {
   return effect(`navigation:${document.id}`, async (context) => navigationMessage(
-    controller,
     document,
     await controller.navigate(
       document,
@@ -552,11 +519,26 @@ function loadEffect(
 }
 
 function beginNavigation(
+  controller: BrowserController,
   state: BrowserTuiState,
   document: BrowserDocumentState,
   target: string,
-  navigation: TuiEffect<BrowserTuiMessage>
+  navigation: TuiEffect<BrowserTuiMessage>,
+  provenance: NavigationProvenance | null = { kind: "direct" },
 ): TuiUpdateResult<BrowserTuiState, BrowserTuiMessage> {
+  if (provenance !== null && target.includes(":")) {
+    try {
+      if (provenance.kind === "page-initiated") assertPageInitiatedNavigation(provenance.sourceUrl, target);
+      if (isSameDocumentNavigation(document.snapshot.finalUrl, target)) {
+        const entry = currentEntry(document.navigation);
+        if (entry === undefined) throw new Error("Active navigation entry is missing.");
+        const loaded = acceptNavigation(document, fragmentSnapshot(document.snapshot, target), "push", provenance, entry.documentId);
+        const next = { ...updateDocument(state, document.id, () => ({ ...loaded, navigationGeneration: document.navigationGeneration + 1 })),
+          overlay: null, omnibox: resetCommandInput(state.omnibox, target), omniboxDirty: false, status: status(`Opened ${target}`, "success") };
+        return result(next, { cancel: [{ kind: "effect", id: `navigation:${document.id}` }], effects: [persistEffect(controller, next)] });
+      }
+    } catch (error) { return result({ ...state, status: status(error instanceof Error ? error.message : String(error), "error") }); }
+  }
   const next = updateDocument(
     { ...state, overlay: null, status: status(`Loading ${target}…`) },
     document.id,
@@ -596,10 +578,8 @@ function moveSearch(
   const match = search.matches[activeMatchIndex];
   if (match === undefined) return document;
   const updated = { ...document, search: { ...search, activeMatchIndex } };
-  const anchor = search.anchors.get(match.id);
-  return anchor === undefined || document.rendering.status !== "ready"
-    || search.layoutRevision !== document.rendering.viewport?.layoutRevision
-    ? updated : documentWithScrollRow(updated, anchor);
+  return { ...updated, rendering: { ...updated.rendering,
+    pendingReveal: { query: search.query, match: match.id, align: "nearest" }, pendingFocus: null } };
 }
 
 function controlById(
@@ -831,7 +811,7 @@ function runCommand(
     case "go":
     case "go-stream": {
       const target = controller.resolveOmnibox(command.target, document.snapshot.finalUrl);
-      return beginNavigation(
+      return beginNavigation(controller,
         { ...state, overlay: null },
         document,
         target,
@@ -871,16 +851,9 @@ function reduceBrowser(
         : {}),
       status: status(`Opened ${message.document.snapshot.finalUrl}`, "success"),
     };
-    const restoredActive = state.activeDocumentIndex === state.documents.indexOf(current);
-    return result(next, {
-      effects: restoredActive ? [] : [
-        ...(activeTab(state).kind === "ready" && activeDocument(state).rendering.status === "ready"
-          ? [persistSnapshotEffect(controller, message.document.snapshot)]
-          : []),
-        persistEffect(controller, next),
-      ],
-    });
+    return result(next, { effects: [persistSnapshotEffect(controller, message.document.snapshot), persistEffect(controller, next)] });
   }
+
   if (message.kind === "tabRestoreFailed") {
     const current = state.documents.find((entry) => entry.id === message.documentId);
     if (current === undefined || current.kind !== "loading"
@@ -917,10 +890,28 @@ function reduceBrowser(
   const viewportRows = browserPageSize(state, context.terminalSize).rows;
   switch (message.kind) {
     case "terminalResized":
-      return result({ ...state, documents: state.documents.map((tab) => tab.kind !== "ready" || tab.search === null ? tab : ({
-        ...tab, search: { ...tab.search, anchors: new Map(), layoutRevision: null },
-        rendering: { ...tab.rendering, pendingSearch: null, searchRequestGeneration: tab.rendering.searchRequestGeneration + 1 },
-      })) });
+      return result({ ...state, documents: state.documents.map((tab) => {
+        if (tab.kind !== "ready") return tab;
+        // Capture focus before the retained view is cropped to the new terminal.
+        // Its native slot can disappear until the matching layout is accepted;
+        // a resulting focus-leave must not erase this pending reveal identity.
+        const focusedNode = tab.documentState.focus ?? tab.rendering.pendingFocus?.node;
+        const focused = tab.id === selectedTab.id && state.overlay === null
+          ? tab.rendering.summary?.focusOrder.find((entry) => entry.node === focusedNode)
+          : undefined;
+        return {
+          ...tab,
+          ...(tab.search === null ? {} : { search: { ...tab.search, anchors: new Map(), layoutRevision: null } }),
+          rendering: {
+            ...tab.rendering,
+            ...(tab.search === null ? {} : { pendingSearch: null, searchRequestGeneration: tab.rendering.searchRequestGeneration + 1 }),
+            ...(focused === undefined ? {} : {
+              pendingReveal: { node: focused.node, align: "nearest" as const },
+              pendingFocus: { node: focused.node, actionId: focused.actionId, formControl: focused.actionKind === "form-control" },
+            }),
+          },
+        };
+      }) });
     case "viewportReady": {
       const payload = message.payload;
       const current = state.documents.find((entry) => entry.id === payload.documentId);
@@ -929,25 +920,27 @@ function reduceBrowser(
         || current.stateRevision !== payload.stateRevision
         || current.rendering.requestedViewportRevision !== payload.viewportRevision
         || payload.summary.identity !== payload.summaryIdentity) return result(state);
-      controller.acknowledgeViewport(payload);
       const pendingFocus = current.rendering.pendingFocus;
       const focusVisible = current.id === selectedTab.id && pendingFocus !== null
         && payload.focusTargets.some((target) => target.node === pendingFocus.node);
-      const updated = updateDocument(state, current.id, (entry) => ({
-        ...entry,
-        rendering: {
-          ...entry.rendering,
-          status: "ready",
-          committedViewportRevision: payload.viewportRevision,
-          viewport: payload,
-          summary: payload.summary,
-          pendingFocus: focusVisible ? null : entry.rendering.pendingFocus,
-          error: null
-        }
-      }));
+      const updated = updateDocument(state, current.id, (entry) => {
+        const committed = {
+          ...entry, scrollColumn: payload.scrollColumn ?? 0, scrollOffsets: payload.scrollOffsets,
+          rendering: { ...entry.rendering, status: "ready" as const, committedViewportRevision: payload.viewportRevision,
+            viewport: payload, summary: payload.summary, pendingReveal: null, pendingFocus: null, error: null },
+        };
+        const restoreAnchor = entry.rendering.summary === null && entry.rendering.pendingReveal === null;
+        const preserveAnchor = entry.rendering.pendingReveal === null && (restoreAnchor || payload.scrollRow === documentScrollRow(entry));
+        const positioned = preserveAnchor ? committed : documentWithScrollRow(committed, payload.scrollRow, viewportRows);
+        return { ...positioned, rendering: { ...positioned.rendering,
+          requestKey: restoreAnchor ? entry.rendering.requestKey : viewportRequestKey(positioned, viewportParameters(state, positioned, context.terminalSize)) } };
+      });
       const firstCommittedViewport = current.rendering.committedViewportRevision === 0;
       return result(updated, {
-        ...(focusVisible ? {
+        ...(current.id === selectedTab.id && pendingFocus !== null && !focusVisible && !state.omniboxDirty ? {
+          focus: { kind: "element", elementId: `browser-${current.id}` },
+        } : {}),
+        ...(focusVisible && !state.omniboxDirty ? {
           focus: pendingFocus.formControl
             ? { kind: "element", elementId: pendingFocus.node }
             : {
@@ -956,14 +949,9 @@ function reduceBrowser(
                 targetId: pendingFocus.actionId,
               },
         } : {}),
-        ...(firstCommittedViewport
-          ? {
-              effects: [
-                persistSnapshotEffect(controller, current.snapshot),
-                persistEffect(controller, updated),
-              ],
-            }
-          : {}),
+        effects: [{ id: `viewport-accepted:${current.id}`, concurrency: "enqueue", run() {
+          controller.acknowledgeViewport(payload); return Promise.resolve({ kind: "none" });
+        } }, ...(firstCommittedViewport ? [persistEffect(controller, updated)] : [])],
       });
     }
     case "viewportFailed": {
@@ -994,7 +982,8 @@ function reduceBrowser(
         || current.rendering.viewport?.layoutRevision !== message.layoutRevision) return result(state);
       const previousId = current.search?.query === message.query
         ? current.search.matches[current.search.activeMatchIndex]?.id : undefined;
-      const activeMatchIndex = Math.max(0, message.matches.findIndex((match) => match.id === previousId));
+      const previousIndex = previousId === undefined ? current.search?.activeMatchIndex ?? 0 : message.matches.findIndex((match) => match.id === previousId);
+      const activeMatchIndex = Math.max(0, Math.min(message.matches.length - 1, previousIndex));
       const search: BrowserDocumentSearch = {
         documentRevision: message.documentRevision, stateRevision: message.stateRevision,
         requestGeneration: message.requestGeneration, layoutRevision: message.layoutRevision,
@@ -1002,9 +991,9 @@ function reduceBrowser(
         activeMatchIndex, truncated: message.truncated,
       };
       const match = search.matches[activeMatchIndex];
-      const anchor = match === undefined ? undefined : search.anchors.get(match.id);
       const withSearch = { ...current, search, rendering: { ...current.rendering, pendingSearch: null } };
-      const updated = anchor === undefined ? withSearch : documentWithScrollRow(withSearch, anchor, viewportRows);
+      const updated = match === undefined ? withSearch : { ...withSearch, rendering: { ...withSearch.rendering,
+        pendingReveal: { query: search.query, match: match.id, align: "nearest" as const }, pendingFocus: null } };
       return result({
         ...updateDocument(state, current.id, () => updated),
         ...(current.id !== selectedTab.id ? {} : { status: match === undefined
@@ -1041,16 +1030,22 @@ function reduceBrowser(
       const document = selectedTab;
       if (message.operation === "stop") {
         return result(updateDocument(state, document.id, (current) =>
-          ({ ...controller.restoreDocument(current), navigationGeneration: current.navigationGeneration + 1 })
+          ({ ...current, loading: false, pendingUrl: null, navigationGeneration: current.navigationGeneration + 1 })
         ), { cancel: [{ kind: 'effect', id: `navigation:${document.id}` }] });
       }
       if (message.operation === "back" && !document.canGoBack) return result(state);
       if (message.operation === "forward" && !document.canGoForward) return result(state);
-      return beginNavigation(
+      if (message.operation === "back" || message.operation === "forward") {
+        const loaded = activateHistory(document, traverseHistory(document.navigation, message.operation));
+        const next = { ...updateDocument(state, document.id, () => ({ ...loaded, navigationGeneration: document.navigationGeneration + 1 })),
+          overlay: null, findBar: loaded.search === null ? null : { input: { text: loaded.search.query, cursor: loaded.search.query.length } }, omnibox: resetCommandInput(state.omnibox, loaded.snapshot.finalUrl), omniboxDirty: false };
+        return result(next, { cancel: [{ kind: "effect", id: `navigation:${document.id}` }], effects: [persistEffect(controller, next)] });
+      }
+      return beginNavigation(controller,
         state,
         document,
         message.operation,
-        navigationEffect(controller, document, message.operation)
+        navigationEffect(controller, document)
       );
     }
     case "omniboxTransition": {
@@ -1073,7 +1068,7 @@ function reduceBrowser(
     }
     case "focusOmnibox":
       return result({
-        ...state,
+        ...updateDocument(state, selectedTab.id, (document) => ({ ...document, rendering: { ...document.rendering, pendingFocus: null } })),
         omnibox: resetCommandInput(
           state.omnibox,
           tabUrl(selectedTab),
@@ -1103,7 +1098,7 @@ function reduceBrowser(
         }, { cancel: [{ kind: 'effect', id: `restore:${selectedTab.id}` }] });
       }
       const document = selectedTab;
-      return beginNavigation({
+      return beginNavigation(controller, {
         ...state,
         omnibox: submittedCommandInput(state.omnibox, message.value, target),
         omniboxDirty: false
@@ -1187,13 +1182,14 @@ function reduceBrowser(
       });
     }
     case "closeDocument": {
+      const closedTab = selectedTab.kind === "ready" ? resumeDocument(selectedTab) : selectedTab;
       const remaining = state.documents.filter((tab) => tab.id !== selectedTab.id);
       const documents = remaining.length === 0 ? [controller.placeholder("about:newtab")] : remaining;
       const activeDocumentIndex = Math.min(state.activeDocumentIndex, documents.length - 1);
       const selected = documents[activeDocumentIndex];
       const next = {
         ...state, documents, activeDocumentIndex,
-        recentlyClosed: [selectedTab, ...state.recentlyClosed].slice(0, 10),
+        recentlyClosed: [closedTab, ...state.recentlyClosed].slice(0, 10),
         overlay: null, omniboxDirty: false, omnibox: resetCommandInput(state.omnibox, selected === undefined ? "" : tabUrl(selected)),
         status: status(`Closed ${tabLabel(selectedTab)}.`, "success"),
       };
@@ -1206,7 +1202,7 @@ function reduceBrowser(
       const closed = state.recentlyClosed[0];
       if (!closed) return result({ ...state, status: status("No recently closed tab.", "error") });
       const restored = closed.kind === "ready"
-        ? controller.restoreDocument(closed)
+        ? resumeDocument(closed)
         : { ...closed, kind: "restoring" as const, restoreRevision: closed.restoreRevision + 1 };
       const next = {
         ...state,
@@ -1279,12 +1275,17 @@ function reduceBrowser(
       const loadedIndex = state.documents.findIndex((entry) => entry.id === message.documentId);
       const current = state.documents[loadedIndex];
       if (!current || current.kind !== "ready" || current.documentRevision !== message.documentRevision
-        || current.navigationGeneration !== message.navigationGeneration) return result(state);
-      const loaded = pageFromSnapshot(current, message.snapshot, message);
+        || current.navigationGeneration !== message.navigationGeneration
+        || currentEntry(current.navigation)?.id !== message.sourceEntryId) return result(state);
+      let loaded: BrowserDocumentState;
+      try { loaded = acceptNavigation(current, message.snapshot, message.mode, message.provenance, message.sharedDocumentId); }
+      catch (error) { return result(updateDocument({ ...state, status: status(error instanceof Error ? error.message : String(error), "error") }, current.id,
+        (entry) => ({ ...entry, loading: false, pendingUrl: null, error: error instanceof Error ? error.message : String(error) }))); }
       const next = {
         ...updateDocument(state, message.documentId, () => loaded),
         ...(loadedIndex === state.activeDocumentIndex && !state.omniboxDirty
           ? {
+            findBar: loaded.search === null ? null : { input: { text: loaded.search.query, cursor: loaded.search.query.length } },
             omnibox: resetCommandInput(state.omnibox, message.snapshot.finalUrl),
             omniboxDirty: false
           }
@@ -1400,17 +1401,22 @@ function reduceBrowser(
       return result(updateDocumentFocus(state, document, message.target));
     case "scroll":
       return result(updateDocument(state, document.id, (current) =>
-        documentWithScrollRow(current, documentScrollRow(current) + message.rows, viewportRows)
+        scrollDocument(current, message.rows, message.columns ?? 0, viewportRows)
+      ));
+    case "scrollOwner":
+      return result(updateDocument(state, document.id, (current) =>
+        scrollDocument(current, message.rows, message.columns, viewportRows, message.node)
       ));
     case "scrollTo":
       return result(updateDocument(state, document.id, (current) =>
-        documentWithScrollRow(current, message.row, viewportRows)
+        current.rendering.viewport?.viewportOverflow.y === "hidden" || current.rendering.viewport?.viewportOverflow.y === "clip"
+          ? current : documentWithScrollRow(current, message.row, viewportRows)
       ));
     case "scrollTop":
-      return result(updateDocument(state, document.id, (current) => documentWithScrollRow(current, 0, viewportRows)));
+      return result(updateDocument(state, document.id, (current) => scrollDocument(current, -1_000_000_000, 0, viewportRows)));
     case "scrollBottom":
       return result(updateDocument(state, document.id, (current) =>
-        documentWithScrollRow(current, current.rendering.summary?.documentRowCount ?? 1, viewportRows)
+        scrollDocument(current, 1_000_000_000, 0, viewportRows)
       ));
     case "movePageFocus": {
       const targets = document.rendering.summary?.focusOrder ?? [];
@@ -1423,32 +1429,11 @@ function reduceBrowser(
         : (currentIndex - 1 + targets.length) % targets.length;
       const target = targets[nextIndex];
       if (target === undefined) return result(state);
-      const top = target.topRow;
-      const bottom = target.bottomRow;
-      const currentRow = documentScrollRow(document);
-      const revealedRow = top < currentRow
-        ? top
-        : bottom > currentRow + viewportRows
-          ? bottom - viewportRows
-          : currentRow;
-      let updated = documentWithFocus(
-        documentWithScrollRow(document, revealedRow, viewportRows),
-        target.node
-      );
       const visible = document.rendering.viewport?.focusTargets.some((entry) => entry.node === target.node) === true;
-      if (!visible) {
-        updated = {
-          ...updated,
-          rendering: {
-            ...updated.rendering,
-            pendingFocus: {
-              node: target.node,
-              actionId: target.actionId,
-              formControl: target.actionKind === "form-control",
-            },
-          },
-        };
-      }
+      const updated = documentWithFocus({ ...document, rendering: { ...document.rendering,
+        pendingReveal: { node: target.node, align: "nearest" },
+        pendingFocus: { node: target.node, actionId: target.actionId, formControl: target.actionKind === "form-control" },
+      } }, target.node);
       return result(updateDocument(state, document.id, () => updated), visible ? {
         focus: target.actionKind === "form-control"
           ? { kind: "element", elementId: target.node }
@@ -1502,17 +1487,16 @@ function reduceBrowser(
           )]
         });
       }
-      return beginNavigation(focusedState, focusedDocument, action.destination, effect(
+      return beginNavigation(controller, focusedState, focusedDocument, action.destination, effect(
         `navigation:${document.id}`,
         async (effectContext) => navigationMessage(
-          controller,
           focusedDocument,
           await controller.openLink(focusedDocument, action.index, effectContext.signal),
           `Opened ${action.label}`
         ),
         "replace",
         focusedDocument
-      ));
+      ), { kind: "page-initiated", sourceUrl: focusedDocument.snapshot.finalUrl });
     }
     case "openLinkMenu": {
       const action = actionById(document, message.actionId);
@@ -1621,7 +1605,7 @@ function reduceBrowser(
           : updateBrowser(controller, state, { kind: "activateActionAt", actionId: `link:${link.node}` }, context);
       }
       const target = value.target ?? "";
-      return beginNavigation(state, document, target, loadEffect(controller, document, target));
+      return beginNavigation(controller, state, document, target, loadEffect(controller, document, target));
     }
     case "openFind": {
       const value = document.search?.query ?? "";
@@ -1692,7 +1676,8 @@ function reduceBrowser(
         document,
         control,
         values,
-        { ...editor, state: next }
+        { ...editor, state: next },
+        controlSelections(document, control)
       ));
     }
     case "formComboboxCommit": {
@@ -1744,15 +1729,21 @@ function reduceBrowser(
     }
     case "formValues": {
       const control = controlById(document, message.controlId);
-      if (control === undefined) return result(state);
+      if (control === undefined || control.disabled) return result(state);
       if (control.kind === "radio") {
         const groupNodes = new Set(
           document.snapshot.document.radioGroup(control.node).map((entry) => entry.node)
         );
+        const reveal = message.focusTarget !== undefined
+          && !document.rendering.viewport?.controls.some((entry) => entry.node === control.node);
         return result(updateDocument(state, document.id, (current) => {
           const focused = documentWithFocus(current, control.node);
           return {
             ...focused,
+            ...(reveal ? { rendering: { ...focused.rendering,
+              pendingReveal: { node: control.node, align: "nearest" as const },
+              pendingFocus: { node: control.node, actionId: `control:${control.node}`, formControl: true }
+            } } : {}),
             documentState: [...groupNodes].reduce(
               (next, node) => applyDocumentAction(
                 focused.snapshot.document,
@@ -1762,7 +1753,7 @@ function reduceBrowser(
               focused.documentState
             )
           };
-        }));
+        }), message.focusTarget === undefined || reveal ? {} : { focus: { kind: "element", elementId: message.focusTarget } });
       }
       return result(updateFormControl(state, document, control, message.values));
     }
@@ -1805,22 +1796,15 @@ function reduceBrowser(
         ? undefined
         : firstMissingRequiredControl(controller, document, form.node);
       if (missing !== undefined) {
-        const focus = missing.kind === "radio"
-          ? {
-            kind: "elementTarget" as const,
-            elementId: `${form.node}:radio:${missing.name.length === 0 ? missing.node : missing.name}`,
-            targetId: missing.node
-          }
-          : { kind: "element" as const, elementId: missing.node };
+        const focus = { kind: "element" as const, elementId: missing.node };
         return result({
           ...updateDocumentFocus(focusedState, focusedDocument, missing.node),
           status: status(`${missing.label} is required.`, "error")
         }, { focus });
       }
-      return beginNavigation(focusedState, focusedDocument, submitter?.formAction ?? form.action, effect(
+      return beginNavigation(controller, focusedState, focusedDocument, submitter?.formAction ?? form.action, effect(
         `navigation:${document.id}`,
         async (effectContext) => navigationMessage(
-          controller,
           focusedDocument,
           await controller.submitForm(
             focusedDocument,
@@ -1833,7 +1817,7 @@ function reduceBrowser(
         ),
         "replace",
         focusedDocument
-      ));
+      ), null);
     }
     case "download": {
       let target: string;
@@ -1933,17 +1917,23 @@ export function updateBrowser(
   const reduced = preparePickerUpdate(state, reduceBrowser(controller, state, message, context));
   const previous = activeTab(state);
   const selectedId = reduced.exit === undefined ? activeTab(reduced.state).id : null;
-  controller.prioritizeRendering(selectedId);
+  const lifecycleEffects: TuiEffect<BrowserTuiMessage>[] = [];
+  if (selectedId !== previous.id || message.kind === "requestActiveViewport") lifecycleEffects.push({ id: "render-priority", concurrency: "replace", run() {
+    controller.prioritizeRendering(selectedId); return Promise.resolve({ kind: "none" });
+  } });
   if (reduced.exit !== undefined || reduced.state.documents.length === 0) return reduced;
-  const restoration = scheduleTabRestorations(controller, reduced.state);
+  const restoration = scheduleTabRestorations(controller, reduced.state, previous, message.kind === "requestActiveViewport");
   let nextState = restoration.state;
   for (const tab of state.documents) {
     if (tab.kind !== "ready") continue;
     const next = nextState.documents.find((entry) => entry.id === tab.id);
-    if (next?.kind !== "ready" || (next.loading && !tab.loading)) controller.cancelDocumentRendering(tab.id);
+    if (next === undefined) lifecycleEffects.push({ id: `release-render:${tab.id}`, concurrency: "enqueue", async run() {
+      await controller.releaseRendering(tab.id); return { kind: "none" };
+    } });
+    if (next?.kind !== "ready" || (next.loading && !tab.loading)) lifecycleEffects.push({ id: `cancel-render:${tab.id}`, concurrency: "enqueue", run() { controller.cancelDocumentRendering(tab.id); return Promise.resolve({ kind: "none" }); } });
     if (next?.kind !== "ready" || next.rendering.searchRequestGeneration !== tab.rendering.searchRequestGeneration
       || (next.loading && !tab.loading) || (tab.id === previous.id && previous.id !== selectedId)) {
-      controller.cancelSearch(tab.id);
+      lifecycleEffects.push({ id: `cancel-search:${tab.id}`, concurrency: "enqueue", run() { controller.cancelSearch(tab.id); return Promise.resolve({ kind: "none" }); } });
       nextState = updateDocument(nextState, tab.id, (document) => ({
         ...document, rendering: { ...document.rendering, pendingSearch: null,
           searchRequestGeneration: Math.max(document.rendering.searchRequestGeneration, tab.rendering.searchRequestGeneration + 1) },
@@ -1959,7 +1949,7 @@ export function updateBrowser(
   const selected = activeTab(nextState);
   const restorationEffects = [...restoration.effects];
   if (selected.kind !== "ready") {
-    const effects = [...(reduced.effects ?? []), ...restorationEffects];
+    const effects = [...lifecycleEffects, ...(reduced.effects ?? []), ...restorationEffects];
     return {
       ...reduced,
       state: nextState,
@@ -1967,7 +1957,7 @@ export function updateBrowser(
     };
   }
   let active = activeDocument(nextState);
-  const addedEffects = [...(reduced.effects ?? []), ...restorationEffects];
+  const addedEffects = [...lifecycleEffects, ...(reduced.effects ?? []), ...restorationEffects];
   if (active.rendering.status === "failed") {
     return {
       ...reduced,
@@ -1996,7 +1986,8 @@ export function updateBrowser(
   const query = nextState.findBar?.input.text.slice(0, MAX_PAGE_SEARCH_QUERY_CODE_UNITS) ?? null;
   const pending = active.rendering.pendingSearch;
   if (pending !== null && (pending.query !== query || pending.stateRevision !== active.stateRevision || active.loading)) {
-    controller.cancelSearch(active.id);
+    const activeId = active.id;
+    addedEffects.push({ id: `cancel-search:${activeId}`, concurrency: "enqueue", run() { controller.cancelSearch(activeId); return Promise.resolve({ kind: "none" }); } });
     nextState = updateDocument(nextState, active.id, (document) => ({
       ...document, rendering: { ...document.rendering, pendingSearch: null,
         searchRequestGeneration: document.rendering.searchRequestGeneration + 1 },
@@ -2151,6 +2142,8 @@ export function createBrowserApp(
           currentActionId: focusedControlActionId(state, focusPath) ?? ""
         })
       },
+      { id: "scroll-left", phase: "afterFocus", triggers: [{ kind: "key", key: "arrowLeft" }], enabled: ({ state }) => state.overlay === null, message: { kind: "scroll", rows: 0, columns: -1 } },
+      { id: "scroll-right", phase: "afterFocus", triggers: [{ kind: "key", key: "arrowRight" }], enabled: ({ state }) => state.overlay === null, message: { kind: "scroll", rows: 0, columns: 1 } },
       { id: "scroll-down", phase: "afterFocus", triggers: [{ kind: "key", key: "arrowDown" }], enabled: ({ state }) => state.overlay === null || state.overlay.kind === "detail", message: { kind: "scroll", rows: 1 } },
       { id: "scroll-up", phase: "afterFocus", triggers: [{ kind: "key", key: "arrowUp" }], enabled: ({ state }) => state.overlay === null || state.overlay.kind === "detail", message: { kind: "scroll", rows: -1 } },
       { id: "page-down", triggers: [{ kind: "key", key: "pageDown" }, { kind: "text", text: " " }], enabled: ({ state }) => state.overlay === null || state.overlay.kind === "detail", message: { kind: "scroll", rows: 10 } },

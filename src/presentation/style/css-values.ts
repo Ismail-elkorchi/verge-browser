@@ -16,6 +16,15 @@ import type {
 
 const LENGTH_UNITS = new Set<CssLengthUnit>(["px", "em", "rem", "ch", "%", "vw", "vh"]);
 
+const ABSOLUTE_UNITS: Readonly<Record<string, number>> = Object.freeze({ in: 96, cm: 96 / 2.54, mm: 96 / 25.4, q: 96 / 101.6, pt: 96 / 72, pc: 16 });
+function dimensionLength(value: number, unit: string): { value: number; unit: CssLengthUnit } | null {
+  const normalized = unit.toLowerCase();
+  const factor = Object.hasOwn(ABSOLUTE_UNITS, normalized) ? ABSOLUTE_UNITS[normalized] : undefined;
+  if (!Number.isFinite(value)) return null;
+  if (factor !== undefined) return { value: value * factor, unit: "px" };
+  return LENGTH_UNITS.has(normalized as CssLengthUnit) ? { value, unit: normalized as CssLengthUnit } : null;
+}
+
 type MathResult =
   | { readonly dimension: "number"; readonly value: number }
   | {
@@ -186,9 +195,8 @@ class MathParser {
       return Number.isFinite(value.value) ? lengthResult(valueExpression(value.value, "%"), "percentage") : null;
     }
     if (value.kind === "dimension") {
-      const unit = value.unit.toLowerCase() as CssLengthUnit;
-      if (!LENGTH_UNITS.has(unit) || !Number.isFinite(value.value)) return null;
-      return lengthResult(valueExpression(value.value, unit), "none");
+      const dimension = dimensionLength(value.value, value.unit);
+      return dimension === null ? null : lengthResult(valueExpression(dimension.value, dimension.unit), "none");
     }
     if (value.kind === "simple-block" && value.associatedToken === "open-paren") {
       return new MathParser(value.value).parse();
@@ -241,12 +249,20 @@ export function parseCssLength(
   source: string,
   options: { readonly allowAuto?: boolean; readonly allowNegative?: boolean; readonly allowNone?: boolean } = {}
 ): CssLength | null {
-  const normalized = source.trim().toLowerCase();
+  const parsed = parseComponentValues(source);
+  return parsed.ok ? parseCssLengthComponents(parsed.value, options) : null;
+}
+
+/** Component entry point shared by media and declaration evaluation. */
+export function parseCssLengthComponents(
+  components: readonly ComponentValue[],
+  options: { readonly allowAuto?: boolean; readonly allowNegative?: boolean; readonly allowNone?: boolean } = {}
+): CssLength | null {
+  const values = compact(components);
+  const single = values.length === 1 ? values[0] : undefined;
+  const normalized = single?.kind === "ident" ? single.value.toLowerCase() : "";
   if (options.allowAuto !== false && normalized === "auto") return Object.freeze({ kind: "auto" });
   if (options.allowNone === true && normalized === "none") return Object.freeze({ kind: "none" });
-  const parsed = parseComponentValues(source);
-  if (!parsed.ok) return null;
-  const values = compact(parsed.value);
   if (values.length === 1) {
     const value = values[0];
     if (value?.kind === "number" && value.value === 0) return Object.freeze({ kind: "zero" });
@@ -255,13 +271,12 @@ export function parseCssLength(
       return Object.freeze({ kind: "length", value: value.value, unit: "%" });
     }
     if (value?.kind === "dimension") {
-      const unit = value.unit.toLowerCase() as CssLengthUnit;
-      if (!LENGTH_UNITS.has(unit) || !Number.isFinite(value.value)
-        || (options.allowNegative !== true && value.value < 0)) return null;
-      return Object.freeze({ kind: "length", value: value.value, unit });
+      const dimension = dimensionLength(value.value, value.unit);
+      if (dimension === null || (options.allowNegative !== true && dimension.value < 0)) return null;
+      return Object.freeze({ kind: "length", ...dimension });
     }
   }
-  const math = new MathParser(parsed.value).parse();
+  const math = new MathParser(components).parse();
   if (math?.dimension !== "length-percentage") return null;
   return Object.freeze({
     kind: "calculation",
@@ -423,4 +438,52 @@ export function parseCssTranslations(source: string): readonly CssTranslation[] 
       y: name === "translatey" ? first : lengths[1] ?? zero }));
   }
   return Object.freeze(translations);
+}
+
+export function evaluateCssMath(
+  expression: CssLengthPercentageExpression,
+  basis: number,
+  parentPx: number,
+  rootPx: number,
+  viewportWidth: number,
+  viewportHeight: number
+): number | null {
+  if (expression.kind === "value") {
+    if (!Number.isFinite(expression.value)) return null;
+    if (expression.unit === "px") return expression.value;
+    if (expression.unit === "%") return basis * expression.value / 100;
+    if (expression.unit === "em") return parentPx * expression.value;
+    if (expression.unit === "rem") return rootPx * expression.value;
+    if (expression.unit === "ch") return parentPx * 0.5 * expression.value;
+    if (expression.unit === "vw") return viewportWidth * expression.value / 100;
+    return viewportHeight * expression.value / 100;
+  }
+  if (expression.kind === "negate") {
+    const result = evaluateCssMath(expression.value, basis, parentPx, rootPx, viewportWidth, viewportHeight);
+    return result === null ? null : -result;
+  }
+  if (expression.kind === "sum") {
+    const left = evaluateCssMath(expression.left, basis, parentPx, rootPx, viewportWidth, viewportHeight);
+    const right = evaluateCssMath(expression.right, basis, parentPx, rootPx, viewportWidth, viewportHeight);
+    return left === null || right === null ? null : left + right;
+  }
+  if (expression.kind === "product") {
+    const result = evaluateCssMath(expression.value, basis, parentPx, rootPx, viewportWidth, viewportHeight);
+    return result === null ? null : result * expression.factor;
+  }
+  if (expression.kind === "minimum" || expression.kind === "maximum") {
+    let result: number | null = null;
+    for (const value of expression.values) {
+      const candidate = evaluateCssMath(value, basis, parentPx, rootPx, viewportWidth, viewportHeight);
+      if (candidate === null) return null;
+      result = result === null ? candidate
+        : expression.kind === "minimum" ? Math.min(result, candidate) : Math.max(result, candidate);
+    }
+    return result;
+  }
+  const minimum = evaluateCssMath(expression.minimum, basis, parentPx, rootPx, viewportWidth, viewportHeight);
+  const preferred = evaluateCssMath(expression.preferred, basis, parentPx, rootPx, viewportWidth, viewportHeight);
+  const maximum = evaluateCssMath(expression.maximum, basis, parentPx, rootPx, viewportWidth, viewportHeight);
+  return minimum === null || preferred === null || maximum === null
+    ? null : Math.max(minimum, Math.min(preferred, maximum));
 }

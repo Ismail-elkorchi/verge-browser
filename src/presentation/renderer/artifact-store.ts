@@ -459,9 +459,15 @@ export class RenderArtifactStore {
       stage,
       operation,
     );
+    const revealQuery = request.window.reveal !== undefined && "query" in request.window.reveal ? request.window.reveal.query : null;
+    const query = request.searchQuery ?? revealQuery;
+    const searchProjection = query === null ? null : this.#searchProjection(
+      this.#document(request.documentId, request.documentRevision), artifacts, query, 10_000, request.signal,
+    );
     const displayList = record("viewport-display-list-construction", () => buildViewportDisplayList({
       documentDisplayList: artifacts.documentDisplayList,
       spatialIndex: artifacts.displayListSpatialIndex,
+      searchProjection,
       context: {
         ...request.terminalContext,
         ...(terminalBudgets === undefined ? {} : { budgets: terminalBudgets }),
@@ -478,17 +484,7 @@ export class RenderArtifactStore {
       displayList,
       cellBuffer: cells.cellBuffer,
       documentGeometry: artifacts.documentGeometry,
-      ...(request.searchQuery === undefined || request.searchQuery === null
-        ? {}
-        : {
-          searchProjection: this.#searchProjection(
-            this.#document(request.documentId, request.documentRevision),
-            artifacts,
-            request.searchQuery,
-            10_000,
-            request.signal,
-          ),
-        }),
+      searchProjection,
       truncations: cells.truncations,
       ...(request.signal === undefined ? {} : { signal: request.signal }),
     }));

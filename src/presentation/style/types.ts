@@ -1,3 +1,6 @@
+import type { SelectorResultCache } from "./selector-cache.js";
+export type CssOverflow = "visible" | "hidden" | "clip" | "auto" | "scroll";
+
 import type {
   ComponentValue,
   CssDeclaration,
@@ -201,8 +204,9 @@ export interface ComputedBoxStyle {
   readonly gridAutoRows: CssGridAutoTrackList;
   readonly gridAutoFlow: CssGridAutoFlow;
   readonly gridPlacement: CssGridPlacement;
-  readonly overflowX: "visible" | "hidden" | "clip";
-  readonly overflowY: "visible" | "hidden" | "clip";
+  readonly overflowX: CssOverflow;
+  readonly overflowY: CssOverflow;
+  readonly contain: "none" | "paint";
 }
 
 export interface ComputedStyle {
@@ -315,7 +319,10 @@ export interface StyleBudgets {
   readonly maxStylesheetSources: number;
   readonly maxStylesheetBytes: number;
   readonly maxInlineStylesheetBytes: number;
-  readonly maxSelectorQueries: number;
+  readonly maxSelectorCacheBytes: number;
+  /** Whole immutable tree-index construction work, independent of query evaluation. */
+  readonly maxSelectorConstructionSteps: number;
+  /** Actual cumulative author matching work per evaluation; hits do no matching. */
   readonly maxSelectorSteps: number;
   readonly maxDiagnostics: number;
 }
@@ -427,9 +434,8 @@ export interface RetainedSelectorMatchSet {
 export interface StylesheetSelectorRuntime {
   namespaces: StylesheetNamespaces;
   state: DocumentState | null;
-  authorSession: SelectorMatchSession<WebDocumentNode> | null;
-  userAgentSession: SelectorMatchSession<WebDocumentNode> | null;
-  readonly matches: Map<string, RetainedSelectorMatchSet>;
+  session: SelectorMatchSession<WebDocumentNode> | null;
+  readonly matches: SelectorResultCache;
   computedSnapshot: StyleSnapshot | null;
   computedEnvironment: string | null;
   clear(): void;

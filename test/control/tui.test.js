@@ -9,7 +9,7 @@ import { renderFramePlain } from "@ismail-elkorchi/terminal-ui/renderer";
 import { createTuiRuntime } from "@ismail-elkorchi/terminal-ui/tui";
 import { HttpFields } from "@ismail-elkorchi/http-client";
 
-import { BrowserSession } from "../../dist/app/session.js";
+import { PageAcquisition } from "../../dist/app/page-acquisition.js";
 import { BrowserStore } from "../../dist/app/storage.js";
 import {
   browserMediaEnvironment,
@@ -20,6 +20,7 @@ import {
   scrollToSource
 } from "../../dist/ui/document-layout.js";
 import { prepareBrowserTui, renderBrowserOnce } from "../../dist/ui/run.js";
+import { acceptNavigation } from "../../dist/ui/navigation-state.js";
 import { updateBrowser } from "../../dist/ui/app.js";
 import { selectEditor } from "../../dist/ui/form-editors.js";
 
@@ -96,7 +97,7 @@ async function preparedFixture(options = {}) {
       async close() {},
       ...options.services
     },
-    createSession: () => new BrowserSession({
+    createAcquisition: () => new PageAcquisition({
       loader: options.loader ?? loader,
       stylesheetLoader: async () => { throw new Error("unexpected stylesheet"); },
       defaultParseMode: "text"
@@ -167,9 +168,9 @@ test("workspace restoration paints placeholders first, loads the active tab firs
       async writeTextFile() {}, async downloadFile() { throw new Error("not used"); },
       async openExternal() {}, async openPath() {}, async close() {},
     },
-    createSession: () => {
+    createAcquisition: () => {
       sessions += 1;
-      return new BrowserSession({
+      return new PageAcquisition({
         loader: async (requestUrl) => {
           starts.push(requestUrl);
           const operation = deferred();
@@ -333,7 +334,11 @@ test("outline document nodes resolve through layout-fragment geometry", async ()
     const heading = document.snapshot.document.headings.find((entry) => entry.text === "Forms");
     assert.ok(heading);
     const anchored = scrollToSource(document, heading.node);
-    assert.ok(documentScrollRow(anchored) > 20);
+    assert.deepEqual(anchored.rendering.pendingReveal, { node: heading.node, align: "start" });
+    await runtime.dispatch({ kind: "pickerSelect", value: { kind: "outline", index: 0, node: heading.node } });
+    await waitUntil(runtime, () => runtime.state().documents[0].rendering.pendingReveal === null
+      && runtime.state().documents[0].rendering.status === "ready");
+    assert.ok(documentScrollRow(runtime.state().documents[0]) > 20);
   } finally {
     await runtime.dispose();
     await prepared.controller.close();
@@ -491,8 +496,9 @@ test("a new snapshot never reuses an opaque scroll reference from stale UI state
       ...initial,
       scrollAnchor: { source: initial.snapshot.document.headings[0].node, rowOffset: 7 }
     };
-    await prepared.controller.navigate(stale, "https://example.test/next");
-    const restored = prepared.controller.restoreDocument(stale);
+    const acquired = await prepared.controller.navigate(stale, "https://example.test/next");
+    assert.equal(runtime.state().documents[0].snapshot, initial.snapshot);
+    const restored = acceptNavigation(stale, acquired.snapshot, acquired.mode, acquired.provenance);
     assert.equal(restored.snapshot.finalUrl, "https://example.test/next");
     assert.equal(restored.scrollAnchor.source, restored.snapshot.document.body);
     assert.equal(restored.scrollAnchor.rowOffset, 0);
@@ -608,15 +614,15 @@ test("ordinary buttons use the native terminal control path without debug prose"
 });
 
 test("rendering truncation takes precedence over a stale navigation success status", async () => {
-  const rules = Array.from({ length: 4_097 }, (_, index) => `.selector-${index} { color:red }`).join("\n");
+  const rules = "span:nth-child(odd of :not(.absent)){color:red}";
   const incompleteLoader = async (requestUrl) => response(
     requestUrl,
-    `<title>Incomplete</title><style>${rules}</style><main><p>Visible text</p></main>`
+    `<title>Incomplete</title><style>${rules}</style><main><p>Visible text</p>${"<span>item</span>".repeat(2000)}</main>`
   );
   const { runtime, prepared } = await preparedFixture({ loader: incompleteLoader });
   try {
     const frame = renderFramePlain(runtime.frame());
-    assert.match(frame, /rendering incomplete \(style\.maxSelectorQueries=4096\)/u);
+    assert.match(frame, /rendering incomplete \(style\.maxSelectorSteps=\d+\)/u);
     assert.doesNotMatch(frame, /Opened Incomplete/u);
   } finally {
     await runtime.dispose();
@@ -663,7 +669,7 @@ test("one-shot output and the interactive view consume the same cell-buffer rows
   const options = {
     store,
     services,
-    createSession: () => new BrowserSession({ loader, stylesheetLoader: async () => { throw new Error("unexpected"); }, defaultParseMode: "text" })
+    createAcquisition: () => new PageAcquisition({ loader, stylesheetLoader: async () => { throw new Error("unexpected"); }, defaultParseMode: "text" })
   };
   const output = await renderBrowserOnce("https://example.test/next", options, { columns: 80, rows: 24 });
   assert.match(output, /Second page/u);
@@ -1050,4 +1056,340 @@ test("picker preparation is replaced, cancelled on close, and fenced across reop
     await runtime.dispose();
     await prepared.controller.close();
   }
+});
+
+test("native controls retain layout allocations, selected labels, and separated radio boxes", async () => {
+  const html = `<title>Native geometry</title><style>select{width:160px}textarea{width:160px} .gap{height:48px}</style>
+    <form><label for="choice">Language</label><select id="choice" name="choice"><option value="42">First</option><option value="42" selected>Visible label</option></select>
+    <textarea name="notes" rows="3" cols="20">one\ntwo\nthree</textarea>
+    <p><label><input type="radio" name="r" value="a" checked>Alpha</label></p>
+    <div class="gap">Between radio controls</div>
+    <p><label><input type="radio" name="r" value="b">Beta</label></p><input name="empty" size="8"></form>`;
+  const { runtime, prepared } = await preparedFixture({ terminalSize: { columns: 80, rows: 35 }, loader: async (url) => response(url, html) });
+  try {
+    const document = runtime.state().documents[0];
+    const controls = document.snapshot.document.controls;
+    const choice = controls.find((control) => control.name === "choice");
+    const notes = controls.find((control) => control.name === "notes");
+    const radios = controls.filter((control) => control.kind === "radio");
+    const empty = controls.find((control) => control.name === "empty");
+    const geometries = document.rendering.viewport.controls;
+    assert.equal(geometries.find((entry) => entry.node === notes.node).allocation.height, 3);
+    assert.equal(geometries.find((entry) => entry.node === empty.node).allocation.width, 8);
+    const first = geometries.find((entry) => entry.node === radios[0].node).allocation;
+    const second = geometries.find((entry) => entry.node === radios[1].node).allocation;
+    assert.ok(second.row > first.row + first.height + 1);
+    const frame = renderFramePlain(runtime.frame());
+    assert.equal(frame.split("Language").length - 1, 1);
+    assert.ok(frame.includes("Visible label"), frame);
+    assert.ok(frame.includes("one") && frame.includes("two") && frame.includes("three"), frame);
+    assert.ok(frame.includes("Between radio controls"), frame);
+    assert.match(frame, /◉|\(\*\)/u);
+    assert.match(frame, /○|\( \)/u);
+    assert.equal(frame.split("Alpha").length - 1, 1);
+    assert.equal(frame.split("Beta").length - 1, 1);
+    await runtime.dispatch({ kind: "formComboboxTransition", controlId: choice.node, transition: { kind: "open" } });
+    await runtime.dispatch({ kind: "formComboboxCommit", controlId: choice.node, event: { kind: "commit", id: `${choice.node}:0` } });
+    await waitUntil(runtime, () => renderFramePlain(runtime.frame()).includes("First"));
+    assert.deepEqual(runtime.state().documents[0].documentState.controls.get(choice.node).values, ["42"]);
+    await runtime.dispatch({ kind: "formComboboxTransition", controlId: choice.node, transition: { kind: "open" } });
+    await runtime.dispatch({ kind: "formComboboxTransition", controlId: choice.node, transition: { kind: "dismiss", reason: "escape" } });
+    assert.deepEqual(runtime.state().documents[0].documentState.controls.get(choice.node).selected, [choice.options[0].node]);
+    await runtime.dispatch({ kind: "formValues", controlId: radios[0].node, values: ["a"], focusTarget: radios[0].node });
+    await waitUntil(runtime, () => runtime.frame().focusPath?.includes(radios[0].node));
+    await runtime.handleInput(key("arrowDown"));
+    await waitUntil(runtime, () => runtime.frame().focusPath?.includes(radios[1].node));
+    assert.deepEqual(runtime.state().documents[0].documentState.controls.get(radios[1].node).values, ["b"]);
+    assert.deepEqual(runtime.state().documents[0].documentState.controls.get(radios[0].node).values, []);
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});
+
+test("partly clipped textarea keeps full editor geometry and caret through resize", async () => {
+  const { runtime, prepared } = await preparedFixture({ terminalSize: { columns: 80, rows: 24 }, loader: async (url) => response(url,
+    `<title>Clipped editor</title><style>body{margin:0}.clip{height:32px;overflow:hidden}textarea{width:160px;height:64px}</style><div class="clip"><textarea name="notes">first\nsecond\nthird</textarea></div>`) });
+  try {
+    const initial = runtime.state().documents[0];
+    const area = initial.snapshot.document.controls[0];
+    const geometry = initial.rendering.viewport.controls.find((entry) => entry.node === area.node);
+    assert.equal(geometry.allocation.height, 4);
+    assert.equal(geometry.visible.height, 2);
+    await runtime.dispatch({ kind: "movePageFocus", direction: "next", currentActionId: "" });
+    await waitUntil(runtime, () => runtime.frame().focusPath?.includes(area.node));
+    await runtime.handleInput(key("end"));
+    await runtime.handleInput({ kind: "text", text: "X", paste: false });
+    const edited = runtime.state().documents[0].formEditors[area.node].state;
+    const accepted = runtime.state().documents[0].documentState.controls.get(area.node).values[0];
+    assert.ok(accepted.includes("X"));
+    await runtime.resize({ columns: 48, rows: 24 });
+    await waitUntil(runtime, () => runtime.state().documents[0].rendering.status === "ready");
+    assert.equal(runtime.state().documents[0].formEditors[area.node].state, edited);
+    assert.ok(runtime.frame().focusPath?.includes(area.node));
+    await runtime.handleInput({ kind: "text", text: "Y", paste: false });
+    assert.ok(runtime.state().documents[0].documentState.controls.get(area.node).values[0].includes("XY"));
+    const resized = runtime.state().documents[0].rendering.viewport.controls.find((entry) => entry.node === area.node);
+    assert.equal(resized.allocation.height, 4);
+    assert.equal(resized.visible.height, 2);
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});
+
+test("one-shot native forms display labels and multiline values at terminal widths", async () => {
+  for (const columns of [80, 120, 160]) {
+    const directory = await mkdtemp(join(tmpdir(), "verge-once-forms-"));
+    const store = await BrowserStore.open({ statePath: join(directory, "state.json") });
+    const output = await renderBrowserOnce("https://example.test/", {
+      store,
+      services: { async close() {} },
+      createAcquisition: () => new PageAcquisition({
+        loader: async (url) => response(url, `<title>Form</title><style>select{width:160px}textarea{display:block}</style><label for="s">Language</label><select id="s"><option value="42">Visible option</option></select><textarea rows="3">first\nsecond\nthird</textarea>`),
+        defaultParseMode: "text"
+      })
+    }, { columns, rows: 24 });
+    assert.equal(output.split("Language").length - 1, 1);
+    assert.ok(output.includes("Visible option"), output);
+    assert.ok(output.includes("first") && output.includes("second") && output.includes("third"), output);
+  }
+});
+
+test("pointer wheel targets a nested scroll owner without scrolling the page", async () => {
+  const { runtime, prepared } = await preparedFixture({ loader: async (url) => response(url,
+    `<title>Nested scroll</title><style>body{margin:0}.port{height:48px;width:240px;overflow:auto}p{margin:0;height:16px}</style><div id="port" class="port">${Array.from({length:12},(_,i)=>`<p>Nested line ${i}</p>`).join("")}</div><p>Outside</p>`) });
+  try {
+    const initial = runtime.state().documents[0];
+    const port = initial.rendering.viewport.scrollPorts.find((entry) => entry.node === initial.snapshot.document.elementById("port"));
+    assert.ok(port);
+    await runtime.handleInput({ kind: "mouse", sequence: "", encoding: "sgr", action: "wheel", button: "wheelDown",
+      row: 3 + port.rect.row, column: 2 + port.rect.column, rawCode: 65,
+      modifiers: {shift:false,alt:false,ctrl:false}, deltaRows:1, deltaColumns:0 });
+    await waitUntil(runtime, () => runtime.state().documents[0].scrollOffsets.some((entry) => entry.node === port.node && entry.block > 0));
+    assert.equal(documentScrollRow(runtime.state().documents[0]), 0);
+    assert.equal(runtime.state().documents[0].scrollOffsets.find((entry) => entry.node === port.node).block, 3 * initial.rendering.viewport.cellBlock);
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});
+
+test("radio keyboard navigation reveals a separated offscreen peer", async () => {
+  const { runtime, prepared } = await preparedFixture({ terminalSize: {columns:80,rows:20}, loader: async (url) => response(url,
+    `<title>Radio reveal</title><input type="radio" name="r" value="a" checked><div style="height:640px">Gap</div><input type="radio" name="r" value="b">`) });
+  try {
+    const controls = runtime.state().documents[0].snapshot.document.controls;
+    await runtime.dispatch({ kind: "formValues", controlId: controls[0].node, values:["a"], focusTarget: controls[0].node });
+    await waitUntil(runtime, () => runtime.frame().focusPath?.includes(controls[0].node));
+    await runtime.handleInput(key("arrowDown"));
+    await waitUntil(runtime, () => runtime.frame().focusPath?.includes(controls[1].node));
+    assert.ok(documentScrollRow(runtime.state().documents[0]) > 0);
+    assert.deepEqual(runtime.state().documents[0].documentState.controls.get(controls[1].node).values, ["b"]);
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});
+
+test("duplicate URL entries restore independent live forms and scroll without refetching history", async () => {
+  let loads = 0;
+  const { runtime, prepared } = await preparedFixture({ loader: async (url) => {
+    loads += 1; return response(url, pages.get("https://example.test/"));
+  } });
+  const ready = () => runtime.state().documents[0].rendering.status === "ready";
+  try {
+    let current = runtime.state().documents[0];
+    const control = current.snapshot.document.controls.find((entry) => entry.name === "q");
+    await runtime.dispatch({ kind: "formText", controlId: control.node, transition: { kind: "edit", operation: { kind: "insert", text: "FIRST" } } });
+    await waitUntil(runtime, ready);
+    await runtime.dispatch({ kind: "scrollTo", row: 20 }); await waitUntil(runtime, ready);
+    const first = runtime.state().documents[0];
+    const firstScroll = documentScrollRow(first);
+    await runtime.dispatch({ kind: "omniboxSubmit", value: "https://example.test/next" });
+    await waitUntil(runtime, () => ready() && runtime.state().documents[0].snapshot.finalUrl.endsWith("/next"));
+    await runtime.dispatch({ kind: "omniboxSubmit", value: "https://example.test/" });
+    await waitUntil(runtime, () => ready() && runtime.state().documents[0].snapshot.finalUrl === "https://example.test/");
+    current = runtime.state().documents[0];
+    const secondControl = current.snapshot.document.controls.find((entry) => entry.name === "q");
+    await runtime.dispatch({ kind: "formText", controlId: secondControl.node, transition: { kind: "edit", operation: { kind: "insert", text: "SECOND" } } });
+    await waitUntil(runtime, ready);
+    await runtime.dispatch({ kind: "navigate", operation: "back" }); await waitUntil(runtime, ready);
+    await runtime.dispatch({ kind: "navigate", operation: "back" }); await waitUntil(runtime, ready);
+    current = runtime.state().documents[0];
+    assert.equal(current.snapshot.document, first.snapshot.document);
+    assert.equal(current.documentState.controls.get(control.node).values[0], "alphaFIRST");
+    assert.equal(current.formEditors[control.node].state.cursor, "alphaFIRST".length);
+    assert.equal(documentScrollRow(current), firstScroll);
+    await runtime.dispatch({ kind: "navigate", operation: "forward" }); await waitUntil(runtime, ready);
+    await runtime.dispatch({ kind: "navigate", operation: "forward" }); await waitUntil(runtime, ready);
+    current = runtime.state().documents[0];
+    assert.equal(current.documentState.controls.get(secondControl.node).values[0], "alphaSECOND");
+    assert.equal(loads, 3);
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});
+
+test("fragment navigation uses accepted target geometry and shares latest live form edits", async () => {
+  let loads = 0;
+  const source = `<input name="edit" value="live"><a href="#target">Jump</a>${"<p>Paragraph</p>".repeat(35)}<h2 id="target">Target</h2>${"<p>After</p>".repeat(30)}`;
+  const { runtime, prepared } = await preparedFixture({ loader: async (url) => { loads += 1; return response(url, source); } });
+  const ready = () => runtime.state().documents[0].rendering.status === "ready";
+  try {
+    const first = runtime.state().documents[0];
+    const control = first.snapshot.document.controls[0];
+    await runtime.dispatch({ kind: "omniboxSubmit", value: "https://example.test/#target" });
+    await waitUntil(runtime, () => ready() && runtime.state().documents[0].rendering.pendingReveal === null);
+    let current = runtime.state().documents[0];
+    assert.equal(current.snapshot.document, first.snapshot.document);
+    assert.equal(current.documentState.urlTarget, first.snapshot.document.elementById("target"));
+    assert.ok(documentScrollRow(current) > 20);
+    await runtime.dispatch({ kind: "formText", controlId: control.node, transition: { kind: "edit", operation: { kind: "insert", text: "LATEST" } } });
+    await waitUntil(runtime, ready);
+    await runtime.dispatch({ kind: "navigate", operation: "back" }); await waitUntil(runtime, ready);
+    current = runtime.state().documents[0];
+    assert.equal(current.snapshot.finalUrl, "https://example.test/");
+    assert.equal(current.documentState.controls.get(control.node).values[0], "liveLATEST");
+    assert.equal(current.documentState.urlTarget, null); assert.equal(documentScrollRow(current), 0);
+    assert.equal(loads, 1);
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});
+
+test("native select popup overlays a later textarea inside document and control viewports", async () => {
+  const { runtime, prepared } = await preparedFixture({ loader: async (url) => response(url,
+    `<title>Popup layer</title><style>select,textarea{display:block;width:160px}</style><select name="language"><option value="en">English</option><option value="fr">French</option></select><textarea rows="3">draft</textarea>`) });
+  try {
+    const select = runtime.state().documents[0].snapshot.document.controls[0];
+    await runtime.dispatch({ kind: "formComboboxTransition", controlId: select.node, transition:{kind:"open"} });
+    const frame = renderFramePlain(runtime.frame());
+    assert.ok(frame.includes("English") && frame.includes("French"), frame);
+    assert.equal(frame.includes("draft"), false, frame);
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});
+
+test("Stop keeps the accepted entry and edits made during acquisition after a late response", async () => {
+  let release;
+  const delayed = new Promise((resolve) => { release = resolve; });
+  const calls = [];
+  const { runtime, prepared } = await preparedFixture({ loader: async (url, options) => {
+    calls.push({ url, method: options?.method ?? "GET" });
+    if (url.endsWith("/slow")) await delayed;
+    return response(url, pages.get("https://example.test/"));
+  } });
+  try {
+    const initial = runtime.state().documents[0];
+    const control = initial.snapshot.document.controls.find((entry) => entry.name === "q");
+    await runtime.dispatch({ kind: "omniboxSubmit", value: "https://example.test/slow" });
+    await waitUntil(runtime, () => calls.some((call) => call.url.endsWith("/slow")));
+    await runtime.dispatch({ kind: "formText", controlId: control.node, transition: { kind: "edit", operation: { kind: "insert", text: "KEPT" } } });
+    await runtime.dispatch({ kind: "navigate", operation: "stop" });
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    let current = runtime.state().documents[0];
+    assert.equal(current.snapshot, initial.snapshot); assert.equal(current.navigation.entries.length, 1);
+    assert.equal(current.loading, false); assert.equal(current.documentState.controls.get(control.node).values[0], "alphaKEPT");
+    await runtime.dispatch({ kind: "navigate", operation: "reload" });
+    await waitUntil(runtime, () => runtime.state().documents[0].snapshot !== initial.snapshot && !runtime.state().documents[0].loading);
+    current = runtime.state().documents[0];
+    assert.equal(current.snapshot.finalUrl, initial.snapshot.finalUrl); assert.equal(current.navigation.entries.length, 1);
+    assert.equal(calls.at(-1).method, "GET");
+  } finally { release(); await runtime.dispose(); await prepared.controller.close(); }
+});
+
+test("partly clipped select popup escapes crop and preserves pointer, keyboard, and dismissal behavior", async () => {
+  const { runtime, prepared } = await preparedFixture({ loader: async (url) => response(url,
+    `<title>Partial select</title><style>body{margin:0}.clip{width:80px;overflow:hidden}select{display:block;width:160px}</style><div class="clip"><select aria-label="Language" name="language"><option value="en">English</option><option value="fr">French</option></select></div>`) });
+  try {
+    const initial = runtime.state().documents[0];
+    const select = initial.snapshot.document.controls[0];
+    const geometry = initial.rendering.viewport.controls.find((entry) => entry.node === select.node);
+    assert.equal(geometry.allocation.width, 20);
+    assert.equal(geometry.visible.width, 10);
+    assert.equal(select.label, "Language");
+    await runtime.dispatch({ kind: "movePageFocus", direction: "next", currentActionId: "" });
+    await waitUntil(runtime, () => runtime.frame().focusPath?.includes(select.node));
+    await runtime.handleInput(key("enter"));
+    assert.equal(runtime.state().documents[0].formEditors[select.node].state.open, true);
+    assert.ok(renderFramePlain(runtime.frame()).includes("French"));
+    assert.ok(JSON.stringify(runtime.frame().accessibility).includes("Language"));
+    const french = runtime.frame().hitTargets.find((target) => target.id === `${select.node}:popup:list:option:${select.node}:1`);
+    const trigger = runtime.frame().hitTargets.find((target) => target.id === `${select.node}:trigger`);
+    assert.ok(french.bounds.row >= trigger.bounds.row + trigger.bounds.height);
+    const click = async (row, column) => {
+      for (const action of ["press", "release"]) await runtime.handleInput({ kind: "mouse", sequence: "", encoding: "sgr", action, button: "left",
+        row, column, rawCode: 0, modifiers: {shift:false,alt:false,ctrl:false} });
+    };
+    await click(french.bounds.row, french.bounds.column);
+    assert.equal(runtime.state().documents[0].formEditors[select.node].state.interaction.activeId, `${select.node}:1`);
+    await click(french.bounds.row, french.bounds.column);
+    assert.deepEqual(runtime.state().documents[0].documentState.controls.get(select.node).values, ["fr"]);
+    assert.equal(runtime.state().documents[0].formEditors[select.node].state.open, false);
+    await runtime.handleInput(key("enter"));
+    await click(20, 50);
+    assert.equal(runtime.state().documents[0].formEditors[select.node].state.open, false);
+    await runtime.handleInput(key("enter"));
+    await runtime.handleInput(key("arrowUp"));
+    await runtime.handleInput(key("enter"));
+    assert.deepEqual(runtime.state().documents[0].documentState.controls.get(select.node).values, ["en"]);
+    await runtime.handleInput(key("enter"));
+    await runtime.handleInput(key("arrowDown"));
+    await runtime.handleInput(key("enter"));
+    assert.deepEqual(runtime.state().documents[0].documentState.controls.get(select.node).values, ["fr"]);
+    assert.ok(renderFramePlain(runtime.frame()).includes("French"));
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});
+
+test("root horizontal window projects native controls, links, and pointer targets once", async () => {
+  const { runtime, prepared } = await preparedFixture({ terminalSize: { columns:80,rows:24 }, loader: async (url) => response(url,
+    `<title>Root pan</title><style>body{margin:0;width:2000px}input{position:absolute;left:800px;top:0;width:80px}a{position:absolute;left:880px;top:32px;width:160px}</style><input name="edit" value="alpha"><a href="/next">Target link</a>`) });
+  try {
+    await runtime.dispatch({kind:"scroll",rows:0,columns:100});
+    await waitUntil(runtime,()=>runtime.state().documents[0].rendering.viewport.cellBuffer.windowStartColumn===100);
+    const document = runtime.state().documents[0];
+    const control = document.snapshot.document.controls[0];
+    const geometry = document.rendering.viewport.controls.find((entry)=>entry.node===control.node);
+    assert.equal(geometry.allocation.column,100);
+    const frame=runtime.frame();
+    assert.ok(renderFramePlain(frame).includes("alpha"));
+    assert.ok(renderFramePlain(frame).includes("Target link"));
+    const editor=frame.hitTargets.find((target)=>target.id===`${control.node}:text`);
+    assert.equal(editor.bounds.column,1);
+    const link=frame.hitTargets.find((target)=>target.id.startsWith("activate:link:"));
+    assert.equal(link.bounds.column,11);
+    for(const action of ["press","release"]) await runtime.handleInput({kind:"mouse",sequence:"",encoding:"sgr",action,button:"left",row:editor.bounds.row,column:editor.bounds.column,rawCode:0,modifiers:{shift:false,alt:false,ctrl:false}});
+    await runtime.handleInput({kind:"text",text:"Z",paste:false});
+    assert.ok(runtime.state().documents[0].documentState.controls.get(control.node).values[0].includes("Z"));
+    await runtime.handleInput({kind:"mouse",sequence:"",encoding:"sgr",action:"wheel",button:"wheelRight",row:10,column:50,rawCode:67,modifiers:{shift:false,alt:false,ctrl:false},deltaRows:0,deltaColumns:1});
+    await waitUntil(runtime,()=>runtime.state().documents[0].rendering.viewport.cellBuffer.windowStartColumn===103);
+    await runtime.dispatch({kind:"movePageFocus",direction:"next",currentActionId:`control:${control.node}`});
+    await waitUntil(runtime,()=>runtime.frame().focusPath?.at(-1)?.startsWith("link:"));
+    await runtime.handleInput(key("arrowLeft"));
+    await waitUntil(runtime,()=>runtime.state().documents[0].rendering.viewport.cellBuffer.windowStartColumn===102);
+    assert.ok(runtime.state().documents[0].documentState.controls.get(control.node).values[0].includes("Z"));
+  } finally {await runtime.dispose();await prepared.controller.close();}
+});
+
+test("negative RTL root window projects native editor source columns without clamping", async () => {
+  const {runtime,prepared}=await preparedFixture({terminalSize:{columns:80,rows:24},loader:async url=>response(url,
+    `<html dir="rtl"><title>RTL pan</title><style>body{margin:0}input{position:absolute;left:-640px;top:0;width:80px}</style><input name="edit" value="alpha"></html>`)});
+  try {
+    const origin=runtime.state().documents[0].rendering.viewport.minScrollColumn;
+    assert.equal(origin,-80);
+    await runtime.dispatch({kind:"scroll",rows:0,columns:origin});
+    await waitUntil(runtime,()=>runtime.state().documents[0].rendering.viewport.cellBuffer.windowStartColumn===origin);
+    const document=runtime.state().documents[0];
+    const control=document.snapshot.document.controls[0];
+    assert.equal(document.rendering.viewport.controls.find(entry=>entry.node===control.node).allocation.column,origin);
+    assert.equal(runtime.frame().hitTargets.find(target=>target.id===`${control.node}:text`).bounds.column,1);
+    assert.ok(renderFramePlain(runtime.frame()).includes("alpha"));
+  } finally {await runtime.dispose();await prepared.controller.close();}
+});
+
+test("native editor focus and caret survive becoming fully visible after resize", async () => {
+  const {runtime,prepared}=await preparedFixture({terminalSize:{columns:48,rows:24},loader:async url=>response(url,
+    `<title>Editor resize</title><style>body{margin:0}input{width:640px}</style><input name="edit" value="alpha">`)});
+  try {
+    const control=runtime.state().documents[0].snapshot.document.controls[0];
+    await runtime.dispatch({kind:"movePageFocus",direction:"next",currentActionId:""});
+    await waitUntil(runtime,()=>runtime.frame().focusPath?.includes(control.node));
+    await runtime.handleInput({kind:"text",text:"X",paste:false});
+    const editor=runtime.state().documents[0].formEditors[control.node];
+    const before=runtime.state().documents[0].rendering.viewport.controls.find(entry=>entry.node===control.node);
+    assert.ok(before.visible.width<before.allocation.width);
+    await runtime.resize({columns:100,rows:24});
+    await waitUntil(runtime,()=>runtime.state().documents[0].rendering.status==="ready");
+    const after=runtime.state().documents[0].rendering.viewport.controls.find(entry=>entry.node===control.node);
+    assert.equal(after.visible.width,after.allocation.width);
+    assert.equal(runtime.state().documents[0].formEditors[control.node],editor);
+    assert.ok(runtime.frame().focusPath?.includes(control.node));
+    await runtime.handleInput({kind:"text",text:"Y",paste:false});
+    assert.equal(runtime.state().documents[0].documentState.controls.get(control.node).values[0],"alphaXY");
+  } finally {await runtime.dispose();await prepared.controller.close();}
 });

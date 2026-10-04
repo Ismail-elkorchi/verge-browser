@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { BrowserSession } from "./app/session.js";
+import { PageAcquisition } from "./app/page-acquisition.js";
 import { BrowserStore } from "./app/storage.js";
 import { createNodeBrowserServices } from "./runtime/node-browser-services.js";
 import { renderBrowserOnce, runBrowserTui } from "./ui/run.js";
@@ -42,7 +42,7 @@ async function main(): Promise<void> {
   const browserOptions = {
     store,
     services,
-    createSession: (httpSession: HttpSessionAdapter) => new BrowserSession({ httpSession }),
+    createAcquisition: (httpSession: HttpSessionAdapter) => new PageAcquisition({ httpSession }),
     ...(searchUrlTemplate === undefined ? {} : { searchUrlTemplate }),
     ...(downloadDirectory === undefined ? {} : { downloadDirectory }),
     restoreWorkspace: cliFlags.initialTarget === null && !cliFlags.runOnce

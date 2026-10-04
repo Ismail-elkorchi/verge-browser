@@ -10,10 +10,9 @@ import {
   buildFormSubmissionRequest
 } from "../app/forms.js";
 import { assertPageInitiatedNavigation } from "../app/security.js";
-import {
-  openPageInitiatedNavigation,
-  type BrowserSession
-} from "../app/session.js";
+import type { PageAcquisition } from "../app/page-acquisition.js";
+import { commitNavigation, emptyHistory, currentEntry, type NavigationProvenance } from "../app/navigation-history.js";
+import { emptyRendering, navigationFocus } from "./navigation-state.js";
 import {
   type BrowserWorkspace,
   type DownloadRecord,
@@ -22,12 +21,12 @@ import {
   type BrowserStore
 } from "../app/storage.js";
 import {
-  indexedPageSnapshot,
   type PageRequestOptions,
   type IndexedPageSnapshot
 } from "../app/types.js";
 import {
   createDocumentState,
+  resolveDocumentFragment,
   type DocumentForm,
   type DocumentNodeRef,
   type DocumentState
@@ -115,7 +114,7 @@ function storedScrollAnchor(document: BrowserDocumentState): StoredBrowserDocume
     if (node.kind === "element") {
       const id = document.snapshot.document.attribute(node.ref, "id");
       if (id !== null && id.length > 0) {
-        return { target: { kind: "element-id", value: id }, rowOffset: document.scrollAnchor.rowOffset };
+        return { target: { kind: "element-id", value: id }, rowOffset: document.scrollAnchor.rowOffset, ...(document.scrollColumn === undefined || document.scrollColumn === 0 ? {} : { columnOffset: document.scrollColumn }) };
       }
     }
     if (sourceTarget === null && (node.kind === "element" || node.kind === "text") && node.sourceRange !== null) {
@@ -123,7 +122,7 @@ function storedScrollAnchor(document: BrowserDocumentState): StoredBrowserDocume
     }
     source = node.parent;
   }
-  return { target: sourceTarget, rowOffset: document.scrollAnchor.rowOffset };
+  return { target: sourceTarget, rowOffset: document.scrollAnchor.rowOffset, ...(document.scrollColumn === undefined || document.scrollColumn === 0 ? {} : { columnOffset: document.scrollColumn }) };
 }
 
 function restoredScrollAnchor(
@@ -166,10 +165,16 @@ async function settleBrowserCleanup(
   if (errors.length > 1) throw new AggregateError(errors, message);
 }
 
+export interface AcquiredNavigation {
+  readonly snapshot: IndexedPageSnapshot;
+  readonly provenance: NavigationProvenance;
+  readonly mode: "push" | "replace";
+}
+
 export interface BrowserControllerOptions {
   readonly store: BrowserStore;
   readonly services: BrowserServices;
-  readonly createSession: (httpSession: HttpSessionAdapter) => BrowserSession;
+  readonly createAcquisition: (httpSession: HttpSessionAdapter) => PageAcquisition;
   readonly searchUrlTemplate?: string;
   readonly downloadDirectory?: string;
   readonly downloadMaxBytes?: number;
@@ -186,7 +191,7 @@ export interface BrowserPickerEntry {
 export class BrowserController {
   readonly #store: BrowserStore;
   readonly #services: BrowserServices;
-  readonly #createSession: (httpSession: HttpSessionAdapter) => BrowserSession;
+  readonly #createAcquisition: (httpSession: HttpSessionAdapter) => PageAcquisition;
   readonly #searchUrlTemplate: string;
   readonly #downloadDirectory: string;
   readonly #downloadMaxBytes: number;
@@ -205,8 +210,8 @@ export class BrowserController {
     tail: Promise<unknown>;
   }>();
   readonly #restorations = new TabRestorationScheduler<BrowserDocumentState>();
-  readonly #sessions = new Map<string, BrowserSession>();
-  readonly #provisionalSessionIds = new Set<string>();
+  readonly #acquisitions = new Map<string, PageAcquisition>();
+  readonly #provisionalAcquisitionIds = new Set<string>();
   #nextDocumentNumber = 1;
   #workspaceSaveRevision = 0;
 
@@ -215,7 +220,7 @@ export class BrowserController {
     this.#renderer = this.#renderWorkerFactory();
     this.#store = options.store;
     this.#services = options.services;
-    this.#createSession = options.createSession;
+    this.#createAcquisition = options.createAcquisition;
     this.#searchUrlTemplate = options.searchUrlTemplate ?? DEFAULT_SEARCH_URL_TEMPLATE;
     this.#downloadDirectory = options.downloadDirectory ?? "Downloads";
     this.#downloadMaxBytes = options.downloadMaxBytes ?? DEFAULT_DOWNLOAD_MAX_BYTES;
@@ -236,9 +241,9 @@ export class BrowserController {
   public async saveWorkspace(state: BrowserTuiState): Promise<void> {
     const revision = ++this.#workspaceSaveRevision;
     for (const document of [...state.documents, ...state.recentlyClosed]) {
-      this.#provisionalSessionIds.delete(document.id);
+      this.#provisionalAcquisitionIds.delete(document.id);
     }
-    await this.#releaseDiscardedSessions(state);
+    await this.#releaseDiscardedAcquisitions(state);
     const workspace: BrowserWorkspace = {
       documents: state.documents.map((document) => ({
         url: document.kind === "ready" ? document.snapshot.finalUrl : document.requestedUrl,
@@ -265,9 +270,9 @@ export class BrowserController {
     for (const id of this.#documentAttachments.keys()) this.#renderer.cancelDocument(id);
     this.#documentAttachments.clear();
     this.#externalNetworkPolicy.close(new Error("Browser controller closed."));
-    const sessions = [...this.#sessions.values()];
-    this.#sessions.clear();
-    this.#provisionalSessionIds.clear();
+    const sessions = [...this.#acquisitions.values()];
+    this.#acquisitions.clear();
+    this.#provisionalAcquisitionIds.clear();
     const errors: unknown[] = [];
     try {
       await settleBrowserCleanup([
@@ -293,14 +298,7 @@ export class BrowserController {
     }
   }
 
-  public async openInitial(
-    target: string,
-    scrollAnchor?: StoredBrowserDocument["scrollAnchor"]
-  ): Promise<BrowserDocumentState> {
-    return this.#openNewDocument(target, undefined, scrollAnchor, true);
-  }
-
-  /** Reserves a stable tab identity without allocating a session or loading a page. */
+  /** Reserves a stable tab identity without allocating acquisition or loading a page. */
   public placeholder(
     target: string,
     scrollAnchor?: StoredBrowserDocument["scrollAnchor"],
@@ -325,13 +323,13 @@ export class BrowserController {
     });
   }
 
-  /** Starts loading a placeholder. Session ownership begins at this boundary. */
+  /** Starts loading a placeholder. Acquisition ownership begins at this boundary. */
   public restorePlaceholder(
     tab: BrowserPlaceholderTabState,
     signal?: AbortSignal,
   ): Promise<BrowserDocumentState> {
     return this.#restorations.schedule(tab.id, (loadSignal) =>
-      this.#openDocument(tab.id, tab.requestedUrl, loadSignal, tab.storedScrollAnchor, false), signal);
+      this.#openDocument(tab.id, tab.requestedUrl, loadSignal, tab.storedScrollAnchor), signal);
   }
 
   public configureRestoration(tab: BrowserTabState): void {
@@ -523,86 +521,32 @@ export class BrowserController {
     return suggestions;
   }
 
-  public navigationAvailability(document: BrowserDocumentState): {
-    readonly canGoBack: boolean;
-    readonly canGoForward: boolean;
-  } {
-    const session = this.#session(document.id);
-    return { canGoBack: session.canBack(), canGoForward: session.canForward() };
-  }
-
-  public restoreDocument(document: BrowserDocumentState): BrowserDocumentState {
-    const session = this.#session(document.id);
-    const snapshot = session.current === null ? document.snapshot : indexedPageSnapshot(session.current);
-    const snapshotChanged = snapshot !== document.snapshot;
-    const scrollAnchor = snapshotChanged
-      ? { source: snapshot.document.body ?? snapshot.document.documentElement, rowOffset: 0 }
-      : document.scrollAnchor;
-    return {
-      ...document,
-      ...(snapshotChanged
-        ? {
-            documentRevision: document.documentRevision + 1,
-            stateRevision: document.stateRevision + 1,
-            rendering: {
-              status: "idle" as const,
-              requestedViewportRevision: 0,
-              committedViewportRevision: 0,
-              requestKey: null,
-              pendingSearch: null, searchRequestGeneration: 0,
-              pendingFocus: null,
-              viewport: null,
-              summary: null,
-              error: null,
-            },
-          }
-        : {}),
-      snapshot,
-      scrollAnchor,
-      ...(snapshotChanged
-        ? { search: null, documentState: createDocumentState(snapshot.document), formEditors: {} }
-        : {}),
-      loading: false,
-      pendingUrl: null,
-      canGoBack: session.canBack(),
-      canGoForward: session.canForward(),
-      error: null
-    };
-  }
-
   public async navigate(
     document: BrowserDocumentState,
     target: string,
     requestOptions: PageRequestOptions = {},
     parseMode?: "text" | "stream"
-  ): Promise<IndexedPageSnapshot> {
-    const resolvedTarget = resolveInputUrl(target, document.snapshot.finalUrl);
-    return indexedPageSnapshot(await this.#session(document.id).openWithRequest(
-      resolvedTarget,
-      requestOptions,
-      parseMode
-    ));
+  ): Promise<AcquiredNavigation> {
+    const snapshot = await this.#acquisition(document.id).acquire(
+      resolveInputUrl(target, document.snapshot.finalUrl), requestOptions, parseMode);
+    return { snapshot, provenance: { kind: "direct" }, mode: "push" };
   }
 
-  public async openLink(
-    document: BrowserDocumentState,
-    linkIndex: number,
-    signal?: AbortSignal
-  ): Promise<IndexedPageSnapshot> {
-    return indexedPageSnapshot(await this.#session(document.id).openLink(linkIndex, signal));
+  public async openLink(document: BrowserDocumentState, linkIndex: number, signal?: AbortSignal): Promise<AcquiredNavigation> {
+    const link = document.snapshot.document.links.find((candidate) => candidate.index === linkIndex);
+    if (link === undefined) throw new Error(`No link exists at index ${String(linkIndex)}`);
+    const provenance = { kind: "page-initiated" as const, sourceUrl: document.snapshot.finalUrl };
+    const snapshot = await this.#acquisition(document.id).acquire(link.destination,
+      signal === undefined ? {} : { signal }, document.snapshot.diagnostics.parseMode, provenance);
+    return { snapshot, provenance, mode: "push" };
   }
 
-  public async traverse(
-    document: BrowserDocumentState,
-    operation: "back" | "forward" | "reload",
-    signal?: AbortSignal
-  ): Promise<IndexedPageSnapshot> {
-    const session = this.#session(document.id);
-    return indexedPageSnapshot(operation === "back"
-      ? await session.back(signal)
-      : operation === "forward"
-        ? await session.forward(signal)
-        : await session.reload(signal));
+  public async reload(document: BrowserDocumentState, signal?: AbortSignal): Promise<AcquiredNavigation> {
+    const entry = currentEntry(document.navigation);
+    if (entry === undefined) throw new Error("No page is loaded.");
+    const snapshot = await this.#acquisition(document.id).acquire(entry.snapshot.finalUrl,
+      signal === undefined ? {} : { signal }, entry.parseMode, entry.provenance);
+    return { snapshot, provenance: entry.provenance, mode: "replace" };
   }
 
   public openNewFromDocument(
@@ -611,27 +555,25 @@ export class BrowserController {
     signal?: AbortSignal
   ): Promise<BrowserDocumentState> {
     assertPageInitiatedNavigation(document.snapshot.finalUrl, target);
-    return this.#openNewDocument(target, signal, undefined, false, document.snapshot.finalUrl);
+    return this.#openDocument(this.#newDocumentId(), target, signal, undefined, document.snapshot.finalUrl);
   }
 
   public async submitForm(
-    document: BrowserDocumentState,
-    form: DocumentForm,
-    state: DocumentState,
-    submitter: DocumentNodeRef | undefined,
-    signal?: AbortSignal
-  ): Promise<IndexedPageSnapshot> {
-    const submission = buildFormSubmissionRequest(form, state, submitter);
-    assertPageInitiatedNavigation(document.snapshot.finalUrl, submission.url);
-    return indexedPageSnapshot(await openPageInitiatedNavigation(
-      this.#session(document.id),
-      document.snapshot.finalUrl,
-      submission.url,
-      {
-        ...submission.requestOptions,
-        ...(signal === undefined ? {} : { signal })
-      }
-    ));
+    document: BrowserDocumentState, form: DocumentForm, state: DocumentState,
+    submitter: DocumentNodeRef | undefined, signal?: AbortSignal,
+  ): Promise<AcquiredNavigation> {
+    const actionAttribute = document.snapshot.document.attribute(form.node, "action");
+    const controls = form.controls.map((control) => control.kind === "submit"
+      && document.snapshot.document.attribute(control.node, "formaction") === ""
+      ? { ...control, formAction: document.snapshot.finalUrl } : control);
+    const submission = buildFormSubmissionRequest({ ...form, controls,
+      action: actionAttribute === null || actionAttribute.length === 0 ? document.snapshot.finalUrl : form.action,
+    }, state, submitter);
+    const provenance = { kind: "page-initiated" as const, sourceUrl: document.snapshot.finalUrl };
+    const snapshot = await this.#acquisition(document.id).acquire(submission.url, {
+      ...submission.requestOptions, ...(signal === undefined ? {} : { signal }),
+    }, undefined, provenance);
+    return { snapshot, provenance, mode: "push" };
   }
 
   public async persistSnapshot(snapshot: IndexedPageSnapshot): Promise<void> {
@@ -811,62 +753,32 @@ export class BrowserController {
     return `Opened ${parsedTarget.toString()} externally.`;
   }
 
-  async #openNewDocument(
-    target: string,
-    signal?: AbortSignal,
-    scrollAnchor?: StoredBrowserDocument["scrollAnchor"],
-    persist = false,
-    sourceUrl?: string
-  ): Promise<BrowserDocumentState> {
-    const id = this.#newDocumentId();
-    return this.#openDocument(id, target, signal, scrollAnchor, persist, sourceUrl);
-  }
-
   async #openDocument(
     id: string,
     target: string,
     signal?: AbortSignal,
     scrollAnchor?: StoredBrowserDocument["scrollAnchor"],
-    persist = false,
     sourceUrl?: string,
   ): Promise<BrowserDocumentState> {
     signal?.throwIfAborted();
     if (this.#closed) throw new Error("Browser controller is closed.");
-    const session = this.#createSession(this.#store.httpSession);
-    this.#sessions.set(id, session);
-    this.#provisionalSessionIds.add(id);
+    const session = this.#createAcquisition(this.#store.httpSession);
+    this.#acquisitions.set(id, session);
+    this.#provisionalAcquisitionIds.add(id);
     try {
-      const snapshot = await this.#open(session, target, signal, sourceUrl);
+      const snapshot = await session.acquire(resolveInputUrl(target), signal === undefined ? {} : { signal }, undefined,
+        sourceUrl === undefined ? { kind: "direct" } : { kind: "page-initiated", sourceUrl });
       signal?.throwIfAborted();
-      if (this.#sessions.get(id) !== session) throw this.#obsoletePreparation();
-      if (persist) await this.#persist(snapshot);
-      return this.#document(id, snapshot, scrollAnchor);
+      if (this.#acquisitions.get(id) !== session) throw this.#obsoletePreparation();
+      return this.#document(id, snapshot, scrollAnchor, sourceUrl);
     } catch (error) {
-      if (this.#sessions.get(id) === session) {
-        this.#sessions.delete(id);
-        this.#provisionalSessionIds.delete(id);
+      if (this.#acquisitions.get(id) === session) {
+        this.#acquisitions.delete(id);
+        this.#provisionalAcquisitionIds.delete(id);
       }
       await session.destroy(error instanceof Error ? error : new Error(String(error)));
       throw error;
     }
-  }
-
-  async #open(
-    session: BrowserSession,
-    target: string,
-    signal?: AbortSignal,
-    sourceUrl?: string
-  ): Promise<IndexedPageSnapshot> {
-    const resolvedTarget = resolveInputUrl(target);
-    const snapshot = sourceUrl === undefined
-      ? await session.open(resolvedTarget, signal)
-      : await openPageInitiatedNavigation(
-        session,
-        sourceUrl,
-        resolvedTarget,
-        { ...(signal === undefined ? {} : { signal }) }
-      );
-    return indexedPageSnapshot(snapshot);
   }
 
   async #persist(snapshot: IndexedPageSnapshot): Promise<void> {
@@ -881,23 +793,23 @@ export class BrowserController {
     );
   }
 
-  #session(documentId: string): BrowserSession {
-    const session = this.#sessions.get(documentId);
-    if (!session) throw new Error(`No browser session exists for ${documentId}.`);
+  #acquisition(documentId: string): PageAcquisition {
+    const session = this.#acquisitions.get(documentId);
+    if (!session) throw new Error(`No page acquisition exists for ${documentId}.`);
     return session;
   }
 
-  async #releaseDiscardedSessions(state: BrowserTuiState): Promise<void> {
+  async #releaseDiscardedAcquisitions(state: BrowserTuiState): Promise<void> {
     const retainedIds = new Set([
       ...state.documents.map((document) => document.id),
       ...state.recentlyClosed.map((document) => document.id)
     ]);
-    const discarded = [...this.#sessions.entries()]
-      .filter(([id]) => !retainedIds.has(id) && !this.#provisionalSessionIds.has(id));
+    const discarded = [...this.#acquisitions.entries()]
+      .filter(([id]) => !retainedIds.has(id) && !this.#provisionalAcquisitionIds.has(id));
     const discardedRendering = [...this.#documentAttachments.keys()]
       .filter((id) => !retainedIds.has(id));
     for (const [id] of discarded) {
-      this.#sessions.delete(id);
+      this.#acquisitions.delete(id);
     }
     for (const id of discardedRendering) this.#documentAttachments.delete(id);
     await settleBrowserCleanup(
@@ -918,8 +830,11 @@ export class BrowserController {
   #document(
     id: string,
     snapshot: IndexedPageSnapshot,
-    storedAnchor?: StoredBrowserDocument["scrollAnchor"]
+    storedAnchor?: StoredBrowserDocument["scrollAnchor"],
+    sourceUrl?: string,
   ): BrowserDocumentState {
+    const fragment = resolveDocumentFragment(snapshot.document, snapshot.finalUrl);
+    const restoredAnchor = restoredScrollAnchor(snapshot, storedAnchor);
     const firstAnchor = {
       source: snapshot.document.body ?? snapshot.document.documentElement,
       rowOffset: 0,
@@ -931,22 +846,18 @@ export class BrowserController {
       documentRevision: 1,
       stateRevision: 1,
       snapshot,
-      scrollAnchor: restoredScrollAnchor(snapshot, storedAnchor) ?? firstAnchor,
-      documentState: createDocumentState(snapshot.document),
-      rendering: {
-        status: "idle",
-        requestedViewportRevision: 0,
-        committedViewportRevision: 0,
-        requestKey: null,
-        pendingSearch: null, searchRequestGeneration: 0,
-        pendingFocus: null,
-        viewport: null,
-        summary: null,
-        error: null
-      },
+      scrollAnchor: restoredAnchor ?? firstAnchor,
+      scrollColumn: storedAnchor?.columnOffset ?? 0,
+      scrollOffsets: [],
+      documentState: createDocumentState(snapshot.document, snapshot.finalUrl),
+      rendering: { ...emptyRendering(),
+        pendingReveal: restoredAnchor === undefined && fragment.kind === "node" ? { node: fragment.node, align: "start" } : null,
+        pendingFocus: fragment.kind === "node" ? navigationFocus(snapshot, fragment.node) : null },
       search: null,
       formEditors: {},
-      savedViews: {},
+      navigation: commitNavigation(emptyHistory(), snapshot, "push", sourceUrl === undefined ? { kind: "direct" } : { kind: "page-initiated", sourceUrl }),
+      entryViews: {},
+      liveDocuments: {},
       loading: false,
       pendingUrl: null,
       canGoBack: false,

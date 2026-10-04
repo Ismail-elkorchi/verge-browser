@@ -3,7 +3,7 @@ import { runTui, TuiRunError } from "@ismail-elkorchi/terminal-ui/tui";
 import type { DiagnosticOccurrence, TerminalDiagnosticValue } from "@ismail-elkorchi/terminal-ui";
 import type { HttpSessionAdapter } from "@ismail-elkorchi/http-client";
 
-import type { BrowserSession } from "../app/session.js";
+import type { PageAcquisition } from "../app/page-acquisition.js";
 import type { BrowserStore } from "../app/storage.js";
 import type { RenderInstrumentation } from "../presentation/renderer/index.js";
 import type { TerminalSize } from "@ismail-elkorchi/terminal-ui/host";
@@ -17,7 +17,7 @@ import { browserView } from "./view.js";
 export interface BrowserTuiOptions {
   readonly store: BrowserStore;
   readonly services: BrowserServices;
-  readonly createSession: (httpSession: HttpSessionAdapter) => BrowserSession;
+  readonly createAcquisition: (httpSession: HttpSessionAdapter) => PageAcquisition;
   readonly searchUrlTemplate?: string;
   readonly downloadDirectory?: string;
   readonly downloadMaxBytes?: number;
@@ -127,6 +127,9 @@ export async function renderBrowserOnce(
       columns: pageSize.columns,
       rows: pageSize.rows,
       scrollRow: documentScrollRow(selected),
+      scrollColumn: selected.scrollColumn ?? 0,
+      scrollOffsets: selected.scrollOffsets,
+      ...(selected.rendering.pendingReveal === null ? {} : { reveal: selected.rendering.pendingReveal }),
       overscanBefore: Math.min(6, pageSize.rows),
       overscanAfter: Math.min(12, pageSize.rows),
       preferences: browserRenderPreferences(),
@@ -145,11 +148,14 @@ export async function renderBrowserOnce(
     }
     const renderedDocument = {
       ...selected,
+      scrollColumn: payload.scrollColumn ?? 0,
+      scrollOffsets: payload.scrollOffsets,
       rendering: {
         ...selected.rendering,
         status: "ready" as const,
         requestedViewportRevision: viewportRevision,
         committedViewportRevision: viewportRevision,
+        pendingReveal: null,
         viewport: payload,
         summary: payload.summary,
         error: null,

@@ -212,6 +212,7 @@ export interface DocumentFormControlBase {
 export interface DocumentTextControl extends DocumentFormControlBase {
   readonly kind: "text";
   readonly inputType: "text" | "search" | "email" | "url" | "tel" | "password" | "number";
+  readonly size: number;
   readonly defaultValue: string;
   readonly placeholder: string | null;
   readonly readOnly: boolean;
@@ -222,6 +223,8 @@ export interface DocumentTextControl extends DocumentFormControlBase {
 
 export interface DocumentTextareaControl extends DocumentFormControlBase {
   readonly kind: "textarea";
+  readonly rows: number;
+  readonly cols: number;
   readonly defaultValue: string;
   readonly placeholder: string | null;
   readonly readOnly: boolean;
@@ -352,7 +355,7 @@ export type DocumentIndexOutcome = {
 };
 
 export type DocumentAction =
-  | { readonly kind: "follow-link"; readonly target: DocumentNodeRef }
+  | { readonly kind: "set-url-target"; readonly target: DocumentNodeRef | null }
   | { readonly kind: "reset-form"; readonly target: DocumentNodeRef }
   | { readonly kind: "set-control-value"; readonly target: DocumentNodeRef; readonly value: string }
   | { readonly kind: "set-checked"; readonly target: DocumentNodeRef; readonly checked: boolean }

@@ -1,3 +1,5 @@
+import type { ViewportRevealRequest } from "../presentation/terminal/index.js";
+import type { NavigationHistory, NavigationProvenance } from "../app/navigation-history.js";
 import type {
   CheckboxGroupTransition,
   ComboboxCommitEvent,
@@ -101,6 +103,7 @@ export interface BrowserDocumentState {
   readonly stateRevision: number;
   readonly snapshot: IndexedPageSnapshot;
   readonly documentState: DocumentState;
+  readonly scrollOffsets: readonly { readonly node: DocumentNodeRef; readonly inline: number; readonly block: number }[];
   readonly rendering: {
     readonly status: "idle" | "rendering" | "ready" | "failed";
     readonly requestedViewportRevision: number;
@@ -108,6 +111,7 @@ export interface BrowserDocumentState {
     readonly requestKey: string | null;
     readonly searchRequestGeneration: number;
     readonly pendingSearch: { readonly query: string; readonly requestGeneration: number; readonly stateRevision: number } | null;
+    readonly pendingReveal: ViewportRevealRequest | null;
     readonly pendingFocus: {
       readonly node: DocumentNodeRef;
       readonly actionId: string;
@@ -117,6 +121,7 @@ export interface BrowserDocumentState {
     readonly summary: RenderDocumentSummary | null;
     readonly error: string | null;
   };
+  readonly scrollColumn?: number;
   readonly scrollAnchor: {
     readonly source: DocumentNodeRef | null;
     readonly rowOffset: number;
@@ -134,9 +139,17 @@ export interface BrowserDocumentState {
       }
     | { readonly kind: "checkboxGroup"; readonly state: CollectionInteractionState }
   >>;
-  readonly savedViews: Readonly<Record<string, {
-    readonly document: IndexedPageSnapshot["document"];
+  readonly navigation: NavigationHistory;
+  readonly entryViews: Readonly<Record<string, {
+    readonly scrollColumn?: number;
     readonly scrollAnchor: BrowserDocumentState["scrollAnchor"];
+    readonly focus: DocumentNodeRef | null;
+    readonly search: { readonly query: string; readonly activeMatchIndex: number } | null;
+  }>>;
+  readonly liveDocuments: Readonly<Record<string, {
+    readonly documentState: DocumentState;
+    readonly formEditors: BrowserDocumentState["formEditors"];
+    readonly scrollOffsets: BrowserDocumentState["scrollOffsets"];
   }>>;
   readonly loading: boolean;
   readonly pendingUrl: string | null;
@@ -270,7 +283,8 @@ export type BrowserTuiMessage =
   | { readonly kind: "searchFailed"; readonly documentId: string; readonly documentRevision: number;
       readonly stateRevision: number; readonly requestGeneration: number; readonly message: string }
   | { readonly kind: "dismiss" }
-  | { readonly kind: "scroll"; readonly rows: number }
+  | { readonly kind: "scroll"; readonly rows: number; readonly columns?: number }
+  | { readonly kind: "scrollOwner"; readonly node: DocumentNodeRef | null; readonly rows: number; readonly columns: number }
   | { readonly kind: "scrollTo"; readonly row: number }
   | { readonly kind: "scrollTop" }
   | { readonly kind: "scrollBottom" }
@@ -329,7 +343,7 @@ export type BrowserTuiMessage =
   | { readonly kind: "formComboboxTransition"; readonly controlId: string; readonly transition: ComboboxControlTransition }
   | { readonly kind: "formComboboxCommit"; readonly controlId: string; readonly event: ComboboxCommitEvent }
   | { readonly kind: "formCheckboxGroup"; readonly controlId: string; readonly transition: CheckboxGroupTransition }
-  | { readonly kind: "formValues"; readonly controlId: string; readonly values: readonly string[] }
+  | { readonly kind: "formValues"; readonly controlId: string; readonly values: readonly string[]; readonly focusTarget?: DocumentNodeRef }
   | { readonly kind: "activateButton"; readonly controlId: string }
   | { readonly kind: "resetForm"; readonly formId: string; readonly resetterId?: string }
   | { readonly kind: "submitForm"; readonly formId: string; readonly submitterId?: string }
@@ -340,8 +354,10 @@ export type BrowserTuiMessage =
       readonly documentId: string;
       readonly snapshot: IndexedPageSnapshot;
       readonly status: string;
-      readonly canGoBack: boolean;
-      readonly canGoForward: boolean;
+      readonly sourceEntryId: string;
+      readonly provenance: NavigationProvenance;
+      readonly mode: "push" | "replace";
+      readonly sharedDocumentId?: string;
     }
   | {
       readonly kind: "documentOpened";

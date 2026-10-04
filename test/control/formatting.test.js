@@ -551,7 +551,7 @@ test("author-style truncation cannot suppress retained document content", () => 
   const { formatting } = formatted(
     `<style>span:first-child{color:red} span:last-child{color:blue}</style><main>${"<span>word</span>".repeat(20)}</main>`,
     undefined,
-    { maxSelectorQueries: 1 }
+    { maxSelectorSteps: 1 }
   );
   assert.ok(formatting.suppressed.every((entry) => entry.reason === "display-none"));
   assert.equal(nodes(formatting).filter((node) => node.kind === "text-sequence").length, 20);

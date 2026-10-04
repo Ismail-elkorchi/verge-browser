@@ -306,14 +306,14 @@ test("diagnostic truncation reports omitted occurrences across compile and evalu
 
 test("each evaluation has a fresh work budget and reuses its structural session", () => {
   const result = setup('<style>.hot:hover{color:red}.hot:focus{background:blue}</style><p id=t class=hot>x</p>');
-  const target = result.document.elementById("t"), session = result.program.selectorRuntime.authorSession;
+  const target = result.document.elementById("t"), session = result.program.selectorRuntime.session;
   for (let index = 0; index < 120; index += 1) {
     const state = Object.freeze({ ...result.state, hover: index % 2 === 0 ? target : null, focus: index % 3 === 0 ? target : null });
     const styles = result.resolve(state, environment, { maxSelectorSteps: 100 });
     assert.equal(styles.outcome.status, "complete");
     assert.deepEqual(styles.style(target).text.color, state.hover === target ? red : null);
     assert.deepEqual(styles.style(target).text.background, state.focus === target ? blue : null);
-    assert.equal(result.program.selectorRuntime.authorSession, session);
+    assert.equal(result.program.selectorRuntime.session, session);
     assert.ok(session.usage().steps <= 100);
   }
 });
@@ -360,7 +360,8 @@ test("deep repeated nesting retains a shared selector graph and bounded evaluati
   const result = setup(`<style>#t{${"&,&{".repeat(depth)}color:red;${"}".repeat(depth + 1)}</style><p id=t>x</p>`);
   assert.equal(result.styles.outcome.status, "complete");
   assert.deepEqual(result.style().text.color, red);
-  assert.ok(result.program.selectorRuntime.authorSession.usage().steps < 10_000);
+  // The complete work meter counts 13,615 steps for this shared nesting graph.
+  assert.ok(result.program.selectorRuntime.session.usage().steps < 20_000);
   const nested = [...result.program.compiledSelectors.values()].at(-1);
   assert.equal(nested[0].selector.selectors[0].compounds[0].simples[0].argument.selectors,
     nested[1].selector.selectors[0].compounds[0].simples[0].argument.selectors);
@@ -372,4 +373,43 @@ test("nesting support queries and top-level scope consume the implemented select
   const root = result.styles.style(result.document.documentElement);
   assert.deepEqual(root.text.background, blue);
   assert.deepEqual(root.text.color, green);
+});
+
+test("overflow shorthand cascade and computed axes cover the five policies", () => {
+  const keywords = ["visible", "clip", "hidden", "auto", "scroll"];
+  const normalized = (axis, other) => ["hidden", "auto", "scroll"].includes(other)
+    ? axis === "visible" ? "auto" : axis === "clip" ? "hidden" : axis : axis;
+  for (const x of keywords) for (const y of keywords) {
+    const box = setup(`<p id=t style="overflow:${x} ${y}">x</p>`).style().box;
+    assert.equal(box.overflowX, normalized(x, y), `${x}/${y} x`);
+    assert.equal(box.overflowY, normalized(y, x), `${x}/${y} y`);
+  }
+  for (const declaration of ["overflow-x:clip;overflow:hidden", "overflow:hidden!important;overflow-x:clip"]) {
+    const box = setup(`<p id=t style="${declaration}">x</p>`).style().box;
+    assert.equal(box.overflowX, "hidden");
+    assert.equal(box.overflowY, "hidden");
+  }
+  assert.equal(setup('<p id=t style="overflow:auto;overflow:var(--missing)">x</p>').style().box.overflowY, "visible");
+});
+
+test("media math shares typed lengths, absolute units, and initial font metrics", () => {
+  for (const expression of ["calc(1120px - 1px)", "min(1200px, max(1000px, 1119px))", "clamp(1000px,1119px,1200px)", "calc(11in + 63px)", "calc(69em + 15px)"]) {
+    const result = setup(`<style>html{font-size:100px}@media (max-width:${expression}){#t{color:red}}</style><p id=t>x</p>`);
+    for (const [width, matches] of [[1118,true],[1119,true],[1120,false]]) {
+      const styles = result.resolve(result.state, {...environment, viewportWidthCssPx:width});
+      assert.equal(styles.style(result.document.elementById("t")).text.color?.r === 255, matches, `${expression}/${width}`);
+    }
+  }
+  for (const value of ["calc(100% + 1px)", "calc(1px / 0)", "calc(1px * 1px)", "var(--boundary)"]) {
+    assert.notDeepEqual(setup(`<style>@media (max-width:${value}){#t{color:red}}</style><p id=t>x</p>`).style().text.color, red);
+  }
+});
+
+test("overflow rollback, inheritance and support use the cascade machinery", () => {
+  const result = setup(`<style>@layer base,next;@layer base{#t{overflow:hidden auto}}@layer next{#t{overflow:clip;overflow:revert-layer}}#child{overflow:inherit}@supports (overflow:clip scroll){#t{color:red}}@supports (contain:paint){#child{color:blue}}</style><div id=t><div id=child>x</div></div>`);
+  assert.equal(result.style().box.overflowX,"hidden");
+  assert.equal(result.style().box.overflowY,"auto");
+  assert.equal(result.style("child").box.overflowY,"auto");
+  assert.deepEqual(result.style().text.color,red);
+  assert.deepEqual(result.style("child").text.color,blue);
 });

@@ -13,6 +13,7 @@ import { layoutElement, renderElementFrame, renderFramePlain } from "@ismail-elk
 import { createTuiRuntime, defineTui } from "@ismail-elkorchi/terminal-ui/tui";
 
 import { fetchPage, fetchPageStream, fetchStylesheet } from "../../dist/app/fetch-page.js";
+import { PageAcquisition } from "../../dist/app/page-acquisition.js";
 import { BrowserSession } from "../../dist/app/session.js";
 import { BrowserStore } from "../../dist/app/storage.js";
 import { documentContentBounds } from "../../dist/ui/document-layout.js";
@@ -59,7 +60,7 @@ async function fixture(overrides = {}) {
       async openExternal() {}, async openPath() {}, async close() {},
       ...overrides.services,
     },
-    createSession: () => new BrowserSession({
+    createAcquisition: () => new PageAcquisition({
       loader: async (target) => response(target, { html: overrides.html ?? html }),
       stylesheetLoader: async () => { throw new Error("Unexpected stylesheet"); },
       defaultParseMode: "text",
@@ -308,15 +309,15 @@ test("aborting after a buffered custom loader resolves preserves the original pa
 });
 
 test("one-shot rendering rejects a style-budget incomplete document", async () => {
-  const rules = Array.from({ length: 4_097 }, (_, index) => `.boundary-${index}{color:red}`).join("\n");
-  const f = await fixture({ html: `<!doctype html><title>Incomplete</title><style>${rules}</style><p>Visible</p>` });
+  const rules = "span:nth-child(odd of :not(.absent)){color:red}";
+  const f = await fixture({ html: `<!doctype html><title>Incomplete</title><style>${rules}</style><p>Visible</p>${"<span>item</span>".repeat(2000)}` });
   try {
     assert.match(renderFramePlain(f.runtime.frame()), /rendering incomplete/u);
     await f.runtime.dispatch({ kind: "openDetail", detail: "diagnostics" });
-    assert.ok(f.runtime.state().overlay.lines.some((line) => line === "Incomplete: style.maxSelectorQueries=4096"));
+    assert.ok(f.runtime.state().overlay.lines.some((line) => /^Incomplete: style\.maxSelectorSteps=\d+$/u.test(line)));
     assert.ok(f.runtime.state().overlay.lines.includes("Style fallback: user-agent-only"));
     assert.equal(f.runtime.state().documents[0].rendering.summary.styleOutcome.fallback, "user-agent-only");
-    await assert.rejects(renderBrowserOnce(url, f.options, terminalSize), /One-shot rendering was incomplete \(style\.maxSelectorQueries=4096\)/u);
+    await assert.rejects(renderBrowserOnce(url, f.options, terminalSize), /One-shot rendering was incomplete \(style\.maxSelectorSteps=\d+\)/u);
   } finally { await f.close(); }
 });
 
@@ -357,4 +358,68 @@ test("retained control children remain inside their document allocation while re
       assert.match(renderFramePlain(f.runtime.frame()), /Visible page/u);
     }
   } finally { await f.close(); }
+});
+
+test("focused retained editor survives a fully clipped resize while the new viewport is pending", async () => {
+  const f = await fixture({ terminalSize: {columns:120,rows:30}, html: `<title>Pending resize</title><style>body{margin:0}input{position:absolute;left:760px;top:64px;width:160px}</style><input aria-label="Query" value="retained">` });
+  let release;
+  try {
+    const control=f.runtime.state().documents[0].snapshot.document.controls[0];
+    await f.runtime.dispatch({kind:"movePageFocus",direction:"next",currentActionId:""});
+    await waitUntil(f.runtime,()=>f.runtime.frame().focusPath?.includes(control.node));
+    await text(f.runtime,"X");
+    await waitUntil(f.runtime,()=>f.runtime.state().documents[0].rendering.status==="ready");
+    const editor=f.runtime.state().documents[0].formEditors[control.node];
+    const blocked=new Promise(resolve=>{release=resolve;});
+    const render=f.prepared.controller.renderViewport.bind(f.prepared.controller);
+    f.prepared.controller.renderViewport=async(...args)=>{await blocked;return render(...args);};
+    await f.runtime.resize({columns:80,rows:30});
+    assert.equal(f.runtime.state().documents[0].rendering.status,"rendering");
+    assert.equal(f.runtime.state().documents[0].formEditors[control.node],editor);
+    assert.equal(f.runtime.state().documents[0].rendering.pendingFocus?.node,control.node);
+    await f.runtime.resize({columns:60,rows:30});
+    assert.equal(f.runtime.state().documents[0].rendering.pendingFocus?.node,control.node);
+    assert.equal(f.runtime.diagnostics().length,0);
+    assert.equal(renderFramePlain(f.runtime.frame()).includes("retainedX"),false);
+    assert.ok(f.runtime.frame().focusPath?.includes(control.node));
+    await text(f.runtime,"Z");
+    const pendingEditor=f.runtime.state().documents[0].formEditors[control.node];
+    assert.equal(f.runtime.state().documents[0].documentState.controls.get(control.node).values[0],"retainedXZ");
+    assert.equal(f.runtime.state().omnibox.editor.input.text,url);
+    release();
+    await waitUntil(f.runtime,()=>f.runtime.state().documents[0].rendering.status==="ready");
+    assert.equal(f.runtime.state().documents[0].formEditors[control.node],pendingEditor);
+    assert.ok(f.runtime.frame().focusPath?.includes(control.node));
+    await text(f.runtime,"Y");
+    assert.equal(f.runtime.state().documents[0].documentState.controls.get(control.node).values[0],"retainedXZY");
+  } finally {release?.();await f.close();}
+});
+
+test("fully clipped retained select suppresses its open portal during pending resize", async () => {
+  const f=await fixture({terminalSize:{columns:120,rows:30},html:`<title>Portal resize</title><style>body{margin:0}select{position:absolute;left:760px;top:64px;width:160px}</style><select aria-label="Language"><option value="en">English</option><option value="fr">French</option></select>`});
+  let release;
+  try {
+    const control=f.runtime.state().documents[0].snapshot.document.controls[0];
+    await f.runtime.dispatch({kind:"movePageFocus",direction:"next",currentActionId:""});
+    await waitUntil(f.runtime,()=>f.runtime.frame().focusPath?.includes(control.node));
+    await input(f.runtime,key("enter"));
+    await waitUntil(f.runtime,()=>f.runtime.state().documents[0].rendering.status==="ready");
+    assert.ok(renderFramePlain(f.runtime.frame()).includes("French"));
+    const editor=f.runtime.state().documents[0].formEditors[control.node];
+    const blocked=new Promise(resolve=>{release=resolve;});
+    const render=f.prepared.controller.renderViewport.bind(f.prepared.controller);
+    f.prepared.controller.renderViewport=async(...args)=>{await blocked;return render(...args);};
+    await f.runtime.resize({columns:80,rows:30});
+    assert.equal(f.runtime.state().documents[0].rendering.status,"rendering");
+    assert.equal(f.runtime.diagnostics().length,0);
+    assert.equal(f.runtime.state().documents[0].formEditors[control.node],editor);
+    assert.equal(f.runtime.state().documents[0].rendering.pendingFocus?.node,control.node);
+    assert.equal(renderFramePlain(f.runtime.frame()).includes("French"),false);
+    assert.ok(!f.runtime.frame().hitTargets.some(target=>target.id.startsWith(`${control.node}:popup:`)));
+    release();
+    await waitUntil(f.runtime,()=>f.runtime.state().documents[0].rendering.status==="ready");
+    assert.ok(f.runtime.frame().focusPath?.includes(control.node));
+    assert.equal(f.runtime.state().documents[0].formEditors[control.node],editor);
+    assert.deepEqual(f.runtime.state().documents[0].documentState.controls.get(control.node).values,["en"]);
+  } finally {release?.();await f.close();}
 });

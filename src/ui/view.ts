@@ -54,6 +54,7 @@ import type {
 import type {
   TerminalAccessibilityBound,
   TerminalCellRow,
+  TerminalControlGeometry,
   TerminalFocusTarget,
   TerminalHitRegion,
   TerminalSearchResult,
@@ -102,8 +103,8 @@ interface BrowserViewportTerminal {
   readonly accessibilityBounds: readonly TerminalAccessibilityBound[];
   readonly search: TerminalSearchResult | null;
   readonly documentRowCount: number;
-  readonly visibleDocumentNodes: readonly DocumentNodeRef[];
-  cellRectsForDocumentNode(node: DocumentNodeRef): readonly Rect[];
+  readonly controls: readonly TerminalControlGeometry[];
+  readonly scrollPorts: NonNullable<BrowserDocumentState["rendering"]["viewport"]>["scrollPorts"];
 }
 
 interface BrowserControlGroup {
@@ -118,11 +119,12 @@ interface BrowserDocumentComponentOptions {
 interface BrowserControlComponentOptions {
   readonly label: string;
   readonly node: DocumentNodeRef;
+  readonly geometry: TerminalControlGeometry;
 }
 
 type BrowserDocumentAction = Extract<
   BrowserTuiMessage,
-  { readonly kind: "activateActionAt" | "focusDocumentNode" | "openLinkMenu" }
+  { readonly kind: "activateActionAt" | "focusDocumentNode" | "openLinkMenu" | "scrollOwner" }
 >;
 
 const browserControlSlots = {
@@ -139,8 +141,10 @@ const browserControlComponent = defineComponent<
   semantics: "semantic",
   accessibleRole: "group",
   slots: browserControlSlots,
-  measure({ slots }) {
-    return slots.measure("control");
+  measure({ model }) {
+    return { minWidth: 0, minHeight: 0,
+      preferredWidth: model.geometry.allocation.width,
+      preferredHeight: model.geometry.allocation.height };
   },
   layout({ bounds }) {
     return { control: bounds };
@@ -171,14 +175,23 @@ function labelledBrowserControl(
   id: string,
   node: DocumentNodeRef,
   label: string,
-  control: Element<BrowserTuiMessage>
+  control: Element<BrowserTuiMessage>,
+  geometry: TerminalControlGeometry
 ): Element<BrowserTuiMessage> {
-  return browserControlComponent({
+  const labelled = browserControlComponent({
     id: `${id}:labelled-control`,
     label,
     node,
+    geometry,
     onAction: (action): BrowserTuiMessage => action,
     slots: { control }
+  });
+  return viewport(labelled, {
+    id: `${id}:control-clip`,
+    offset: {
+      row: geometry.visible.row - geometry.allocation.row,
+      column: geometry.visible.column - geometry.allocation.column
+    }
   });
 }
 
@@ -302,38 +315,9 @@ function rowSegments(
 }
 
 function controlGroups(controls: readonly DocumentFormControl[]): readonly BrowserControlGroup[] {
-  const groups: BrowserControlGroup[] = [];
-  const radioGroups = new Map<string, DocumentFormControl[]>();
-  for (const control of controls) {
-    if (control.kind !== "radio") continue;
-    const groupName = control.name.length === 0
-      ? control.node
-      : `${control.form ?? "document"}\u0000${control.name}`;
-    const group = radioGroups.get(groupName) ?? [];
-    group.push(control);
-    radioGroups.set(groupName, group);
-  }
-  const emittedRadios = new Set<string>();
-  for (const control of controls) {
-    if (control.kind === "hidden") continue;
-    if (control.kind !== "radio") {
-      groups.push({ form: control.form, controls: [control] });
-      continue;
-    }
-    const groupName = control.name.length === 0
-      ? control.node
-      : `${control.form ?? "document"}\u0000${control.name}`;
-    if (emittedRadios.has(groupName)) continue;
-    emittedRadios.add(groupName);
-    groups.push({ form: control.form, controls: radioGroups.get(groupName) ?? [control] });
-  }
-  return groups;
-}
-
-function radioGroupElementId(group: BrowserControlGroup): string | null {
-  const first = group.controls[0];
-  if (first?.kind !== "radio") return null;
-  return `${group.form ?? "document"}:radio:${first.name.length === 0 ? first.node : first.name}`;
+  // Radio semantics are shared, but each input owns an independent DOM allocation.
+  return controls.filter((control) => control.kind !== "hidden")
+    .map((control) => ({ form: control.form, controls: [control] }));
 }
 
 function documentNodeForTerminalFocusTarget(
@@ -342,12 +326,6 @@ function documentNodeForTerminalFocusTarget(
 ): DocumentNodeRef | null {
   const directControl = document.source.snapshot.document.control(targetId as DocumentNodeRef);
   if (directControl !== null) return directControl.node;
-  for (const group of document.controlGroups) {
-    if (radioGroupElementId(group) !== targetId) continue;
-    return group.controls.find((control) => controlValues(document.source, control).length > 0)?.node
-      ?? group.controls[0]?.node
-      ?? null;
-  }
   const action = document.terminalRender.focusMap.targets.find(
     (candidate) => documentActionId(candidate.action) === targetId
   );
@@ -357,6 +335,7 @@ function documentNodeForTerminalFocusTarget(
 function radioAction(
   controls: readonly DocumentChoiceControl[],
   selectedId: string | undefined,
+  activeId: string,
   transition: RadioGroupTransition
 ): BrowserTuiMessage {
   const options = controls.map((control) => ({
@@ -366,20 +345,23 @@ function radioAction(
     disabled: control.disabled
   }));
   const initial = {
-    ...(selectedId === undefined ? {} : { activeId: selectedId }),
+    activeId,
     selection: {
       mode: "single" as const,
       ...(selectedId === undefined ? {} : { selectedId })
     }
   };
-  const next = radioGroupReducer(initial, transition, options);
+  const moved = radioGroupReducer(initial, transition, options);
+  const next = transition.kind === "moveActive" || transition.kind === "firstActive" || transition.kind === "lastActive"
+    ? radioGroupReducer(moved, { kind: "commitActive" }, options) : moved;
   const nextId = next.selection.mode === "single" ? next.selection.selectedId : undefined;
   const control = controls.find((entry) => entry.node === nextId) ?? controls[0];
   if (!control) throw new Error("A radio group must contain at least one control.");
   return {
     kind: "formValues",
     controlId: control.node,
-    values: nextId === undefined ? [] : [control.value]
+    values: nextId === undefined ? [] : [control.value],
+    focusTarget: control.node
   };
 }
 
@@ -456,7 +438,7 @@ function inlineFormControl(
   if (control.kind === "checkbox") {
     const checkboxOptions = {
       id: control.node,
-      label: control.label,
+      label: "",
       checked: values.includes(control.value),
       required: control.required
     };
@@ -475,6 +457,7 @@ function inlineFormControl(
       const groupOptions = {
         id: control.node,
         label: control.label,
+        labelVisibility: "hidden" as const,
         options: controlOptions(control),
         state: multiSelectEditor(document.source, control),
         required: control.required
@@ -489,6 +472,7 @@ function inlineFormControl(
     const selectOptions = {
       id: control.node,
       label: control.label,
+      labelVisibility: "hidden" as const,
       collection: editor.collection,
       optionsView: editor.optionsView,
       required: control.required,
@@ -549,6 +533,12 @@ function inlineFormControl(
   return null;
 }
 
+function controlGeometry(document: BrowserDocumentComponentModel, node: DocumentNodeRef): TerminalControlGeometry {
+  const geometry = document.terminalRender.controls.find((entry) => entry.node === node);
+  if (geometry === undefined) throw new Error("A visible control requires layout-owned geometry.");
+  return geometry;
+}
+
 function inlineControlGroup(
   document: BrowserDocumentComponentModel,
   group: BrowserControlGroup
@@ -560,35 +550,27 @@ function inlineControlGroup(
     const control = inlineFormControl(document, first, group.form);
     return control === null
       ? null
-      : labelledBrowserControl(first.node, first.node, first.label, control);
+      : labelledBrowserControl(first.node, first.node, first.label, control, controlGeometry(document, first.node));
   }
-  const controls = group.controls.filter(
-    (control): control is DocumentChoiceControl => control.kind === "radio"
-  );
+  const controls = document.source.snapshot.document.radioGroup(first.node);
   const selected = controls.find((candidate) => controlValues(document.source, candidate).length > 0);
-  const id = radioGroupElementId(group);
-  if (id === null) throw new Error("A radio control group requires a radio-group identity.");
   const control = radioGroup({
-    id,
+    id: first.node,
     label: first.label,
-    options: controls.map((candidate) => ({
-      id: candidate.node,
-      label: candidate.label,
-      value: candidate.value,
-      disabled: candidate.disabled
-    })),
+    labelVisibility: "hidden",
+    options: [{ id: first.node, label: "", value: first.value, disabled: first.disabled }],
     state: {
-      ...(selected === undefined ? {} : { activeId: selected.node }),
+      activeId: first.node,
       selection: {
         mode: "single",
-        ...(selected === undefined ? {} : { selectedId: selected.node })
+        ...(selected?.node === first.node ? { selectedId: first.node } : {})
       }
     },
-    required: controls.some((candidate) => candidate.required),
-    onTransition: (transition): BrowserTuiMessage => radioAction(controls, selected?.node, transition)
+    disabled: first.disabled,
+    required: first.required,
+    onTransition: (transition): BrowserTuiMessage => radioAction(controls, selected?.node, first.node, transition)
   });
-  const focusNode = selected?.node ?? controls.find((candidate) => !candidate.disabled)?.node ?? first.node;
-  return labelledBrowserControl(id, focusNode, first.label, control);
+  return labelledBrowserControl(first.node, first.node, first.label, control, controlGeometry(document, first.node));
 }
 
 /** Projects document cells into the same clipped surface used for painting. */
@@ -631,13 +613,12 @@ function browserDocumentChildBounds(
   const contentBounds = documentContentBounds(bounds);
   const entries = document.controlGroups;
   return Array.from({ length: childCount }, (_, index) => {
-    const entry = entries[index];
-    if (!entry) {
-      return { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 };
-    }
-    const rectangles = entry.controls.flatMap((control) => terminalRender.cellRectsForDocumentNode(control.node));
-    return documentCellUnion(rectangles, contentBounds, contentBounds)
-      ?? { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 };
+    const control = entries[index]?.controls[0];
+    const geometry = terminalRender.controls.find((candidate) => candidate.node === control?.node);
+    if (geometry === undefined) throw new Error("A retained control slot requires its committed geometry.");
+    return { ...geometry.visible,
+      row: contentBounds.row + geometry.visible.row,
+      column: contentBounds.column + geometry.visible.column };
   });
 }
 
@@ -653,13 +634,16 @@ const browserDocumentComponent = defineComponent<BrowserDocumentComponentOptions
   accessibleRole: "document",
   slots: browserDocumentSlots,
   measure({ model, constraints, slots }) {
+    const terminalRender = model.document.terminalRender;
     const bounds = {
       row: 0,
       column: 0,
-      width: constraints.width,
+      // The accepted canvas keeps its logical width while a resized viewport is
+      // prepared. The outer viewport clips it physically without unmounting a
+      // focused native editor or discarding input routed to that editor.
+      width: Math.max(constraints.width, terminalRender.cellBuffer.columns),
       height: constraints.height
     };
-    const terminalRender = model.document.terminalRender;
     const childCount = slots.count("controls");
     const childBounds = browserDocumentChildBounds(
       model.document,
@@ -779,7 +763,27 @@ const browserDocumentComponent = defineComponent<BrowserDocumentComponentOptions
     const document = model.document;
     const terminalRender = document.terminalRender;
     const contentBounds = documentContentBounds(bounds);
-    return terminalRender.hitTestIndex.regions
+    const scrollTargets = terminalRender.scrollPorts.flatMap((port) => {
+      if (!port.userScrollInline && !port.userScrollBlock) return [];
+      const clipped = documentCellBounds(port.rect, contentBounds, visibleBounds);
+      return clipped === null ? [] : [{
+        id: `scroll-owner:${port.node}`,
+        bounds: clipped,
+        accepts: ["scroll" as const],
+        message: (event: RoutedPointerEvent): BrowserDocumentAction | ReturnType<typeof ignoreMessage> => event.kind === "scroll"
+          ? { kind: "scrollOwner", node: port.node, rows: event.deltaRows * 3, columns: event.deltaColumns * 3 }
+          : ignoreMessage()
+      }];
+    });
+    const rootScrollTarget = {
+      id: "document-scroll",
+      bounds: visibleBounds,
+      accepts: ["scroll" as const],
+      message: (event: RoutedPointerEvent): BrowserDocumentAction | ReturnType<typeof ignoreMessage> => event.kind === "scroll"
+        ? { kind: "scrollOwner", node: null, rows: event.deltaRows * 3, columns: event.deltaColumns * 3 }
+        : ignoreMessage()
+    };
+    return [rootScrollTarget, ...scrollTargets, ...terminalRender.hitTestIndex.regions
       .filter((placement) => placement.action.kind !== "form-control")
       .flatMap((placement) => {
         const clipped = documentCellBounds(placement.rect, contentBounds, visibleBounds);
@@ -793,7 +797,7 @@ const browserDocumentComponent = defineComponent<BrowserDocumentComponentOptions
             : ["click" as const, "pointerDown" as const],
           cursor: "pointer" as const,
           focus: { kind: "target" as const, targetId: placementActionId },
-          message: (event: RoutedPointerEvent) =>
+          message: (event: RoutedPointerEvent): BrowserDocumentAction | ReturnType<typeof ignoreMessage> =>
             event.kind === "pointerDown" && event.button !== "middle"
               ? ignoreMessage()
               : event.kind === "contextMenu" && placement.action.kind === "link"
@@ -813,7 +817,7 @@ const browserDocumentComponent = defineComponent<BrowserDocumentComponentOptions
                       : "current"
                 }
         }];
-      });
+      })];
   }
 });
 
@@ -851,17 +855,28 @@ function browserDocument(
 function committedBrowserViewport(document: BrowserDocumentState): BrowserViewportTerminal | null {
   const payload = document.rendering.viewport;
   if (payload === null) return null;
-  const rects = new Map(payload.cellRectsByDocumentNode);
+  // Render payload geometry stays in source coordinates. Project only this TUI
+  // adapter into the committed horizontal window; row text/code-unit ranges
+  // already describe that window and must not be shifted a second time.
+  const column = payload.cellBuffer.windowStartColumn ?? 0;
+  const rect = (value: Rect): Rect => column === 0 ? value : { ...value, column: value.column - column };
   return {
-    cellBuffer: payload.cellBuffer,
-    hitTestIndex: { regions: payload.hitRegions },
-    focusMap: { targets: payload.focusTargets },
-    accessibilityBounds: payload.accessibilityBounds,
+    cellBuffer: column === 0 ? payload.cellBuffer : {
+      ...payload.cellBuffer,
+      windowStartColumn: 0,
+      rows: payload.cellBuffer.rows.map((row) => ({ ...row,
+        cells: row.cells.map((cell) => ({ ...cell, column: cell.column - column })),
+        spans: row.spans.map((span) => ({ ...span, column: span.column - column }))
+      }))
+    },
+    hitTestIndex: { regions: column === 0 ? payload.hitRegions : payload.hitRegions.map((entry) => ({ ...entry, rect: rect(entry.rect) })) },
+    focusMap: { targets: column === 0 ? payload.focusTargets : payload.focusTargets.map((entry) => ({ ...entry, rects: entry.rects.map(rect) })) },
+    accessibilityBounds: column === 0 ? payload.accessibilityBounds : payload.accessibilityBounds.map((entry) => ({ ...entry, rect: rect(entry.rect) })),
     search: payload.search,
-    visibleDocumentNodes: Object.freeze([...rects.keys()]),
+    controls: column === 0 ? payload.controls : payload.controls.map((entry) => ({ ...entry, allocation: rect(entry.allocation), visible: rect(entry.visible) })),
+    scrollPorts: column === 0 ? payload.scrollPorts : payload.scrollPorts.map((entry) => ({ ...entry, rect: rect(entry.rect) })),
     documentRowCount: document.rendering.summary?.documentRowCount
       ?? payload.cellBuffer.documentRowCount,
-    cellRectsForDocumentNode: (node) => rects.get(node) ?? [],
   };
 }
 
@@ -891,7 +906,7 @@ function browserDocumentComponentModel(
     finalUrl: document.snapshot.finalUrl,
     search: document.search,
     searchRangesByRow,
-    controlGroups: controlGroups(terminalRender.visibleDocumentNodes.flatMap((node) => {
+    controlGroups: controlGroups(terminalRender.controls.flatMap(({ node }) => {
       const control = document.snapshot.document.control(node);
       return control === null ? [] : [control];
     }))

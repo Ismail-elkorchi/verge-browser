@@ -1,9 +1,8 @@
+import { scrollAttachmentEnvelope } from "./viewport-geometry.js";
 import { registerRetainedOwner } from "../../memory/retained-cost.js";
 import type { DocumentNodeRef } from "../../document/index.js";
 import {
   cssCoordinate,
-  cssCoordinateFromFixed,
-  cssLengthFromFixed,
   cssPx,
   cssRect,
   cssUnion,
@@ -18,6 +17,7 @@ import type {
   DocumentAccessibilityGeometry,
   DocumentDisplayList,
   DocumentFocusGeometry,
+  DocumentControlGeometry,
   DocumentGeometryEntry,
   DocumentGeometryIndex,
   DocumentScrollAnchorGeometry,
@@ -46,10 +46,6 @@ interface GeometryIntervalNode<T> {
   readonly right: GeometryIntervalNode<T> | null;
 }
 
-interface AttachedGeometry<T> {
-  readonly value: T;
-  readonly rects: readonly CssRect[];
-}
 
 function geometryIntervalTree<T>(values: readonly GeometryInterval<T>[]): GeometryIntervalNode<T> | null {
   if (values.length === 0) return null;
@@ -146,6 +142,39 @@ class GeometrySpatialIndex<T> {
   }
 }
 
+/** Semantic candidates use the same owner-local inverse windows as paint commands. */
+class OwnedGeometrySpatialIndex<T> {
+  readonly #owners: ReadonlyMap<LayoutFragmentId | null, GeometrySpatialIndex<T>>;
+  public constructor(values: readonly T[], fragments: (value: T) => readonly LayoutFragmentId[],
+    rects: (value: T) => readonly CssRect[], layout: LayoutFragmentTree, extent: CssRect, includeEmpty = false) {
+    const groups = new Map<LayoutFragmentId | null, {value:T;rects:readonly CssRect[]}[]>();
+    for (const value of values) {
+      const ownedFragments = fragments(value);
+      for (const [index, rect] of rects(value).entries()) {
+        const fragment = ownedFragments[index];
+        if (fragment === undefined) throw new Error("Semantic rectangle is missing its layout owner.");
+        const owner = layout.scrollAncestor(fragment);
+        const attachment = inheritedAttachment(layout, fragment);
+        const attachedHere = attachment !== null && (owner === null
+          || layout.scrollAncestor(attachment.root)?.fragment === owner.fragment || attachment.root === fragment);
+        const candidate = attachedHere ? scrollAttachmentEnvelope(rect, attachment, extent, layout) : rect;
+        const key = owner?.fragment ?? null;
+        const group = groups.get(key) ?? [];
+        group.push({value,rects:[candidate]});
+        groups.set(key,group);
+      }
+    }
+    this.#owners = new Map([...groups].map(([owner,entries])=>[owner,new GeometrySpatialIndex(entries,includeEmpty)]));
+    registerRetainedOwner(this,()=>[this.#owners]);
+  }
+  public query(rect: CssRect, signal?: AbortSignal, owner?: LayoutFragmentId | null): readonly T[] {
+    if (owner !== undefined) return this.#owners.get(owner)?.query(rect,signal) ?? [];
+    const values = new Set<T>();
+    for (const index of this.#owners.values()) for (const value of index.query(rect,signal)) values.add(value);
+    return [...values];
+  }
+}
+
 function fragmentBorderRects(fragment: LayoutFragment): readonly CssRect[] {
   return fragment.kind !== "text" && fragment.inlineContinuations !== undefined
     ? fragment.inlineContinuations.map((continuation) => continuation.borderRect)
@@ -154,6 +183,8 @@ function fragmentBorderRects(fragment: LayoutFragment): readonly CssRect[] {
 
 class ImmutableDocumentGeometryIndex implements DocumentGeometryIndex {
   readonly documentExtent: CssRect;
+  readonly controls: readonly DocumentControlGeometry[];
+  readonly #controlSpatial: OwnedGeometrySpatialIndex<DocumentControlGeometry>;
   readonly focusOrder: readonly DocumentFocusGeometry[];
   readonly accessibility: readonly DocumentAccessibilityGeometry[];
   readonly scrollAnchors: readonly DocumentScrollAnchorGeometry[];
@@ -163,26 +194,26 @@ class ImmutableDocumentGeometryIndex implements DocumentGeometryIndex {
   readonly #anchors: ReadonlyMap<DocumentNodeRef, DocumentScrollAnchorGeometry>;
   readonly #focus: ReadonlyMap<DocumentNodeRef, DocumentFocusGeometry>;
   readonly #accessibility: ReadonlyMap<DocumentNodeRef, DocumentAccessibilityGeometry>;
-  readonly #focusSpatial: GeometrySpatialIndex<DocumentFocusGeometry>;
-  readonly #attachedFocusSpatial: GeometrySpatialIndex<DocumentFocusGeometry>;
-  readonly #accessibilitySpatial: GeometrySpatialIndex<DocumentAccessibilityGeometry>;
-  readonly #attachedAccessibilitySpatial: GeometrySpatialIndex<DocumentAccessibilityGeometry>;
+  readonly #focusSpatial: OwnedGeometrySpatialIndex<DocumentFocusGeometry>;
+  readonly #accessibilitySpatial: OwnedGeometrySpatialIndex<DocumentAccessibilityGeometry>;
   readonly #focusOrdinal: ReadonlyMap<DocumentNodeRef, number>;
   readonly #accessibilityOrdinal: ReadonlyMap<DocumentNodeRef, number>;
 
   public constructor(
+    layout: LayoutFragmentTree,
     documentExtent: CssRect,
     geometry: ReadonlyMap<DocumentNodeRef, DocumentGeometryEntry>,
+    controls: readonly DocumentControlGeometry[],
     focusOrder: readonly DocumentFocusGeometry[],
-    attachedFocus: readonly AttachedGeometry<DocumentFocusGeometry>[],
     accessibility: readonly DocumentAccessibilityGeometry[],
-    attachedAccessibility: readonly AttachedGeometry<DocumentAccessibilityGeometry>[],
     scrollAnchors: readonly DocumentScrollAnchorGeometry[],
     retainedRectangles: number,
     truncations: readonly TerminalTruncation[],
   ) {
     this.documentExtent = documentExtent;
     this.#geometry = geometry;
+    this.controls = Object.freeze(controls);
+    this.#controlSpatial = new OwnedGeometrySpatialIndex(controls, entry=>[entry.fragment], entry=>[entry.rect],layout,documentExtent);
     this.focusOrder = Object.freeze([...focusOrder]);
     this.accessibility = Object.freeze([...accessibility]);
     this.scrollAnchors = Object.freeze(scrollAnchors
@@ -195,20 +226,12 @@ class ImmutableDocumentGeometryIndex implements DocumentGeometryIndex {
     this.#accessibility = new Map(accessibility.map((entry) => [entry.documentNode, entry]));
     this.#focusOrdinal = new Map(focusOrder.map((entry, ordinal) => [entry.node, ordinal]));
     this.#accessibilityOrdinal = new Map(accessibility.map((entry, ordinal) => [entry.documentNode, ordinal]));
-    this.#focusSpatial = new GeometrySpatialIndex(focusOrder.map((entry) => ({
-      value: entry,
-      rects: entry.rects,
-    })));
-    this.#attachedFocusSpatial = new GeometrySpatialIndex(attachedFocus);
-    this.#accessibilitySpatial = new GeometrySpatialIndex(accessibility.map((entry) => ({
-      value: entry,
-      rects: Object.freeze([entry.rect]),
-    })), true);
-    this.#attachedAccessibilitySpatial = new GeometrySpatialIndex(attachedAccessibility, true);
+    this.#focusSpatial = new OwnedGeometrySpatialIndex(focusOrder,entry=>entry.rectFragments,entry=>entry.rects,layout,documentExtent);
+    this.#accessibilitySpatial = new OwnedGeometrySpatialIndex(accessibility,entry=>entry.rectFragments,entry=>entry.rects,layout,documentExtent,true);
     this.retainedRectangles = retainedRectangles;
     this.truncations = Object.freeze([...truncations]);
     Object.freeze(this);
-    registerRetainedOwner(this, () => [this.#geometry, this.#anchors, this.#focus, this.#accessibility, this.#focusSpatial, this.#attachedFocusSpatial, this.#accessibilitySpatial, this.#attachedAccessibilitySpatial, this.#focusOrdinal, this.#accessibilityOrdinal]);
+    registerRetainedOwner(this, () => [this.#controlSpatial, this.#geometry, this.#anchors, this.#focus, this.#accessibility, this.#focusSpatial, this.#accessibilitySpatial, this.#focusOrdinal, this.#accessibilityOrdinal]);
   }
 
   public forDocumentNode(node: DocumentNodeRef): DocumentGeometryEntry | null {
@@ -227,27 +250,20 @@ class ImmutableDocumentGeometryIndex implements DocumentGeometryIndex {
     return this.#accessibility.get(node) ?? null;
   }
 
-  public focusIntersecting(rect: CssRect, signal?: AbortSignal): readonly DocumentFocusGeometry[] {
-    const values = new Map<DocumentNodeRef, DocumentFocusGeometry>();
-    for (const entry of this.#focusSpatial.query(rect, signal)) values.set(entry.node, entry);
-    for (const entry of this.#attachedFocusSpatial.query(rect, signal)) values.set(entry.node, entry);
-    return Object.freeze([...values.values()].sort((left, right) =>
-      (this.#focusOrdinal.get(left.node) ?? 0) - (this.#focusOrdinal.get(right.node) ?? 0)));
+  public controlsIntersecting(rect: CssRect, signal?: AbortSignal, owner?: LayoutFragmentId | null): readonly DocumentControlGeometry[] {
+    return Object.freeze([...new Set(this.#controlSpatial.query(rect,signal,owner))]);
   }
 
-  public accessibilityIntersecting(
-    rect: CssRect,
-    signal?: AbortSignal,
-  ): readonly DocumentAccessibilityGeometry[] {
-    const values = new Map<DocumentNodeRef, DocumentAccessibilityGeometry>();
-    for (const entry of this.#accessibilitySpatial.query(rect, signal)) values.set(entry.documentNode, entry);
-    for (const entry of this.#attachedAccessibilitySpatial.query(rect, signal)) {
-      values.set(entry.documentNode, entry);
-    }
-    return Object.freeze([...values.values()].sort((left, right) =>
-      (this.#accessibilityOrdinal.get(left.documentNode) ?? 0)
-        - (this.#accessibilityOrdinal.get(right.documentNode) ?? 0)));
+  public focusIntersecting(rect: CssRect, signal?: AbortSignal, owner?: LayoutFragmentId | null): readonly DocumentFocusGeometry[] {
+    return Object.freeze([...new Set(this.#focusSpatial.query(rect,signal,owner))].sort((left,right)=>
+      (this.#focusOrdinal.get(left.node)??0)-(this.#focusOrdinal.get(right.node)??0)));
   }
+
+  public accessibilityIntersecting(rect: CssRect, signal?: AbortSignal, owner?: LayoutFragmentId | null): readonly DocumentAccessibilityGeometry[] {
+    return Object.freeze([...new Set(this.#accessibilitySpatial.query(rect,signal,owner))].sort((left,right)=>
+      (this.#accessibilityOrdinal.get(left.documentNode)??0)-(this.#accessibilityOrdinal.get(right.documentNode)??0)));
+  }
+
 }
 
 function inheritedAttachment(
@@ -263,55 +279,8 @@ function inheritedAttachment(
   return null;
 }
 
-function attachmentEnvelope(
-  rect: CssRect,
-  attachment: LayoutScrollAttachment,
-  documentExtent: CssRect,
-): CssRect {
-  if (attachment.kind === "fixed") return documentExtent;
-  const normal = attachment.normalBorderRect;
-  const containing = attachment.containingBlock;
-  const rootInlinePositions = attachment.left === null && attachment.right === null
-    ? [normal.x]
-    : [normal.x, containing.x, containing.x + containing.width - normal.width];
-  const rootBlockPositions = attachment.top === null && attachment.bottom === null
-    ? [normal.y]
-    : [normal.y, containing.y, containing.y + containing.height - normal.height];
-  const minInline = Math.min(...rootInlinePositions);
-  const maxInline = Math.max(...rootInlinePositions);
-  const minBlock = Math.min(...rootBlockPositions);
-  const maxBlock = Math.max(...rootBlockPositions);
-  return cssRect(
-    cssCoordinateFromFixed(rect.x + minInline - normal.x),
-    cssCoordinateFromFixed(rect.y + minBlock - normal.y),
-    cssLengthFromFixed(rect.width + maxInline - minInline),
-    cssLengthFromFixed(rect.height + maxBlock - minBlock),
-  );
-}
 
-function attachedGeometry<T>(
-  values: readonly T[],
-  fragments: (value: T) => readonly LayoutFragmentId[],
-  rects: (value: T) => readonly CssRect[],
-  layout: LayoutFragmentTree,
-  documentExtent: CssRect,
-): readonly AttachedGeometry<T>[] {
-  const attached: AttachedGeometry<T>[] = [];
-  for (const value of values) {
-    const valueFragments = fragments(value);
-    const envelopes: CssRect[] = [];
-    for (const [index, rect] of rects(value).entries()) {
-      const fragment = valueFragments[index];
-      if (fragment === undefined) throw new Error("Semantic rectangle is missing its layout owner.");
-      const attachment = inheritedAttachment(layout, fragment);
-      if (attachment !== null) envelopes.push(attachmentEnvelope(rect, attachment, documentExtent));
-    }
-    if (envelopes.length > 0) attached.push(Object.freeze({ value, rects: Object.freeze(envelopes) }));
-  }
-  return Object.freeze(attached);
-}
 
-/** Builds document-space semantic and interaction geometry once per document layout. */
 export function buildDocumentGeometryIndex(
   list: DocumentDisplayList,
   signal?: AbortSignal,
@@ -324,10 +293,11 @@ export function buildDocumentGeometryIndex(
       cssPx(0),
       cssPx(0),
     );
-    return new ImmutableDocumentGeometryIndex(empty, new Map(), [], [], [], [], [], 0, []);
+    return new ImmutableDocumentGeometryIndex(list.layout, empty, new Map(), [], [], [], [], 0, []);
   }
   const document = list.layout.formatting.document;
   const geometry = new Map<DocumentNodeRef, MutableGeometry>();
+  const controls: DocumentControlGeometry[] = [];
   const focus = new Map<DocumentNodeRef, {
     action: NonNullable<LayoutFragment["action"]>;
     fragments: LayoutFragmentId[];
@@ -347,6 +317,7 @@ export function buildDocumentGeometryIndex(
   };
   let retainedRectangles = 0;
   let retainedFocusRectangles = 0;
+  let retainedAccessibilityRectangles = 0;
   const truncations = new Map<TerminalTruncation["budget"], number>();
   const truncated = (budget: TerminalTruncation["budget"], limit: number): void => {
     truncations.set(budget, limit);
@@ -376,6 +347,12 @@ export function buildDocumentGeometryIndex(
           retainedRectangles += 1;
         } else truncated("maxRetainedDocumentRectangles", budgets.maxRetainedDocumentRectangles);
       }
+    }
+    if (fragment.kind === "control" && fragment.documentNode !== null && fragment.style.visible
+      && fragment.borderRect.width > 0 && fragment.borderRect.height > 0) {
+      if (controls.length < budgets.maxRetainedDocumentRectangles) {
+        controls.push(Object.freeze({ node: fragment.documentNode, fragment: fragment.id, rect: fragment.borderRect }));
+      } else truncated("maxRetainedDocumentRectangles", budgets.maxRetainedDocumentRectangles);
     }
     if (fragment.action === null) continue;
     const control = document.control(fragment.action.node);
@@ -470,8 +447,12 @@ export function buildDocumentGeometryIndex(
     }
     const focusValue = focus.get(node);
     if (focusValue !== undefined) {
+      const firstFragment = focusValue.fragments[0];
+      const scrollOwner = firstFragment === undefined ? null
+        : list.layout.scrollContainer(firstFragment) ?? list.layout.scrollAncestor(firstFragment);
       focusOrder.push(Object.freeze({
         node,
+        scrollOwner: scrollOwner?.documentNode ?? null,
         action: focusValue.action,
         layoutFragments: Object.freeze(focusValue.fragments),
         rects: Object.freeze(focusValue.rects),
@@ -481,7 +462,7 @@ export function buildDocumentGeometryIndex(
     }
     const semantic = document.semantic(node);
     if (semantic === null || semantic.accessibilityHidden || value === undefined) continue;
-    if (accessibility.length >= budgets.maxRetainedAccessibilityRectangles) {
+    if (retainedAccessibilityRectangles >= budgets.maxRetainedAccessibilityRectangles) {
       truncated("maxRetainedAccessibilityRectangles", budgets.maxRetainedAccessibilityRectangles);
       continue;
     }
@@ -492,10 +473,16 @@ export function buildDocumentGeometryIndex(
       const fragment = list.layout.fragment(fragmentId);
       if (!fragment.style.visible) continue;
       for (const rect of fragmentBorderRects(fragment)) {
+        if (retainedAccessibilityRectangles >= budgets.maxRetainedAccessibilityRectangles) {
+          truncated("maxRetainedAccessibilityRectangles",budgets.maxRetainedAccessibilityRectangles);
+          break;
+        }
+        retainedAccessibilityRectangles += 1;
         semanticRects.push(rect);
         semanticRectFragments.push(fragmentId);
       }
     }
+    if (semanticRects.length === 0) retainedAccessibilityRectangles += 1;
     if (rect === null) {
       const fragment = value.fragments[0] === undefined ? null : list.layout.fragment(value.fragments[0]);
       rect = fragment?.borderRect ?? cssRect(cssCoordinate(cssPx(0)), cssCoordinate(cssPx(0)), cssPx(0), cssPx(0));
@@ -519,27 +506,14 @@ export function buildDocumentGeometryIndex(
       rectFragments: Object.freeze(semanticRectFragments),
     }));
   }
-  const root = list.layout.fragment(list.layout.root);
-  const extent = root.overflowRect;
+  const extent = list.layout.scrollExtent;
   return new ImmutableDocumentGeometryIndex(
+    list.layout,
     extent,
     immutable,
+    controls,
     focusOrder,
-    attachedGeometry(
-      focusOrder,
-      (entry) => entry.rectFragments,
-      (entry) => entry.rects,
-      list.layout,
-      extent,
-    ),
     accessibility,
-    attachedGeometry(
-      accessibility,
-      (entry) => entry.rectFragments,
-      (entry) => entry.rects,
-      list.layout,
-      extent,
-    ),
     anchors,
     retainedRectangles,
     [...truncations].map(([budget, limit]) => Object.freeze({ budget, limit })),

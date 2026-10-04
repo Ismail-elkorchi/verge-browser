@@ -15,3 +15,5 @@ export type {
   HtmlTableColumnGroupMetadata,
   HtmlTableMetadata,
 } from "./table/index.js";
+
+export { resolveDocumentFragment, type DocumentFragmentTarget } from "./fragment.js";

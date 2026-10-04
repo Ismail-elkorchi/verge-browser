@@ -60,7 +60,7 @@ function viewport(request, identity, summary) {
 
 const summary = { identity: "layout-1", documentRowCount: 500, incomplete: [], scrollAnchors: [{ documentNode: "target", row: 300 }],
   styleOutcome: { status: "complete", computedNodes: 1 }, styleDiagnostics: [], omittedStyleDiagnosticCount: 0,
-  focusOrder: [{ node: "target", actionId: "link:target", actionKind: "link", topRow: 300, bottomRow: 301 }], authorStateDependencies: [] };
+  focusOrder: [{ node: "target", scrollOwner: null, actionId: "link:target", actionKind: "link", topRow: 300, bottomRow: 301 }], authorStateDependencies: [] };
 
 test("summary receipt survives rejection of its viewport and acknowledges only held identity", async () => {
   const f = fixture();
@@ -78,6 +78,7 @@ test("summary receipt survives rejection of its viewport and acknowledges only h
     assert.equal(result.summary.documentRowCount, 500);
     assert.equal(result.summary.scrollAnchorByDocumentNode.get("target").row, 300);
     assert.equal(result.summary.focusOrder[0].topRow, 300);
+    assert.equal(result.summary.focusOrder[0].scrollOwner, null);
     const c = f.client.renderViewport(f.document, 3, parameters);
     const requestC = f.worker.requests.at(-1);
     assert.equal(requestC.heldSummaryIdentity, "layout-1");
@@ -187,7 +188,7 @@ function controllerFixture() {
   const f = fixture();
   const controller = new BrowserController({
     store: { async flush() {} }, services: { async close() {} },
-    createSession: () => { throw new Error("unexpected session allocation"); }, renderWorkerFactory: () => f.client,
+    createAcquisition: () => { throw new Error("unexpected session allocation"); }, renderWorkerFactory: () => f.client,
   });
   return { ...f, controller };
 }
@@ -321,7 +322,7 @@ test("a worker restart cannot accept an old epoch attachment acknowledgement", a
   const f = fixture();
   await f.client.close();
   const controller = new BrowserController({ store: { async flush() {} }, services: { async close() {} },
-    createSession: () => { throw new Error("unexpected session"); }, renderWorkerFactory: () => {
+    createAcquisition: () => { throw new Error("unexpected session"); }, renderWorkerFactory: () => {
       const worker = new ControlledWorker();
       const client = new RenderWorkerClient({ transport: worker, shutdownDeadlineMilliseconds: 10 });
       workers.push(worker); clients.push(client);

@@ -1,3 +1,4 @@
+import { resolveDocumentFragment } from "./fragment.js";
 import { registerRetainedOwner } from "../memory/retained-cost.js";
 import type {
   DocumentAction,
@@ -134,45 +135,8 @@ function defaultControlStates(
   return states;
 }
 
-function initialUrlTarget(document: IndexedWebDocumentSnapshot): DocumentNodeRef | null {
-  let fragment: string;
-  try {
-    fragment = new URL(document.finalUrl).hash.slice(1);
-  } catch {
-    return null;
-  }
-  if (fragment.length === 0) return null;
-  try {
-    fragment = decodeURIComponent(fragment);
-  } catch {
-    // A malformed escape sequence remains a literal fragment identifier.
-  }
-  return document.elementById(fragment);
-}
-
-function followedUrlTarget(document: IndexedWebDocumentSnapshot, destination: string): DocumentNodeRef | null {
-  let target: URL;
-  let current: URL;
-  try {
-    target = new URL(destination);
-    current = new URL(document.finalUrl);
-  } catch {
-    return null;
-  }
-  const fragment = target.hash.slice(1);
-  target.hash = "";
-  current.hash = "";
-  if (target.toString() !== current.toString() || fragment.length === 0) return null;
-  let id = fragment;
-  try {
-    id = decodeURIComponent(id);
-  } catch {
-    // A malformed escape sequence remains a literal fragment identifier.
-  }
-  return document.elementById(id);
-}
-
-export function createDocumentState(document: IndexedWebDocumentSnapshot): DocumentState {
+export function createDocumentState(document: IndexedWebDocumentSnapshot, entryUrl: string = document.finalUrl): DocumentState {
+  const fragment = resolveDocumentFragment(document, entryUrl);
   const controls = defaultControlStates(document.controls);
   const open = new Set<DocumentNodeRef>();
   for (const disclosure of document.disclosures) {
@@ -184,7 +148,7 @@ export function createDocumentState(document: IndexedWebDocumentSnapshot): Docum
     focus: null,
     hover: null,
     active: null,
-    urlTarget: initialUrlTarget(document)
+    urlTarget: fragment.kind === "node" ? fragment.node : null
   });
 }
 
@@ -199,10 +163,9 @@ export function applyDocumentAction(
     if (action.kind === "hover") return Object.freeze({ ...state, hover: action.target });
     return Object.freeze({ ...state, active: action.target });
   }
-  if (action.kind === "follow-link") {
-    const link = document.link(action.target);
-    if (link === null) throw new RangeError("Link action requires a link target");
-    return Object.freeze({ ...state, urlTarget: followedUrlTarget(document, link.destination) });
+  if (action.kind === "set-url-target") {
+    if (action.target !== null && document.node(action.target).kind !== "element") throw new TypeError("URL target must be an element.");
+    return Object.freeze({ ...state, urlTarget: action.target });
   }
   if (action.kind === "reset-form") {
     const form = document.form(action.target);

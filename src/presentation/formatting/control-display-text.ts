@@ -50,27 +50,23 @@ export function controlDisplayText(node: FormattingFormControlNode, tree: Format
     const value = state?.values[0] ?? control.defaultValue;
     const visibleValue = value || control.placeholder || "";
     return result(control.label, value, [
-      { kind: "label", text: control.label },
-      { kind: "control-decoration", text: control.label.length > 0 ? ": " : "" },
       { kind: value.length > 0 ? "control-value" : "placeholder", text: visibleValue }
     ]);
   }
   if (control.kind === "checkbox" || control.kind === "radio") {
     const checked = state?.checked ?? control.defaultChecked;
     return result(control.label, checked ? control.value : "", [
-      { kind: "control-decoration", text: `${checked ? "[x]" : "[ ]"} ` },
-      { kind: "label", text: control.label }
+      { kind: "control-decoration", text: control.kind === "radio" ? (checked ? "(●)" : "( )") : (checked ? "[x]" : "[ ]") }
     ]);
   }
   if (control.kind === "select") {
-    const values = state?.values ?? control.options
-      .filter((option) => option.defaultSelected)
-      .map((option) => option.value);
-    const value = values.join(", ");
+    const selected = new Set(state?.selected ?? control.options
+      .filter((option) => option.defaultSelected).map((option) => option.node));
+    const options = control.options.filter((option) => selected.has(option.node));
+    const value = options.map((option) => option.value).join(", ");
     return result(control.label, value, [
-      { kind: "label", text: control.label },
-      { kind: "control-decoration", text: control.label.length > 0 ? ": " : "" },
-      { kind: "control-value", text: value }
+      { kind: "control-value", text: options.map((option) => option.label).join(", ") },
+      { kind: "control-decoration", text: control.multiple ? "" : " ▸" }
     ]);
   }
   if (control.kind === "submit" || control.kind === "reset" || control.kind === "button") {
@@ -83,7 +79,6 @@ export function controlDisplayText(node: FormattingFormControlNode, tree: Format
   }
   if (control.kind === "hidden") return result("", control.defaultValue, []);
   return result(control.label, "", [
-    { kind: "label", text: control.label },
-    { kind: "control-decoration", text: control.label.length > 0 ? ": unsupported control" : "unsupported control" }
+    { kind: "control-decoration", text: "unsupported control" }
   ]);
 }

@@ -4,17 +4,12 @@ import type {
   TextSearchLayoutProjection,
   TextSearchMatchId,
 } from "../search/index.js";
-import { cssIntersection } from "../layout/index.js";
 import { terminalPaintBudgets } from "./display-list.js";
-import {
-  inheritedScrollAttachment,
-  scrollAttachedClipRect,
-  scrollAttachmentTranslation,
-  translatedScrollAttachedRect,
-} from "./viewport-display-list.js";
 import type {
   DocumentGeometryIndex,
   TerminalAccessibilityBound,
+  TerminalControlGeometry,
+  TerminalScrollPort,
   TerminalCellRect,
   TerminalFocusMap,
   TerminalFocusTarget,
@@ -44,12 +39,9 @@ function cssRectsToCellRects(
     const right = Math.min(rightBoundary, rect.x + rect.width);
     const bottom = Math.min(bottomBoundary, rect.y + rect.height);
     if (left >= right || top >= bottom) continue;
-    const column = Math.max(0, Math.floor(left / displayList.context.cellWidthCssPx));
+    const column = Math.floor(left / displayList.context.cellWidthCssPx);
     const row = Math.max(0, Math.floor(top / displayList.context.rowHeightCssPx));
-    const endColumn = Math.min(
-      displayList.context.columns,
-      Math.ceil(right / displayList.context.cellWidthCssPx),
-    );
+    const endColumn = Math.ceil(right / displayList.context.cellWidthCssPx);
     const endRow = Math.ceil(bottom / displayList.context.rowHeightCssPx);
     if (endColumn > column && endRow > row) {
       results.push(Object.freeze({ row, column, width: endColumn - column, height: endRow - row }));
@@ -66,10 +58,7 @@ function resolvedViewportGeometry(
   return rects.flatMap((rect, index) => {
     const fragment = fragments[index];
     if (fragment === undefined) throw new Error("Semantic rectangle is missing its layout owner.");
-    const attachment = inheritedScrollAttachment(displayList.documentDisplayList.layout, fragment);
-    const [inline, block] = attachment === null ? [0, 0] : scrollAttachmentTranslation(attachment, displayList.viewportRect);
-    const resolved = cssIntersection(translatedScrollAttachedRect(rect, inline, block),
-      scrollAttachedClipRect(displayList.documentDisplayList.layout, fragment, displayList.viewportRect));
+    const resolved = displayList.projection.visible(fragment, rect);
     return cssRectsToCellRects([resolved], displayList).map((cellRect) => ({ rect: cellRect, fragment }));
   });
 }
@@ -171,6 +160,8 @@ function searchResult(
   }
   const byMatch = new Map<TextSearchMatchId, TerminalSearchRange[]>();
   for (const [fragment, visible] of spansByFragment) {
+    // Logical source order must not depend on whether the index coalesced a run.
+    visible.sort((left, right) => (left.span.contentStartCodeUnit ?? 0) - (right.span.contentStartCodeUnit ?? 0));
     for (const layoutSpan of projection.spansByFragment.get(fragment) ?? []) {
       for (const entry of visible) {
         const span = entry.span;
@@ -178,6 +169,14 @@ function searchResult(
           || layoutSpan.contentStartCodeUnit >= span.contentEndCodeUnit
           || layoutSpan.contentEndCodeUnit <= span.contentStartCodeUnit) continue;
         const exact = span.contentEndCodeUnit - span.contentStartCodeUnit === span.endCodeUnit - span.startCodeUnit;
+        let sourceRange = layoutSpan.sourceRange;
+        if (sourceRange !== null && span.sourceRange !== null) {
+          const start = Math.max(sourceRange.start, span.sourceRange.start);
+          const end = Math.min(sourceRange.end, span.sourceRange.end);
+          sourceRange = end > start
+            ? Object.freeze({ start, end, provenance: sourceRange.provenance })
+            : null;
+        }
         const range = Object.freeze({
           match: layoutSpan.match,
           row: entry.row,
@@ -189,7 +188,7 @@ function searchResult(
             : span.endCodeUnit,
           layoutFragment: layoutSpan.fragment,
           documentNode: layoutSpan.documentNode,
-          sourceRange: layoutSpan.sourceRange,
+          sourceRange,
         });
         const ranges = byMatch.get(layoutSpan.match) ?? [];
         ranges.push(range);
@@ -229,7 +228,8 @@ export function buildViewportTerminalResult(input: BuildViewportTerminalResultIn
       accessibilityBounds: Object.freeze([]),
       search: null,
       commandById: new Map(),
-      cellRectsByDocumentNode: new Map(),
+      controls: Object.freeze([]),
+      scrollPorts: Object.freeze([]),
       truncations: Object.freeze([...(input.truncations ?? [])]),
     });
   }
@@ -252,9 +252,9 @@ export function buildViewportTerminalResult(input: BuildViewportTerminalResultIn
       }
     }
   }
-  const focusCandidates = new Map(input.documentGeometry
-    .focusIntersecting(input.displayList.windowRect, input.signal)
-    .map((target) => [target.node, target]));
+  const candidateWindows = [...input.displayList.projection.candidateWindows()];
+  const focusCandidates = new Map(candidateWindows.flatMap(([owner, window]) =>
+    input.documentGeometry.focusIntersecting(window, input.signal, owner)).map((target) => [target.node, target]));
   const actionPaintOrder = new Map<DocumentNodeRef, number>();
   for (const command of input.displayList.commands) {
     if (command.action === null) continue;
@@ -297,6 +297,7 @@ export function buildViewportTerminalResult(input: BuildViewportTerminalResultIn
     focusRectangles += rects.length;
     focusTargets.push(Object.freeze({
       node: target.node,
+      scrollOwner: target.scrollOwner,
       action: target.action,
       layoutFragments: target.layoutFragments,
       rects: Object.freeze(rects),
@@ -321,9 +322,8 @@ export function buildViewportTerminalResult(input: BuildViewportTerminalResultIn
     }
   }
   const accessibilityBounds: TerminalAccessibilityBound[] = [];
-  const accessibilityCandidates = new Map(input.documentGeometry
-    .accessibilityIntersecting(input.displayList.windowRect, input.signal)
-    .map((entry) => [entry.documentNode, entry]));
+  const accessibilityCandidates = new Map(candidateWindows.flatMap(([owner, window]) =>
+    input.documentGeometry.accessibilityIntersecting(window, input.signal, owner)).map((entry) => [entry.documentNode, entry]));
   for (const node of visibleAccessibilityRects.keys()) {
     const entry = input.documentGeometry.accessibilityForNode(node);
     if (entry !== null) accessibilityCandidates.set(node, entry);
@@ -370,6 +370,41 @@ export function buildViewportTerminalResult(input: BuildViewportTerminalResultIn
       rect,
     }));
   }
+  const scrollPorts: TerminalScrollPort[] = [];
+  const layout = input.displayList.documentDisplayList.layout;
+  for (const owner of input.displayList.projection.visibleScrollOwners()) {
+    const rect = cssRectsToCellRects([input.displayList.projection.visible(owner.fragment, owner.scrollport)], input.displayList)[0];
+    if (rect === undefined) continue;
+    const [inline, block] = input.displayList.projection.offset(owner);
+    scrollPorts.push(Object.freeze({ node: owner.documentNode,
+      parent: owner.parent === null ? null : layout.scrollContainer(owner.parent)?.documentNode ?? null,
+      rect, inline, block, minInline: owner.minInline, maxInline: owner.maxInline,
+      minBlock: owner.minBlock, maxBlock: owner.maxBlock,
+      userScrollInline: owner.overflowX === "auto" || owner.overflowX === "scroll",
+      userScrollBlock: owner.overflowY === "auto" || owner.overflowY === "scroll",
+    }));
+  }
+  const controls: TerminalControlGeometry[] = [];
+  const controlCandidates = new Set(candidateWindows.flatMap(([owner, window]) =>
+    input.documentGeometry.controlsIntersecting(window, input.signal, owner)));
+  for (const control of controlCandidates) {
+    const allocation = input.displayList.projection.rect(control.fragment, control.rect);
+    const clipped = input.displayList.projection.visible(control.fragment, control.rect);
+    const visible = cssRectsToCellRects([clipped], input.displayList)[0];
+    if (visible === undefined) continue;
+    const column = Math.floor(allocation.x / input.displayList.context.cellWidthCssPx);
+    const row = Math.floor(allocation.y / input.displayList.context.rowHeightCssPx);
+    controls.push(Object.freeze({
+      node: control.node,
+      layoutFragment: control.fragment,
+      allocation: Object.freeze({
+        column, row,
+        width: Math.ceil((allocation.x + allocation.width) / input.displayList.context.cellWidthCssPx) - column,
+        height: Math.ceil((allocation.y + allocation.height) / input.displayList.context.rowHeightCssPx) - row,
+      }),
+      visible,
+    }));
+  }
   return Object.freeze({
     cellBuffer: input.cellBuffer,
     hitTestIndex: new ViewportHitTestIndex(hitRegions),
@@ -379,7 +414,8 @@ export function buildViewportTerminalResult(input: BuildViewportTerminalResultIn
       ? null
       : searchResult(input.searchProjection, input.cellBuffer),
     commandById,
-    cellRectsByDocumentNode: new Map([...rectsByNode].map(([node, rects]) => [node, Object.freeze(rects)])),
+    controls: Object.freeze(controls),
+    scrollPorts: Object.freeze(scrollPorts),
     truncations: Object.freeze(truncations),
   });
 }

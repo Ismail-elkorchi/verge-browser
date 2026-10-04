@@ -68,6 +68,7 @@ export interface StoredBrowserDocument {
   readonly scrollAnchor: {
     readonly target: StoredScrollTarget;
     readonly rowOffset: number;
+    readonly columnOffset?: number;
   };
 }
 
@@ -253,7 +254,9 @@ function normalizeWorkspace(value: unknown): BrowserWorkspace | null {
       url: document["url"],
       scrollAnchor: {
         target,
-        rowOffset: Math.min(Number(anchorRecord["rowOffset"]), MAX_SCROLL_ROW_OFFSET)
+        rowOffset: Math.min(Number(anchorRecord["rowOffset"]), MAX_SCROLL_ROW_OFFSET),
+        ...(Number.isSafeInteger(anchorRecord["columnOffset"]) ? { columnOffset: Math.max(-MAX_SCROLL_ROW_OFFSET,
+          Math.min(MAX_SCROLL_ROW_OFFSET, Number(anchorRecord["columnOffset"]))) } : {})
       }
     }];
   }).slice(0, MAX_WORKSPACE_DOCUMENTS);

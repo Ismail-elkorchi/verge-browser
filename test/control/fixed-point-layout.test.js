@@ -613,7 +613,7 @@ test("generated text, list markers, controls, and replaced boxes share line-box 
   const text = renderedText(result);
   assert.match(text, /prefix/u);
   assert.match(text, /item/u);
-  assert.match(text, /Query: value/u);
+  assert.match(text, /Queryvalue/u);
   assert.match(text, /photo/u);
   const kinds = new Set(result.displayList.commands.map((command) => result.layout.fragment(command.layoutFragment).kind));
   assert.ok(kinds.has("control"));
@@ -2577,10 +2577,10 @@ test("atomic visual fallback stays inside its content box while accessible label
   const result = render("<style>body{margin:0}input{position:fixed;left:0;top:0;width:18px;height:16px;padding:0;border:0}</style><input id='x' aria-label='Complete accessible label' value='abcdef'><p style='margin-top:80px'>tail</p>");
   const ref = elementById(result, "x");
   const controlText = (terminal) => terminal.cellBuffer.rows.flatMap((row) => row.cells).filter((cell) => terminal.commandById.get(cell.command)?.documentNode === ref).map((cell) => cell.text).join("");
-  assert.equal(controlText(result.terminal), "Co");
+  assert.equal(controlText(result.terminal), "ab");
   assert.equal(result.documentGeometry.accessibilityForNode(ref)?.name, "Complete accessible label");
   const scrolled = terminalViewport(result.displayList, { scrollRow: 2, viewportRows: 10 });
-  assert.equal(controlText(scrolled), "Co");
+  assert.equal(controlText(scrolled), "ab");
 });
 
 test("atomic flex min-content is indivisible and translated offscreen menus do not leak labels", () => {
@@ -2645,4 +2645,91 @@ test("overflow-wrap:anywhere contributes emergency breaks to min-content while b
     const box = principalFragment(result, elementById(result, "text"));
     assert.equal(box.contentRect.width, cssPx(columns * 8), declaration);
   }
+});
+
+test("logical search coalesces only exact contiguous source runs and preserves substring provenance", () => {
+  const result = render("<p>abcdef אבג 😀é</p>", 80);
+  const matches = result.searchIndex.search("bcd", 10).matches;
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0].slices.length, 1);
+  const slice = matches[0].slices[0];
+  assert.equal(result.formatting.document.sourceText.slice(slice.sourceRange.start, slice.sourceRange.end), "bcd");
+  assert.equal(slice.contentEnd - slice.contentStart, 3);
+  assert.equal(result.searchIndex.search("bcd", 10).matches, matches);
+  for (const query of ["אב", "😀é"]) {
+    const match = result.searchIndex.search(query, 10).matches[0];
+    assert.equal(match.slices.length, 1);
+    const range = match.slices[0].sourceRange;
+    assert.equal(result.formatting.document.sourceText.slice(range.start, range.end), query);
+    assert.ok(search(result, query).ranges.length > 0);
+  }
+  const split = render('<p>a<span>b</span>c &amp; d  e</p>', 80);
+  assert.equal(split.searchIndex.search("abc", 10).matches[0].slices.length, 3);
+  assert.equal(split.searchIndex.search("d e", 10).matches[0].slices.length, 3);
+  const expanded = render('<p style="text-transform:uppercase">aßb</p>', 80);
+  assert.equal(expanded.searchIndex.text, "ASSB");
+  assert.equal(expanded.searchIndex.search("ss", 10).matches[0].slices[0].contentEnd
+    - expanded.searchIndex.search("ss", 10).matches[0].slices[0].contentStart, 1);
+  const folded = render("<p>İx</p>", 80);
+  const foldedMatch = folded.searchIndex.search("i̇", 10).matches[0];
+  assert.equal(foldedMatch.end - foldedMatch.start, 1);
+});
+
+test("text layout clusters reuse the canonical immutable inline source ranges", () => {
+  const result = render("<p>Latin אבג 😀é</p>", 80);
+  const ranges = new Set();
+  for (const stream of result.inlineItemStreams.streams) {
+    for (const item of stream.items) if (item.sourceRange !== null) ranges.add(item.sourceRange);
+  }
+  assert.ok(ranges.size > 0);
+  const pending = [result.layout.fragment(result.layout.root)];
+  while (pending.length > 0) {
+    const fragment = pending.pop();
+    pending.push(...result.layout.children(fragment.id));
+    for (const cluster of fragment.visualClusters ?? []) {
+      if (cluster.sourceRange !== null) assert.ok(ranges.has(cluster.sourceRange));
+    }
+  }
+});
+
+
+test("CSS text and inline streams retain one canonical text unit", () => {
+  const result = render("<p>Latin אבג 😀é</p>", 80);
+  let checked = 0;
+  for (const stream of result.inlineItemStreams.streams) {
+    for (const item of stream.items) {
+      if (item.kind !== "text" || item.formattingNode === null) continue;
+      const units = result.inlineItemStreams.textForFormattingNode(item.formattingNode).units;
+      assert.ok(units.includes(item));
+      assert.ok(Object.isFrozen(item));
+      checked += 1;
+    }
+  }
+  assert.ok(checked > 5);
+  const textFragments = result.displayList.commands
+    .filter((command) => command.kind === "text")
+    .map((command) => result.layout.fragment(command.layoutFragment));
+  for (const fragment of textFragments) {
+    assert.ok(Object.isFrozen(fragment.children));
+    assert.equal(fragment.children.length, 0);
+    assert.equal(fragment.children, textFragments[0].children);
+    assert.equal(fragment.lineBoxes, textFragments[0].lineBoxes);
+  }
+  const other = render("<p>another document</p>", 80);
+  const otherText = other.displayList.commands.find((command) => command.kind === "text");
+  assert.equal(other.layout.fragment(otherText.layoutFragment).children, textFragments[0].children);
+});
+
+test("paint generation clips tall backgrounds and borders to viewport plus overscan before charging units", () => {
+  const result = render('<div style="height:1000000px;background:red;border:1px solid">top</div>', 20, 5, {
+    terminal: { maxGeneratedPaintUnits: 1_000 },
+  });
+  assert.equal(result.terminal.cellBuffer.outcome.status, "complete");
+  const scrolled = terminalViewport(result.displayList, {
+    scrollRow: 1_000, viewportRows: 5, overscanBefore: 2, overscanAfter: 3,
+  });
+  assert.equal(scrolled.cellBuffer.outcome.status, "complete");
+  assert.equal(scrolled.cellBuffer.rows.length, 10);
+  assert.equal(scrolled.cellBuffer.windowStartRow, 998);
+  assert.ok(scrolled.cellBuffer.rows.every((row) => !row.text.includes("└") && !row.text.includes("┘")));
 });

@@ -1,3 +1,4 @@
+import { parseCssLengthComponents, evaluateCssMath } from "./css-values.js";
 import { parseComponentValues, serializeCssComponentValues, type ComponentValue } from "@ismail-elkorchi/css-parser";
 import type { CompiledMediaQuery, MediaEnvironment } from "./types.js";
 
@@ -84,13 +85,16 @@ function query(values: readonly ComponentValue[], unsupported?: MediaDiagnosticS
   return modifier === "not" ? { kind: "not", value: result } : result;
 }
 
-function lengthPx(value: ComponentValue | undefined): number | null {
-  if (value?.kind === "number" && value.value === 0) return 0;
-  if (value?.kind !== "dimension" || !Number.isFinite(value.value)) return null;
-  const scale: Readonly<Record<string, number>> = { px: 1, em: 16, rem: 16, ch: 8, in: 96, cm: 96 / 2.54, mm: 96 / 25.4, q: 96 / 101.6, pt: 96 / 72, pc: 16 };
-  const unit = value.unit.toLowerCase();
-  const factor = Object.hasOwn(scale, unit) ? scale[unit] : undefined;
-  return factor === undefined ? null : value.value * factor;
+function lengthPx(value: ComponentValue | undefined, environment: MediaEnvironment): number | null {
+  if (value === undefined) return null;
+  const length = parseCssLengthComponents([value], { allowAuto: false, allowNegative: true });
+  if (length === null || length.kind === "auto" || length.kind === "none") return null;
+  if (length.kind === "zero") return 0;
+  if (length.kind === "length" && length.unit === "%") return null;
+  if (length.kind === "calculation" && length.calculation.percentageDependence !== "none") return null;
+  const expression = length.kind === "length" ? { kind: "value" as const, value: length.value, unit: length.unit } : length.calculation.expression;
+  const result = evaluateCssMath(expression, 0, 16, 16, environment.viewportWidthCssPx, environment.viewportHeightCssPx);
+  return result !== null && Number.isFinite(result) ? result : null;
 }
 
 function compare(left: number, operator: string, right: number): boolean {
@@ -127,7 +131,7 @@ function rangeFeature(values: readonly ComponentValue[], environment: MediaEnvir
   if ((name !== "width" && name !== "height") || operands.filter((value) => value.kind === "ident").length !== 1) return null;
   if (operands.length === 3 && (featureIndex !== 1 || operators[0]?.[0] !== operators[1]?.[0] || operators[0] === "=")) return null;
   const dimensions = operands.map((value, position) => position === featureIndex
-    ? name === "width" ? environment.viewportWidthCssPx : environment.viewportHeightCssPx : lengthPx(value));
+    ? name === "width" ? environment.viewportWidthCssPx : environment.viewportHeightCssPx : lengthPx(value, environment));
   if (dimensions.some((value) => value === null)) return null;
   return operators.every((operator, position) => compare(dimensions[position] as number, operator, dimensions[position + 1] as number));
 }
@@ -145,7 +149,7 @@ function feature(values: readonly ComponentValue[], environment: MediaEnvironmen
   if (dimension !== null) {
     const actual = dimension[2] === "width" ? environment.viewportWidthCssPx : environment.viewportHeightCssPx;
     if (boolean) return dimension[1] === undefined ? actual > 0 : null;
-    const boundary = lengthPx(value);
+    const boundary = lengthPx(value, environment);
     return boundary === null ? null : compare(actual, dimension[1] === "min-" ? ">=" : dimension[1] === "max-" ? "<=" : "=", boundary);
   }
   if (name === "prefers-reduced-motion") return boolean || keyword === "reduce" ? environment.reducedMotion

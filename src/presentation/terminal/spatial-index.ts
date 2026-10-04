@@ -1,7 +1,7 @@
 import { registerRetainedOwner } from "../../memory/retained-cost.js";
-import type { LayoutFragmentId } from "../layout/index.js";
+import { cssIntersection, cssUnion, type CssRect, type LayoutFragmentId, type LayoutScrollAttachment, type LayoutScrollOwner } from "../layout/index.js";
+import { ViewportGeometryProjection, translatedRect, scrollAttachmentEnvelope } from "./viewport-geometry.js";
 import type {
-  DisplayListAttachmentGroup,
   DisplayListSpatialIndex,
   DisplayListSpatialQuery,
   DocumentDisplayList,
@@ -23,12 +23,7 @@ interface IntervalNode<TValue> {
 }
 
 function commandInterval(command: TerminalPaintCommand): SpatialInterval<TerminalPaintCommand> {
-  const start = Math.max(command.rect.y, command.clipRect.y);
-  const clippedEnd = Math.min(
-    command.rect.y + command.rect.height,
-    command.clipRect.y + command.clipRect.height,
-  );
-  return Object.freeze({ value: command, start, end: Math.max(start + 1, clippedEnd) });
+  return Object.freeze({ value: command, start: command.rect.y, end: command.rect.y + Math.max(1, command.rect.height) });
 }
 
 function intervalTree<TValue>(values: readonly SpatialInterval<TValue>[]): IntervalNode<TValue> | null {
@@ -99,131 +94,161 @@ function queryIntervals<TValue>(
   return Object.freeze({ values: Object.freeze(values), visitedIntervals });
 }
 
-function stickyInterval(group: DisplayListAttachmentGroup): SpatialInterval<DisplayListAttachmentGroup> {
-  const attachment = group.attachment;
-  if (attachment.kind !== "sticky") throw new TypeError("Expected a sticky display-list attachment.");
-  let commandStart: number = attachment.normalBorderRect.y;
-  let commandEnd: number = attachment.normalBorderRect.y + attachment.normalBorderRect.height;
-  for (const command of group.commands) {
-    commandStart = Math.min(commandStart, command.rect.y);
-    commandEnd = Math.max(commandEnd, command.rect.y + command.rect.height);
-  }
-  const before = commandStart - attachment.normalBorderRect.y;
-  const after = commandEnd - (attachment.normalBorderRect.y + attachment.normalBorderRect.height);
-  const start = attachment.bottom !== null
-    ? attachment.containingBlock.y + before
-    : commandStart;
-  const end = attachment.top !== null
-    ? attachment.containingBlock.y + attachment.containingBlock.height + after
-    : commandEnd;
-  return Object.freeze({ value: group, start, end: Math.max(start + 1, end) });
+interface AttachedCommands {
+  readonly attachment: LayoutScrollAttachment;
+  readonly root: IntervalNode<TerminalPaintCommand> | null;
 }
 
-function intersectsInline(command: TerminalPaintCommand, left: number, right: number): boolean {
-  const start = Math.max(command.rect.x, command.clipRect.x);
-  const clippedEnd = Math.min(
-    command.rect.x + command.rect.width,
-    command.clipRect.x + command.clipRect.width,
-  );
-  const end = Math.max(start + 1, clippedEnd);
-  return start < right && end > left;
+interface OwnerIndex {
+  readonly paintOrder: number;
+  readonly owner: LayoutScrollOwner | null;
+  readonly commands: IntervalNode<TerminalPaintCommand> | null;
+  readonly children: IntervalNode<LayoutScrollOwner> | null;
+  readonly sticky: IntervalNode<AttachedCommands> | null;
+  readonly fixed: readonly AttachedCommands[];
+}
+
+function inlineIntersects(rect: CssRect, query: CssRect): boolean {
+  return rect.x < query.x + query.width && rect.x + Math.max(1, rect.width) > query.x;
 }
 
 class ImmutableDisplayListSpatialIndex implements DisplayListSpatialIndex {
   readonly commandCount: number;
-  readonly attachmentCommandCount: number;
-  readonly fixedAttachmentGroups: readonly DisplayListAttachmentGroup[];
-  readonly #root: IntervalNode<TerminalPaintCommand> | null;
-  readonly #stickyRoot: IntervalNode<DisplayListAttachmentGroup> | null;
+  readonly #owners: ReadonlyMap<LayoutFragmentId | null, OwnerIndex>;
+  readonly #list: DocumentDisplayList;
 
   public constructor(list: DocumentDisplayList) {
-    const attachmentByFragment = new Map<LayoutFragmentId, ReturnType<typeof list.layout.scrollAttachment>>();
-    const attachmentFor = (fragment: LayoutFragmentId) => {
-      const known = attachmentByFragment.get(fragment);
-      if (known !== undefined) return known;
+    this.#list = list;
+    const layout = list.layout;
+    const ownerPaintOrder = new Map(list.fragmentPaintOrder.flatMap((id,index)=>layout.scrollContainer(id)===null?[]:[[id,index] as const]));
+    const attachments = new Map<LayoutFragmentId, LayoutScrollAttachment | null>();
+    const attachmentFor = (id: LayoutFragmentId): LayoutScrollAttachment | null => {
       const path: LayoutFragmentId[] = [];
-      let current: LayoutFragmentId | null = fragment;
-      let attachment = null;
+      let current: LayoutFragmentId | null = id;
+      let attachment: LayoutScrollAttachment | null = null;
       while (current !== null) {
-        const cached = attachmentByFragment.get(current);
-        if (cached !== undefined) {
-          attachment = cached;
-          break;
-        }
+        if (attachments.has(current)) { attachment = attachments.get(current) ?? null; break; }
         path.push(current);
-        attachment = list.layout.scrollAttachment(current);
+        attachment = layout.scrollAttachment(current);
         if (attachment !== null) break;
-        current = list.layout.scrollAttachmentParent(current)?.id ?? null;
+        current = layout.scrollAttachmentParent(current)?.id ?? null;
       }
-      for (const id of path) attachmentByFragment.set(id, attachment);
+      for (const fragment of path) attachments.set(fragment, attachment);
       return attachment;
     };
-    const normal: SpatialInterval<TerminalPaintCommand>[] = [];
-    const attached = new Map<LayoutFragmentId, {
-      readonly attachment: NonNullable<ReturnType<typeof attachmentFor>>;
-      readonly commands: TerminalPaintCommand[];
+    const buckets = new Map<LayoutFragmentId | null, {
+      owner: LayoutScrollOwner | null;
+      commands: SpatialInterval<TerminalPaintCommand>[];
+      children: SpatialInterval<LayoutScrollOwner>[];
+      attached: Map<LayoutFragmentId, { attachment: LayoutScrollAttachment; commands: SpatialInterval<TerminalPaintCommand>[] }>;
     }>();
-    for (const command of list.commands) {
-      const attachment = attachmentFor(command.layoutFragment);
-      if (attachment === null) {
-        normal.push(commandInterval(command));
-        continue;
+    const bucket = (id: LayoutFragmentId | null) => {
+      let value = buckets.get(id);
+      if (value === undefined) {
+        value = { owner: id === null ? null : layout.scrollContainer(id), commands: [], children: [], attached: new Map() };
+        buckets.set(id, value);
       }
-      const group = attached.get(attachment.root) ?? { attachment, commands: [] };
-      group.commands.push(command);
-      attached.set(attachment.root, group);
+      return value;
+    };
+    bucket(null);
+    for (const owner of layout.scrollOwners) {
+      bucket(owner.fragment);
+      const attachment = attachmentFor(owner.fragment);
+      const rect = attachment?.kind === "sticky" ? scrollAttachmentEnvelope(owner.scrollport, attachment, layout.scrollExtent, layout) : owner.scrollport;
+      bucket(owner.parent).children.push({ value: owner,
+        start: attachment?.kind === "fixed" ? Number.MIN_SAFE_INTEGER : rect.y,
+        end: attachment?.kind === "fixed" ? Number.MAX_SAFE_INTEGER : rect.y + Math.max(1, rect.height),
+      });
+    }
+    for (const command of list.commands) {
+      const owner = layout.scrollAncestor(command.layoutFragment);
+      const target = bucket(owner?.fragment ?? null);
+      const attachment = attachmentFor(command.layoutFragment);
+      // An attachment outside this owner is already represented by the owner's projection.
+      if (attachment === null || (owner !== null && layout.scrollAncestor(attachment.root)?.fragment !== owner.fragment
+        && attachment.root !== command.layoutFragment)) {
+        target.commands.push(commandInterval(command));
+      } else {
+        let group = target.attached.get(attachment.root);
+        if (group === undefined) { group = { attachment, commands: [] }; target.attached.set(attachment.root, group); }
+        group.commands.push(commandInterval(command));
+      }
     }
     this.commandCount = list.commands.length;
-    const groups = Object.freeze([...attached.values()].map((group) => Object.freeze({
-      attachment: group.attachment,
-      commands: Object.freeze(group.commands),
-    })));
-    this.attachmentCommandCount = groups.reduce((count, group) => count + group.commands.length, 0);
-    this.fixedAttachmentGroups = Object.freeze(groups.filter((group) => group.attachment.kind === "fixed"));
-    this.#root = intervalTree(normal);
-    this.#stickyRoot = intervalTree(groups
-      .filter((group) => group.attachment.kind === "sticky")
-      .map(stickyInterval));
+    this.#owners = new Map([...buckets].map(([id, value]) => {
+      const sticky: SpatialInterval<AttachedCommands>[] = [];
+      const fixed: AttachedCommands[] = [];
+      for (const group of value.attached.values()) {
+        const retained = Object.freeze({ attachment: group.attachment, root: intervalTree(group.commands) });
+        if (group.attachment.kind === "fixed") fixed.push(retained);
+        else {
+          const attachment = group.attachment;
+          const bounds = cssUnion(group.commands.map(entry=>entry.value.rect), attachment.normalBorderRect);
+          const envelope = scrollAttachmentEnvelope(bounds, attachment, layout.scrollExtent, layout);
+          sticky.push({ value: retained, start:envelope.y, end:envelope.y+Math.max(1,envelope.height) });
+        }
+      }
+      return [id, Object.freeze({ paintOrder:id===null?-1:ownerPaintOrder.get(id)??0, owner: value.owner, commands: intervalTree(value.commands),
+        children: intervalTree(value.children), sticky: intervalTree(sticky), fixed: Object.freeze(fixed) })];
+    }));
     Object.freeze(this);
-    registerRetainedOwner(this, () => [this.#root, this.#stickyRoot]);
+    registerRetainedOwner(this, () => [this.#list, this.#owners]);
   }
 
-  public query(rect: Parameters<DisplayListSpatialIndex["query"]>[0], signal?: AbortSignal): DisplayListSpatialQuery {
-    const top = rect.y;
-    const bottom = rect.y + rect.height;
-    const left = rect.x;
-    const right = rect.x + rect.width;
-    const queried = queryIntervals(this.#root, top, bottom, (command) => intersectsInline(command, left, right), signal);
-    const commands = [...queried.values];
+  public query(rect: CssRect, signal?: AbortSignal, suppliedProjection?: ViewportGeometryProjection): DisplayListSpatialQuery {
+    const projection = suppliedProjection ?? new ViewportGeometryProjection(this.#list.layout, rect);
+    const commands: TerminalPaintCommand[] = [];
+    let visitedIntervals = 0;
+    const retain = (command: TerminalPaintCommand): void => {
+      const resolvedRect = projection.rect(command.layoutFragment, command.rect);
+      const clipRect = projection.clip(command.layoutFragment, command.kind !== "text");
+      const visible = cssIntersection(resolvedRect, clipRect);
+      if ((command.rect.width > 0 && command.rect.height > 0 && (visible.width <= 0 || visible.height <= 0))
+        || visible.x >= rect.x + rect.width || visible.x + Math.max(1, visible.width) <= rect.x
+        || visible.y >= rect.y + rect.height || visible.y + Math.max(1, visible.height) <= rect.y
+        || clipRect.width <= 0 || clipRect.height <= 0) return;
+      const resolved = { ...command, rect: resolvedRect, clipRect };
+      commands.push(Object.freeze(command.kind === "border-side"
+        ? { ...resolved, borderRect: projection.rect(command.layoutFragment, command.borderRect) } : resolved));
+    };
+    const queryCommands = (root: IntervalNode<TerminalPaintCommand> | null, query: CssRect): void => {
+      const result = queryIntervals(root, query.y, query.y + query.height, (command) => inlineIntersects(command.rect, query), signal);
+      visitedIntervals += result.visitedIntervals;
+      for (const command of result.values) retain(command);
+    };
+    const pending: (LayoutFragmentId | null)[] = [null];
+    while (pending.length > 0) {
+      signal?.throwIfAborted();
+      const id = pending.pop();
+      const entry = this.#owners.get(id ?? null);
+      if (entry === undefined) continue;
+      let query = rect;
+      if (entry.owner !== null) {
+        const port = projection.visible(entry.owner.fragment, entry.owner.scrollport);
+        const visible = cssIntersection(port, rect);
+        if (visible.width <= 0 || visible.height <= 0) continue;
+        const [inline, block] = projection.translation(entry.owner.fragment);
+        const [offsetInline, offsetBlock] = projection.offset(entry.owner);
+        query = translatedRect(visible, offsetInline - inline, offsetBlock - block);
+      }
+      projection.recordContentWindow(entry.owner?.fragment ?? null, query, entry.paintOrder);
+      queryCommands(entry.commands, query);
+      const children = queryIntervals(entry.children, query.y, query.y + query.height, () => true, signal);
+      visitedIntervals += children.visitedIntervals;
+      for (const owner of children.values) pending.push(owner.fragment);
+      const sticky = queryIntervals(entry.sticky, query.y, query.y + query.height, () => true, signal);
+      visitedIntervals += sticky.visitedIntervals;
+      for (const group of [...entry.fixed, ...sticky.values]) {
+        const [inline, block] = projection.translation(group.attachment.root);
+        queryCommands(group.root, translatedRect(rect, -inline, -block));
+      }
+    }
     commands.sort((a, b) => a.paintOrder - b.paintOrder);
-    return Object.freeze({
-      commands: Object.freeze(commands),
-      metrics: Object.freeze({ visitedIntervals: queried.visitedIntervals, returnedCommands: commands.length }),
-    });
-  }
-
-  public queryStickyAttachments(
-    rect: Parameters<DisplayListSpatialIndex["queryStickyAttachments"]>[0],
-    signal?: AbortSignal,
-  ) {
-    const queried = queryIntervals(
-      this.#stickyRoot,
-      rect.y,
-      rect.y + rect.height,
-      () => true,
-      signal,
-    );
-    return Object.freeze({
-      groups: queried.values,
-      metrics: Object.freeze({
-        visitedIntervals: queried.visitedIntervals,
-        returnedCommands: queried.values.reduce((count, group) => count + group.commands.length, 0),
-      }),
-    });
+    return Object.freeze({ commands: Object.freeze(commands), metrics: Object.freeze({ visitedIntervals, returnedCommands: commands.length }) });
   }
 }
 
-/** Builds one bounded document-space interval tree; paint commands are retained by reference. */
+/** Per-owner interval indexes retain commands by reference and query their current content window. */
 export function buildDisplayListSpatialIndex(list: DocumentDisplayList): DisplayListSpatialIndex {
   return new ImmutableDisplayListSpatialIndex(list);
 }
