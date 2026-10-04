@@ -224,10 +224,12 @@ export function buildTextSearchIndex(
   const parts: string[] = [];
   const segments: TextSearchSegment[] = [];
   let length = 0;
+  let previousExact = false;
   let pendingSeparator: Omit<TextSearchSegment, "start" | "end"> | null = null;
   const append = (
     value: string,
-    segment: Omit<TextSearchSegment, "start" | "end">
+    segment: Omit<TextSearchSegment, "start" | "end">,
+    exactSourceText: boolean,
   ): void => {
     if (value.length === 0) return;
     if (pendingSeparator !== null && length > 0) {
@@ -235,9 +237,33 @@ export function buildTextSearchIndex(
       segments.push({ ...pendingSeparator, start: length, end: length + 1 });
       length += 1;
       pendingSeparator = null;
+      previousExact = false;
     }
     parts.push(value);
-    segments.push({ ...segment, start: length, end: length + value.length });
+    const previous = segments.at(-1);
+    const range = segment.sourceRange;
+    const exact = exactSourceText && range !== null
+      && value.length === segment.contentEnd - segment.contentStart
+      && value.length === range.end - range.start;
+    if (exact && previousExact && previous !== undefined && previous.sourceRange !== null
+      && previous.end === length && previous.formatting === segment.formatting
+      && previous.source === segment.source && previous.contentEnd === segment.contentStart
+      && previous.sourceRange.end === range.start
+      && previous.sourceRange.provenance === range.provenance) {
+      segments[segments.length - 1] = {
+        ...previous,
+        end: length + value.length,
+        contentEnd: segment.contentEnd,
+        sourceRange: Object.freeze({
+          start: previous.sourceRange.start,
+          end: range.end,
+          provenance: range.provenance,
+        }),
+      };
+    } else {
+      segments.push({ ...segment, start: length, end: length + value.length });
+    }
+    previousExact = exact;
     length += value.length;
   };
   const separator = (segment: Omit<TextSearchSegment, "start" | "end">): void => {
@@ -274,7 +300,7 @@ export function buildTextSearchIndex(
       const segment = nodeSegment(node, unit.contentStartCodeUnit, unit.contentEndCodeUnit);
       if (unit.kind === "soft-hyphen") continue;
       if (unit.kind === "forced-break" || unit.kind === "tab" || unit.collapsibleSpace) separator(segment);
-      else append(unit.text, segment);
+      else append(unit.text, segment, node.kind === "text-sequence" && node.source !== null);
     }
   };
   const pending: ({ readonly phase: "enter"; readonly id: FormattingNodeId }
@@ -330,7 +356,8 @@ export function projectTextSearchToLayout(
         const fragmentStart = fragment.contentStartCodeUnit;
         const fragmentEnd = fragment.contentEndCodeUnit;
         if (fragmentStart === null || fragmentEnd === null
-          || !(fragment.kind === "text" || (fragment.visualClusters?.length ?? 0) > 0)
+          || !(fragment.kind === "text" || (fragment.visualClusters?.length ?? 0) > 0
+            || fragment.controlLines?.some((line) => line.clusters.length > 0) === true)
           || slice.contentStart >= fragmentEnd || slice.contentEnd <= fragmentStart) continue;
         const contentStartCodeUnit = Math.max(slice.contentStart, fragmentStart);
         const contentEndCodeUnit = Math.min(slice.contentEnd, fragmentEnd);

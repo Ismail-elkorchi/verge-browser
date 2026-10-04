@@ -7,6 +7,7 @@ import { clearInterval, setInterval } from "node:timers";
 import { createMemoryTerminalHost } from "@ismail-elkorchi/terminal-ui/host";
 import { createTuiRuntime } from "@ismail-elkorchi/terminal-ui/tui";
 
+import { PageAcquisition } from "../../dist/app/page-acquisition.js";
 import { BrowserSession } from "../../dist/app/session.js";
 import { BrowserStore } from "../../dist/app/storage.js";
 import { createDocumentState } from "../../dist/document/index.js";
@@ -242,7 +243,7 @@ async function tuiMeasurements(html) {
       async writeTextFile() {}, async downloadFile() { throw new Error("not used"); },
       async openExternal() {}, async openPath() {}, async close() {},
     },
-    createSession: () => new BrowserSession({
+    createAcquisition: () => new PageAcquisition({
       loader: async (requestUrl) => fetchResult(requestUrl, requestUrl === "about:newtab"
         ? "<title>New tab</title><main><h1>New tab</h1></main>" : html),
       stylesheetLoader: async () => { throw new Error("unexpected external stylesheet"); },
@@ -413,9 +414,9 @@ async function restoredWorkspaceShell(tabCount) {
       async writeTextFile() {}, async downloadFile() { throw new Error("not used"); },
       async openExternal() {}, async openPath() {}, async close() {},
     },
-    createSession: () => {
+    createAcquisition: () => {
       sessions += 1;
-      return new BrowserSession({
+      return new PageAcquisition({
         loader: async (requestUrl) => {
           starts.push(requestUrl);
           if (!released) await new Promise((resolvePromise) => pending.push(resolvePromise));

@@ -1,3 +1,4 @@
+import { viewportInlineRange } from "../../presentation/terminal/viewport-geometry.js";
 import { RenderBudgetExceededError } from "../../memory/retained-cost.js";
 import { parentPort, workerData } from "node:worker_threads";
 
@@ -81,6 +82,7 @@ function post(response: RenderWorkerResponse): void {
 function context(parameters: Extract<RenderWorkerRequest, { readonly kind: "request-viewport" }>["parameters"]) {
   const columns = boundedInteger("columns", parameters.columns, 10_000);
   const rows = boundedInteger("rows", parameters.rows, 10_000);
+  boundedInteger("scrollColumn magnitude", Math.abs(parameters.scrollColumn ?? 0), 1_000_000_000);
   boundedInteger("scrollRow", parameters.scrollRow, 1_000_000_000);
   boundedInteger("overscanBefore", parameters.overscanBefore, 1_000);
   boundedInteger("overscanAfter", parameters.overscanAfter, 1_000);
@@ -250,7 +252,10 @@ function receive(message: RenderWorkerRequest): void {
       viewportRevision: message.viewportRevision,
       ...renderContext,
       window: {
+        ...(message.parameters.scrollOffsets === undefined ? {} : { scrollOffsets: message.parameters.scrollOffsets }),
+        ...(message.parameters.reveal === undefined ? {} : { reveal: message.parameters.reveal }),
         scrollRow: message.parameters.scrollRow,
+        scrollColumn: message.parameters.scrollColumn ?? 0,
         viewportRows: message.parameters.rows,
         overscanBefore: message.parameters.overscanBefore,
         overscanAfter: message.parameters.overscanAfter,
@@ -268,7 +273,16 @@ function receive(message: RenderWorkerRequest): void {
       ...renderContext,
       signal: documentSignal,
     });
+    const inlineRange = viewportInlineRange(artifacts.documentLayout, message.parameters.columns * CELL_WIDTH);
     const payload: TransferredViewportRenderPayload = Object.freeze({
+      viewportOverflow: artifacts.documentLayout.viewportOverflow,
+      cellInline: renderContext.terminalContext.cellWidthCssPx,
+      cellBlock: renderContext.terminalContext.rowHeightCssPx,
+      scrollRow: result.displayList.window.scrollRow,
+      scrollColumn: result.displayList.window.scrollColumn ?? 0,
+      minScrollColumn: Math.floor(inlineRange.minInline / CELL_WIDTH),
+      maxScrollColumn: Math.ceil(inlineRange.maxInline / CELL_WIDTH),
+      scrollOffsets: result.displayList.window.scrollOffsets ?? [],
       summaryIdentity: summaryKey,
       layoutRevision: result.artifactKey.documentLayout,
       documentId: result.documentId,
@@ -281,7 +295,8 @@ function receive(message: RenderWorkerRequest): void {
       focusTargets: result.terminal.focusMap.targets,
       accessibilityBounds: result.terminal.accessibilityBounds,
       search: result.terminal.search,
-      cellRectsByDocumentNode: Object.freeze([...result.terminal.cellRectsByDocumentNode]),
+      controls: result.terminal.controls,
+      scrollPorts: result.terminal.scrollPorts,
       summary: includeSummary ? Object.freeze({
         identity: summaryKey,
         documentRowCount: result.documentExtentRows,
@@ -315,6 +330,7 @@ function receive(message: RenderWorkerRequest): void {
           }
           return Object.freeze({
             node: target.node,
+            scrollOwner: target.scrollOwner,
             actionId: documentActionId(target.action),
             actionKind: target.action.kind,
             topRow,

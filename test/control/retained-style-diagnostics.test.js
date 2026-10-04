@@ -249,11 +249,11 @@ test("cancellation during retained diagnostic replay does not publish a partial 
       if (++checks === checkpoints) throw abort;
     } },
   }), abort);
-  assert.equal(result.program.selectorRuntime.computedSnapshot, initial);
+  assert.equal(result.program.selectorRuntime.computedSnapshot, null);
   assertDiagnostics(result.resolve(result.state), initial);
 });
 
-for (const budget of ["maxSelectorQueries", "maxSelectorSteps"]) {
+for (const budget of ["maxSelectorSteps"]) {
   test(`typed ${budget} fallback survives diagnostic truncation and later recovery`, () => {
     const result = setup('<style>#t{color:red}.other{color:blue}</style><p id=t style="background:green">Target</p>', {
       budgets: { maxDiagnostics: 1 },
@@ -295,7 +295,7 @@ test("source truncation retains admitted author rules without claiming a user-ag
 });
 
 test("selector fallback is explicit even when an earlier source budget owns the truncation label", () => {
-  const budgets = { maxDiagnostics: 1, maxStylesheetSources: 1, maxSelectorQueries: 1 };
+  const budgets = { maxDiagnostics: 1, maxStylesheetSources: 1, maxSelectorSteps: 1 };
   const result = setup('<style>#t{color:red}.other{color:blue}</style><style>p{color:green}</style><p id=t>Target</p>', {
     budgets,
     initialDiagnostics: [{ code: "stylesheet-parse", sourceUrl: "earlier", detail: "Already reported", occurrences: 1 }],

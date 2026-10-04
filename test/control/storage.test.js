@@ -114,7 +114,7 @@ test("BrowserStore serializes concurrent history, workspace, and download writes
     const workspace = {
       documents: [{
         url: "https://example.com/",
-        scrollAnchor: { target: { kind: "element-id", value: "content" }, rowOffset: 2 }
+        scrollAnchor: { target: { kind: "element-id", value: "content" }, rowOffset: 2, columnOffset: -17 }
       }],
       activeDocumentIndex: 0,
       sidePanel: "downloads"

@@ -119,7 +119,7 @@ function snapCssRect(rect: CssRect, clip: CssRect, list: RasterizationDisplayLis
     0,
     0,
     Math.min(list.context.columns, budgets.maxRetainedCellBufferColumns),
-    budgets.maxRetainedCellBufferRows
+    Math.min(list.context.rows, budgets.maxRetainedCellBufferRows)
   ));
 }
 
@@ -423,9 +423,10 @@ function initialTruncations(list: RasterizationDisplayList, budgets: TerminalPai
   return truncations;
 }
 
-function viewportLocalCommand(command: TerminalPaintCommand, blockOffset: number): TerminalPaintCommand {
+function viewportLocalCommand(command: TerminalPaintCommand, blockOffset: number, inlineOffset: number): TerminalPaintCommand {
   const move = (rect: CssRect): CssRect => Object.freeze({
     ...rect,
+    x: cssCoordinateAdd(rect.x, cssLengthFromFixed(-inlineOffset)),
     y: cssCoordinateAdd(rect.y, cssLengthFromFixed(-blockOffset))
   });
   const moved = {
@@ -449,6 +450,7 @@ function rejectedViewportBuffer(
       columns: Math.max(0, safeInteger(list.context.columns)),
       documentRowCount: 0,
       windowStartRow: start,
+      windowStartColumn: list.window.scrollColumn ?? 0,
       viewportRows: Math.max(0, safeInteger(list.window.viewportRows)),
       overscanBefore: list.window.scrollRow - start,
       overscanAfter: list.window.overscanAfter,
@@ -471,8 +473,10 @@ export function rasterizeViewportDisplayList(
   const overscanBefore = viewport.window.scrollRow - windowStartRow;
   const requestedRows = viewport.window.viewportRows + overscanBefore + viewport.window.overscanAfter;
   const rowCount = Math.min(requestedRows, budgets.maxRetainedCellBufferRows);
+  const windowStartColumn = viewport.window.scrollColumn ?? 0;
+  const inlineOffset = windowStartColumn * viewport.context.cellWidthCssPx;
   const blockOffset = windowStartRow * viewport.context.rowHeightCssPx;
-  const localCommands = viewport.commands.map((command) => viewportLocalCommand(command, blockOffset));
+  const localCommands = viewport.commands.map((command) => viewportLocalCommand(command, blockOffset, inlineOffset));
   const localList: RasterizationDisplayList = Object.freeze({
     layout: viewport.documentDisplayList.layout,
     context: Object.freeze({ ...viewport.context, rows: Math.max(1, rowCount) }),
@@ -571,7 +575,7 @@ export function rasterizeViewportDisplayList(
       const endCodeUnit = text.length;
       const command = unit.command;
       cells.push(Object.freeze({
-        column: unit.column,
+        column: unit.column + windowStartColumn,
         text: unit.text,
         width: unit.width,
         style: unit.actualStyle,
@@ -593,7 +597,7 @@ export function rasterizeViewportDisplayList(
           contentEndCodeUnit: unit.contentEndCodeUnit,
           startCodeUnit,
           endCodeUnit,
-          column: unit.column,
+          column: unit.column + windowStartColumn,
           width: unit.width
         });
         const previous = spans.at(-1);
@@ -649,6 +653,7 @@ export function rasterizeViewportDisplayList(
     columns: Math.min(localList.context.columns, budgets.maxRetainedCellBufferColumns),
     documentRowCount,
     windowStartRow,
+    windowStartColumn,
     viewportRows: viewport.window.viewportRows,
     overscanBefore,
     overscanAfter: Math.max(0, rowCount - viewport.window.viewportRows - overscanBefore),

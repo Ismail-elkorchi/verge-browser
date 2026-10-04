@@ -1,5 +1,7 @@
 import {
   cssCoordinateAdd,
+  cssRect,
+  cssMin,
   cssCoordinateDifference,
   cssMax,
   cssPx,
@@ -146,6 +148,16 @@ function commandGroup(fragment: LayoutFragment): readonly Omit<TerminalPaintComm
           }),
         );
       }
+    }
+  }
+  if (fragment.kind === "control" && fragment.controlLines !== undefined) {
+    for (const [index, line] of fragment.controlLines.entries()) {
+      if (line.blockOffset >= fragment.contentRect.height) break;
+      if (line.text.length === 0) continue;
+      commands.push(Object.freeze({ ...common, id: `terminal-paint:control-line:${fragment.id}:${String(index)}`,
+        kind: "text", rect: cssRect(fragment.contentRect.x, cssCoordinateAdd(fragment.contentRect.y, line.blockOffset),
+          fragment.contentRect.width, cssMin(line.height, cssCoordinateDifference(cssCoordinateAdd(fragment.contentRect.y, fragment.contentRect.height), cssCoordinateAdd(fragment.contentRect.y, line.blockOffset)))),
+        text: line.text, clusters: line.clusters }));
     }
   }
   const text = fragment.kind === "text" ? fragment.visualText

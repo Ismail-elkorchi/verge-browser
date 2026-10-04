@@ -1,3 +1,4 @@
+import { SelectorResultCache } from "./selector-cache.js";
 import { nestedPrelude, nestingContext, resolveNesting, withImplicitNesting, type NestingContext } from "./nesting.js";
 import { DiagnosticCollector } from "./diagnostics.js";
 import { presentationalHints } from "./presentational-hints.js";
@@ -83,20 +84,18 @@ class BoundedSubstitutionCache implements CustomPropertySubstitutionCache {
   public clear(): void { this.#values.clear(); }
 }
 
-function selectorRuntime(): StylesheetSelectorRuntime {
+function selectorRuntime(maximumBytes: number): StylesheetSelectorRuntime {
   return {
     state: null,
     namespaces: EMPTY_NAMESPACES,
-    authorSession: null,
-    userAgentSession: null,
-    matches: new Map(),
+    session: null,
+    matches: new SelectorResultCache(maximumBytes),
     computedSnapshot: null,
     computedEnvironment: null,
     clear() {
       this.state = null;
       this.namespaces = EMPTY_NAMESPACES;
-      this.authorSession = null;
-      this.userAgentSession = null;
+      this.session = null;
       this.matches.clear();
       this.computedSnapshot = null;
       this.computedEnvironment = null;
@@ -450,7 +449,7 @@ export function compileStylesheetProgram(input: CompileStylesheetProgramInput): 
     sources: Object.freeze(sources),
     compiledSelectors,
     compiledDeclarations,
-    selectorRuntime: selectorRuntime(),
+    selectorRuntime: selectorRuntime(limits.maxSelectorCacheBytes),
     propertyValidation,
     substitutedValues: new BoundedSubstitutionCache(4_096),
     inlineDeclarations,
@@ -467,8 +466,8 @@ export function compileStylesheetProgram(input: CompileStylesheetProgramInput): 
   });
   // External sessions expose counts, not their private allocations. Charge explicit estimates.
   registerRetainedOwner(program.selectorRuntime, () => [], () =>
-    (Number(program.selectorRuntime.authorSession !== null) + Number(program.selectorRuntime.userAgentSession !== null))
-      * (nodes.totalNodes * 640 + stylesheetByteSize * 4));
+    Number(program.selectorRuntime.session !== null)
+      * (nodes.totalNodes * 640 + nodes.elements.length * 320 + stylesheetByteSize * 4));
   registerRetainedOwner(program.propertyValidation, () => [], () => {
     return program.propertyValidation.statistics().entries * (512 + (validationValueSizes.get(program.propertyValidation) ?? 0) * 8);
   });

@@ -1,3 +1,5 @@
+import type { CssOverflow } from "../style/types.js";
+import { clipsOverflow, isScrollableOverflow } from "../style/overflow.js";
 import { registerRetainedOwner } from "../../memory/retained-cost.js";
 import type {
   DocumentNodeRef,
@@ -30,7 +32,8 @@ import {
   type BidiParagraphCollection,
   type BreakOpportunityKind,
 } from "../../unicode/index.js";
-import type { InlineItemStream, ProcessedCssText } from "../text/index.js";
+import { processCssText } from "../text/index.js";
+import type { InlineItem, InlineItemStream, ProcessedCssText } from "../text/index.js";
 import type {
   ComputedStyle,
   CssGap,
@@ -64,6 +67,7 @@ import {
 import type {
   BuildLayoutFragmentTreeInput,
   LayoutBoxFragment,
+  LayoutControlTextLine,
   LayoutClipChain,
   LayoutBudgets,
   LayoutFragment,
@@ -73,6 +77,7 @@ import type {
   LayoutOutcome,
   LayoutPaintStyle,
   LayoutScrollAttachment,
+  LayoutScrollOwner,
   LayoutStackingMetadata,
   LayoutTableCollapsedBorderSegment,
   LayoutTextCluster,
@@ -388,49 +393,51 @@ interface InlineLineEntry {
   readonly bidiItemEnd: number;
 }
 
-interface InlineTextIdentity {
-  readonly formattingNode: FormattingNodeId | null;
-  readonly contentStartCodeUnit: number;
-  readonly contentEndCodeUnit: number;
-  readonly kind:
-    "text" | "atomic-inline" | "structural-control" | "forced-break";
-}
+// Empty immutable collections carry no document identity and are safe to share.
+const EMPTY_FRAGMENT_CHILDREN: readonly LayoutFragmentId[] = Object.freeze([]);
+const EMPTY_FRAGMENT_LINES: readonly LineBox[] = Object.freeze([]);
 
 interface InlineBidiPosition {
   readonly paragraph: number;
   readonly item: number;
 }
 
+/** Private packed storage, never exposed for mutation by artifact consumers. */
+class InlineBidiPositions {
+  readonly #values: Int32Array;
+  public constructor(values: Int32Array) {
+    this.#values = values;
+    Object.freeze(this);
+    registerRetainedOwner(this, () => [this.#values]);
+  }
+  public at(index: number): InlineBidiPosition | undefined {
+    if (index < 0 || index * 2 + 1 >= this.#values.length) return undefined;
+    const paragraph = this.#values[index * 2];
+    const item = this.#values[index * 2 + 1];
+    return paragraph === undefined || item === undefined || paragraph < 0 ? undefined : { paragraph, item };
+  }
+}
+
 interface InlineTextNodeAnalysis {
   readonly units: readonly InlineLogicalUnit[];
 }
 
+/** Layout offsets reference the immutable source item rather than copying its text identity. */
 interface InlineLogicalUnit {
   readonly logicalIndex: number;
-  readonly kind:
-    | "text"
-    | "tab"
-    | "soft-hyphen"
-    | "atomic-inline"
-    | "forced-break"
-    | "break-opportunity";
-  readonly formattingNode: FormattingNodeId;
-  readonly text: string;
-  readonly contentStartCodeUnit: number;
-  readonly contentEndCodeUnit: number;
+  readonly item: InlineItem & { readonly formattingNode: FormattingNodeId };
   readonly bidiItemStart: number;
   readonly bidiItemEnd: number;
   readonly lineStartCodeUnit: number;
   readonly lineEndCodeUnit: number;
-  readonly collapsibleSpace: boolean;
 }
 
 interface InlineTextAnalysis {
-  readonly bidi: BidiParagraphCollection<InlineTextIdentity>;
+  readonly bidi: BidiParagraphCollection<InlineItem | null>;
   readonly textNodes: ReadonlyMap<FormattingNodeId, InlineTextNodeAnalysis>;
   readonly atomicItems: ReadonlyMap<FormattingNodeId, number>;
   readonly firstUnitByFormatting: ReadonlyMap<FormattingNodeId, number>;
-  readonly positions: readonly InlineBidiPosition[];
+  readonly positions: InlineBidiPositions;
   readonly logicalUnits: readonly InlineLogicalUnit[];
   readonly unitsByBidiItem: readonly (InlineLogicalUnit | undefined)[];
   readonly breaksBefore: readonly BreakOpportunityKind[];
@@ -768,7 +775,30 @@ function hasTransform(tree: FormattingTree, node: FormattingNode, style: Compute
     && (node.outer !== "inline" || isAtomicInlineBox(tree, node));
 }
 
+function hasOverflowBox(tree: FormattingTree, node: FormattingNode): boolean {
+  return ownsOuterBoxStyle(node) && (node.outer !== "inline" || isAtomicInlineBox(tree, node));
+}
+
+function hasPaintContainment(tree: FormattingTree, node: FormattingNode, style: ComputedStyle | null): boolean {
+  return ownsOuterBoxStyle(node) && style?.box.contain === "paint"
+    && node.kind !== "table-column" && node.kind !== "table-column-group"
+    && (node.outer !== "inline" || isAtomicInlineBox(tree, node));
+}
+
+function viewportOverflowSource(formatting: FormattingTree): DocumentNodeRef | null {
+  const root = formatting.document.documentElement;
+  if (root === null) return null;
+  const rootStyle = formatting.styles.style(root);
+  if (rootStyle.display.box === "none") return null;
+  const body = formatting.document.body;
+  const bodyStyle = body === null ? null : formatting.styles.style(body);
+  return rootStyle.box.overflowX === "visible" && rootStyle.box.overflowY === "visible"
+    && rootStyle.box.contain === "none" && bodyStyle?.box.contain === "none"
+    && bodyStyle.display.box !== "none" ? body : root;
+}
+
 class LayoutBuilder {
+  readonly #viewportOverflowSource: DocumentNodeRef | null;
   readonly #input: BuildLayoutFragmentTreeInput;
   readonly #formatting: FormattingTree;
   readonly #budgets: LayoutBudgets;
@@ -842,6 +872,7 @@ class LayoutBuilder {
   ) {
     this.#input = input;
     this.#formatting = input.formatting;
+    this.#viewportOverflowSource = viewportOverflowSource(input.formatting);
     this.#budgets = budgets;
     this.#paintStyleCache = formattingCache(
       PAINT_STYLE_CACHE,
@@ -890,8 +921,10 @@ class LayoutBuilder {
       this.#textFragments += 1;
     }
     this.#fragments.set(value.id, value);
-    if (value.kind !== "text" && this.#hasTransform(this.#formatting.node(value.formattingNode))) {
-      this.#hasInFlowPositioning = true;
+    if (value.kind !== "text") {
+      const node = this.#formatting.node(value.formattingNode);
+      const position = this.#boxComputed(node)?.box.position;
+      if (this.#hasTransform(node) || position === "relative" || position === "sticky") this.#hasInFlowPositioning = true;
     }
     for (const child of value.children) this.#parentIndex.set(child, value.id);
     const byFormatting = this.#formattingIndex.get(value.formattingNode) ?? [];
@@ -917,9 +950,18 @@ class LayoutBuilder {
     return hasTransform(this.#formatting, node, this.#computed(node));
   }
 
+  #paintContainment(node: FormattingNode): boolean {
+    return hasPaintContainment(this.#formatting, node, this.#boxComputed(node));
+  }
+
+  #independentFormattingContext(node: FormattingNode): boolean {
+    const box = this.#boxComputed(node)?.box;
+    return this.#paintContainment(node) || (hasOverflowBox(this.#formatting, node) && box !== undefined && (isScrollableOverflow(box.overflowX) || isScrollableOverflow(box.overflowY)));
+  }
+
   #establishesPositionedContainingBlock(node: FormattingNode): boolean {
     const style = this.#boxComputed(node);
-    return (style !== null && style.box.position !== "static") || this.#hasTransform(node);
+    return (style !== null && style.box.position !== "static") || this.#hasTransform(node) || this.#paintContainment(node);
   }
 
   #reserveInlineTextAnalysis(analysis: InlineTextAnalysis): void {
@@ -975,7 +1017,7 @@ class LayoutBuilder {
       this.#reserveInlineTextAnalysis(cached);
       return cached;
     }
-    const items: BidiItem<InlineTextIdentity>[] = [];
+    const items: BidiItem<InlineItem | null>[] = [];
     const textNodeRecords = new Map<
       FormattingNodeId,
       {
@@ -999,7 +1041,7 @@ class LayoutBuilder {
       bidiType: BidiClass,
       text: string,
       codePoint: number | null,
-      identity: InlineTextIdentity,
+      identity: InlineItem | null,
     ): number => {
       if (items.length >= this.#budgets.maxBidiItems - this.#bidiItems) {
         this.#truncated ??= "maxBidiItems";
@@ -1015,18 +1057,17 @@ class LayoutBuilder {
       const logicalIndex = items.length;
       items.push(
         Object.freeze({
-          logicalIndex,
           kind:
-            identity.kind === "text"
+            codePoint !== null && identity?.kind !== "atomic-inline"
               ? "code-point"
-              : identity.kind === "atomic-inline"
+              : identity?.kind === "atomic-inline"
                 ? "atomic-inline"
                 : "structural-control",
           text,
           codePoint,
           bidiClass: bidiType,
-          sourceStartCodeUnit: identity.contentStartCodeUnit,
-          sourceEndCodeUnit: identity.contentEndCodeUnit,
+          sourceStartCodeUnit: identity?.contentStartCodeUnit ?? 0,
+          sourceEndCodeUnit: identity?.contentEndCodeUnit ?? 0,
           identity,
         }),
       );
@@ -1036,44 +1077,22 @@ class LayoutBuilder {
     };
     const appendUnit = (
       node: FormattingNode,
-      kind: InlineLogicalUnit["kind"],
+      kind: "text" | "tab" | "soft-hyphen" | "atomic-inline" | "forced-break" | "break-opportunity",
       text: string,
-      contentStartCodeUnit: number,
-      contentEndCodeUnit: number,
-      collapsibleSpace: boolean,
+      item: InlineItem,
     ): InlineLogicalUnit => {
       const bidiItemStart = items.length;
       if (kind === "forced-break") {
-        append("B", "", null, {
-          formattingNode: node.id,
-          contentStartCodeUnit,
-          contentEndCodeUnit,
-          kind: "forced-break",
-        });
+        append("B", "", null, item);
       } else if (kind === "break-opportunity") {
-        append("BN", "", null, {
-          formattingNode: node.id,
-          contentStartCodeUnit,
-          contentEndCodeUnit,
-          kind: "structural-control",
-        });
+        append("BN", "", null, item);
       } else if (kind === "atomic-inline") {
-        append("ON", text, 0xfffc, {
-          formattingNode: node.id,
-          contentStartCodeUnit,
-          contentEndCodeUnit,
-          kind,
-        });
+        append("ON", text, 0xfffc, item);
       } else {
         for (const character of text) {
           const codePoint = character.codePointAt(0);
           if (codePoint === undefined) continue;
-          append(bidiClass(codePoint), character, codePoint, {
-            formattingNode: node.id,
-            contentStartCodeUnit,
-            contentEndCodeUnit,
-            kind: "text",
-          });
+          append(bidiClass(codePoint), character, codePoint, item);
         }
       }
       const lineValue =
@@ -1082,18 +1101,14 @@ class LayoutBuilder {
           : kind === "break-opportunity"
             ? "\u200b"
             : text;
-      const unit = Object.freeze({
+      if (item.formattingNode === null) throw new RangeError("Logical layout units require a formatting node.");
+      const unit: InlineLogicalUnit = Object.freeze({
         logicalIndex: logicalUnits.length,
-        kind,
-        formattingNode: node.id,
-        text,
-        contentStartCodeUnit,
-        contentEndCodeUnit,
+        item: item as InlineItem & { readonly formattingNode: FormattingNodeId },
         bidiItemStart,
         bidiItemEnd: items.length,
         lineStartCodeUnit: logicalText.length,
         lineEndCodeUnit: logicalText.length + lineValue.length,
-        collapsibleSpace,
       });
       logicalUnits.push(unit);
       if (!firstUnitByFormatting.has(node.id))
@@ -1102,12 +1117,7 @@ class LayoutBuilder {
       return unit;
     };
     const control = (type: BidiClass): void => {
-      append(type, "", null, {
-        formattingNode: null,
-        contentStartCodeUnit: 0,
-        contentEndCodeUnit: 0,
-        kind: "structural-control",
-      });
+      append(type, "", null, null);
     };
     for (const item of stream.items) {
       this.#input.signal?.throwIfAborted();
@@ -1122,7 +1132,7 @@ class LayoutBuilder {
       if (item.formattingNode === null) continue;
       const node = this.#formatting.node(item.formattingNode);
       if (item.kind === "atomic-inline") {
-        const unit = appendUnit(node, "atomic-inline", "\ufffc", 0, 0, false);
+        const unit = appendUnit(node, "atomic-inline", "\ufffc", item);
         atomicItems.set(node.id, unit.bidiItemStart);
         continue;
       }
@@ -1136,15 +1146,13 @@ class LayoutBuilder {
             node,
             "forced-break",
             "",
-            item.contentStartCodeUnit,
-            item.contentEndCodeUnit,
-            false,
+            item,
           ),
         );
         continue;
       }
       if (item.kind === "break-opportunity") {
-        appendUnit(node, "break-opportunity", "", 0, 0, false);
+        appendUnit(node, "break-opportunity", "", item);
         continue;
       }
       const record = textNodeRecords.get(node.id) ?? {
@@ -1160,9 +1168,7 @@ class LayoutBuilder {
               ? "tab"
               : "text",
           item.text,
-          item.contentStartCodeUnit,
-          item.contentEndCodeUnit,
-          item.collapsibleSpace,
+          item,
         ),
       );
     }
@@ -1188,7 +1194,7 @@ class LayoutBuilder {
         const formattingNode =
           unit === undefined
             ? null
-            : this.#formatting.node(unit.formattingNode);
+            : this.#formatting.node(unit.item.formattingNode);
         const style =
           formattingNode === null ? null : this.#computed(formattingNode);
         const breakWord = style?.text.wordBreak === "break-word";
@@ -1224,7 +1230,7 @@ class LayoutBuilder {
       itemEnd: number,
     ): "ltr" | "rtl" | "auto" => {
       for (let item = itemStart; item < itemEnd; item += 1) {
-        const formattingNode = items[item]?.identity.formattingNode;
+        const formattingNode = items[item]?.identity?.formattingNode;
         if (
           formattingNode !== null &&
           formattingNode !== undefined &&
@@ -1246,7 +1252,7 @@ class LayoutBuilder {
       },
       this.#input.signal,
     );
-    const positions: InlineBidiPosition[] = [];
+    const positions = new Int32Array(items.length * 2).fill(-1);
     let bidiRuns = 0;
     for (const [paragraphIndex, slice] of bidi.paragraphs.entries()) {
       if (slice.paragraph.outcome.status === "rejected")
@@ -1264,10 +1270,8 @@ class LayoutBuilder {
       bidiRuns += slice.paragraph.outcome.runs;
       for (let item = 0; item < slice.paragraph.items.length; item += 1) {
         const globalItem = slice.itemStart + item;
-        positions[globalItem] = Object.freeze({
-          paragraph: paragraphIndex,
-          item,
-        });
+        positions[globalItem * 2] = paragraphIndex;
+        positions[globalItem * 2 + 1] = item;
       }
     }
     const textNodes = new Map<FormattingNodeId, InlineTextNodeAnalysis>();
@@ -1306,7 +1310,7 @@ class LayoutBuilder {
       textNodes,
       atomicItems,
       firstUnitByFormatting,
-      positions: Object.freeze(positions),
+      positions: new InlineBidiPositions(positions),
       logicalUnits: Object.freeze(logicalUnits),
       unitsByBidiItem: Object.freeze(unitsByBidiItem),
       breaksBefore: Object.freeze(breaksBefore),
@@ -1742,7 +1746,7 @@ class LayoutBuilder {
     );
     const boundary =
       !this.#normalBlockFlow(node) ||
-      (this.#boxComputed(node)?.box.overflowY ?? "visible") !== "visible" ||
+      this.#independentFormattingContext(node) ||
       depth >= this.#budgets.maxDepth;
     if (boundary) {
       const profile = Object.freeze({
@@ -1928,11 +1932,11 @@ class LayoutBuilder {
     inherited: CssRect,
   ): CssRect {
     const style = this.#boxComputed(node);
-    if (style === null) return inherited;
+    if (style === null || (node.pseudo === null && node.source === this.#viewportOverflowSource) || !hasOverflowBox(this.#formatting, node)) return inherited;
     let result = inherited;
     if (
-      style.box.overflowX !== "visible" ||
-      style.box.overflowY !== "visible"
+      clipsOverflow(style.box.overflowX) ||
+      clipsOverflow(style.box.overflowY)
     ) {
       const xRect =
         style.box.overflowX === "visible"
@@ -2041,7 +2045,8 @@ class LayoutBuilder {
   }
 
   #clip(node: FormattingNode, paddingRect: CssRect, borderRect: CssRect, inherited: CssRect): CssRect {
-    return this.#explicitClip(node, borderRect, this.#overflowClip(node, paddingRect, inherited));
+    const clipped = this.#explicitClip(node, borderRect, this.#overflowClip(node, paddingRect, inherited));
+    return this.#paintContainment(node) ? cssIntersection(clipped, paddingRect) : clipped;
   }
 
   #visuallyClipped(
@@ -2266,15 +2271,16 @@ class LayoutBuilder {
     while (
       paragraph !== undefined &&
       logicalItemStart > 0 &&
-      paragraph.items[logicalItemStart - 1]?.identity.kind ===
-        "structural-control"
+      paragraph.items[logicalItemStart - 1]?.kind === "structural-control"
+      && paragraph.items[logicalItemStart - 1]?.identity?.kind !== "forced-line-break"
     ) {
       logicalItemStart -= 1;
     }
     while (
       paragraph !== undefined &&
       logicalItemEnd < paragraph.items.length &&
-      paragraph.items[logicalItemEnd]?.identity.kind === "structural-control"
+      paragraph.items[logicalItemEnd]?.kind === "structural-control"
+      && paragraph.items[logicalItemEnd]?.identity?.kind !== "forced-line-break"
     ) {
       logicalItemEnd += 1;
     }
@@ -2565,16 +2571,21 @@ class LayoutBuilder {
     const style = this.#computed(node);
     if (style === null) return null;
     const metrics = this.#metrics(style);
-    const text = unit.kind === "soft-hyphen" ? "-" : unit.text;
+    let logicalText = "";
+    for (let index = unit.logicalIndex; index < logicalUnitEnd; index += 1) {
+      logicalText += cursor.textAnalysis.logicalUnits[index]?.item.text ?? "";
+    }
+    const finalUnit = cursor.textAnalysis.logicalUnits[logicalUnitEnd - 1] ?? unit;
+    const text = unit.item.kind === "soft-hyphen" ? "-" : logicalText;
     if (text.length === 0) return null;
     this.#ensureLineCapacity(cursor);
     this.#ensureLineFragmentCapacity(cursor);
     const usedLineHeight = this.#lineHeight(style, metrics);
     const visible = style.visibility === "visible";
     const globalStart = unit.bidiItemStart;
-    const globalEnd = unit.bidiItemEnd;
+    const globalEnd = finalUnit.bidiItemEnd;
     const position =
-      globalStart < 0 ? undefined : cursor.textAnalysis.positions[globalStart];
+      globalStart < 0 ? undefined : cursor.textAnalysis.positions.at(globalStart);
     const paragraphSlice =
       position === undefined
         ? undefined
@@ -2592,18 +2603,18 @@ class LayoutBuilder {
       if (candidate === undefined || candidate.bidiItemStart >= globalEnd)
         break;
       if (
-        (candidate.kind === "text" ||
-          candidate.kind === "tab" ||
-          candidate.kind === "soft-hyphen") &&
+        (candidate.item.kind === "text" ||
+          candidate.item.kind === "tab" ||
+          candidate.item.kind === "soft-hyphen") &&
         candidate.bidiItemStart >= globalStart &&
         candidate.bidiItemEnd <= globalEnd
       ) {
         const candidateText =
-          candidate.kind === "soft-hyphen"
+          candidate.item.kind === "soft-hyphen"
             ? "-"
-            : candidate.kind === "tab"
+            : candidate.item.kind === "tab"
               ? " "
-              : candidate.text;
+              : candidate.item.text;
         advance = cssAdd(
           advance,
           cursor.usedUnitAdvances.get(candidate.logicalIndex) ??
@@ -2629,21 +2640,21 @@ class LayoutBuilder {
         candidate === undefined ||
         candidate.bidiItemStart < globalStart ||
         candidate.bidiItemEnd > globalEnd ||
-        (candidate.kind !== "text" &&
-          candidate.kind !== "tab" &&
-          candidate.kind !== "soft-hyphen")
+        (candidate.item.kind !== "text" &&
+          candidate.item.kind !== "tab" &&
+          candidate.item.kind !== "soft-hyphen")
       )
         continue;
       let clusterText =
-        candidate.kind === "soft-hyphen"
+        candidate.item.kind === "soft-hyphen"
           ? "-"
-          : candidate.kind === "tab"
+          : candidate.item.kind === "tab"
             ? " "
-            : candidate.text;
+            : candidate.item.text;
       if (
         paragraphSlice !== undefined &&
-        candidate.kind !== "soft-hyphen" &&
-        candidate.kind !== "tab"
+        candidate.item.kind !== "soft-hyphen" &&
+        candidate.item.kind !== "tab"
       ) {
         clusterText = "";
         const localStart = candidate.bidiItemStart - paragraphSlice.itemStart;
@@ -2654,23 +2665,16 @@ class LayoutBuilder {
       }
       const visualStartCodeUnit = visualText.length;
       visualText += clusterText;
-      const clusterSourceRange =
-        node.kind !== "text-sequence" ||
-        node.source === null ||
-        node.sourceRange === null
-          ? node.sourceRange
-          : this.#formatting.document.textSourceRange(
-              node.source,
-              candidate.contentStartCodeUnit,
-              candidate.contentEndCodeUnit,
-            );
+      const clusterSourceRange = node.kind === "text-sequence"
+        ? candidate.item.sourceRange
+        : node.sourceRange;
       visualClusters.push(
         Object.freeze({
           text: clusterText,
           visualStartCodeUnit,
           visualEndCodeUnit: visualText.length,
-          contentStartCodeUnit: candidate.contentStartCodeUnit,
-          contentEndCodeUnit: candidate.contentEndCodeUnit,
+          contentStartCodeUnit: candidate.item.contentStartCodeUnit,
+          contentEndCodeUnit: candidate.item.contentEndCodeUnit,
           sourceRange: clusterSourceRange,
           advance:
             cursor.usedUnitAdvances.get(candidate.logicalIndex) ??
@@ -2688,21 +2692,21 @@ class LayoutBuilder {
           ? node.sourceRange
           : this.#formatting.document.textSourceRange(
               node.source,
-              unit.contentStartCodeUnit,
-              unit.contentEndCodeUnit,
+              unit.item.contentStartCodeUnit,
+              finalUnit.item.contentEndCodeUnit,
             );
     const fragment = this.#store<LayoutTextFragment>({
       id: this.#newId(
         node.id,
-        `text:${String(unit.contentStartCodeUnit)}:${String(unit.logicalIndex)}`,
+        `text:${String(unit.item.contentStartCodeUnit)}:${String(unit.logicalIndex)}`,
       ),
       kind: "text",
       formattingNode: node.id,
       documentNode: node.source,
       pseudoElement: node.pseudo,
       sourceRange,
-      contentStartCodeUnit: unit.contentStartCodeUnit,
-      contentEndCodeUnit: unit.contentEndCodeUnit,
+      contentStartCodeUnit: unit.item.contentStartCodeUnit,
+      contentEndCodeUnit: finalUnit.item.contentEndCodeUnit,
       text: visible && metrics.fontSize > 0 ? text : "",
       visualText: visible && metrics.fontSize > 0 ? visualText : "",
       visualClusters: visible && metrics.fontSize > 0
@@ -2716,8 +2720,8 @@ class LayoutBuilder {
       marginRect: box,
       overflowRect: box,
       clipRect: clip,
-      children: Object.freeze([]),
-      lineBoxes: Object.freeze([]),
+      children: EMPTY_FRAGMENT_CHILDREN,
+      lineBoxes: EMPTY_FRAGMENT_LINES,
       usedFontMetrics: metrics,
       baseline: metrics.baseline,
       visualOrder: ++this.#visualOrder,
@@ -2763,12 +2767,12 @@ class LayoutBuilder {
     cursor: InlineFormattingCursor,
     unit: InlineLogicalUnit,
   ): CssPixelLength {
-    const node = this.#formatting.node(unit.formattingNode);
-    if (unit.kind === "text")
-      return this.#measure(unit.text, this.#fontSize(this.#computed(node)));
-    if (unit.kind === "soft-hyphen") return ZERO;
-    if (unit.kind === "tab") return ZERO;
-    if (unit.kind === "atomic-inline") {
+    const node = this.#formatting.node(unit.item.formattingNode);
+    if (unit.item.kind === "text")
+      return this.#measure(unit.item.text, this.#fontSize(this.#computed(node)));
+    if (unit.item.kind === "soft-hyphen") return ZERO;
+    if (unit.item.kind === "tab") return ZERO;
+    if (unit.item.kind === "atomic-inline") {
       return this.#atomicInlineAdvance(
         node,
         nonNegative(cssCoordinateDifference(cursor.maxX, cursor.continuationX)),
@@ -2787,7 +2791,7 @@ class LayoutBuilder {
   #selectInlineLineBreaks(cursor: InlineFormattingCursor): void {
     const selection = selectLogicalLines(
       cursor.textAnalysis.logicalUnits.map((unit) => {
-        const node = this.#formatting.node(unit.formattingNode);
+        const node = this.#formatting.node(unit.item.formattingNode);
         const wrappingAllowed =
           node.kind !== "text-sequence" &&
           node.kind !== "generated-text" &&
@@ -2798,15 +2802,15 @@ class LayoutBuilder {
           logicalIndex: unit.logicalIndex,
           advance: this.#logicalUnitAdvance(cursor, unit),
           tabInterval:
-            unit.kind === "tab"
+            unit.item.kind === "tab"
               ? cssMultiply(
                   this.#metrics(this.#computed(node)).chAdvance,
                   this.#computed(node)?.text.tabSize ?? 8,
                 )
               : null,
           breakBefore: this.#breakBeforeUnit(cursor, unit),
-          forcedBreak: unit.kind === "forced-break",
-          collapsibleSpace: unit.collapsibleSpace,
+          forcedBreak: unit.item.kind === "forced-line-break",
+          collapsibleSpace: ("collapsibleSpace" in unit.item && unit.item.collapsibleSpace),
           wrappingAllowed,
         });
       }),
@@ -2841,6 +2845,7 @@ class LayoutBuilder {
     baseDirection: "ltr" | "rtl" | "auto",
     directionalSegments: readonly ControlDisplayTextSegment[],
     metrics: UsedFontMetrics,
+    lines?: LayoutControlTextLine[],
   ): readonly LayoutTextCluster[] {
     const items: BidiItem<number>[] = [];
     const ranges: {
@@ -2883,7 +2888,6 @@ class LayoutBuilder {
       contentOffset: number,
     ): void => {
       append({
-        logicalIndex: items.length,
         kind: "structural-control",
         text: "",
         codePoint: null,
@@ -2918,7 +2922,6 @@ class LayoutBuilder {
       const start = items.length;
       if (unit.kind === "forced-break") {
         append({
-          logicalIndex: items.length,
           kind: "structural-control",
           text: "",
           codePoint: null,
@@ -2932,7 +2935,6 @@ class LayoutBuilder {
           const codePoint = character.codePointAt(0);
           if (codePoint === undefined) continue;
           append({
-            logicalIndex: items.length,
             kind: "code-point",
             text: character,
             codePoint,
@@ -2964,6 +2966,8 @@ class LayoutBuilder {
     let bidiRuns = 0;
     let visualRuns = 0;
     for (const slice of paragraphs.paragraphs) {
+      const lineStart = clusters.length;
+      if (lines !== undefined) { visualAdvance = ZERO; visualCodeUnitOffset = 0; }
       if (slice.paragraph.outcome.status === "rejected")
         throw new RangeError("Atomic inline bidi input was rejected.");
       if (slice.paragraph.outcome.status === "truncated") {
@@ -3043,6 +3047,12 @@ class LayoutBuilder {
         visualCodeUnitOffset += clusterText.length;
         visualAdvance = cssAdd(visualAdvance, advance);
       }
+      if (lines !== undefined) {
+        const lineClusters = Object.freeze(clusters.splice(lineStart));
+        const height = this.#lineHeight(this.#computed(node), metrics);
+        lines.push(Object.freeze({ text: lineClusters.map((cluster) => cluster.text).join(""), clusters: lineClusters,
+          blockOffset: cssMultiply(height, lines.length), height }));
+      }
     }
     this.#bidiItems += items.length;
     this.#bidiRuns += bidiRuns;
@@ -3067,12 +3077,12 @@ class LayoutBuilder {
         cursor.lineSelectionStopped = true;
         break;
       }
-      if (unit.kind === "forced-break") {
+      if (unit.item.kind === "forced-line-break") {
         this.#finalizeLine(cursor, true, "forced");
         index += 1;
         continue;
       }
-      if (unit.kind === "soft-hyphen") {
+      if (unit.item.kind === "soft-hyphen") {
         const following =
           cursor.textAnalysis.logicalUnits[unit.logicalIndex + 1];
         if (
@@ -3096,7 +3106,7 @@ class LayoutBuilder {
         index += 1;
         continue;
       }
-      const firstPosition = cursor.textAnalysis.positions[unit.bidiItemStart];
+      const firstPosition = cursor.textAnalysis.positions.at(unit.bidiItemStart);
       const firstParagraph =
         firstPosition === undefined
           ? undefined
@@ -3107,17 +3117,17 @@ class LayoutBuilder {
           ? null
           : (firstParagraph?.embeddingLevels[firstPosition.item] ?? null);
       let end = index + 1;
-      while (unit.kind === "text" && end < units.length) {
+      while (unit.item.kind === "text" && end < units.length) {
         const candidate = units[end];
         if (
           candidate === undefined ||
-          candidate.kind !== "text" ||
-          candidate.collapsibleSpace !== unit.collapsibleSpace ||
+          candidate.item.kind !== "text" ||
+          ("collapsibleSpace" in candidate.item && candidate.item.collapsibleSpace) !== ("collapsibleSpace" in unit.item && unit.item.collapsibleSpace) ||
           cursor.suppressedUnits.has(candidate.logicalIndex) ||
           cursor.selectedLineBreaks.has(candidate.logicalIndex)
         )
           break;
-        const position = cursor.textAnalysis.positions[candidate.bidiItemStart];
+        const position = cursor.textAnalysis.positions.at(candidate.bidiItemStart);
         const paragraph =
           position === undefined
             ? undefined
@@ -3135,25 +3145,15 @@ class LayoutBuilder {
         end += 1;
       }
       const last = units[end - 1] ?? unit;
-      let text = "";
-      for (let cursorIndex = index; cursorIndex < end; cursorIndex += 1)
-        text += units[cursorIndex]?.text ?? "";
-      const grouped = Object.freeze({
-        ...unit,
-        text,
-        contentEndCodeUnit: last.contentEndCodeUnit,
-        bidiItemEnd: last.bidiItemEnd,
-        lineEndCodeUnit: last.lineEndCodeUnit,
-      });
       const placed = this.#textFragment(
         node,
         cursor,
-        grouped,
+        unit,
         clip,
         last.logicalIndex + 1,
       );
       if (placed !== null) children.push(placed.id);
-      cursor.collapsedSpace = unit.collapsibleSpace;
+      cursor.collapsedSpace = ("collapsibleSpace" in unit.item && unit.item.collapsibleSpace);
       index = end;
     }
     const fallback = cssRect(cursor.x, cursor.y, ZERO, ZERO);
@@ -3167,6 +3167,12 @@ class LayoutBuilder {
       children,
       [],
     );
+  }
+
+  #controlIntrinsicInline(node: FormattingNode, metrics: UsedFontMetrics): CssPixelLength | null {
+    if (node.kind !== "form-control") return null;
+    return node.control.kind === "text" ? cssMultiply(metrics.chAdvance, node.control.size)
+      : node.control.kind === "textarea" ? cssMultiply(metrics.chAdvance, node.control.cols) : null;
   }
 
   #atomic(
@@ -3225,12 +3231,20 @@ class LayoutBuilder {
                   direction: htmlDirection,
                 },
               ])));
+    const controlLines: LayoutControlTextLine[] | undefined = node.kind === "form-control" && node.control.kind === "textarea" ? [] : undefined;
+    const atomicText = controlLines === undefined ? processedText : processCssText(logicalText, "none", "pre", false,
+      { maxGraphemeClusters: Math.max(0, this.#budgets.maxGraphemeClusters - this.#graphemeClusters) }, this.#input.signal);
+    if (atomicText.outcome.status !== "complete") {
+      this.#truncated ??= "maxGraphemeClusters";
+      throw new LayoutBudgetExhausted();
+    }
     const visualClusters = this.#atomicVisualClusters(
       node,
-      processedText,
+      atomicText,
       baseDirection,
       directionalSegments,
       metrics,
+      controlLines,
     );
     const text = visualClusters.map((cluster) => cluster.text).join("");
     const lineHeight = this.#lineHeight(style, metrics);
@@ -3250,13 +3264,13 @@ class LayoutBuilder {
       border.top,
       border.bottom,
     );
-    const intrinsicWidth =
+    const intrinsicWidth = this.#controlIntrinsicInline(node, metrics) ?? (
       node.kind !== "form-control" && node.intrinsicWidth !== null
         ? cssPx(node.intrinsicWidth)
         : visualClusters.reduce<CssPixelLength>(
             (advance, cluster) => cssAdd(advance, cluster.advance),
             ZERO,
-          );
+          ));
     const specifiedWidth =
       style === null
         ? null
@@ -3283,7 +3297,8 @@ class LayoutBuilder {
     const intrinsicHeight =
       node.kind !== "form-control" && node.intrinsicHeight !== null
         ? cssPx(node.intrinsicHeight)
-        : lineHeight;
+        : node.kind === "form-control" && node.control.kind === "textarea"
+          ? cssMultiply(lineHeight, node.control.rows) : lineHeight;
     const indefiniteHeight = (value: CssLength): CssPixelLength | null =>
       this.#usedLength(value, null, style);
     const toContentHeight = (value: CssPixelLength): CssPixelLength =>
@@ -3366,8 +3381,8 @@ class LayoutBuilder {
       marginRect,
       overflowRect: borderRect,
       clipRect: this.#clip(node, paddingRect, borderRect, clip),
-      children: Object.freeze([]),
-      lineBoxes: Object.freeze([]),
+      children: EMPTY_FRAGMENT_CHILDREN,
+      lineBoxes: EMPTY_FRAGMENT_LINES,
       usedFontMetrics: metrics,
       baseline: metrics.baseline,
       visualOrder: ++this.#visualOrder,
@@ -3388,7 +3403,8 @@ class LayoutBuilder {
             kind: "control",
             controlLabel: control.label,
             controlValue: control.value,
-            controlText: visible && metrics.fontSize > 0 ? text : "",
+            ...(controlLines === undefined ? { controlText: visible && metrics.fontSize > 0 ? text : "" }
+              : { controlLines: Object.freeze(visible && metrics.fontSize > 0 ? controlLines : []) }),
             visualClusters: visible && metrics.fontSize > 0
               ? Object.freeze(visualClusters)
               : Object.freeze([]),
@@ -3404,7 +3420,7 @@ class LayoutBuilder {
     this.#store(fragment, true);
     const atomicLineHeight = cssMax(lineHeight, borderRect.height);
     const bidiPosition =
-      globalItem < 0 ? undefined : cursor.textAnalysis.positions[globalItem];
+      globalItem < 0 ? undefined : cursor.textAnalysis.positions.at(globalItem);
     const verticalAlign = style?.text.verticalAlign ?? {
       kind: "keyword",
       value: "baseline",
@@ -3539,7 +3555,7 @@ class LayoutBuilder {
       usedFontMetrics: atomicMetrics,
     });
     const bidiPosition =
-      globalItem < 0 ? undefined : cursor.textAnalysis.positions[globalItem];
+      globalItem < 0 ? undefined : cursor.textAnalysis.positions.at(globalItem);
     const verticalAlign = style?.text.verticalAlign ?? {
       kind: "keyword",
       value: "baseline",
@@ -3661,8 +3677,8 @@ class LayoutBuilder {
             ? clipRect
             : overflowRect,
         ),
-        children: Object.freeze([...children]),
-        lineBoxes: Object.freeze([...lineBoxes]),
+        children: children.length === 0 ? EMPTY_FRAGMENT_CHILDREN : Object.freeze([...children]),
+        lineBoxes: lineBoxes.length === 0 ? EMPTY_FRAGMENT_LINES : Object.freeze([...lineBoxes]),
         usedFontMetrics: null,
         baseline,
         visualOrder: ++this.#visualOrder,
@@ -4109,6 +4125,12 @@ class LayoutBuilder {
           );
         appendProcessed(processed, style);
       } else if (node.kind === "form-control") {
+        const intrinsic = this.#controlIntrinsicInline(node, this.#metrics(style));
+        if (intrinsic !== null) {
+          total = cssAdd(total, intrinsic);
+          trailingCollapsibleAdvance = ZERO;
+          continue;
+        }
         const processed = this.#input.inlineItemStreams.textForFormattingNode(
           node.id,
         );
@@ -4465,7 +4487,7 @@ class LayoutBuilder {
     const style = this.#boxComputed(node) ?? this.#computed(node);
     if (
       style?.box.minWidth.kind !== "auto" ||
-      style.box.overflowX !== "hidden"
+      !isScrollableOverflow(style.box.overflowX)
     )
       return contributions.borderBox.minContentInlineSize;
     return nonNegative(
@@ -4507,7 +4529,7 @@ class LayoutBuilder {
           ? this.#lineHeight(style, this.#metrics(style))
           : cssPx(node.intrinsicHeight);
     } else if (node.kind === "form-control") {
-      automatic = this.#lineHeight(style, this.#metrics(style));
+      automatic = cssMultiply(this.#lineHeight(style, this.#metrics(style)), node.control.kind === "textarea" ? node.control.rows : 1);
     } else if (
       node.kind === "text-sequence" ||
       node.kind === "generated-text" ||
@@ -5142,7 +5164,7 @@ class LayoutBuilder {
   #positionedContainingNode(node: FormattingNode, fixed: boolean): FormattingNode | null {
     let parent = this.#formatting.parent(node.id);
     while (parent !== null) {
-      if (fixed ? this.#hasTransform(parent) : this.#establishesPositionedContainingBlock(parent)) return parent;
+      if (fixed ? this.#hasTransform(parent) || this.#paintContainment(parent) : this.#establishesPositionedContainingBlock(parent)) return parent;
       parent = this.#formatting.parent(parent.id);
     }
     return null;
@@ -5158,17 +5180,21 @@ class LayoutBuilder {
     return fixed ? this.#input.context.scrollport : this.#input.context.initialContainingBlock;
   }
 
-  #inFlowContainingBlock(node: FormattingNode): CssRect {
+  #inFlowContainingFragment(node: FormattingNode): LayoutFragment | null {
     let parent = this.#formatting.parent(node.id);
     while (parent !== null) {
       const fragmentId = this.#principalFragments.get(parent.id);
       const fragment =
         fragmentId === undefined ? undefined : this.#fragments.get(fragmentId);
       if (fragment !== undefined && fragment.kind !== "text")
-        return fragment.contentRect;
+        return fragment;
       parent = this.#formatting.parent(parent.id);
     }
-    return this.#input.context.initialContainingBlock;
+    return null;
+  }
+
+  #inFlowContainingBlock(node: FormattingNode): CssRect {
+    return this.#inFlowContainingFragment(node)?.contentRect ?? this.#input.context.initialContainingBlock;
   }
 
   #layoutOutOfFlow(
@@ -5422,6 +5448,7 @@ class LayoutBuilder {
         root: result.fragment,
         normalBorderRect: result.borderRect,
         containingBlock,
+        containingFragment: this.#inFlowContainingFragment(node)?.id ?? null,
         top: this.#usedInset(style, "top", this.#input.context.viewport.height),
         right: this.#usedInset(style, "right", this.#input.context.viewport.width),
         bottom: this.#usedInset(style, "bottom", this.#input.context.viewport.height),
@@ -5459,12 +5486,10 @@ class LayoutBuilder {
     forcedContentWidth: CssPixelLength | null = null,
     forcedContentHeight: CssPixelLength | null = null,
   ): LayoutResult {
-    const style = this.#boxComputed(node) ?? this.#computed(node);
     const ownsFloatManager =
       this.#floatManagers.length === 0 ||
       !this.#normalBlockFlow(node) ||
-      style?.box.overflowX !== "visible" ||
-      style.box.overflowY !== "visible";
+      this.#independentFormattingContext(node);
     const manager = ownsFloatManager
       ? new FloatExclusionManager()
       : (this.#floatManagers.at(-1) ?? new FloatExclusionManager());
@@ -5820,7 +5845,7 @@ class LayoutBuilder {
         dimensions.border.top === 0 &&
         dimensions.padding.top === 0 &&
         this.#normalBlockFlow(node) &&
-        (this.#boxComputed(node)?.box.overflowY ?? "visible") === "visible";
+        !this.#independentFormattingContext(node);
       const collapsed = collapseWithParent
         ? ZERO
         : collapseMargins(pendingBottomMargin, topMargin);
@@ -5833,8 +5858,7 @@ class LayoutBuilder {
         : null;
       const childEstablishesBlockFormattingContext =
         !this.#normalBlockFlow(child) ||
-        (childStyle?.box.overflowX ?? "visible") !== "visible" ||
-        (childStyle?.box.overflowY ?? "visible") !== "visible";
+        this.#independentFormattingContext(child);
       if (
         childEstablishesBlockFormattingContext &&
         floatManager.exclusions.length > 0
@@ -5932,7 +5956,7 @@ class LayoutBuilder {
       dimensions.specifiedHeight === null &&
       dimensions.minHeight === 0 &&
       this.#normalBlockFlow(node) &&
-      (this.#boxComputed(node)?.box.overflowY ?? "visible") === "visible";
+      !this.#independentFormattingContext(node);
     if (!collapseLast)
       currentBottom = point(currentBottom, pendingBottomMargin);
     if (ownsFloatManager)
@@ -6188,7 +6212,7 @@ class LayoutBuilder {
     const minimumProperty = rowAxis
       ? style?.box.minWidth
       : style?.box.minHeight;
-    const automaticMinimum = rowAxis
+    const automaticMinimum = isScrollableOverflow((rowAxis ? style?.box.overflowX : style?.box.overflowY) ?? "visible") ? ZERO : rowAxis
       ? cssMin(
           this.#intrinsicMinimumWidth(
             childId,
@@ -6932,7 +6956,11 @@ class LayoutBuilder {
           if (!(error instanceof LayoutBudgetExhausted)) throw error;
         }
         this.#releaseLineReservation(cursor);
-        return result;
+        // Line alignment can move an atomic box. Positioned layout must finalize
+        // against the stored box, not the pre-alignment result returned above.
+        const finalized = this.#fragments.get(result.fragment);
+        return finalized === undefined ? result
+          : {fragment:result.fragment,borderRect:finalized.borderRect,marginRect:finalized.marginRect};
       }
       if (node.kind === "table-wrapper") {
         return this.#tableFormattingContext(
@@ -7141,7 +7169,7 @@ class LayoutBuilder {
       const integerLevel = positioned || flexOrGridItem ? itemStyle?.box.zIndex ?? null : null;
       const establishes =
         entry.root ||
-        (node !== null && this.#hasTransform(node)) ||
+        (node !== null && (this.#hasTransform(node) || this.#paintContainment(node))) ||
         position === "fixed" ||
         position === "sticky" ||
         ((position === "relative" || position === "absolute") &&
@@ -7296,6 +7324,7 @@ class LayoutBuilder {
       if (fragment.kind !== "text" && this.#boxComputed(node) !== null) {
         for (const [kind, own] of [
           ["overflow", this.#overflowClip(node, fragment.paddingRect, canvas.rect)],
+          ["contain", this.#paintContainment(node) ? fragment.paddingRect : canvas.rect],
           ["clip", this.#explicitClip(node, fragment.borderRect, canvas.rect)],
         ] as const) {
           if (!sameRect(own, canvas.rect)) {
@@ -7421,6 +7450,12 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
   readonly root: LayoutFragmentId;
   readonly lineBoxes: readonly LineBox[];
   readonly outcome: LayoutOutcome;
+  readonly viewportDirection: "ltr" | "rtl";
+  readonly viewportOverflow: { readonly x: CssOverflow; readonly y: CssOverflow };
+  readonly scrollExtent: CssRect;
+  readonly scrollOwners: readonly LayoutScrollOwner[];
+  readonly #scrollOwners = new Map<LayoutFragmentId, LayoutScrollOwner>();
+  readonly #scrollAncestors = new Map<LayoutFragmentId, LayoutFragmentId | null>();
   readonly #fragments: ReadonlyMap<LayoutFragmentId, LayoutFragment>;
   readonly #parents: ReadonlyMap<LayoutFragmentId, LayoutFragmentId>;
   readonly #formattingIndex: ReadonlyMap<
@@ -7456,6 +7491,16 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
   ) {
     this.#clipChains = clipChains;
     this.formatting = input.formatting;
+    const html = input.formatting.document.documentElement;
+    const body = input.formatting.document.body;
+    const htmlStyle = html === null ? null : input.formatting.styles.style(html);
+    const bodyStyle = body === null ? null : input.formatting.styles.style(body);
+    this.viewportDirection = htmlStyle?.box.contain === "none" && bodyStyle?.box.contain === "none"
+      ? bodyStyle.text.direction : htmlStyle?.text.direction ?? "ltr";
+    const overflowSource = viewportOverflowSource(input.formatting);
+    const overflow = overflowSource === null ? null : input.formatting.styles.style(overflowSource).box;
+    const viewportPolicy = (value:CssOverflow):CssOverflow => value === "visible" ? "auto" : value === "clip" ? "hidden" : value;
+    this.viewportOverflow = Object.freeze({ x: viewportPolicy(overflow?.overflowX ?? "visible"), y: viewportPolicy(overflow?.overflowY ?? "visible") });
     this.context = Object.freeze({
       ...input.context,
       viewport: Object.freeze({ ...input.context.viewport }),
@@ -7550,8 +7595,122 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
             ([child, parent]) => reachable.has(child) && reachable.has(parent),
           ),
         );
+    const scrolling = this.#buildScrollOwners(input.signal);
+    this.scrollOwners = scrolling.owners;
+    this.scrollExtent = scrolling.extent;
     Object.freeze(this);
-    registerRetainedOwner(this, () => [this.#clipChains, this.#fragments, this.#parents, this.#formattingIndex, this.#documentIndex, this.#stackingMetadata, this.#scrollAttachments]);
+    registerRetainedOwner(this, () => [this.#clipChains, this.#fragments, this.#parents, this.#formattingIndex, this.#documentIndex, this.#stackingMetadata, this.#scrollAttachments, this.#scrollOwners, this.#scrollAncestors, this.scrollOwners, this.scrollExtent]);
+  }
+
+  #buildScrollOwners(signal?: AbortSignal): {readonly owners: readonly LayoutScrollOwner[]; readonly extent: CssRect} {
+    const styles = new Map<LayoutFragmentId, ComputedStyle>();
+    const candidates = new Set<LayoutFragmentId>();
+    const viewportSource = viewportOverflowSource(this.formatting);
+    const ordered: LayoutFragmentId[] = [];
+    const pending = [this.root];
+    while (pending.length > 0) {
+      signal?.throwIfAborted();
+      const id = pending.pop();
+      if (id === undefined) continue;
+      const fragment = this.fragment(id);
+      ordered.push(id);
+      const node = this.formatting.node(fragment.formattingNode);
+      if (fragment.kind !== "text" && node.styleNode !== null && hasOverflowBox(this.formatting, node)) {
+        const style = node.pseudo === null ? this.formatting.styles.style(node.styleNode)
+          : this.formatting.styles.pseudo(node.styleNode, node.pseudo) ?? this.formatting.styles.style(node.styleNode);
+        const propagated = node.pseudo === null && fragment.documentNode === viewportSource;
+        styles.set(id,propagated ? {...style,box:{...style.box,overflowX:"visible",overflowY:"visible"}} : style);
+        if (!propagated && fragment.documentNode !== null && (isScrollableOverflow(style.box.overflowX) || isScrollableOverflow(style.box.overflowY))) candidates.add(id);
+      }
+      for (let index = fragment.children.length - 1; index >= 0; index -= 1) {
+        const child = fragment.children[index];
+        if (child !== undefined) pending.push(child);
+      }
+    }
+    if (candidates.size === 0 && ![...styles.values()].some(style=>style.box.contain === "paint" || clipsOverflow(style.box.overflowX) || clipsOverflow(style.box.overflowY))) {
+      return {owners:Object.freeze([]),extent:this.fragment(this.root).overflowRect};
+    }
+    const redirected = new Map<LayoutFragmentId, LayoutFragmentId[]>();
+    const outOfFlow = new Set<LayoutFragmentId>();
+    for (const id of ordered) {
+      const style = styles.get(id);
+      if (style?.box.position !== "absolute" && style?.box.position !== "fixed") continue;
+      const parent = this.scrollAttachmentParent(id);
+      if (parent?.id === this.parent(id)?.id) continue;
+      outOfFlow.add(id);
+      if (parent !== null) {
+        const children = redirected.get(parent.id) ?? [];
+        children.push(id);
+        redirected.set(parent.id,children);
+      }
+    }
+    // A child's trapped paint overflow must not enlarge an ancestor's scroll range.
+    const propagated = new Map<LayoutFragmentId, CssRect>();
+    const extents = new Map<LayoutFragmentId, CssRect>();
+    for (let index = ordered.length - 1; index >= 0; index -= 1) {
+      signal?.throwIfAborted();
+      const id = ordered[index];
+      if (id === undefined) continue;
+      const fragment = this.fragment(id);
+      let extent = fragment.kind === "text" ? fragment.borderRect : fragment.paddingRect;
+      let inFlowExtent = fragment.contentRect;
+      for (const child of [...fragment.children.filter(child=>!outOfFlow.has(child)), ...(redirected.get(id)??[])]) {
+        if (this.scrollAttachment(child)?.kind === "fixed") continue;
+        const rect = propagated.get(child);
+        if (rect !== undefined) {
+          extent = cssUnion([extent, rect], extent);
+          const position = styles.get(child)?.box.position;
+          if (position !== "absolute" && position !== "fixed") inFlowExtent = cssUnion([inFlowExtent,rect],inFlowExtent);
+        }
+      }
+      if (candidates.has(id)) {
+        const rtl = styles.get(id)?.text.direction === "rtl";
+        const inlinePadding = rtl ? fragment.contentRect.x-fragment.paddingRect.x
+          : fragment.paddingRect.x+fragment.paddingRect.width-fragment.contentRect.x-fragment.contentRect.width;
+        const bottomPadding = fragment.paddingRect.y+fragment.paddingRect.height-fragment.contentRect.y-fragment.contentRect.height;
+        const padded = cssRect(cssCoordinateFromFixed(inFlowExtent.x-(rtl?inlinePadding:0)),inFlowExtent.y,
+          cssLengthFromFixed(inFlowExtent.width+inlinePadding),cssLengthFromFixed(inFlowExtent.height+bottomPadding));
+        extent = cssUnion([extent,padded],extent);
+      }
+      extents.set(id, extent);
+      const style = styles.get(id);
+      if (style !== undefined) {
+        const port = fragment.paddingRect;
+        const contain = hasPaintContainment(this.formatting, this.formatting.node(fragment.formattingNode), style);
+        const clipX = contain || clipsOverflow(style.box.overflowX);
+        const clipY = contain || clipsOverflow(style.box.overflowY);
+        extent = cssRect(clipX ? port.x : extent.x, clipY ? port.y : extent.y,
+          clipX ? port.width : extent.width, clipY ? port.height : extent.height);
+      }
+      propagated.set(id, cssUnion([fragment.borderRect, extent], fragment.borderRect));
+    }
+    for (const id of ordered) {
+      const parent = this.scrollAttachmentParent(id);
+      const ancestor = parent === null ? null : candidates.has(parent.id) ? parent.id : this.#scrollAncestors.get(parent.id) ?? null;
+      if (ancestor !== null) this.#scrollAncestors.set(id, ancestor);
+      if (!candidates.has(id)) continue;
+      const fragment = this.fragment(id);
+      const style = styles.get(id);
+      const extent = extents.get(id);
+      if (style === undefined || extent === undefined || fragment.documentNode === null) continue;
+      const port = fragment.paddingRect;
+      const rtl = style.text.direction === "rtl";
+      this.#scrollOwners.set(id, Object.freeze({ fragment: id, documentNode: fragment.documentNode,
+        parent: ancestor, scrollport: port, contentExtent: extent,
+        minInline: isScrollableOverflow(style.box.overflowX) && rtl ? Math.min(0, extent.x - port.x) : 0,
+        maxInline: isScrollableOverflow(style.box.overflowX) && !rtl ? Math.max(0, extent.x + extent.width - port.x - port.width) : 0,
+        minBlock: 0,
+        maxBlock: isScrollableOverflow(style.box.overflowY) ? Math.max(0, extent.y + extent.height - port.y - port.height) : 0,
+        overflowX: style.box.overflowX, overflowY: style.box.overflowY, direction: style.text.direction,
+      }));
+    }
+    return {owners:Object.freeze([...this.#scrollOwners.values()]),extent:propagated.get(this.root)??this.fragment(this.root).overflowRect};
+  }
+
+  public scrollContainer(id: LayoutFragmentId): LayoutScrollOwner | null { return this.#scrollOwners.get(id) ?? null; }
+  public scrollAncestor(id: LayoutFragmentId): LayoutScrollOwner | null {
+    const owner = this.#scrollAncestors.get(id);
+    return owner === undefined || owner === null ? null : this.#scrollOwners.get(owner) ?? null;
   }
 
   public static rejected(
@@ -7575,8 +7734,8 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
       marginRect: empty,
       overflowRect: empty,
       clipRect: empty,
-      children: Object.freeze([]),
-      lineBoxes: Object.freeze([]),
+      children: EMPTY_FRAGMENT_CHILDREN,
+      lineBoxes: EMPTY_FRAGMENT_LINES,
       usedFontMetrics: null,
       baseline: null,
       visualOrder: 0,
@@ -7656,10 +7815,13 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
     const computed = (candidate: FormattingNode): ComputedStyle | null => candidate.styleNode === null ? null
       : candidate.pseudo === null ? this.formatting.styles.style(candidate.styleNode)
         : this.formatting.styles.pseudo(candidate.styleNode, candidate.pseudo) ?? this.formatting.styles.style(candidate.styleNode);
-    if (fragment.kind === "text" || !ownsOuterBoxStyle(node) || computed(node)?.box.position !== "fixed") return this.parent(id);
+    const position = computed(node)?.box.position;
+    if (fragment.kind === "text" || !ownsOuterBoxStyle(node) || (position !== "fixed" && position !== "absolute")) return this.parent(id);
     let owner = this.formatting.parent(node.id);
     while (owner !== null) {
-      if (hasTransform(this.formatting, owner, computed(owner))) {
+      const ownerStyle = computed(owner);
+      if ((position === "absolute" && ownsOuterBoxStyle(owner) && ownerStyle !== null && ownerStyle.box.position !== "static")
+        || hasTransform(this.formatting, owner, ownerStyle) || hasPaintContainment(this.formatting, owner, ownerStyle)) {
         return this.forFormattingNode(owner.id).find((candidate) => candidate.kind !== "text") ?? null;
       }
       owner = this.formatting.parent(owner.id);

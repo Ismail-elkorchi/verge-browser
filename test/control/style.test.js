@@ -901,12 +901,12 @@ test("style work exhaustion is a typed truncation and retains already-computed U
   const { document, styles } = setup(
     `<style>p { color:red } div { color:blue } span { color:green }</style><p>P</p><div>D</div><span>S</span>`,
     undefined,
-    { maxSelectorQueries: 1 }
+    { maxSelectorSteps: 1 }
   );
   assert.deepEqual(styles.outcome, {
     status: "truncated",
     computedNodes: styles.outcome.computedNodes,
-    budget: "maxSelectorQueries",
+    budget: "maxSelectorSteps",
     limit: 1,
     fallback: "user-agent-only",
   });
@@ -919,10 +919,10 @@ test("author-style exhaustion leaves a total baseline style for every retained e
   const { document, styles } = setup(
     `<style>span:first-child{color:red} span:last-child{color:blue}</style><main>${"<span>word</span>".repeat(20)}</main>`,
     undefined,
-    { maxSelectorQueries: 1 }
+    { maxSelectorSteps: 1 }
   );
   assert.equal(styles.outcome.status, "truncated");
-  assert.equal(styles.outcome.budget, "maxSelectorQueries");
+  assert.equal(styles.outcome.budget, "maxSelectorSteps");
   const pending = [document.root];
   let elements = 0;
   while (pending.length > 0) {

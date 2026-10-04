@@ -12,7 +12,6 @@ export type BidiParagraphDirectionInput = BidiParagraphDirection
   | ((itemStart: number, itemEnd: number) => BidiParagraphDirection);
 
 export interface BidiItem<TIdentity = unknown> {
-  readonly logicalIndex: number;
   readonly kind: "code-point" | "atomic-inline" | "structural-control";
   readonly text: string;
   readonly codePoint: number | null;
@@ -552,7 +551,7 @@ export function resolveBidiParagraph<TIdentity>(
   for (let index = 0; index < items.length; index += 1) {
     checkCancellation(signal, index);
     const item = items[index];
-    if (item === undefined || item.logicalIndex !== index || !Number.isSafeInteger(item.sourceStartCodeUnit)
+    if (item === undefined || !Number.isSafeInteger(item.sourceStartCodeUnit)
       || !Number.isSafeInteger(item.sourceEndCodeUnit) || item.sourceStartCodeUnit < 0
       || item.sourceEndCodeUnit < item.sourceStartCodeUnit) {
       return Object.freeze({
@@ -766,7 +765,6 @@ function bidiItemsFromTextBounded<TIdentity>(
     if (codePoint === undefined) continue;
     const end = offset + character.length;
     items.push(Object.freeze({
-      logicalIndex: items.length,
       kind: "code-point",
       text: character,
       codePoint,
@@ -804,7 +802,7 @@ export function resolveBidiParagraphs<TIdentity>(
     if (index < inputItems.length && inputItems[index]?.bidiClass !== "B") continue;
     const end = index < inputItems.length ? index + 1 : index;
     if (end > start || inputItems.length === 0) {
-      const local = inputItems.slice(start, end).map((item, logicalIndex) => Object.freeze({ ...item, logicalIndex }));
+      const local = inputItems.slice(start, end);
       const direction = typeof directionInput === "function" ? directionInput(start, end) : directionInput;
       const paragraph = resolveBidiParagraph(local, direction, {
         ...budgets,

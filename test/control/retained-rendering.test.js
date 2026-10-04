@@ -86,7 +86,10 @@ function render(store, viewportRevision, options = {}) {
     viewportRevision,
     ...renderContexts,
     window: {
+      ...(options.reveal === undefined ? {} : { reveal: options.reveal }),
+      ...(options.scrollOffsets === undefined ? {} : { scrollOffsets: options.scrollOffsets }),
       scrollRow: options.scrollRow ?? 0,
+      scrollColumn: options.scrollColumn ?? 0,
       viewportRows: options.rows ?? 24,
       overscanBefore: options.overscanBefore ?? 2,
       overscanAfter: options.overscanAfter ?? 3,
@@ -121,7 +124,6 @@ test("scroll requests retain immutable artifacts and rasterize only the viewport
   for (const stage of immutableStages) assert.equal(invocation(scrolled, stage), 0, stage);
   for (const stage of [
     "spatial-query",
-    "fixed-sticky-resolution",
     "viewport-display-list-construction",
     "cell-rasterization",
     "terminal-index-construction",
@@ -179,7 +181,7 @@ test("selector sessions retain structural matches and invalidate only relevant d
     documentRevision: 1,
     ...contexts(80, 24),
   });
-  const initialAuthorSession = initialArtifacts.stylesheetProgram.selectorRuntime.authorSession;
+  const initialAuthorSession = initialArtifacts.stylesheetProgram.selectorRuntime.session;
   assert.ok(initialAuthorSession);
   const initialSession = cold.artifactKey;
   const target = document.elementById("target");
@@ -200,7 +202,7 @@ test("selector sessions retain structural matches and invalidate only relevant d
     documentRevision: 1,
     ...contexts(80, 24),
   });
-  assert.equal(focusedArtifacts.stylesheetProgram.selectorRuntime.authorSession, initialAuthorSession);
+  assert.equal(focusedArtifacts.stylesheetProgram.selectorRuntime.session, initialAuthorSession);
   assert.equal(focusedArtifacts.computedStyles.style(target).text.color.b, 255);
 
   const plain = document.elementById("plain");
@@ -427,7 +429,7 @@ function comparableRendering(store, result, columns, rows) {
     actions: result.terminal.hitTestIndex.regions,
     focus: result.terminal.focusMap.targets,
     accessibility: result.terminal.accessibilityBounds,
-    sourceRects: [...result.terminal.cellRectsByDocumentNode],
+    controls: result.terminal.controls,
     anchors: result.scrollAnchors,
     focusOrder: result.focusOrder,
     extent: result.documentExtentRows,
@@ -850,4 +852,96 @@ test("wrapped link hit regions follow inline continuations rather than their bou
     assert.ok(rendered.terminal.hitTestIndex.at(1, 1)?.action.destination.endsWith("/wrapped"));
     assert.equal(rendered.terminal.hitTestIndex.at(1, 3), null);
   } finally { fixture.store.dispose(); }
+});
+
+
+for (const nested of [false, true]) {
+  test(`search reveal uses exact occurrence within a wrapped source node, nested=${nested}`, () => {
+    const { store } = attachedStore(`<style>html,body,p{margin:0}#owner{${nested ? "height:64px;overflow:auto" : ""}}</style><div id=owner><p>needle ${"word ".repeat(300)}needle</p></div>`);
+    try {
+      const request = { documentId: "document", documentRevision: 1, ...contexts(10, 24) };
+      const search = store.search(request, "needle");
+      assert.equal(search.matches.length, 2);
+      const last = search.matches[1];
+      const revealed = render(store, 1, { columns: 10, rows: 24, overscanBefore: 0, overscanAfter: 0,
+        searchQuery: "needle", reveal: { query: "needle", match: last.id, align: "nearest" } });
+      assert.ok(revealed.terminal.search.matches.some((match) => match.id === last.id), "selected occurrence is painted inside actual viewport");
+      if (nested) {
+        assert.equal(revealed.displayList.window.scrollRow, 0);
+        assert.ok(revealed.displayList.window.scrollOffsets.some((offset) => offset.block > 0));
+      } else assert.ok(revealed.displayList.window.scrollRow > 100);
+      const first = render(store, 2, { columns: 10, rows: 24, overscanBefore: 0, overscanAfter: 0,
+        scrollRow: revealed.displayList.window.scrollRow, scrollOffsets: revealed.displayList.window.scrollOffsets,
+        searchQuery: "needle", reveal: { query: "needle", match: search.matches[0].id, align: "nearest" } });
+      assert.ok(first.terminal.search.matches.some((match) => match.id === search.matches[0].id));
+      assert.equal(first.displayList.window.scrollRow, 0);
+      assert.ok(first.displayList.window.scrollOffsets.every((offset) => offset.block === 0));
+    } finally { store.dispose(); }
+  });
+}
+
+
+test("root horizontal viewport shares source columns across paint, hits, focus, controls and search", () => {
+  const fixture = attachedStore(`<style>html,body{margin:0}main{width:1200px}a,input{position:absolute;left:720px;top:32px;white-space:nowrap}input{top:64px;width:160px}</style><main><a id="target" href="/target">horizontal-target</a><input id="field" value="control-value"></main>`);
+  const initial = render(fixture.store, 1, {columns:40,rows:10,searchQuery:"horizontal-target"});
+  const target = fixture.document.elementById("target");
+  assert.equal(initial.terminal.focusMap.targets.some(entry=>entry.node===target),false);
+  const shifted = render(fixture.store, 2, {columns:40,rows:10,scrollColumn:80,searchQuery:"horizontal-target"});
+  for (const stage of immutableStages) assert.equal(invocation(shifted, stage), 0, stage);
+  assert.equal(shifted.terminal.cellBuffer.windowStartColumn,80);
+  assert.match(shifted.terminal.cellBuffer.rows.map(row=>row.text).join("\n"),/horizontal-target/);
+  const cell=shifted.terminal.cellBuffer.rows.flatMap(row=>row.cells).find(cell=>cell.documentNode===fixture.document.node(target).children[0]);
+  assert.ok(cell.column>=90);
+  assert.ok(shifted.terminal.hitTestIndex.regions.some(entry=>entry.action?.node===target));
+  assert.ok(shifted.terminal.focusMap.targets.some(entry=>entry.node===target));
+  assert.ok(shifted.terminal.controls.some(entry=>entry.node===fixture.document.elementById("field")));
+  assert.ok(shifted.terminal.search.matches.length>0);
+  const revealed=render(fixture.store,3,{columns:40,rows:10,reveal:{node:target,align:"nearest"}});
+  assert.ok(revealed.displayList.window.scrollColumn>0);
+  assert.match(revealed.terminal.cellBuffer.rows.map(row=>row.text).join("\n"),/horizontal-target/);
+  const resized=render(fixture.store,4,{columns:120,rows:10,scrollColumn:10000});
+  assert.ok(resized.displayList.window.scrollColumn<10000);
+});
+
+test("RTL root viewport pans negative source columns and root reveal uses the same projection", () => {
+  const fixture=attachedStore(`<html dir="rtl"><style>html,body{margin:0}main{width:1200px}a{position:absolute;left:-640px;top:32px;white-space:nowrap}</style><main><a id="target" href="/target">rtl-target</a></main></html>`);
+  const target=fixture.document.elementById("target");
+  const shifted=render(fixture.store,1,{columns:40,rows:10,scrollColumn:-85});
+  assert.ok(shifted.displayList.window.scrollColumn<0);
+  assert.match(shifted.terminal.cellBuffer.rows.map(row=>row.text).join("\n"),/rtl-target/);
+  assert.ok(shifted.terminal.cellBuffer.rows.flatMap(row=>row.cells).some(cell=>cell.column<0));
+  assert.ok(shifted.terminal.focusMap.targets.some(entry=>entry.node===target));
+  const revealed=render(fixture.store,2,{columns:40,rows:10,reveal:{node:target,align:"nearest"}});
+  assert.ok(revealed.displayList.window.scrollColumn<0);
+  assert.match(revealed.terminal.cellBuffer.rows.map(row=>row.text).join("\n"),/rtl-target/);
+  assert.equal(render(fixture.store,3,{columns:40,rows:10,scrollColumn:1000}).displayList.window.scrollColumn,0);
+});
+
+test("root horizontal origin keeps fixed content stationary and source geometry aligned",()=>{
+  const fixture=attachedStore(`<style>html,body{margin:0}main{width:1200px;height:500px}a{position:fixed;left:16px;top:16px;white-space:nowrap}</style><main><a id="fixed" href="/fixed">fixed-marker</a></main>`);
+  const target=fixture.document.elementById("fixed");
+  const first=render(fixture.store,1,{columns:40,rows:10});
+  const shifted=render(fixture.store,2,{columns:40,rows:10,scrollColumn:60,scrollRow:4});
+  const painted=result=>result.terminal.cellBuffer.rows.filter(row=>row.text.includes("fixed-marker"));
+  assert.equal(painted(first)[0].text,painted(shifted)[0].text);
+  const sourceColumn=result=>result.terminal.focusMap.targets.find(entry=>entry.node===target).rects[0].column;
+  assert.equal(sourceColumn(shifted)-sourceColumn(first),60);
+});
+
+test("worker root inline protocol returns clamped signed origin and reachable extents", async()=>{
+  const document=parseWebDocument(`<html dir="rtl"><style>html,body{margin:0}main{width:1200px}a{position:absolute;left:-640px;top:16px;white-space:nowrap}</style><main><a href="/target">worker-target</a></main></html>`,{requestUrl:"https://worker.example/",finalUrl:"https://worker.example/"});
+  const browserDocument={id:"root-inline-worker",documentRevision:1,stateRevision:1,documentState:createDocumentState(document),snapshot:{requestUrl:document.requestUrl,finalUrl:document.finalUrl,document,stylesheets:embeddedStylesheetSources(document),styleDiagnostics:[]}};
+  const client=new RenderWorkerClient();
+  try {
+    await client.attach(browserDocument);
+    const parameters={columns:40,rows:10,scrollRow:0,scrollColumn:-80,overscanBefore:0,overscanAfter:0,preferences:{unicode:true,ambiguousWidth:1,colorDepth:24,colorScheme:"dark",reducedMotion:false,hover:"hover",pointer:"fine"},searchQuery:null};
+    const result=await client.renderViewport(browserDocument,1,parameters);
+    assert.equal(result.scrollColumn,-80);
+    assert.equal(result.cellBuffer.windowStartColumn,-80);
+    assert.ok(result.minScrollColumn<=-80);
+    assert.equal(result.maxScrollColumn,0);
+    assert.match(result.cellBuffer.rows.map(row=>row.text).join("\n"),/worker-target/);
+    const resized=await client.renderViewport(browserDocument,2,{...parameters,columns:120,scrollColumn:-1000000});
+    assert.equal(resized.scrollColumn,resized.minScrollColumn);
+  } finally {await client.close();}
 });

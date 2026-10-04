@@ -15,7 +15,6 @@ export type RenderStage =
   | "inline-item-stream-construction"
   | "logical-search-index-construction"
   | "normal-flow-layout"
-  | "fixed-sticky-resolution"
   | "document-display-list-construction"
   | "display-list-spatial-index-construction"
   | "document-geometry-index-construction"

@@ -242,10 +242,11 @@ export function buildInlineItemStreamSet(tree: FormattingTree, signal?: AbortSig
           throw new RangeError("Inline item stream exceeded its grapheme-cluster budget.");
         }
         graphemeClusters += processed.outcome.graphemeClusters;
-        textByFormatting.set(node.id, processed);
+        const retainedUnits: LogicalTextUnit[] = [];
         collapsibleSpacePending = processed.collapsibleSpacePending;
         for (const unit of processed.units) {
           if (unit.kind === "forced-break") {
+            retainedUnits.push(unit);
             items.push(Object.freeze({
               ...identity,
               kind: "forced-line-break",
@@ -257,17 +258,18 @@ export function buildInlineItemStreamSet(tree: FormattingTree, signal?: AbortSig
             collapsibleSpacePending = false;
             continue;
           }
-          items.push(Object.freeze({
+          // One canonical object owns both CSS text offsets and inline provenance.
+          const item: InlineTextItem & LogicalTextUnit = Object.freeze({
             ...identity,
-            kind: unit.kind === "tab" ? "tab" : unit.kind === "soft-hyphen" ? "soft-hyphen" : "text",
-            text: unit.text,
-            collapsibleSpace: unit.collapsibleSpace,
+            ...unit,
+            kind: unit.kind,
             whiteSpace: node.whiteSpace,
             sourceRange: unitSourceRange(tree, node, unit),
-            contentStartCodeUnit: unit.contentStartCodeUnit,
-            contentEndCodeUnit: unit.contentEndCodeUnit
-          }));
+          });
+          items.push(item);
+          retainedUnits.push(item);
         }
+        textByFormatting.set(node.id, Object.freeze({ ...processed, units: Object.freeze(retainedUnits) }));
         return;
       }
       if (node.kind === "forced-line-break") {

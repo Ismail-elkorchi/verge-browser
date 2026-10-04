@@ -132,11 +132,11 @@ test("initial document state resolves the final URL fragment through the ID inde
   assert.equal(createDocumentState(document).urlTarget, document.headings[0].node);
 });
 
-test("following a same-document link updates target state to the destination element", () => {
+test("validated URL target update is renderer state, not navigation", () => {
   const document = parseWebDocument(`<a href="#chapter">Jump</a><h2 id="chapter">Chapter</h2>`, context);
   const state = applyDocumentAction(document, createDocumentState(document), {
-    kind: "follow-link",
-    target: document.links[0].node
+    kind: "set-url-target",
+    target: document.elementById("chapter")
   });
   assert.equal(state.urlTarget, document.elementById("chapter"));
 });
@@ -151,8 +151,8 @@ test("dynamic state transitions retain unchanged immutable state collections", (
   assert.strictEqual(focused.controls, initial.controls);
   assert.strictEqual(focused.open, initial.open);
   const targeted = applyDocumentAction(document, focused, {
-    kind: "follow-link",
-    target: document.links[0].node
+    kind: "set-url-target",
+    target: document.elementById("chapter")
   });
   assert.strictEqual(targeted.controls, focused.controls);
   assert.strictEqual(targeted.open, focused.open);
@@ -291,4 +291,22 @@ test("HTML directionality is indexed with Unicode first-strong, isolation, overr
     document.directionality(byId(document, "image")).renderedText.map(({ kind, direction }) => [kind, direction]),
     [["alternative-text", "rtl"], ["title", "rtl"]]
   );
+});
+
+test("control intrinsic dimensions normalize HTML integer attributes independently of values", () => {
+  const document = parseWebDocument(`<input id="default"><input id="sized" size=" +12tail">
+    <input id="invalid" size="-4"><input id="overflow" size="999999999999999999999">
+    <textarea id="area" rows="3" cols="32">one\ntwo</textarea>
+    <textarea id="fallback" rows="0" cols="n/a"></textarea>`, context);
+  assert.equal(document.control(byId(document, "default")).size, 20);
+  assert.equal(document.control(byId(document, "sized")).size, 12);
+  assert.equal(document.control(byId(document, "invalid")).size, 20);
+  assert.equal(document.control(byId(document, "overflow")).size, 20);
+  const area = document.control(byId(document, "area"));
+  assert.equal(area.rows, 3);
+  assert.equal(area.cols, 32);
+  assert.equal(area.defaultValue, "one\ntwo");
+  const fallback = document.control(byId(document, "fallback"));
+  assert.equal(fallback.rows, 2);
+  assert.equal(fallback.cols, 20);
 });

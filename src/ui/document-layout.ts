@@ -148,11 +148,12 @@ export function documentWithScrollRow(
   }
   const anchor = lower === 0 ? undefined : anchors[lower - 1];
   if (anchor === undefined) {
-    return { ...document, scrollAnchor: { source: null, rowOffset: rowIndex } };
+    return { ...document, rendering: { ...document.rendering, pendingReveal: null, pendingFocus: null }, scrollAnchor: { source: null, rowOffset: rowIndex } };
   }
   return {
     ...document,
     scrollAnchor: { source: anchor.documentNode, rowOffset: rowIndex - anchor.row },
+    rendering: { ...document.rendering, pendingReveal: null, pendingFocus: null },
   };
 }
 
@@ -206,5 +207,6 @@ export function scrollToSource(
   document: BrowserDocumentState,
   source: DocumentNodeRef | undefined
 ): BrowserDocumentState {
-  return source === undefined ? document : { ...document, scrollAnchor: { source, rowOffset: 0 } };
+  return source === undefined ? document : { ...document, rendering: { ...document.rendering,
+    pendingReveal: { node: source, align: "start" }, pendingFocus: null } };
 }

@@ -1,5 +1,6 @@
 import type {
   SelectorStateDependency,
+  CssOverflow,
   StylesheetResource,
   StyleDiagnostic,
   StyleOutcome,
@@ -7,7 +8,10 @@ import type {
 import type {
   DisplayListSpatialQueryMetrics,
   TerminalAccessibilityBound,
-  TerminalCellRect,
+  TerminalControlGeometry,
+  TerminalScrollPort,
+  ViewportRevealRequest,
+  DocumentScrollOffset,
   TerminalFocusTarget,
   TerminalHitRegion,
   TerminalSearchResult,
@@ -70,9 +74,12 @@ export interface RenderDocumentAttachment {
 }
 
 export interface ViewportRequestParameters {
+  readonly scrollOffsets?: readonly DocumentScrollOffset[];
+  readonly reveal?: ViewportRevealRequest;
   readonly columns: number;
   readonly rows: number;
   readonly scrollRow: number;
+  readonly scrollColumn?: number;
   readonly overscanBefore: number;
   readonly overscanAfter: number;
   readonly preferences: BrowserRenderPreferences;
@@ -112,6 +119,7 @@ export interface RenderScrollAnchorEntry {
 }
 
 export interface RenderFocusOrderEntry {
+  readonly scrollOwner: DocumentNodeRef | null;
   readonly node: DocumentNodeRef;
   readonly actionId: string;
   readonly actionKind: DocumentActionIdentity["kind"];
@@ -120,6 +128,14 @@ export interface RenderFocusOrderEntry {
 }
 
 export interface ViewportRenderPayload {
+  readonly minScrollColumn?: number;
+  readonly maxScrollColumn?: number;
+  readonly viewportOverflow: { readonly x: CssOverflow; readonly y: CssOverflow };
+  readonly cellInline: number;
+  readonly cellBlock: number;
+  readonly scrollRow: number;
+  readonly scrollColumn?: number;
+  readonly scrollOffsets: readonly DocumentScrollOffset[];
   readonly summaryIdentity: string;
   readonly layoutRevision: string;
   readonly documentId: string;
@@ -132,7 +148,8 @@ export interface ViewportRenderPayload {
   readonly focusTargets: readonly TerminalFocusTarget[];
   readonly accessibilityBounds: readonly TerminalAccessibilityBound[];
   readonly search: TerminalSearchResult | null;
-  readonly cellRectsByDocumentNode: readonly (readonly [DocumentNodeRef, readonly TerminalCellRect[]])[];
+  readonly controls: readonly TerminalControlGeometry[];
+  readonly scrollPorts: readonly TerminalScrollPort[];
   readonly summary: RenderDocumentSummary;
   readonly stageMetrics: readonly RenderStageMeasurement[];
 }

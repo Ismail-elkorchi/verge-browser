@@ -145,6 +145,13 @@ function cleanText(value: string): string {
   return value.replace(/\s+/gu, " ").trim();
 }
 
+/** HTML non-negative integer parsing, with invalid/zero dimensions using defaults. */
+function controlDimension(value: string | null, fallback: number): number {
+  const digits = value?.match(/^[\t\n\f\r ]*\+?([0-9]+)/u)?.[1];
+  const parsed = digits === undefined ? NaN : Number(digits);
+  return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= 2_147_483_647 ? parsed : fallback;
+}
+
 function finiteNumber(value: string | null): number | null {
   if (value === null || value.trim().length === 0) return null;
   const number = Number(value);
@@ -889,6 +896,8 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
         control = Object.freeze({
           ...common,
           kind: "textarea",
+          rows: controlDimension(attribute(element.ref, "rows"), 2),
+          cols: controlDimension(attribute(element.ref, "cols"), 20),
           defaultValue: text(element.ref, limits.maxTextCodeUnits),
           placeholder: attribute(element.ref, "placeholder"),
           readOnly: attribute(element.ref, "readonly") !== null
@@ -923,7 +932,7 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
           node: option.ref,
           select: element.ref,
           value: attribute(option.ref, "value") ?? text(option.ref, limits.maxTextCodeUnits),
-          label: cleanText(text(option.ref, limits.maxTextCodeUnits)),
+          label: attribute(option.ref, "label") || cleanText(text(option.ref, limits.maxTextCodeUnits)),
           defaultSelected: attribute(option.ref, "selected") !== null || (!multiple && !hasSelected && index === 0),
           disabled: disabledByGroup || attribute(option.ref, "disabled") !== null
         }));
@@ -967,6 +976,7 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
           control = Object.freeze({
             ...common,
             kind: "text",
+            size: controlDimension(attribute(element.ref, "size"), 20),
             inputType: inputType as "text" | "search" | "email" | "url" | "tel" | "password" | "number",
             defaultValue,
             placeholder: attribute(element.ref, "placeholder"),

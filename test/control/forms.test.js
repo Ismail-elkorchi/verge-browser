@@ -186,3 +186,11 @@ test("invalid button and input type keywords follow HTML missing-value defaults"
   const document = documentWithForm(`<form><input type="future-widget" name="value"><button type="future-button">Go</button></form>`);
   assert.deepEqual(document.forms[0].controls.map((control) => control.kind), ["text", "submit"]);
 });
+
+test("select option display labels stay distinct from submitted values and identities", () => {
+  const document = documentWithForm(`<form><select name="choice"><option value="42" label="First label">first fallback</option><option value="42" label="Second label" selected>second fallback</option></select></form>`);
+  const control = document.forms[0].controls[0];
+  assert.deepEqual(control.options.map((option) => [option.label, option.value]), [["First label", "42"], ["Second label", "42"]]);
+  assert.notEqual(control.options[0].node, control.options[1].node);
+  assert.deepEqual(createDocumentState(document).controls.get(control.node).selected, [control.options[1].node]);
+});

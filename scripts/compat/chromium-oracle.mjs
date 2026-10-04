@@ -48,7 +48,7 @@ function nativeStyle(style) {
     : `${style.text.lineHeight.value.kind === "zero" ? 0 : style.text.lineHeight.value.value}px`;
   const display = style.display.box !== "principal" ? style.display.box
     : style.display.internal ?? (style.display.inner === "flow" ? style.display.outer : style.display.inner);
-  return { display, visibility: style.visibility, fontSize: `${fontSize}px`, lineHeight,
+  return { display, overflowX: style.box.overflowX, overflowY: style.box.overflowY, contain: style.box.contain, visibility: style.visibility, fontSize: `${fontSize}px`, lineHeight,
     color: cssColor(style.text.color), backgroundColor: cssColor(style.text.background),
     direction: style.text.direction, whiteSpace: style.text.whiteSpace, fontWeight: String(style.text.fontWeight) };
 }
@@ -124,7 +124,7 @@ const inspect = async (javaScriptEnabled) => {
               const style = computedStyle(element);
               return { tag: element.tagName.toLowerCase(), id: element.id,
                 rectangle: { x: rect.x + globalThis.scrollX, y: rect.y + globalThis.scrollY, width: rect.width, height: rect.height },
-                style: Object.fromEntries(["display", "visibility", "fontSize", "lineHeight", "color", "backgroundColor", "direction", "whiteSpace", "fontWeight"].map((property) => [property, style[property]])) };
+                style: Object.fromEntries(["display", "visibility", "fontSize", "lineHeight", "color", "backgroundColor", "direction", "whiteSpace", "fontWeight", "overflowX", "overflowY", "contain"].map((property) => [property, style[property]])) };
             };
             return {
               url: document.URL, compatibilityMode: document.compatMode,

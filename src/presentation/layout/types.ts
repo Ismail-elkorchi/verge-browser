@@ -1,3 +1,4 @@
+import type { CssOverflow } from "../style/types.js";
 import type {
   DocumentNodeRef,
   DocumentSemanticEntry,
@@ -113,6 +114,13 @@ export interface LayoutTextCluster {
   readonly advance: CssPixelLength;
 }
 
+export interface LayoutControlTextLine {
+  readonly text: string;
+  readonly clusters: readonly LayoutTextCluster[];
+  readonly blockOffset: CssPixelLength;
+  readonly height: CssPixelLength;
+}
+
 export interface LayoutTextFragment {
   readonly id: LayoutFragmentId;
   readonly kind: "text";
@@ -195,6 +203,7 @@ export interface LayoutBoxFragment {
   readonly controlLabel?: string;
   readonly controlValue?: string;
   readonly controlText?: string;
+  readonly controlLines?: readonly LayoutControlTextLine[];
   readonly replacedText?: string;
   readonly visualClusters?: readonly LayoutTextCluster[];
   readonly tableCollapsedBorderSegments?: readonly LayoutTableCollapsedBorderSegment[];
@@ -230,6 +239,7 @@ export type LayoutScrollAttachment = Readonly<{
   readonly root: LayoutFragmentId;
   readonly normalBorderRect: CssRect;
   readonly containingBlock: CssRect;
+  readonly containingFragment: LayoutFragmentId | null;
   readonly top: CssPixelLength | null;
   readonly right: CssPixelLength | null;
   readonly bottom: CssPixelLength | null;
@@ -292,13 +302,35 @@ export interface BuildLayoutFragmentTreeInput {
 }
 
 export interface LayoutClipChain {
-  readonly kind: "canvas" | "viewport" | "overflow" | "clip";
+  readonly kind: "canvas" | "viewport" | "overflow" | "clip" | "contain";
   readonly owner: LayoutFragmentId | null;
   readonly rect: CssRect;
   readonly parent: LayoutClipChain | null;
 }
 
+/** Layout-owned immutable scrolling geometry. Offsets live in the viewport state. */
+export interface LayoutScrollOwner {
+  readonly fragment: LayoutFragmentId;
+  readonly documentNode: DocumentNodeRef;
+  readonly parent: LayoutFragmentId | null;
+  readonly scrollport: CssRect;
+  readonly contentExtent: CssRect;
+  readonly minInline: number;
+  readonly maxInline: number;
+  readonly minBlock: number;
+  readonly maxBlock: number;
+  readonly overflowX: CssOverflow;
+  readonly overflowY: CssOverflow;
+  readonly direction: "ltr" | "rtl";
+}
+
 export interface LayoutFragmentTree {
+  readonly viewportDirection: "ltr" | "rtl";
+  readonly scrollExtent: CssRect;
+  readonly viewportOverflow: { readonly x: CssOverflow; readonly y: CssOverflow };
+  readonly scrollOwners: readonly LayoutScrollOwner[];
+  scrollContainer(id: LayoutFragmentId): LayoutScrollOwner | null;
+  scrollAncestor(id: LayoutFragmentId): LayoutScrollOwner | null;
   clipChain(id: LayoutFragmentId): LayoutClipChain | null;
   readonly formatting: FormattingTree;
   readonly context: LayoutContext;

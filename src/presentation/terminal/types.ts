@@ -1,8 +1,9 @@
+import type { DocumentScrollOffset, ViewportGeometryProjection } from "./viewport-geometry.js";
 import type { DocumentNodeRef, DocumentSemanticEntry, DocumentSourceRange } from "../../document/index.js";
 import type { DocumentActionIdentity, FormattingNodeId } from "../formatting/index.js";
 import type {
   CssEdges, CssPixelLength, CssRect, LayoutFragmentId,
-  LayoutFragmentTree, LayoutPaintStyle, LayoutScrollAttachment, LayoutTextCluster
+  LayoutFragmentTree, LayoutPaintStyle, LayoutTextCluster
 } from "../layout/index.js";
 import type { TextSearchMatchId } from "../search/index.js";
 
@@ -122,23 +123,17 @@ export interface DisplayListSpatialQuery {
 
 export interface DisplayListSpatialIndex {
   readonly commandCount: number;
-  readonly attachmentCommandCount: number;
-  readonly fixedAttachmentGroups: readonly DisplayListAttachmentGroup[];
-  query(rect: CssRect, signal?: AbortSignal): DisplayListSpatialQuery;
-  queryStickyAttachments(rect: CssRect, signal?: AbortSignal): DisplayListAttachmentSpatialQuery;
+  query(rect: CssRect, signal?: AbortSignal, projection?: ViewportGeometryProjection): DisplayListSpatialQuery;
 }
 
-export interface DisplayListAttachmentGroup {
-  readonly attachment: LayoutScrollAttachment;
-  readonly commands: readonly TerminalPaintCommand[];
-}
-
-export interface DisplayListAttachmentSpatialQuery {
-  readonly groups: readonly DisplayListAttachmentGroup[];
-  readonly metrics: DisplayListSpatialQueryMetrics;
-}
+export type ViewportRevealRequest =
+  | { readonly node: DocumentNodeRef; readonly align: "start" | "nearest" }
+  | { readonly query: string; readonly match: string; readonly align: "start" | "nearest" };
 
 export interface ViewportWindow {
+  readonly scrollColumn?: number;
+  readonly scrollOffsets?: readonly DocumentScrollOffset[];
+  readonly reveal?: ViewportRevealRequest;
   readonly scrollRow: number;
   readonly viewportRows: number;
   readonly overscanBefore: number;
@@ -149,6 +144,7 @@ export interface ViewportDisplayList {
   readonly documentDisplayList: DocumentDisplayList;
   readonly context: TerminalRenderContext;
   readonly window: ViewportWindow;
+  readonly projection: ViewportGeometryProjection;
   readonly viewportRect: CssRect;
   readonly windowRect: CssRect;
   readonly commands: readonly TerminalPaintCommand[];
@@ -228,6 +224,7 @@ export type TerminalTruncation = {
 
 /** Cell rows retained only for the requested viewport window and overscan. */
 export interface ViewportCellBuffer {
+  readonly windowStartColumn?: number;
   readonly columns: number;
   readonly documentRowCount: number;
   readonly windowStartRow: number;
@@ -256,6 +253,8 @@ export interface TerminalHitTestIndex {
 }
 
 export interface TerminalFocusTarget {
+  /** Actual layout scroll owner; null means the root viewport. */
+  readonly scrollOwner: DocumentNodeRef | null;
   readonly node: DocumentNodeRef;
   readonly action: DocumentActionIdentity;
   readonly layoutFragments: readonly LayoutFragmentId[];
@@ -305,7 +304,36 @@ export interface DocumentGeometryEntry {
   readonly rects: readonly CssRect[];
 }
 
+export interface DocumentControlGeometry {
+  readonly node: DocumentNodeRef;
+  readonly fragment: LayoutFragmentId;
+  readonly rect: CssRect;
+}
+
+export interface TerminalScrollPort {
+  readonly node: DocumentNodeRef;
+  readonly parent: DocumentNodeRef | null;
+  readonly rect: TerminalCellRect;
+  readonly inline: number;
+  readonly block: number;
+  readonly minInline: number;
+  readonly maxInline: number;
+  readonly minBlock: number;
+  readonly maxBlock: number;
+  readonly userScrollInline: boolean;
+  readonly userScrollBlock: boolean;
+}
+
+export interface TerminalControlGeometry {
+  readonly node: DocumentNodeRef;
+  readonly layoutFragment: LayoutFragmentId;
+  /** Full allocation, kept independent of clipping so editors retain their geometry. */
+  readonly allocation: TerminalCellRect;
+  readonly visible: TerminalCellRect;
+}
+
 export interface DocumentFocusGeometry {
+  readonly scrollOwner: DocumentNodeRef | null;
   readonly rectFragments: readonly LayoutFragmentId[];
   readonly node: DocumentNodeRef;
   readonly action: DocumentActionIdentity;
@@ -334,6 +362,7 @@ export interface DocumentScrollAnchorGeometry {
 
 export interface DocumentGeometryIndex {
   readonly documentExtent: CssRect;
+  readonly controls: readonly DocumentControlGeometry[];
   readonly focusOrder: readonly DocumentFocusGeometry[];
   readonly accessibility: readonly DocumentAccessibilityGeometry[];
   readonly scrollAnchors: readonly DocumentScrollAnchorGeometry[];
@@ -343,8 +372,9 @@ export interface DocumentGeometryIndex {
   anchorForNode(node: DocumentNodeRef): DocumentScrollAnchorGeometry | null;
   focusForNode(node: DocumentNodeRef): DocumentFocusGeometry | null;
   accessibilityForNode(node: DocumentNodeRef): DocumentAccessibilityGeometry | null;
-  focusIntersecting(rect: CssRect, signal?: AbortSignal): readonly DocumentFocusGeometry[];
-  accessibilityIntersecting(rect: CssRect, signal?: AbortSignal): readonly DocumentAccessibilityGeometry[];
+  controlsIntersecting(rect: CssRect, signal?: AbortSignal, owner?: LayoutFragmentId | null): readonly DocumentControlGeometry[];
+  focusIntersecting(rect: CssRect, signal?: AbortSignal, owner?: LayoutFragmentId | null): readonly DocumentFocusGeometry[];
+  accessibilityIntersecting(rect: CssRect, signal?: AbortSignal, owner?: LayoutFragmentId | null): readonly DocumentAccessibilityGeometry[];
 }
 
 export interface ViewportTerminalResult {
@@ -354,7 +384,8 @@ export interface ViewportTerminalResult {
   readonly accessibilityBounds: readonly TerminalAccessibilityBound[];
   readonly search: TerminalSearchResult | null;
   readonly commandById: ReadonlyMap<string, TerminalPaintCommand>;
-  readonly cellRectsByDocumentNode: ReadonlyMap<DocumentNodeRef, readonly TerminalCellRect[]>;
+  readonly controls: readonly TerminalControlGeometry[];
+  readonly scrollPorts: readonly TerminalScrollPort[];
   readonly truncations: readonly TerminalTruncation[];
 }
 

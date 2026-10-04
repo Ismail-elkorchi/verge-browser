@@ -7,3 +7,5 @@ export { buildDocumentGeometryIndex } from "./document-geometry.js";
 export { buildViewportDisplayList } from "./viewport-display-list.js";
 export { buildViewportTerminalResult } from "./viewport-indexes.js";
 export type * from "./types.js";
+
+export type { DocumentScrollOffset } from "./viewport-geometry.js";

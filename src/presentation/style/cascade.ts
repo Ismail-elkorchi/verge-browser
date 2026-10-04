@@ -1,3 +1,5 @@
+import { SelectorResultCache } from "./selector-cache.js";
+import { normalizedOverflow } from "./overflow.js";
 import { DiagnosticCollector, diagnosticIdentity } from "./diagnostics.js";
 import { EMPTY_NAMESPACES, bindSelectorNamespaces } from "./namespaces.js";
 import { namedColor } from "./named-colors.js";
@@ -23,7 +25,6 @@ import {
   type CssBlockItem,
   type SelectorEnvironment,
   type SelectorList,
-  type SelectorMatchSession,
   type SelectorSpecificity
 } from "@ismail-elkorchi/css-parser";
 
@@ -44,7 +45,6 @@ import type {
   CssFlexBasis,
   CssLegacyClip,
   CssLength,
-  CssLengthPercentageExpression,
   CascadeLayerPath,
   CompiledDeclarationProgram,
   MediaEnvironment,
@@ -61,6 +61,7 @@ import type {
 import {
   parseCssFunctionalColor,
   parseCssLength,
+  evaluateCssMath,
   parseCssTranslations,
   resolveCssVariableValues,
   splitCssComponentValues
@@ -124,7 +125,7 @@ const SUPPORTED_PROPERTIES = new Set([
   "border-color", "border-top-color", "border-right-color", "border-bottom-color", "border-left-color",
   "border-top", "border-right", "border-bottom", "border-left",
   "table-layout", "border-collapse", "border-spacing", "caption-side", "empty-cells",
-  "overflow", "overflow-x", "overflow-y",
+  "overflow", "overflow-x", "overflow-y", "contain",
   "position", "top", "right", "bottom", "left", "inset", "inset-block", "inset-block-start",
   "inset-block-end", "inset-inline", "inset-inline-start", "inset-inline-end", "z-index",
   "float", "clear", "clip", "clip-path", "transform",
@@ -176,6 +177,7 @@ interface ComputedDiagnosticContribution {
 }
 
 interface CandidateCollection {
+  readonly commitCache: () => void;
   readonly candidates: CandidateMap;
   /** Null means no prior dynamic-state result can safely seed incremental computation. */
   readonly affectedDynamicNodes: ReadonlySet<DocumentNodeRef> | null;
@@ -299,8 +301,12 @@ function canonicalProperty(name: string): string | null {
   return semantics?.name ?? null;
 }
 
-function selectorEnvironment(input: ResolveStylesInput): SelectorEnvironment<WebDocumentNode> {
-  const currentState = (): DocumentState => input.program.selectorRuntime.state ?? input.state;
+function selectorEnvironment(program: ResolveStylesInput["program"]): SelectorEnvironment<WebDocumentNode> {
+  const currentState = (): DocumentState => {
+    const state = program.selectorRuntime.state;
+    if (state === null) throw new Error("Selector callbacks require an active evaluation state.");
+    return state;
+  };
   const state: DocumentState = {
     get controls() { return currentState().controls; },
     get open() { return currentState().open; },
@@ -309,7 +315,7 @@ function selectorEnvironment(input: ResolveStylesInput): SelectorEnvironment<Web
     get active() { return currentState().active; },
     get urlTarget() { return currentState().urlTarget; },
   };
-  const document = input.program.document;
+  const document = program.document;
   const attributeCache = new Map<DocumentNodeRef, readonly {
     readonly namespace: string | null;
     readonly localName: string;
@@ -376,7 +382,7 @@ function selectorEnvironment(input: ResolveStylesInput): SelectorEnvironment<Web
       }
     },
     documentMode: { syntax: "html", quirks: document.documentMode },
-    get defaultNamespace() { return input.program.selectorRuntime.namespaces.defaultNamespace; },
+    get defaultNamespace() { return program.selectorRuntime.namespaces.defaultNamespace; },
     idValues(_node, element) {
       return element.attributes.filter((attribute) => attribute.namespace === null && attribute.localName === "id")
         .map((attribute) => attribute.value);
@@ -386,7 +392,7 @@ function selectorEnvironment(input: ResolveStylesInput): SelectorEnvironment<Web
         .flatMap((attribute) => attribute.value.split(/[\t\n\f\r ]+/u).filter(Boolean));
     },
     resolveNamespacePrefix(prefix) {
-      const prefixes = input.program.selectorRuntime.namespaces.prefixes;
+      const prefixes = program.selectorRuntime.namespaces.prefixes;
       const resolved = prefixes.get(prefix);
       return resolved === undefined ? { status: "unknown" } : { status: "resolved", namespace: resolved };
     },
@@ -681,9 +687,14 @@ function implementationSupportsDeclaration(source: string): boolean {
     case "border-left": {
       return parseSupportedBorder(value, TRANSPARENT) !== null;
     }
-    case "overflow":
+    case "overflow": {
+      const parts = splitTopLevel(value, "space");
+      return parts !== null && parts.length >= 1 && parts.length <= 2
+        && parts.every((part) => ["visible", "hidden", "clip", "auto", "scroll"].includes(part));
+    }
     case "overflow-x":
-    case "overflow-y": return keyword("visible", "hidden", "clip");
+    case "overflow-y": return keyword("visible", "hidden", "clip", "auto", "scroll");
+    case "contain": return keyword("none", "paint");
     case "position": return keyword("static", "relative", "absolute", "fixed", "sticky");
     case "top":
     case "right":
@@ -801,6 +812,20 @@ export function implementationSupportsCondition(value: string): boolean {
   return declaration.ok && supportsCondition(declaration.value);
 }
 
+/** Whole-index rejection cannot promise a user-agent cascade without an index. */
+export class StyleSelectorConstructionError extends Error {
+  public override readonly name = "StyleSelectorConstructionError";
+  public readonly budget = "maxSelectorConstructionSteps";
+  public constructor(
+    public readonly resource: string,
+    public readonly limit: number,
+    public readonly consumed: number,
+    options?: ErrorOptions,
+  ) {
+    super(`Style selector index construction exceeded ${resource}: consumed=${String(consumed)}, limit=${String(limit)}.`, options);
+  }
+}
+
 function collectCandidates(
   input: ResolveStylesInput,
   sources: readonly StylesheetProgramSource[],
@@ -825,8 +850,7 @@ function collectCandidates(
     if (previousState.open !== input.state.open) changedDependencies.add("disclosure-open");
   }
   if (changedDependencies.has("disclosure-open")) {
-    selectorRuntime.authorSession = null;
-    selectorRuntime.userAgentSession = null;
+    selectorRuntime.session = null;
   }
   const affectedDynamicNodes = previousState === null || changedDependencies.size === 0
     ? null
@@ -840,57 +864,48 @@ function collectCandidates(
     }
   }
   selectorRuntime.state = input.state;
+  selectorRuntime.matches.resize(limits.maxSelectorCacheBytes);
+  // Staging shares the same byte ceiling with committed results. Failed author
+  // collection never earns cache entries that can change a later cold outcome.
+  const provisional = new SelectorResultCache(Math.max(0, limits.maxSelectorCacheBytes - selectorRuntime.matches.bytes));
   const evaluationOptions = {
     limits: { maxSteps: limits.maxSelectorSteps },
     ...(input.signal === undefined ? {} : { signal: input.signal }),
   };
-  selectorRuntime.authorSession?.beginEvaluation(evaluationOptions);
-  const environment = selectorEnvironment(input);
+  const environment = selectorEnvironment(input.program);
   const root = input.program.document.node(input.program.document.root);
   const scope = input.program.document.documentElement;
   const scopes = new Set(scope === null ? [] : [input.program.document.node(scope)]);
   let sourceOrder = 0;
   let stylesheetOrdinal = 0;
-  let queryCount = 0;
   let exhausted = false;
-  const selectorExhaustion = new Set<"maxSelectorQueries" | "maxSelectorSteps">();
-  const userAgentMatcher = selectorRuntime.userAgentSession ?? createSelectorMatchSession(root, environment, {
-      scopes,
-      limits: {
-        maxNodes: Math.max(1, totalNodes),
-        maxDepth: Math.max(1, totalNodes),
-        maxSteps: Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, totalNodes * 128))
-      },
-      ...(input.signal === undefined ? {} : { signal: input.signal })
-    });
-  userAgentMatcher.beginEvaluation({
-    limits: { maxSteps: Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, totalNodes * 128)) },
-    ...(input.signal === undefined ? {} : { signal: input.signal }),
-  });
-  selectorRuntime.userAgentSession = userAgentMatcher;
-  const authorSelectorMatcher = (): SelectorMatchSession<WebDocumentNode> | null => {
-    if (selectorRuntime.authorSession !== null) return selectorRuntime.authorSession;
+  const selectorExhaustion = new Set<"maxSelectorSteps">();
+  let matcher = selectorRuntime.session;
+  if (matcher === null) {
     try {
-      selectorRuntime.authorSession = createSelectorMatchSession(root, environment, {
+      matcher = createSelectorMatchSession(root, environment, {
         scopes,
         limits: {
           maxNodes: Math.max(1, totalNodes),
-          maxDepth: 2_048,
-          maxSteps: limits.maxSelectorSteps
+          maxDepth: Math.max(1, totalNodes),
+          maxSteps: limits.maxSelectorConstructionSteps,
         },
-        ...(input.signal === undefined ? {} : { signal: input.signal })
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
       });
-      selectorRuntime.authorSession.beginEvaluation(evaluationOptions);
     } catch (error) {
       input.signal?.throwIfAborted();
       if (!(error instanceof SyntaxResourceError)) throw error;
-      truncate("maxSelectorSteps");
-      selectorExhaustion.add("maxSelectorSteps");
-      exhausted = true;
-      selectorRuntime.authorSession = null;
+      throw new StyleSelectorConstructionError(error.limitName, error.limit, error.actual, { cause: error });
     }
-    return selectorRuntime.authorSession;
-  };
+    selectorRuntime.session = matcher;
+  }
+  // The built-in source is always first. Its fixed selector program has a
+  // constant empty-query cost in addition to the document-proportional work.
+  matcher.beginEvaluation({
+    limits: { maxSteps: Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, 4_096 + totalNodes * 128)) },
+    ...(input.signal === undefined ? {} : { signal: input.signal }),
+  });
+  let authorEvaluationStarted = false;
   interface LayerNode {
     readonly name: string;
     readonly path: CascadeLayerPath;
@@ -935,6 +950,12 @@ function collectCandidates(
   };
   for (const source of sources) {
     if (selectorExhaustion.size > 0) break;
+    if (source.origin === "author" && !authorEvaluationStarted) {
+      matcher.beginEvaluation(evaluationOptions);
+      authorEvaluationStarted = true;
+    } else if (source.origin === "user-agent" && authorEvaluationStarted) {
+      throw new Error("The user-agent stylesheet must precede author stylesheets.");
+    }
     selectorRuntime.namespaces = source.namespaces;
     if (!source.mediaConditions.every((condition) => mediaApplies(condition, input.environment, (detail) => { diagnostics.add("stylesheet-media", source.sourceUrl, detail); }))) continue;
     if (!source.supportsConditions.every(implementationSupportsCondition)) continue;
@@ -1013,23 +1034,9 @@ function collectCandidates(
           matchingByPseudo.set(compiled.pseudoElement, matching);
             const authorRule = source.origin === "author";
             try {
-              const matcher = authorRule ? authorSelectorMatcher() : userAgentMatcher;
-              if (matcher === null) {
-                truncate("maxSelectorSteps");
-                selectorExhaustion.add("maxSelectorSteps");
-                exhausted = true;
-                break;
-              }
               const identity = `${source.namespaces.fingerprint}\u0000${compiled.fingerprint}`;
-              let result = selectorRuntime.matches.get(identity)?.result;
+              let result = selectorRuntime.matches.get(identity)?.result ?? provisional.get(identity)?.result;
               if (result === undefined) {
-                if (authorRule && queryCount >= limits.maxSelectorQueries) {
-                  truncate("maxSelectorQueries");
-                  selectorExhaustion.add("maxSelectorQueries");
-                  exhausted = true;
-                  break;
-                }
-                if (authorRule) queryCount += 1;
                 const selectorStarted = input.instrumentation === undefined ? 0 : performance.now();
                 try {
                   result = matcher.query(compiled.selector);
@@ -1039,10 +1046,12 @@ function collectCandidates(
                     performance.now() - selectorStarted,
                   );
                 }
-                selectorRuntime.matches.set(identity, Object.freeze({
+                const cache = authorRule ? provisional : selectorRuntime.matches;
+                cache.set(identity, Object.freeze({
                   dependencies: compiled.dependencies,
                   result,
                 }));
+                if (!authorRule) provisional.resize(Math.max(0, limits.maxSelectorCacheBytes - selectorRuntime.matches.bytes));
               }
               if ([...changedDependencies].some((dependency) => compiled.dependencies.has(dependency))) {
                 for (const match of result.matches) {
@@ -1074,7 +1083,6 @@ function collectCandidates(
               });
               diagnostics.add("selector-unknown", source.sourceUrl, error instanceof Error ? error.name : "Selector evaluation failed.");
             }
-          if (exhausted) break;
         }
         if (exhausted) return;
         visitRules(rule.block.items, inheritedLayer, matchingByPseudo);
@@ -1129,13 +1137,22 @@ function collectCandidates(
     }
   }
   for (const budget of selectorExhaustion) {
-    const consumed = budget === "maxSelectorQueries" ? queryCount : selectorRuntime.authorSession?.usage().steps ?? 0;
+    const consumed = matcher.usage().steps;
     diagnostics.add("stylesheet-limit", "author-stylesheets",
       `Style evaluation exhausted ${budget}: consumed=${String(consumed)}, limit=${String(limits[budget])}; fallback=user-agent-only.`);
   }
-  if (selectorExhaustion.size === 0) mergeCandidateMaps(candidates, authorCandidates);
+  input.signal?.throwIfAborted();
+  if (selectorExhaustion.size === 0) {
+    mergeCandidateMaps(candidates, authorCandidates);
+
+  }
   return Object.freeze({
     candidates,
+    commitCache: () => {
+      if (selectorExhaustion.size === 0) {
+        for (const [identity, retained] of provisional) selectorRuntime.matches.set(identity, retained);
+      }
+    },
     affectedDynamicNodes: selectorExhaustion.size === 0 ? affectedDynamicNodes : null,
     fallback: selectorExhaustion.size === 0 ? null : "user-agent-only",
   });
@@ -1412,7 +1429,8 @@ function initialStyle(parent: ComputedStyle | null, replaced: boolean, htmlDirec
         rowEnd: GRID_AUTO_LINE
       }),
       overflowX: "visible",
-      overflowY: "visible"
+      overflowY: "visible",
+      contain: "none"
     },
     generatedContent: null,
     customProperties: parent?.customProperties ?? EMPTY_CUSTOM_PROPERTIES
@@ -1492,53 +1510,6 @@ function parseLength(
   return parseCssLength(value, { allowAuto, allowNegative, allowNone });
 }
 
-function evaluateComputedMath(
-  expression: CssLengthPercentageExpression,
-  basis: number,
-  parentPx: number,
-  rootPx: number,
-  viewportWidth: number,
-  viewportHeight: number
-): number | null {
-  if (expression.kind === "value") {
-    if (!Number.isFinite(expression.value)) return null;
-    if (expression.unit === "px") return expression.value;
-    if (expression.unit === "%") return basis * expression.value / 100;
-    if (expression.unit === "em") return parentPx * expression.value;
-    if (expression.unit === "rem") return rootPx * expression.value;
-    if (expression.unit === "ch") return parentPx * 0.5 * expression.value;
-    if (expression.unit === "vw") return viewportWidth * expression.value / 100;
-    return viewportHeight * expression.value / 100;
-  }
-  if (expression.kind === "negate") {
-    const result = evaluateComputedMath(expression.value, basis, parentPx, rootPx, viewportWidth, viewportHeight);
-    return result === null ? null : -result;
-  }
-  if (expression.kind === "sum") {
-    const left = evaluateComputedMath(expression.left, basis, parentPx, rootPx, viewportWidth, viewportHeight);
-    const right = evaluateComputedMath(expression.right, basis, parentPx, rootPx, viewportWidth, viewportHeight);
-    return left === null || right === null ? null : left + right;
-  }
-  if (expression.kind === "product") {
-    const result = evaluateComputedMath(expression.value, basis, parentPx, rootPx, viewportWidth, viewportHeight);
-    return result === null ? null : result * expression.factor;
-  }
-  if (expression.kind === "minimum" || expression.kind === "maximum") {
-    let result: number | null = null;
-    for (const value of expression.values) {
-      const candidate = evaluateComputedMath(value, basis, parentPx, rootPx, viewportWidth, viewportHeight);
-      if (candidate === null) return null;
-      result = result === null ? candidate
-        : expression.kind === "minimum" ? Math.min(result, candidate) : Math.max(result, candidate);
-    }
-    return result;
-  }
-  const minimum = evaluateComputedMath(expression.minimum, basis, parentPx, rootPx, viewportWidth, viewportHeight);
-  const preferred = evaluateComputedMath(expression.preferred, basis, parentPx, rootPx, viewportWidth, viewportHeight);
-  const maximum = evaluateComputedMath(expression.maximum, basis, parentPx, rootPx, viewportWidth, viewportHeight);
-  return minimum === null || preferred === null || maximum === null
-    ? null : Math.max(minimum, Math.min(preferred, maximum));
-}
 
 function absoluteFontSize(
   value: CssLength,
@@ -1549,7 +1520,7 @@ function absoluteFontSize(
   if (value.kind === "zero") return value;
   if (value.kind === "auto" || value.kind === "none") return null;
   const pixels = value.kind === "calculation"
-    ? evaluateComputedMath(
+    ? evaluateCssMath(
         value.calculation.expression, parentPx, parentPx, rootPx,
         environment.viewportWidthCssPx, environment.viewportHeightCssPx
       )
@@ -2536,32 +2507,31 @@ function computeStyle(
     if (computed === null) unsupported(entry);
     else style = { ...style, box: { ...style.box, [property === "caption-side" ? "captionSide" : "emptyCells"]: computed } };
   }
-  const overflow = value("overflow");
-  const overflowX = value("overflow-x");
-  const overflowY = value("overflow-y");
-  const parseOverflow = (
-    entry: typeof overflow,
-    inherited: ComputedStyle["box"]["overflowX"] | undefined
-  ): ComputedStyle["box"]["overflowX"] | null => {
-    if (entry === null) return null;
+  const overflowAxis = (axis: "overflowX" | "overflowY", property: "overflow-x" | "overflow-y", index: number): ComputedStyle["box"]["overflowX"] => {
+    const entry = value([property, "overflow"]);
+    if (entry === null) return "visible";
     const wide = cssWide(entry.value);
-    if (wide === "inherit") return inherited ?? "visible";
+    if (wide === "inherit") return parent?.box[axis] ?? "visible";
     if (wide === "initial" || wide === "unset") return "visible";
-    return ["visible", "hidden", "clip"].includes(entry.value)
-      ? entry.value as ComputedStyle["box"]["overflowX"] : null;
+    const parts = splitTopLevel(entry.value, "space");
+    const token = entry.property === "overflow" ? parts?.[index] ?? parts?.[0] : entry.value;
+    if (token !== undefined && ["visible", "hidden", "clip", "auto", "scroll"].includes(token)) {
+      return token as ComputedStyle["box"]["overflowX"];
+    }
+    unsupported(entry);
+    return "visible";
   };
-  const commonOverflowX = parseOverflow(overflow, parent?.box.overflowX);
-  const commonOverflowY = parseOverflow(overflow, parent?.box.overflowY);
-  const x = parseOverflow(overflowX, parent?.box.overflowX) ?? commonOverflowX;
-  const y = parseOverflow(overflowY, parent?.box.overflowY) ?? commonOverflowY;
-  for (const [entry, inherited] of [
-    [overflow, parent?.box.overflowX],
-    [overflowX, parent?.box.overflowX],
-    [overflowY, parent?.box.overflowY]
-  ] as const) {
-    if (entry !== null && parseOverflow(entry, inherited) === null) unsupported(entry);
+  const x = overflowAxis("overflowX", "overflow-x", 0);
+  const y = overflowAxis("overflowY", "overflow-y", 1);
+  style = { ...style, box: { ...style.box, overflowX: normalizedOverflow(x, y), overflowY: normalizedOverflow(y, x) } };
+  const contain = value("contain");
+  if (contain !== null) {
+    const wide = cssWide(contain.value);
+    const computed = wide === "inherit" ? parent?.box.contain ?? "none"
+      : wide === "initial" || wide === "unset" ? "none" : contain.value;
+    if (computed === "none" || computed === "paint") style = { ...style, box: { ...style.box, contain: computed } };
+    else unsupported(contain);
   }
-  style = { ...style, box: { ...style.box, ...(x === null ? {} : { overflowX: x }), ...(y === null ? {} : { overflowY: y }) } };
   const position = value("position");
   if (position !== null) {
     const wide = cssWide(position.value);
@@ -2784,6 +2754,13 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
     totalNodes: input.program.totalNodes,
   };
   const sources = input.program.sources;
+  const selectorRuntime = input.program.selectorRuntime;
+  const previous = selectorRuntime.computedSnapshot;
+  const previousEnvironment = selectorRuntime.computedEnvironment;
+  // Candidate invalidation and evaluation state advance together. Until a new
+  // snapshot succeeds, no reusable computed baseline describes that state.
+  selectorRuntime.computedSnapshot = null;
+  selectorRuntime.computedEnvironment = null;
   const candidateCollection = collectCandidates(
     input,
     sources,
@@ -2794,13 +2771,11 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
     truncate
   );
   const candidates = candidateCollection.candidates;
-  const selectorRuntime = input.program.selectorRuntime;
   const environmentIdentity = styleEnvironmentIdentity(input.environment);
-  const previous = selectorRuntime.computedSnapshot;
   const incremental = candidateCollection.affectedDynamicNodes !== null
     && previous instanceof ImmutableStyleSnapshot
     && previous.outcome.status === "complete"
-    && selectorRuntime.computedEnvironment === environmentIdentity;
+    && previousEnvironment === environmentIdentity;
   const valueDependencies: EvaluatedValueDependencies = incremental ? { ...previous.valueDependencies } : {
     computedViewportInlineSize: false, computedViewportBlockSize: false, usedViewportBlockSize: false,
   };
@@ -2966,6 +2941,8 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
     valueDependencies,
     diagnostics.omittedDiagnosticCount,
   );
+  input.signal?.throwIfAborted();
+  candidateCollection.commitCache();
   selectorRuntime.computedSnapshot = snapshot;
   selectorRuntime.computedEnvironment = environmentIdentity;
   return snapshot;

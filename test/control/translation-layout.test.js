@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { scrollDocument } from "../../dist/ui/document-scroll.js";
 
 import { createDocumentState, parseWebDocument } from "../../dist/document/index.js";
 import { buildFormattingTree } from "../../dist/presentation/formatting/index.js";
@@ -663,3 +664,289 @@ test("transformed deferred layout honors early and late cancellation checkpoints
     assert.equal(checks, stopAt);
   }
 });
+
+test("scroll owners preserve flow, stop trapped extents, and retain unclipped content", () => {
+  const result = render(`<style>#outer{height:64px;overflow:auto}#inner{height:32px;overflow:auto}p{height:32px}</style><div id=outer><div id=inner><p>A</p><p>B</p><p>C</p></div><p>D</p></div><article id=after>ARTICLE</article>`);
+  const outer = result.layout.scrollContainer(fragment(result,"outer").id);
+  const inner = result.layout.scrollContainer(fragment(result,"inner").id);
+  assert.ok(outer && inner);
+  assert.equal(cssPixels(outer.maxBlock), 0);
+  assert.equal(cssPixels(inner.maxBlock), 64);
+  assert.equal(inner.parent, outer.fragment);
+  assert.equal(cssPixels(fragment(result,"after").borderRect.y), 64);
+  const text = result.layout.forDocumentNode(node(result,"inner")).find(value => value.kind === "text");
+  if (text) assert.equal(result.layout.scrollAncestor(text.id)?.fragment, inner.fragment);
+});
+
+test("paint containment clips descendants and establishes local fixed and stacking ownership", () => {
+  const result = render(`<div style="height:32px"></div><div id=owner style="contain:paint;width:80px;height:32px"><div id=fixed style="position:fixed;top:0;height:16px">FIXED</div><div style="height:96px">CONTENT</div></div>`);
+  const owner = fragment(result,"owner");
+  const fixed = fragment(result,"fixed");
+  assert.equal(result.layout.stacking(owner.id).establishesStackingContext,true);
+  assert.equal(result.layout.scrollAttachmentParent(fixed.id)?.id,owner.id);
+  assert.equal(cssPixels(fixed.borderRect.y),32);
+  assert.equal(result.layout.scrollContainer(owner.id),null);
+  assert.ok(result.layout.clipChain(owner.id).kind === "contain");
+});
+
+test("viewport overflow propagation keeps body out of nested owner indexes", () => {
+  const result = render(`<style>body{overflow:hidden auto;height:32px}</style><div style="height:160px">Tall</div>`);
+  assert.deepEqual(result.layout.viewportOverflow,{x:"hidden",y:"auto"});
+  assert.equal(result.layout.scrollOwners.some(owner=>owner.documentNode===result.document.body),false);
+  const overridden = render(`<style>html{overflow:clip}body{overflow:auto;height:32px}</style><div style="height:160px">Tall</div>`);
+  assert.deepEqual(overridden.layout.viewportOverflow,{x:"hidden",y:"hidden"});
+  assert.equal(overridden.layout.scrollOwners.some(owner=>owner.documentNode===overridden.document.body),true);
+});
+
+test("RTL owners expose negative reachable inline offsets and clip never owns scrolling", () => {
+  const result = render(`<div id=rtl style="direction:rtl;width:64px;height:32px;overflow:auto"><div style="position:relative;left:-64px;width:128px;height:32px">wide</div></div><div id=clip style="width:64px;height:32px;overflow:clip"><div style="height:96px">tall</div></div>`);
+  const owner = result.layout.scrollContainer(fragment(result,"rtl").id);
+  assert.equal(cssPixels(owner.minInline),-64);
+  assert.equal(owner.maxInline,0);
+  assert.equal(result.layout.scrollContainer(fragment(result,"clip").id),null);
+});
+
+test("control intrinsic allocations honor HTML dimensions and CSS box sizing", () => {
+  const result = render(`<textarea id=area rows=3 cols=10></textarea><input id=input size=5><textarea id=css rows=6 style="height:32px;box-sizing:border-box;border:1px solid"></textarea><input id=disabled disabled style="width:48px;height:32px">`);
+  assert.equal(cssPixels(fragment(result,"area").contentRect.height),48);
+  assert.equal(cssPixels(fragment(result,"area").contentRect.width),80);
+  assert.equal(cssPixels(fragment(result,"input").contentRect.width),40);
+  assert.equal(cssPixels(fragment(result,"css").borderRect.height),32);
+  assert.equal(cssPixels(fragment(result,"disabled").contentRect.width),48);
+});
+
+test("nested scroll projection moves unclipped content while retaining control allocations and sibling flow", () => {
+  const result = render(`<div id="scroller" style="width:160px;height:32px;overflow:auto"><div style="height:64px">TOP</div><input id="field" value="VALUE" style="width:120px;height:32px"><a id="last" href="/last">LAST</a></div><p id="article">ARTICLE</p>`);
+  const owner = result.layout.scrollContainer(fragment(result, "scroller").id);
+  assert.ok(owner);
+  const spatial = buildDisplayListSpatialIndex(result.displayList);
+  const list = buildViewportDisplayList({ documentDisplayList: result.displayList, spatialIndex: spatial,
+    context: result.displayList.context, window: { scrollRow: 0, viewportRows: 24, overscanBefore: 0, overscanAfter: 0,
+      scrollOffsets: [{ node: node(result, "scroller"), inline: 0, block: cssPx(64) }] } });
+  const raster = rasterizeViewportDisplayList({ displayList: list });
+  const terminal = buildViewportTerminalResult({ displayList: list, cellBuffer: raster.cellBuffer, documentGeometry: result.documentGeometry });
+  const control = terminal.controls.find((entry) => entry.node === node(result, "field"));
+  assert.ok(control, "offscreen unpainted controls are discovered after inner scrolling");
+  assert.equal(control.allocation.row, 0);
+  assert.equal(control.allocation.height, 2);
+  assert.equal(control.visible.height, 2);
+  assert.equal(fragment(result, "article").borderRect.y, cssPx(32));
+  assert.ok(terminal.cellBuffer.rows.find((row) => row.row === 2)?.text.includes("ARTICLE"));
+  assert.ok(terminal.focusMap.forNode(node(result, "field")));
+});
+
+test("textarea fallback retains separate bidi paragraphs and original value offsets", () => {
+  const result = render(`<textarea id=t rows=3 cols=5>first\n\nthird</textarea>`);
+  const control = fragment(result,"t");
+  assert.deepEqual(control.controlLines.map(line=>line.text),["first","","third"]);
+  assert.deepEqual(control.controlLines.map(line=>cssPixels(line.blockOffset)),[0,16,32]);
+  assert.equal(control.visualClusters.length,0);
+  assert.equal(control.controlLines[2].clusters[0].contentStartCodeUnit,7);
+  const commands = result.displayList.commands.filter(command=>command.kind==="text" && command.layoutFragment===control.id);
+  assert.deepEqual(commands.map(command=>command.text),["first","third"]);
+  assert.equal(cssPixels(commands[1].rect.y-commands[0].rect.y),32);
+});
+
+test("non-atomic inline overflow and containment do not create box ownership", () => {
+  const result = render(`<span id=t style="overflow:auto;contain:paint">inline content</span>`);
+  const span = fragment(result,"t");
+  assert.equal(result.layout.scrollContainer(span.id),null);
+  assert.equal(result.layout.stacking(span.id).establishesStackingContext,false);
+});
+
+function projected(result, offsets = [], reveal) {
+  const list = buildViewportDisplayList({documentDisplayList:result.displayList,spatialIndex:buildDisplayListSpatialIndex(result.displayList),context:result.displayList.context,
+    window:{scrollRow:0,viewportRows:24,overscanBefore:0,overscanAfter:0,scrollOffsets:offsets,...(reveal===undefined?{}:{reveal})}});
+  const raster = rasterizeViewportDisplayList({displayList:list});
+  return {list,terminal:buildViewportTerminalResult({displayList:list,cellBuffer:raster.cellBuffer,documentGeometry:result.documentGeometry})};
+}
+
+test("semantic reveal traverses hidden inner and auto outer scroll owners", () => {
+  const result = render(`<div id=outer style="height:64px;width:160px;overflow:auto"><div style="height:64px">OUTER TOP</div><div id=inner style="height:32px;overflow:hidden"><div style="height:64px">INNER TOP</div><input id=target style="width:80px;height:16px"></div><div style="height:32px">END</div></div><p id=article>ARTICLE</p>`);
+  const reveal=projected(result,[],{node:node(result,"target"),align:"nearest"});
+  assert.equal(reveal.list.window.scrollOffsets.length,2);
+  const target=reveal.terminal.controls.find(control=>control.node===node(result,"target"));
+  assert.ok(target);
+  assert.ok(target.visible.row>=0&&target.visible.row<4);
+  assert.equal(fragment(result,"article").borderRect.y,cssPx(64));
+  assert.equal(reveal.terminal.scrollPorts.find(port=>port.node===node(result,"inner"))?.userScrollBlock,false);
+});
+
+test("nested sticky stays at its scrollport while viewport fixed escapes clipping and scrolling", () => {
+  const result=render(`<div id=owner style="height:64px;width:160px;overflow:auto"><div style="height:32px">TOP</div><a id=sticky href=/sticky style="display:block;position:sticky;top:0;height:16px">STICKY</a><div style="height:128px">BOTTOM</div><input id=fixed style="position:fixed;top:96px;width:80px;height:16px"></div>`);
+  const initial=projected(result);
+  const moved=projected(result,[{node:node(result,"owner"),inline:0,block:cssPx(64)}]);
+  const sticky=moved.terminal.focusMap.forNode(node(result,"sticky"));
+  assert.ok(sticky,"sticky action remains a visible semantic candidate");
+  assert.equal(sticky.rects[0].row,0);
+  assert.deepEqual(moved.terminal.controls.find(control=>control.node===node(result,"fixed")),initial.terminal.controls.find(control=>control.node===node(result,"fixed")));
+});
+
+test("empty named anchor reveal retains its layout origin", () => {
+  const result=render(`<div id=owner style="height:32px;overflow:auto"><div style="height:64px">top</div><a id=empty name=empty></a><div style="height:16px">end</div></div>`);
+  const revealed=projected(result,[],{node:node(result,"empty"),align:"start"});
+  assert.ok(revealed.list.window.scrollOffsets.length>0);
+});
+
+test("nested sticky descendants remain queried after the outer sticky leaves normal position", () => {
+  const result=render(`<div style="height:320px"><div id=outer style="position:sticky;top:0;height:32px"><input id=inner style="position:sticky;top:0;width:80px;height:16px"></div></div>`);
+  const list=buildViewportDisplayList({documentDisplayList:result.displayList,spatialIndex:buildDisplayListSpatialIndex(result.displayList),context:result.displayList.context,
+    window:{scrollRow:8,viewportRows:8,overscanBefore:0,overscanAfter:0}});
+  const raster=rasterizeViewportDisplayList({displayList:list});
+  const terminal=buildViewportTerminalResult({displayList:list,cellBuffer:raster.cellBuffer,documentGeometry:result.documentGeometry});
+  assert.ok(terminal.controls.find(control=>control.node===node(result,"inner")),"nested sticky empty control remains allocated");
+});
+
+test("two-axis nested reveal shares paint, focus and full versus clipped control geometry", () => {
+  const result=render(`<div id=outer style="width:64px;height:64px;overflow:auto"><div id=inner style="width:128px;height:128px;overflow:auto"><div style="position:relative;left:192px;top:192px;width:32px;height:32px"><input id=target value=XY style="width:32px;height:32px"></div></div></div><p id=after>AFTER</p>`);
+  const shown=projected(result,[],{node:node(result,"target"),align:"nearest"});
+  const offsets=shown.list.window.scrollOffsets;
+  assert.equal(offsets.length,2);
+  assert.ok(offsets.every(offset=>offset.inline>0&&offset.block>0));
+  const control=shown.terminal.controls.find(entry=>entry.node===node(result,"target"));
+  assert.ok(control);
+  assert.equal(control.allocation.width,4);
+  assert.equal(control.allocation.height,2);
+  assert.deepEqual(shown.terminal.focusMap.forNode(node(result,"target")).rects[0],control.visible);
+  assert.equal(fragment(result,"after").borderRect.y,cssPx(64));
+  const partially=projected(result,offsets.map(offset=>offset.node===node(result,"inner")?{...offset,block:offset.block-16*64}:offset));
+  const clipped=partially.terminal.controls.find(entry=>entry.node===node(result,"target"));
+  assert.ok(clipped);
+  assert.equal(clipped.allocation.height,2);
+  assert.equal(clipped.visible.height,1);
+});
+
+test("scroll and containment clips do not cut their own border chrome", () => {
+  for (const policy of ["overflow:hidden","contain:paint"]) {
+    const result=render(`<div id=box style="${policy};width:64px;height:32px;border:8px solid;background:red">TEXT</div>`);
+    const shown=projected(result);
+    const box=fragment(result,"box");
+    const border=shown.list.commands.find(command=>command.layoutFragment===box.id&&command.kind==="border-side");
+    assert.ok(border);
+    assert.ok(border.clipRect.x<=box.borderRect.x);
+    assert.ok(border.clipRect.y<=box.borderRect.y);
+    assert.ok(border.clipRect.width>=box.borderRect.width);
+  }
+});
+
+test("trapped descendant overflow does not inflate the root scroll extent", () => {
+  const result=render(`<div id=owner style="height:32px;overflow:auto"><div style="height:1600px">tall</div></div><p style="height:32px">AFTER</p>`,80,4);
+  assert.equal(cssPixels(result.layout.scrollExtent.height),64);
+  assert.equal(cssPixels(result.documentGeometry.documentExtent.height),64);
+  assert.equal(cssPixels(result.layout.scrollOwners[0].maxBlock),1568);
+});
+
+test("removed and resized scroll owners reconcile controlled offsets without retaining obsolete identities", () => {
+  const initial=render(`<div id=owner style="height:32px;overflow:auto"><div style="height:160px">tall</div></div>`);
+  const prior=projected(initial,[{node:node(initial,"owner"),inline:0,block:cssPx(128)}]);
+  const resized=render(`<div id=owner style="height:128px;overflow:auto"><div style="height:160px">tall</div></div>`);
+  const next=projected(resized,prior.list.window.scrollOffsets);
+  assert.equal(next.list.window.scrollOffsets[0].block,cssPx(32));
+  const removed=render(`<div id=owner style="height:128px;overflow:clip"><div style="height:160px">tall</div></div>`);
+  assert.deepEqual(projected(removed,next.list.window.scrollOffsets).list.window.scrollOffsets,[]);
+});
+
+test("scroll hit ports follow CSS paint order with deepest owners after their parent", () => {
+  const result=render(`<div id=high style="position:absolute;z-index:2;top:0;width:96px;height:64px;overflow:auto"><div id=deep style="height:32px;overflow:auto"><div style="height:96px">D</div></div></div><div id=low style="position:absolute;z-index:1;top:0;width:96px;height:64px;overflow:auto"><div style="height:96px">L</div></div>`);
+  const ports=projected(result).terminal.scrollPorts.map(port=>port.node);
+  assert.ok(ports.indexOf(node(result,"low"))<ports.indexOf(node(result,"high")));
+  assert.ok(ports.indexOf(node(result,"high"))<ports.indexOf(node(result,"deep")));
+});
+
+test("many offscreen owners keep viewport queries bounded and preserve retained layout identity", () => {
+  const result=render(Array.from({length:300},(_,index)=>`<div style="height:32px;overflow:auto"><input value="${index}" style="height:16px"><div style="height:96px">MORE</div></div>`).join(""),80,4);
+  const spatial=buildDisplayListSpatialIndex(result.displayList);
+  const list=buildViewportDisplayList({documentDisplayList:result.displayList,spatialIndex:spatial,context:result.displayList.context,
+    window:{scrollRow:100,viewportRows:4,overscanBefore:0,overscanAfter:0}});
+  assert.equal(list.documentDisplayList,result.displayList);
+  assert.equal(list.documentDisplayList.layout,result.layout);
+  assert.ok(list.spatialQuery.visitedIntervals<100,String(list.spatialQuery.visitedIntervals));
+  const raster=rasterizeViewportDisplayList({displayList:list});
+  const terminal=buildViewportTerminalResult({displayList:list,cellBuffer:raster.cellBuffer,documentGeometry:result.documentGeometry});
+  assert.ok(terminal.controls.length<=2);
+  assert.ok(terminal.scrollPorts.length<=2);
+});
+
+test("containment on html or body disables body overflow propagation",()=>{
+  for (const selector of ["html","body"]) {
+    const result=render(`<style>${selector}{contain:paint}body{overflow:hidden;height:32px}</style><div style="height:160px">TALL</div>`);
+    assert.deepEqual(result.layout.viewportOverflow,{x:"auto",y:"auto"});
+    assert.ok(result.layout.scrollOwners.some(owner=>owner.documentNode===result.document.body));
+  }
+});
+
+test("nearest reveal does not move an oversized target already spanning the scrollport",()=>{
+  const result=render(`<div id=owner style="height:64px;overflow:auto"><div id=large style="height:192px">LARGE</div></div>`);
+  const offset={node:node(result,"owner"),inline:0,block:cssPx(64)};
+  const revealed=projected(result,[offset],{node:node(result,"large"),align:"nearest"});
+  assert.deepEqual(revealed.list.window.scrollOffsets,[offset]);
+});
+
+test("accessibility geometry budget caps rectangles rather than semantic entry count",()=>{
+  const result=render(`<div role=region aria-label=Region>${Array.from({length:30},(_,i)=>`<span>${i} WORD </span>`).join("")}</div>`,10,8);
+  const geometry=buildDocumentGeometryIndex({...result.displayList,context:{...result.displayList.context,budgets:{maxRetainedAccessibilityRectangles:3}}});
+  assert.ok(geometry.accessibility.reduce((count,entry)=>count+Math.max(1,entry.rects.length),0)<=3);
+  assert.ok(geometry.truncations.some(entry=>entry.budget==="maxRetainedAccessibilityRectangles"));
+});
+
+test("paint containment contains floats and child margins while overflow clip alone does not establish a formatting context",()=>{
+  const contained=render(`<div id=parent style="contain:paint"><div style="float:left;width:32px;height:64px">FLOAT</div></div><p id=after>AFTER</p>`);
+  assert.equal(cssPixels(fragment(contained,"parent").contentRect.height),64);
+  assert.equal(cssPixels(fragment(contained,"after").borderRect.y),64);
+  const clipped=render(`<div id=parent style="overflow:clip"><div style="float:left;width:32px;height:64px">FLOAT</div></div><p id=after>AFTER</p>`);
+  assert.equal(cssPixels(fragment(clipped,"parent").contentRect.height),0);
+  const margins=render(`<div style="height:16px"></div><div id=parent style="contain:paint"><p id=child style="margin-top:32px;height:16px">CHILD</p></div>`);
+  assert.equal(cssPixels(fragment(margins,"child").borderRect.y-fragment(margins,"parent").borderRect.y),32);
+});
+
+test("a standalone relatively positioned control participates in the shared final geometry pass",()=>{
+  const result=render(`<input id=t style="position:relative;left:32px;top:16px;width:32px;height:16px">`);
+  const control=fragment(result,"t");
+  assert.equal(cssPixels(control.borderRect.x),32);
+  assert.equal(cssPixels(control.borderRect.y),16);
+  const geometry=projected(result).terminal.controls.find(entry=>entry.node===node(result,"t"));
+  assert.equal(geometry.allocation.column,4);
+  assert.equal(geometry.allocation.row,1);
+});
+
+test("scrollable content retains end padding at the reachable scroll boundary",()=>{
+  const result=render(`<div id=t style="height:32px;padding:8px;overflow:auto"><div style="height:96px">TALL</div></div>`);
+  const owner=result.layout.scrollContainer(fragment(result,"t").id);
+  assert.equal(cssPixels(owner.maxBlock),64);
+});
+
+test("absolute and fixed controls finalize physical insets after bidi line alignment",()=>{
+  for (const direction of ["ltr","rtl"]) for (const position of ["absolute","fixed"]) {
+    for (const [inset,expected] of [["left:-640px",-640],["right:16px",536]]) {
+      const result=render(`<html dir=${direction}><style>body{margin:0}input{position:${position};${inset};top:0;width:80px}</style><input id=t value=alpha>`,79,24);
+      assert.equal(cssPixels(fragment(result,"t").borderRect.x),expected,`${direction}/${position}/${inset}`);
+    }
+  }
+});
+
+for (const [label,fixture,expectedOwner] of [
+  ["viewport-fixed",`<div id=scroller style="overflow:auto;height:64px"><a id=target href=/target style="position:fixed;top:0">TARGET</a><div style="height:512px">CONTENT</div></div>`,null],
+  ["absolute escaping intermediate overflow",`<main style="position:relative"><div id=scroller style="overflow:auto;height:64px"><a id=target href=/target style="position:absolute;top:0">TARGET</a><div style="height:512px">CONTENT</div></div></main>`,null],
+  ["absolute owned by positioned scroller",`<div id=scroller style="position:relative;overflow:auto;height:64px"><a id=target href=/target style="position:absolute;top:0">TARGET</a><div style="height:512px">CONTENT</div></div>`,"scroller"],
+  ["normal nested",`<div id=outer style="overflow:auto;height:128px"><div id=scroller style="overflow:auto;height:64px"><a id=target href=/target>TARGET</a><div style="height:512px">CONTENT</div></div><div style="height:512px">OUTER</div></div>`,"scroller"],
+  ["focused scroll container",`<a id=target href=/target style="display:block;overflow:auto;height:64px"><div style="height:512px">CONTENT</div></a>`,"target"],
+]) {
+  test(`keyboard scroll uses accepted layout ownership: ${label}`,()=>{
+    const result=render(`${fixture}<div style="height:2048px">ROOT</div>`);
+    const shown=projected(result);
+    const target=node(result,"target");
+    const owner=expectedOwner===null?null:node(result,expectedOwner);
+    assert.equal(result.documentGeometry.focusForNode(target).scrollOwner,owner);
+    assert.equal(shown.terminal.focusMap.forNode(target).scrollOwner,owner);
+    for (const visible of [true,false]) {
+      const initial={scrollOffsets:[],scrollAnchor:{source:null,rowOffset:0},scrollColumn:0,
+        documentState:{focus:target},snapshot:{document:result.document},rendering:{pendingReveal:null,pendingFocus:null,
+          summary:{documentRowCount:200,scrollAnchors:[],focusOrder:result.documentGeometry.focusOrder},
+          viewport:{focusTargets:visible?shown.terminal.focusMap.targets:[],scrollPorts:shown.terminal.scrollPorts,
+            cellInline:cssPx(8),cellBlock:cssPx(16),viewportOverflow:result.layout.viewportOverflow,minScrollColumn:0,maxScrollColumn:0}}};
+      const updated=scrollDocument(initial,1,0,24);
+      assert.equal(updated.scrollAnchor.rowOffset,owner===null?1:0,visible?"visible focus":"summary focus");
+      assert.deepEqual(updated.scrollOffsets,owner===null?[]:[{node:owner,inline:0,block:cssPx(16)}]);
+    }
+  });
+}

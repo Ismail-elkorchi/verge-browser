@@ -1,3 +1,4 @@
+import { viewportInlineRange } from "../../dist/presentation/terminal/viewport-geometry.js";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
@@ -170,10 +171,11 @@ export function renderSnapshot(snapshot, variant, expectedText) {
   try {
     const artifacts = store.analyze(request);
     let viewportRevision = 0;
-    const viewportAt = (scrollRow) => store.renderViewport({
+    const viewportAt = (scrollRow, scrollColumn = 0) => store.renderViewport({
       ...request,
       viewportRevision: ++viewportRevision,
       window: {
+        scrollColumn,
         scrollRow,
         viewportRows: variant.rows,
         overscanBefore: 0,
@@ -182,8 +184,15 @@ export function renderSnapshot(snapshot, variant, expectedText) {
     });
     const primary = viewportAt(variant.scrollRow);
     const windows = [];
+    const inlineRange = viewportInlineRange(artifacts.documentLayout, viewportWidth);
+    const firstColumn = Math.floor(inlineRange.minInline / CELL_WIDTH);
+    const lastColumn = Math.ceil(inlineRange.maxInline / CELL_WIDTH);
+    const columns = new Set([0, firstColumn, lastColumn]);
+    for (let column = firstColumn; column < lastColumn; column += variant.columns) columns.add(column);
     for (let scrollRow = 0; scrollRow < primary.documentExtentRows; scrollRow += variant.rows) {
-      windows.push(scrollRow === variant.scrollRow ? primary : viewportAt(scrollRow));
+      for (const scrollColumn of [...columns].sort((a, b) => a - b)) {
+        windows.push(scrollRow === variant.scrollRow && scrollColumn === 0 ? primary : viewportAt(scrollRow, scrollColumn));
+      }
     }
     const rows = Object.freeze(windows.flatMap((entry) => entry.terminal.cellBuffer.rows));
     const paintCoverage = phrasePaintCoverage(artifacts, rows, expectedText);

@@ -235,6 +235,9 @@ export class RenderWorkerClient {
   public cancelViewport(documentId: string): void {
     const state = this.#cancellation.get(documentId);
     if (state !== undefined) Atomics.add(state.viewport, 0, 1);
+    // Detach cancelled consumers now; shared document analysis may continue until
+    // its owner is retired. #activeRequest still fences the worker until its reply.
+    this.#cancelRequests(documentId, "request-viewport");
   }
 
   public async search(

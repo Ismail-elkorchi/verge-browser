@@ -1,127 +1,17 @@
+import type { TextSearchLayoutProjection } from "../search/index.js";
+import { ViewportGeometryProjection, reconcileScrollOffsets, revealDocumentNode, revealLayoutRect, logicalRangeRect, scrollRevealDelta, viewportInlineRange } from "./viewport-geometry.js";
 import {
-  cssCoordinate,
-  cssIntersection,
   cssCoordinateFromFixed,
   cssLengthFromFixed,
   cssRect,
-  type CssRect,
-  type LayoutFragmentId,
-  type LayoutFragmentTree,
-  type LayoutScrollAttachment,
 } from "../layout/index.js";
 import type {
   DisplayListSpatialIndex,
   DocumentDisplayList,
-  TerminalPaintCommand,
   TerminalRenderContext,
   ViewportDisplayList,
   ViewportWindow,
 } from "./types.js";
-
-export function translatedScrollAttachedRect(rect: CssRect, inline: number, block: number): CssRect {
-  return cssRect(
-    cssCoordinateFromFixed(rect.x + inline),
-    cssCoordinateFromFixed(rect.y + block),
-    rect.width,
-    rect.height,
-  );
-}
-
-export function scrollAttachmentTranslation(
-  attachment: LayoutScrollAttachment,
-  viewport: CssRect,
-): readonly [number, number] {
-  if (attachment.kind === "fixed") return Object.freeze([viewport.x, viewport.y]);
-  const normal = attachment.normalBorderRect;
-  let x: number = normal.x;
-  let y: number = normal.y;
-  if (attachment.left !== null) x = Math.max(x, viewport.x + attachment.left);
-  else if (attachment.right !== null) {
-    x = Math.min(x, viewport.x + viewport.width - attachment.right - normal.width);
-  }
-  if (attachment.top !== null) y = Math.max(y, viewport.y + attachment.top);
-  else if (attachment.bottom !== null) {
-    y = Math.min(y, viewport.y + viewport.height - attachment.bottom - normal.height);
-  }
-  x = Math.max(
-    attachment.containingBlock.x,
-    Math.min(attachment.containingBlock.x + attachment.containingBlock.width - normal.width, x),
-  );
-  y = Math.max(
-    attachment.containingBlock.y,
-    Math.min(attachment.containingBlock.y + attachment.containingBlock.height - normal.height, y),
-  );
-  return Object.freeze([x - normal.x, y - normal.y]);
-}
-
-export function inheritedScrollAttachment(
-  layout: LayoutFragmentTree,
-  fragment: LayoutFragmentId,
-): LayoutScrollAttachment | null {
-  let current: LayoutFragmentId | null = fragment;
-  while (current !== null) {
-    const attachment = layout.scrollAttachment(current);
-    if (attachment !== null) return attachment;
-    current = layout.scrollAttachmentParent(current)?.id ?? null;
-  }
-  return null;
-}
-
-/** Clip translation follows its layout owner, independently of the painted descendant. */
-export function scrollAttachedClipRect(layout: LayoutFragmentTree, fragment: LayoutFragmentId, viewport: CssRect): CssRect {
-  let chain = layout.clipChain(fragment);
-  if (chain === null) return layout.fragment(fragment).clipRect;
-  let resolved: CssRect | null = null;
-  while (chain !== null) {
-    const attachment = chain.owner === null ? null : inheritedScrollAttachment(layout, chain.owner);
-    const offset = attachment === null ? [0, 0] as const : scrollAttachmentTranslation(attachment, viewport);
-    const rect = translatedScrollAttachedRect(chain.rect, offset[0], offset[1]);
-    resolved = resolved === null ? rect : cssIntersection(resolved, rect);
-    chain = chain.parent;
-  }
-  return resolved ?? layout.fragment(fragment).clipRect;
-}
-
-function translatedCommand(
-  command: TerminalPaintCommand,
-  layout: LayoutFragmentTree,
-  viewport: CssRect,
-  inline: number,
-  block: number,
-): TerminalPaintCommand {
-  const common = {
-    ...command,
-    rect: translatedScrollAttachedRect(command.rect, inline, block),
-    clipRect: scrollAttachedClipRect(layout, command.layoutFragment, viewport),
-  };
-  return command.kind === "border-side"
-    ? Object.freeze({ ...common, borderRect: translatedScrollAttachedRect(command.borderRect, inline, block) })
-    : Object.freeze(common);
-}
-
-function intersects(command: TerminalPaintCommand, rect: CssRect): boolean {
-  if (command.kind === "text" && (command.rect.width === 0 || command.rect.height === 0)) {
-    return command.clipRect.width > 0 && command.clipRect.height > 0
-      && command.rect.x >= command.clipRect.x
-      && command.rect.x < command.clipRect.x + command.clipRect.width
-      && command.rect.y >= command.clipRect.y
-      && command.rect.y < command.clipRect.y + command.clipRect.height
-      && command.rect.x >= rect.x && command.rect.x < rect.x + rect.width
-      && command.rect.y >= rect.y && command.rect.y < rect.y + rect.height;
-  }
-  const left = Math.max(command.rect.x, command.clipRect.x);
-  const top = Math.max(command.rect.y, command.clipRect.y);
-  const right = Math.min(
-    command.rect.x + command.rect.width,
-    command.clipRect.x + command.clipRect.width,
-  );
-  const bottom = Math.min(
-    command.rect.y + command.rect.height,
-    command.clipRect.y + command.clipRect.height,
-  );
-  return left < rect.x + rect.width && right > rect.x
-    && top < rect.y + rect.height && bottom > rect.y;
-}
 
 function normalizedWindow(window: ViewportWindow): ViewportWindow {
   const integer = (value: number, minimum: number): number => {
@@ -129,7 +19,9 @@ function normalizedWindow(window: ViewportWindow): ViewportWindow {
     return value;
   };
   return Object.freeze({
+    ...(window.scrollOffsets === undefined ? {} : { scrollOffsets: Object.freeze(window.scrollOffsets.map((entry) => Object.freeze({ ...entry }))) }),
     scrollRow: integer(window.scrollRow, 0),
+    scrollColumn: integer(window.scrollColumn ?? 0, Number.MIN_SAFE_INTEGER),
     viewportRows: integer(window.viewportRows, 1),
     overscanBefore: integer(window.overscanBefore, 0),
     overscanAfter: integer(window.overscanAfter, 0),
@@ -139,21 +31,56 @@ function normalizedWindow(window: ViewportWindow): ViewportWindow {
 export interface BuildViewportDisplayListInput {
   readonly documentDisplayList: DocumentDisplayList;
   readonly spatialIndex: DisplayListSpatialIndex;
+  readonly searchProjection?: TextSearchLayoutProjection | null;
   readonly context: TerminalRenderContext;
   readonly window: ViewportWindow;
   readonly signal?: AbortSignal;
   readonly instrumentation?: {
-    record(stage: "spatial-query" | "fixed-sticky-resolution", elapsedMilliseconds: number): void;
+    record(stage: "spatial-query", elapsedMilliseconds: number): void;
   };
 }
 
 /** Selects and resolves only commands intersecting one viewport and bounded overscan window. */
 export function buildViewportDisplayList(input: BuildViewportDisplayListInput): ViewportDisplayList {
-  const window = normalizedWindow(input.window);
+  let window = normalizedWindow(input.window);
+  const layout = input.documentDisplayList.layout;
+  const cellWidth = input.context.cellWidthCssPx;
+  const inlineRange = viewportInlineRange(layout,input.context.columns*cellWidth);
+  const minColumn = Math.floor(inlineRange.minInline/cellWidth);
+  const maxColumn = Math.ceil(inlineRange.maxInline/cellWidth);
+  const clampColumn = (column: number) => Math.max(minColumn, Math.min(maxColumn, column));
+  window = { ...window, scrollColumn: clampColumn(window.scrollColumn ?? 0) };
+  let offsets = reconcileScrollOffsets(layout, window.scrollOffsets ?? []);
+  const requestedReveal = input.window.reveal;
+  if (requestedReveal !== undefined) {
+    const rootViewport = cssRect(cssCoordinateFromFixed((window.scrollColumn ?? 0) * cellWidth), cssCoordinateFromFixed(window.scrollRow * input.context.rowHeightCssPx),
+      cssLengthFromFixed(input.context.columns * input.context.cellWidthCssPx), cssLengthFromFixed(window.viewportRows * input.context.rowHeightCssPx));
+    const span = "node" in requestedReveal || input.searchProjection?.query !== requestedReveal.query
+      ? undefined : input.searchProjection.spans.find((entry) => entry.match === requestedReveal.match);
+    const range = span === undefined ? null : logicalRangeRect(layout, span.fragment, span.contentStartCodeUnit, span.contentEndCodeUnit);
+    const revealed = "node" in requestedReveal
+      ? revealDocumentNode(layout, rootViewport, offsets, requestedReveal.node, requestedReveal.align)
+      : span !== undefined && range !== null
+        ? revealLayoutRect(layout, rootViewport, offsets, span.fragment, range, requestedReveal.align)
+        : { offsets, rect: null };
+    offsets = revealed.offsets;
+    if (revealed.rect !== null) {
+      const inlineDelta = scrollRevealDelta(revealed.rect.x, revealed.rect.width, rootViewport.x, rootViewport.width, requestedReveal.align);
+      const exactColumn = (rootViewport.x + inlineDelta) / cellWidth;
+      const column = inlineDelta > 0 ? Math.ceil(exactColumn) : Math.floor(exactColumn);
+      window = { ...window, scrollColumn: clampColumn(column) };
+      const delta = scrollRevealDelta(revealed.rect.y, revealed.rect.height, rootViewport.y, rootViewport.height, requestedReveal.align);
+      const exactRow = (rootViewport.y+delta)/input.context.rowHeightCssPx;
+      const row = delta > 0 ? Math.ceil(exactRow) : Math.floor(exactRow);
+      const extent = Math.ceil(layout.scrollExtent.height / input.context.rowHeightCssPx);
+      window = { ...window, scrollRow: Math.max(0, Math.min(row, Math.max(0, extent - window.viewportRows))) };
+    }
+  }
+  window = Object.freeze({ ...window, scrollOffsets: offsets });
   const startRow = Math.max(0, window.scrollRow - window.overscanBefore);
   const retainedRows = window.viewportRows + Math.min(window.scrollRow, window.overscanBefore) + window.overscanAfter;
   const viewport = cssRect(
-    cssCoordinate(cssLengthFromFixed(0)),
+    cssCoordinateFromFixed((window.scrollColumn ?? 0) * cellWidth),
     cssCoordinateFromFixed(window.scrollRow * input.context.rowHeightCssPx),
     cssLengthFromFixed(input.context.columns * input.context.cellWidthCssPx),
     cssLengthFromFixed(window.viewportRows * input.context.rowHeightCssPx),
@@ -165,37 +92,18 @@ export function buildViewportDisplayList(input: BuildViewportDisplayListInput): 
     cssLengthFromFixed(retainedRows * input.context.rowHeightCssPx),
   );
   const queryStarted = input.instrumentation === undefined ? 0 : performance.now();
-  const queried = input.spatialIndex.query(windowRect, input.signal);
+  const projection = new ViewportGeometryProjection(input.documentDisplayList.layout, viewport, window.scrollOffsets);
+  const queried = input.spatialIndex.query(windowRect, input.signal, projection);
   input.instrumentation?.record("spatial-query", performance.now() - queryStarted);
-  const commands = [...queried.commands];
-  const sticky = input.spatialIndex.queryStickyAttachments(windowRect, input.signal);
-  let visitedAttachments = 0;
-  const attachmentStarted = input.instrumentation === undefined ? 0 : performance.now();
-  for (const group of [...input.spatialIndex.fixedAttachmentGroups, ...sticky.groups]) {
-    input.signal?.throwIfAborted();
-    const [inline, block] = scrollAttachmentTranslation(group.attachment, viewport);
-    for (const command of group.commands) {
-      visitedAttachments += 1;
-      if ((visitedAttachments & 255) === 0) input.signal?.throwIfAborted();
-      const resolved = translatedCommand(command, input.documentDisplayList.layout, viewport, inline, block);
-      if (intersects(resolved, windowRect)) commands.push(resolved);
-    }
-  }
-  input.instrumentation?.record("fixed-sticky-resolution", performance.now() - attachmentStarted);
-  commands.sort((left, right) => left.paintOrder - right.paintOrder);
   return Object.freeze({
     documentDisplayList: input.documentDisplayList,
     context: Object.freeze({ ...input.context, rows: window.viewportRows }),
     window,
+    projection,
     viewportRect: viewport,
     windowRect,
-    commands: Object.freeze(commands),
-    spatialQuery: Object.freeze({
-      visitedIntervals: queried.metrics.visitedIntervals
-        + sticky.metrics.visitedIntervals
-        + visitedAttachments,
-      returnedCommands: commands.length,
-    }),
+    commands: queried.commands,
+    spatialQuery: queried.metrics,
     outcome: input.documentDisplayList.outcome,
   });
 }

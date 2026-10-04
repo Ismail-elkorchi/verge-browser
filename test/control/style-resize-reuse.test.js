@@ -57,7 +57,7 @@ function comparable({ artifacts, viewport }) {
     fragments, lines: layout.lineBoxes, commands: artifacts.documentDisplayList.commands,
     cells: viewport.terminal.cellBuffer, actions: viewport.terminal.hitTestIndex.regions,
     focus: viewport.terminal.focusMap.targets, accessibility: viewport.terminal.accessibilityBounds,
-    sourceRects: [...viewport.terminal.cellRectsByDocumentNode], anchors: viewport.scrollAnchors,
+    controls: viewport.terminal.controls, anchors: viewport.scrollAnchors,
     focusOrder: viewport.focusOrder, extent: viewport.documentExtentRows,
   };
 }
