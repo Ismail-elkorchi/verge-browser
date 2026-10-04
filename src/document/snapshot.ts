@@ -4,6 +4,7 @@ import {
   type Attribute,
   type HtmlNode,
   type ParsedDocument,
+  type HtmlDocumentMode,
   type Span
 } from "@ismail-elkorchi/html-parser";
 import { bidiClass } from "../unicode/index.js";
@@ -251,6 +252,7 @@ function landmarkFor(
 }
 
 class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot {
+  readonly documentMode: HtmlDocumentMode;
   readonly root: DocumentNodeRef;
   readonly documentElement: DocumentNodeRef | null;
   readonly head: DocumentNodeRef | null;
@@ -297,6 +299,7 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
   readonly #directTextSourceMappings: ReadonlySet<DocumentNodeRef>;
   readonly #documentText: string;
   public constructor(parsed: ParsedDocument, context: SnapshotContext) {
+    this.documentMode = parsed.documentMode;
     this.sourceText = parsed.sourceText;
     this.requestUrl = context.requestUrl;
     this.finalUrl = context.finalUrl;
@@ -1074,9 +1077,13 @@ class ImmutableIndexedWebDocumentSnapshot implements IndexedWebDocumentSnapshot 
       if (element.namespace === "http://www.w3.org/2000/svg") {
         if (element.parent === null || nodes.get(element.parent)?.kind !== "element"
           || (nodes.get(element.parent) as WebElementNode).namespace !== element.namespace) {
+          const width = finiteNumber(attribute(element.ref, "width"));
+          const height = finiteNumber(attribute(element.ref, "height"));
           replaced.push(Object.freeze({
             node: element.ref, kind: "svg", source: null,
-            fallbackText: accessibleName(element) || "SVG image", width: null, height: null
+            fallbackText: accessibleName(element) || "SVG image",
+            width: width !== null && width >= 0 ? width : null,
+            height: height !== null && height >= 0 ? height : null
           }));
         }
         continue;

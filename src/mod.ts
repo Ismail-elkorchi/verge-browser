@@ -21,7 +21,6 @@ export {
   fetchPage,
   fetchPageStream,
   fetchStylesheet,
-  readByteStreamToText,
   NetworkFetchError,
   PageNetworkClient,
   type LocalFileReader,

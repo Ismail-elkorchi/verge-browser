@@ -9,6 +9,7 @@ import {
   formattingNodeLogicalText,
   documentActionIdentity,
   isAtomicInlineBox,
+  isAtomicFormattingNode,
   isInlineFormattingNode,
   type DocumentActionIdentity,
   type FormattingNode,
@@ -215,7 +216,7 @@ export function buildInlineItemStreamSet(tree: FormattingTree, signal?: AbortSig
       signal?.throwIfAborted();
       const node = tree.node(id);
       const identity = baseIdentity(tree, node);
-      if (isAtomicInlineBox(tree, node)) {
+      if (isAtomicFormattingNode(node) || isAtomicInlineBox(tree, node)) {
         items.push(Object.freeze({
           ...identity,
           kind: "atomic-inline",
@@ -328,6 +329,7 @@ export function buildInlineItemStreamSet(tree: FormattingTree, signal?: AbortSig
     const id = pending.pop();
     if (id === undefined) continue;
     const node = tree.node(id);
+    if (isAtomicFormattingNode(node)) buildStream(node.id, [node.id]);
     const ownsInlineFormattingContext = node.kind === "root" || node.outer === "block" || isAtomicInlineBox(tree, node);
     if (ownsInlineFormattingContext) {
       let run: FormattingNodeId[] = [];

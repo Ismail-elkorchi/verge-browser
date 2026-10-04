@@ -33,13 +33,15 @@
 - `requestOptions.headers` adds request fields. A managed HTTP session owns the
   `Cookie` field.
 - `requestOptions.bodyText` is only used for `POST`.
-- Returns a fully buffered HTML payload plus `networkOutcome`.
+- Returns buffered `bytes` with transport encoding evidence for HTTP and local
+  files, or already-decoded `html` for built-in pages and injected text loaders,
+  plus `networkOutcome`. HTML decoding belongs to the document parser.
 - Throws `NetworkFetchError` for pre-response failures such as DNS, timeout, TLS, redirect-limit, content-type, and size-limit failures.
 - Returns a normal result for HTTP responses, including `4xx` and `5xx`, with `networkOutcome.kind = "http_error"`.
 
 ### `fetchPageStream(requestUrl, timeoutMs?, securityPolicy?, requestOptions?, readLocalFileText?)`
 - Uses the same timeout, policy, and request option rules as `fetchPage`.
-- Returns a streaming body in `stream` instead of buffered `html`.
+- Returns a streaming byte body in `stream` instead of a buffered payload.
 - Applies `maxContentBytes` while the stream is consumed.
 
 ### `fetchStylesheet(requestUrl, timeoutMs?, securityPolicy?, requestOptions?, readLocalFileText?)`

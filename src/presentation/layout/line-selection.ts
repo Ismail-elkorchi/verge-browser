@@ -1,5 +1,5 @@
 import type { BreakOpportunityKind } from "../../unicode/index.js";
-import { cssAdd, cssPx, type CssPixelLength } from "./fixed.js";
+import { cssAdd, cssPx, cssSubtract, type CssPixelLength } from "./fixed.js";
 
 export interface LogicalLineSelectionItem {
   readonly logicalIndex: number;
@@ -61,25 +61,38 @@ export function selectLogicalLines(
     }
   }
   const zero = cssPx(0);
-  const unbreakable: CssPixelLength[] = new Array<CssPixelLength>(items.length).fill(zero);
-  const tabInUnbreakable = new Array<boolean>(items.length).fill(false);
+  const canBreakBefore = (item: LogicalLineSelectionItem, includeEmergency: boolean): boolean =>
+    item.breakBefore === "mandatory" || item.wrappingAllowed
+      && (item.breakBefore === "allowed" || includeEmergency && item.breakBefore === "emergency");
+  const runs = [false, true].map((includeEmergency) => ({
+    includeEmergency,
+    advances: new Array<CssPixelLength>(items.length).fill(zero),
+    hasTabs: new Array<boolean>(items.length).fill(false)
+  }));
   for (let index = items.length - 1; index >= 0; index -= 1) {
     signal?.throwIfAborted();
     const item = items[index];
     if (item === undefined || item.forcedBreak) continue;
     const next = items[index + 1];
-    unbreakable[index] = cssAdd(
-      item.advance,
-      next !== undefined && !next.forcedBreak && next.breakBefore === "prohibited"
-        ? unbreakable[index + 1] ?? zero : zero
-    );
-    tabInUnbreakable[index] = item.tabInterval !== null
-      || next !== undefined && !next.forcedBreak && next.breakBefore === "prohibited"
-        && (tabInUnbreakable[index + 1] ?? false);
+    for (const run of runs) {
+      const continues = next !== undefined && !next.forcedBreak && !canBreakBefore(next, run.includeEmergency);
+      const remainder = continues ? run.advances[index + 1] ?? zero : zero;
+      // Collapsible spaces at the end of a prospective line do not consume its width.
+      run.advances[index] = item.collapsibleSpace && remainder === 0
+        ? zero : cssAdd(item.advance, remainder);
+      run.hasTabs[index] = item.tabInterval !== null || continues && (run.hasTabs[index + 1] ?? false);
+    }
   }
   const breaksBefore = new Set<number>();
   const suppressed = new Set<number>();
   const usedAdvances = new Map<number, CssPixelLength>();
+  const suppressTrailingSpaces = (beforeIndex: number): void => {
+    for (let index = beforeIndex - 1; index >= 0; index -= 1) {
+      signal?.throwIfAborted();
+      if (items[index]?.collapsibleSpace !== true) break;
+      suppressed.add(index);
+    }
+  };
   let lineAdvance: CssPixelLength = zero;
   let available = firstAvailableInlineSize;
   let lineHasContent = false;
@@ -92,8 +105,7 @@ export function selectLogicalLines(
   for (const item of items) {
     signal?.throwIfAborted();
     if (item.forcedBreak) {
-      const previous = items[item.logicalIndex - 1];
-      if (previous?.collapsibleSpace === true) suppressed.add(previous.logicalIndex);
+      suppressTrailingSpaces(item.logicalIndex);
       lineAdvance = zero;
       available = continuationAvailableInlineSize;
       lineHasContent = false;
@@ -116,21 +128,29 @@ export function selectLogicalLines(
       return (remainder === 0 ? candidate.tabInterval : candidate.tabInterval - remainder) as CssPixelLength;
     };
     const unbreakableAdvance = (): CssPixelLength => {
-      if (!(tabInUnbreakable[item.logicalIndex] ?? false)) return unbreakable[item.logicalIndex] ?? zero;
+      // Ordinary opportunities measure through emergency boundaries so an intact
+      // word moves to the next line first. Emergency boundaries only measure to
+      // the next usable boundary, filling an otherwise overlong word greedily.
+      const run = runs[item.breakBefore === "emergency" ? 1 : 0];
+      if (run === undefined) return zero;
+      if (!(run.hasTabs[item.logicalIndex] ?? false)) return run.advances[item.logicalIndex] ?? zero;
       let advance: CssPixelLength = zero;
+      let trailingCollapsibleAdvance: CssPixelLength = zero;
       for (let index = item.logicalIndex; index < items.length; index += 1) {
+        signal?.throwIfAborted();
         const candidate = items[index];
         if (candidate === undefined || candidate.forcedBreak) break;
-        if (index > item.logicalIndex && candidate.breakBefore !== "prohibited") break;
-        advance = cssAdd(advance, advanceAt(candidate, cssAdd(lineAdvance, advance)));
+        if (index > item.logicalIndex && canBreakBefore(candidate, run.includeEmergency)) break;
+        const used = advanceAt(candidate, cssAdd(lineAdvance, advance));
+        advance = cssAdd(advance, used);
+        trailingCollapsibleAdvance = candidate.collapsibleSpace ? cssAdd(trailingCollapsibleAdvance, used) : zero;
       }
-      return advance;
+      return cssSubtract(advance, trailingCollapsibleAdvance);
     };
-    if (item.wrappingAllowed && lineHasContent && item.breakBefore !== "prohibited"
-      && cssAdd(lineAdvance, unbreakableAdvance()) > available) {
+    if (lineHasContent && (item.breakBefore === "mandatory"
+      || canBreakBefore(item, true) && cssAdd(lineAdvance, unbreakableAdvance()) > available)) {
       breaksBefore.add(item.logicalIndex);
-      const previous = items[item.logicalIndex - 1];
-      if (previous?.collapsibleSpace === true) suppressed.add(previous.logicalIndex);
+      suppressTrailingSpaces(item.logicalIndex);
       lineAdvance = zero;
       available = continuationAvailableInlineSize;
       lineHasContent = false;
@@ -150,7 +170,6 @@ export function selectLogicalLines(
     lineAdvance = cssAdd(lineAdvance, usedAdvance);
     if (usedAdvance > 0 || !item.collapsibleSpace) lineHasContent = true;
   }
-  const final = items.at(-1);
-  if (final?.collapsibleSpace === true) suppressed.add(final.logicalIndex);
+  suppressTrailingSpaces(items.length);
   return result(breaksBefore, suppressed, items.length, usedAdvances, { status: "complete", lines });
 }

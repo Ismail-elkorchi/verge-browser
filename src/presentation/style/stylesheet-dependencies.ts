@@ -1,3 +1,4 @@
+import { layerPath, layerNames } from "./layers.js";
 import {
   parseStylesheet,
   parseStylesheetBytes,
@@ -15,18 +16,11 @@ import type {
   StylesheetImportDependency,
   StylesheetResource,
   StylesheetSyntaxInstrumentation,
+  StylesheetSource,
 } from "./types.js";
 
 function significant(values: readonly ComponentValue[]): readonly ComponentValue[] {
   return values.filter((value) => value.kind !== "whitespace");
-}
-
-function layerPath(values: readonly ComponentValue[]): CascadeLayerPath | null {
-  const serialized = serializeCssComponentValues(values).trim();
-  if (serialized.length === 0) return null;
-  const segments = serialized.split(/\s*\.\s*/u);
-  return segments.length > 0 && segments.every((segment) => segment.length > 0)
-    ? Object.freeze(segments) : null;
 }
 
 function importDependency(
@@ -77,19 +71,7 @@ function importDependency(
 
 function layerStatementNames(rule: CssAtRule): readonly CascadeLayerPath[] {
   if (rule.name.toLowerCase() !== "layer" || rule.block !== null) return Object.freeze([]);
-  const names: CascadeLayerPath[] = [];
-  let current: ComponentValue[] = [];
-  const finish = (): void => {
-    const name = layerPath(current);
-    if (name !== null) names.push(name);
-    current = [];
-  };
-  for (const value of rule.prelude) {
-    if (value.kind === "comma") finish();
-    else current.push(value);
-  }
-  finish();
-  return Object.freeze(names);
+  return layerNames(rule.prelude) ?? Object.freeze([]);
 }
 
 function countRules(items: readonly CssBlockItem[]): number {
@@ -119,7 +101,8 @@ function sourceFingerprint(bytes: Uint8Array): string {
 
 function inspectParsed(
   parsed: ReturnType<typeof parseStylesheet> | ReturnType<typeof parseStylesheetBytes>,
-  bytes: Uint8Array
+  bytes: Uint8Array,
+  source: StylesheetSource,
 ): StylesheetDependencyInspection {
   if (!parsed.ok) return Object.freeze({ status: "rejected", reason: "parse" });
   const imports: StylesheetImportDependency[] = [];
@@ -144,6 +127,7 @@ function inspectParsed(
     imports: Object.freeze(imports),
     parsedRules: countRules(parsed.value.rules),
     syntax: parsed.value,
+    source,
     byteSize: bytes.byteLength,
     contentFingerprint: sourceFingerprint(bytes),
     parserDiagnostics: Object.freeze(parsed.errors.map((error) => error.message))
@@ -161,7 +145,8 @@ export function inspectStylesheetText(
   try {
     return inspectParsed(
       parseStylesheet(css, { ...(signal === undefined ? {} : { signal }) }),
-      bytes
+      bytes,
+      Object.freeze({ kind: "text", text: css }),
     );
   } finally {
     instrumentation?.record("stylesheet-syntax-parsing", performance.now() - started);
@@ -187,7 +172,7 @@ export function inspectStylesheetBytes(
         maxSteps: 2_000_000
       },
       ...(signal === undefined ? {} : { signal })
-    }), bytes);
+    }), bytes, Object.freeze({ kind: "bytes", bytes, transportEncodingLabel }));
   } catch {
     signal?.throwIfAborted();
     return Object.freeze({ status: "rejected", reason: "encoding" });
@@ -203,12 +188,15 @@ export function embeddedStylesheetSources(
   instrumentation?: StylesheetSyntaxInstrumentation,
 ): readonly StylesheetResource[] {
   const resources: StylesheetResource[] = [];
+  const inspected = new Map<string, StylesheetDependencyInspection>();
   let dependencyOrder = 0;
   for (const reference of document.stylesheets) {
     signal?.throwIfAborted();
     if (reference.kind !== "embedded") continue;
     const sourceUrl = `${document.finalUrl}#style-${String(reference.order)}`;
-    const inspection = inspectStylesheetText(reference.cssText, signal, instrumentation);
+    const inspection = inspected.get(reference.cssText)
+      ?? inspectStylesheetText(reference.cssText, signal, instrumentation);
+    inspected.set(reference.cssText, inspection);
     if (inspection.status !== "complete") continue;
     resources.push(Object.freeze({
       sourceKind: "embedded",
@@ -217,6 +205,7 @@ export function embeddedStylesheetSources(
       finalUrl: sourceUrl,
       contentType: "text/css",
       syntax: inspection.syntax,
+      source: inspection.source,
       byteSize: inspection.byteSize,
       contentFingerprint: inspection.contentFingerprint,
       parserDiagnostics: inspection.parserDiagnostics,

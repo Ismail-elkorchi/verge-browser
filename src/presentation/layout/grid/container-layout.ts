@@ -399,7 +399,7 @@ export function layoutGridContainer(
       sum(borderRect.height, dimensions.margin.top, dimensions.margin.bottom)
     );
     const finalClip = host.clip(node, paddingRect, borderRect, input.clip);
-    if (style.box.position !== "static") host.registerPositionedContainingBlock(node.id, paddingRect);
+    if (style.box.position !== "static" || style.box.transform !== null) host.registerPositionedContainingBlock(node.id, paddingRect);
     const children: LayoutFragmentId[] = [];
     const baselineItems: {
       readonly row: number;

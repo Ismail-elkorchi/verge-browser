@@ -2,6 +2,7 @@ import type {
   SelectorStateDependency,
   StylesheetResource,
   StyleDiagnostic,
+  StyleOutcome,
 } from "../../presentation/style/index.js";
 import type {
   DisplayListSpatialQueryMetrics,
@@ -16,6 +17,7 @@ import type {
   DocumentControlState,
   DocumentNodeRef,
   DocumentState,
+  IndexedWebDocumentSnapshot,
 } from "../../document/index.js";
 import type { DocumentActionIdentity } from "../../presentation/formatting/index.js";
 import type { RenderStageMeasurement } from "../../presentation/renderer/index.js";
@@ -58,10 +60,12 @@ export interface RenderDocumentAttachment {
   readonly documentRevision: number;
   readonly stateRevision: number;
   readonly sourceText: string;
+  readonly documentMode: IndexedWebDocumentSnapshot["documentMode"];
   readonly requestUrl: string;
   readonly finalUrl: string;
   readonly state: TransferredDocumentState;
-  readonly stylesheets: readonly StylesheetResource[];
+  readonly stylesheetSources: readonly StylesheetResource["source"][];
+  readonly stylesheets: readonly (Omit<StylesheetResource, "syntax" | "source"> & { readonly sourceIndex: number })[];
   readonly styleDiagnostics: readonly StyleDiagnostic[];
 }
 
@@ -93,6 +97,9 @@ export interface RenderDocumentSummary {
   readonly identity: string;
   readonly documentRowCount: number;
   readonly incomplete: readonly string[];
+  readonly styleOutcome: StyleOutcome;
+  readonly styleDiagnostics: readonly StyleDiagnostic[];
+  readonly omittedStyleDiagnosticCount: number;
   readonly scrollAnchors: readonly RenderScrollAnchorEntry[];
   readonly scrollAnchorByDocumentNode: ReadonlyMap<DocumentNodeRef, RenderScrollAnchorEntry>;
   readonly focusOrder: readonly RenderFocusOrderEntry[];
@@ -194,6 +201,7 @@ export type RenderWorkerResponse = {
   readonly budget: "retained-cost" | "working-set";
   readonly estimatedBytes: number;
   readonly limit: number;
+  readonly owner: string;
 } | {
   readonly kind: "acknowledged";
   readonly requestId: number;
@@ -213,6 +221,7 @@ export type RenderWorkerResponse = {
     readonly retainedAnalyses: number;
     readonly retainedCost: number;
     readonly evictions: number;
+    readonly accountedAllocations: number;
     readonly viewportRequests: number;
     readonly completedViewportRequests: number;
     readonly supersededViewportRequests: number;

@@ -1,16 +1,19 @@
 const EXACT_VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 const SHA512 = /^sha512-[A-Za-z0-9+/]+={0,2}$/u;
-const TERMINAL_UI = "@ismail-elkorchi/terminal-ui";
-const SOURCE = /^(?:github:Ismail-elkorchi\/terminal-ui|git\+https:\/\/github\.com\/Ismail-elkorchi\/terminal-ui\.git|git\+ssh:\/\/git@github\.com\/Ismail-elkorchi\/terminal-ui\.git)#([a-f0-9]{40})$/u;
+const SOURCE = /^(?:github:Ismail-elkorchi\/|git\+https:\/\/github\.com\/Ismail-elkorchi\/|git\+ssh:\/\/git@github\.com\/Ismail-elkorchi\/)(html-parser|css-parser|http-client|terminal-ui)(?:\.git)?#([a-f0-9]{40})$/u;
+
+function sourceRevision(value, name) {
+  const match = typeof value === "string" ? SOURCE.exec(value) : null;
+  return match !== null && name === `@ismail-elkorchi/${match[1]}` ? match[2] : undefined;
+}
 
 /** Bind each declared dependency to its lock and npm's actual installation record. */
 export function validateDependencyInstall({ name, dependencySpec, lockEntry, installedManifest, installedLockEntry }) {
-  const revision = name === TERMINAL_UI && typeof dependencySpec === "string"
-    ? SOURCE.exec(dependencySpec)?.[1] : undefined;
+  const revision = sourceRevision(dependencySpec, name);
   if (revision === undefined && (typeof dependencySpec !== "string" || !EXACT_VERSION.test(dependencySpec))) {
-    throw new Error(`${name} requires an exact registry version or, for terminal-ui, an exact 40-hex upstream Git revision`);
+    throw new Error(`${name} requires an exact registry version or an exact 40-hex upstream Git revision`);
   }
-  const resolvedRevision = typeof lockEntry?.resolved === "string" ? SOURCE.exec(lockEntry.resolved)?.[1] : undefined;
+  const resolvedRevision = sourceRevision(lockEntry?.resolved, name);
   const expectedTarball = `https://registry.npmjs.org/${name}/-/${name.split("/").at(-1)}-${dependencySpec}.tgz`;
   if (
     typeof lockEntry?.version !== "string"

@@ -132,13 +132,14 @@ export async function renderBrowserOnce(
       preferences: browserRenderPreferences(),
       searchQuery: selected.search?.query ?? null,
     });
-    const incomplete = payload.cellBuffer.outcome.status === "rejected"
+    const cellIncomplete = payload.cellBuffer.outcome.status === "rejected"
       ? [`cell-buffer.${payload.cellBuffer.outcome.reason}`]
       : payload.cellBuffer.outcome.status === "truncated"
         ? payload.cellBuffer.outcome.truncations.map((entry) =>
           `terminal.${entry.budget}=${String(entry.limit)}`
         )
         : [];
+    const incomplete = [...new Set([...payload.summary.incomplete, ...cellIncomplete])];
     if (incomplete.length > 0) {
       throw new Error(`One-shot rendering was incomplete (${incomplete.join(", ")}).`);
     }

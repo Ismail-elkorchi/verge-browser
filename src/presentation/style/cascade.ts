@@ -1,3 +1,10 @@
+import { DiagnosticCollector, diagnosticIdentity } from "./diagnostics.js";
+import { EMPTY_NAMESPACES, bindSelectorNamespaces } from "./namespaces.js";
+import { namedColor } from "./named-colors.js";
+import { isValidMediaEnvironment, mediaApplies } from "./media.js";
+export { terminalMediaMayApply } from "./media.js";
+import { styleBudgets } from "./budgets.js";
+import { layerNames, layerPath } from "./layers.js";
 import { recordPropertyValidationValue } from "./stylesheet-program.js";
 import { registerRetainedOwner } from "../../memory/retained-cost.js";
 import { recordUsedValueDependencies, usesLengthUnit, type EvaluatedValueDependencies } from "./value-dependencies.js";
@@ -13,8 +20,7 @@ import {
   type ComplexSelector,
   type ComponentValue,
   type CssDeclaration,
-  type CssQualifiedRule,
-  type CssRule,
+  type CssBlockItem,
   type SelectorEnvironment,
   type SelectorList,
   type SelectorMatchSession,
@@ -47,14 +53,15 @@ import type {
   SelectorStateDependency,
   StyleBudgets,
   StyleDiagnostic,
-  StyleDiagnosticCode,
   StyleOutcome,
   StyleSnapshot,
-  StylesheetProgramSource
+  StylesheetProgramSource,
+  StylesheetNamespaces
 } from "./types.js";
 import {
   parseCssFunctionalColor,
   parseCssLength,
+  parseCssTranslations,
   resolveCssVariableValues,
   splitCssComponentValues
 } from "./css-values.js";
@@ -95,15 +102,6 @@ import {
   tablePropertyValueSupported,
 } from "./table/index.js";
 
-const DEFAULT_STYLE_BUDGETS: StyleBudgets = Object.freeze({
-  maxStylesheetSources: 64,
-  maxStylesheetBytes: 2 * 1024 * 1024,
-  maxInlineStylesheetBytes: 512 * 1024,
-  maxSelectorQueries: 4_096,
-  maxSelectorSteps: 500_000,
-  maxDiagnostics: 128
-});
-
 const SUPPORTED_PROPERTIES = new Set([
   "display", "visibility", "white-space", "color", "background", "background-color",
   "font-weight", "font-style", "text-decoration", "text-decoration-line", "text-transform",
@@ -129,7 +127,7 @@ const SUPPORTED_PROPERTIES = new Set([
   "overflow", "overflow-x", "overflow-y",
   "position", "top", "right", "bottom", "left", "inset", "inset-block", "inset-block-start",
   "inset-block-end", "inset-inline", "inset-inline-start", "inset-inline-end", "z-index",
-  "float", "clear", "clip", "clip-path",
+  "float", "clear", "clip", "clip-path", "transform",
   "content"
 ]);
 
@@ -152,37 +150,6 @@ const NORMAL_GAP = Object.freeze({ kind: "normal" as const });
 const MEDIUM_BORDER: CssLength = Object.freeze({ kind: "length", value: 3, unit: "px" });
 const TRANSPARENT: CssColor = Object.freeze({ r: 0, g: 0, b: 0, a: 0 });
 
-const NAMED_COLORS: Readonly<Record<string, CssColor>> = Object.freeze({
-  aliceblue: { r: 240, g: 248, b: 255, a: 1 },
-  aqua: { r: 0, g: 255, b: 255, a: 1 },
-  black: { r: 0, g: 0, b: 0, a: 1 },
-  blue: { r: 0, g: 0, b: 255, a: 1 },
-  brown: { r: 165, g: 42, b: 42, a: 1 },
-  cyan: { r: 0, g: 255, b: 255, a: 1 },
-  darkgray: { r: 169, g: 169, b: 169, a: 1 },
-  darkgreen: { r: 0, g: 100, b: 0, a: 1 },
-  fuchsia: { r: 255, g: 0, b: 255, a: 1 },
-  gold: { r: 255, g: 215, b: 0, a: 1 },
-  gray: { r: 128, g: 128, b: 128, a: 1 },
-  green: { r: 0, g: 128, b: 0, a: 1 },
-  grey: { r: 128, g: 128, b: 128, a: 1 },
-  lightgray: { r: 211, g: 211, b: 211, a: 1 },
-  lime: { r: 0, g: 255, b: 0, a: 1 },
-  magenta: { r: 255, g: 0, b: 255, a: 1 },
-  maroon: { r: 128, g: 0, b: 0, a: 1 },
-  navy: { r: 0, g: 0, b: 128, a: 1 },
-  olive: { r: 128, g: 128, b: 0, a: 1 },
-  orange: { r: 255, g: 165, b: 0, a: 1 },
-  pink: { r: 255, g: 192, b: 203, a: 1 },
-  purple: { r: 128, g: 0, b: 128, a: 1 },
-  red: { r: 255, g: 0, b: 0, a: 1 },
-  silver: { r: 192, g: 192, b: 192, a: 1 },
-  teal: { r: 0, g: 128, b: 128, a: 1 },
-  violet: { r: 238, g: 130, b: 238, a: 1 },
-  white: { r: 255, g: 255, b: 255, a: 1 },
-  yellow: { r: 255, g: 255, b: 0, a: 1 }
-});
-
 interface CascadeLayerPosition {
   readonly identity: string;
   readonly orderPath: readonly number[];
@@ -192,7 +159,7 @@ interface CascadeCandidate {
   readonly declaration: CssDeclaration;
   readonly program: CompiledDeclarationProgram;
   readonly sourceUrl: string;
-  readonly origin: "user-agent" | "author";
+  readonly origin: "user-agent" | "author-presentational-hint" | "author";
   readonly important: boolean;
   readonly elementAttached: boolean;
   readonly specificity: SelectorSpecificity;
@@ -201,11 +168,18 @@ interface CascadeCandidate {
 }
 
 type CandidateMap = Map<string, Map<string, CascadeCandidate[]>>;
+type DiagnosticSink = Pick<DiagnosticCollector, "add">;
+type DiagnosticDescriptor = Omit<StyleDiagnostic, "occurrences">;
+interface ComputedDiagnosticContribution {
+  readonly descriptor: DiagnosticDescriptor;
+  readonly occurrences: number;
+}
 
 interface CandidateCollection {
   readonly candidates: CandidateMap;
   /** Null means no prior dynamic-state result can safely seed incremental computation. */
   readonly affectedDynamicNodes: ReadonlySet<DocumentNodeRef> | null;
+  readonly fallback: "user-agent-only" | null;
 }
 
 let nextCustomPropertyEnvironment = 1;
@@ -214,7 +188,6 @@ class ImmutableCustomPropertyEnvironment implements ReadonlyMap<string, string> 
   readonly identity = nextCustomPropertyEnvironment++;
   readonly #parent: ImmutableCustomPropertyEnvironment | null;
   readonly #changes: ReadonlyMap<string, readonly ComponentValue[] | null>;
-  #materialized: ReadonlyMap<string, string> | null = null;
 
   public constructor(
     parent: ImmutableCustomPropertyEnvironment | null,
@@ -222,22 +195,30 @@ class ImmutableCustomPropertyEnvironment implements ReadonlyMap<string, string> 
   ) {
     this.#parent = parent;
     this.#changes = changes;
-    registerRetainedOwner(this, () => [this.#parent, this.#changes, this.#materialized]);
+    registerRetainedOwner(this, [this.#parent, this.#changes]);
     Object.freeze(this);
   }
 
-  #values(): ReadonlyMap<string, string> {
-    if (this.#materialized !== null) return this.#materialized;
-    const values = new Map<string, string>(this.#parent ?? []);
-    for (const [name, value] of this.#changes) {
-      if (value === null) values.delete(name);
-      else values.set(name, serializeCssComponentValues(value));
+  #components(): ReadonlyMap<string, readonly ComponentValue[]> {
+    const layers: ImmutableCustomPropertyEnvironment[] = [this];
+    for (let parent = this.#parent; parent !== null; parent = parent.#parent) layers.push(parent);
+    const values = new Map<string, readonly ComponentValue[]>();
+    for (let index = layers.length - 1; index >= 0; index -= 1) {
+      const layer = layers[index];
+      if (layer === undefined) continue;
+      for (const [name, value] of layer.#changes) {
+        if (value === null) values.delete(name);
+        else values.set(name, value);
+      }
     }
-    this.#materialized = values;
     return values;
   }
 
-  public get size(): number { return this.#values().size; }
+  #values(): ReadonlyMap<string, string> {
+    return new Map([...this.#components()].map(([name, value]) => [name, serializeCssComponentValues(value)]));
+  }
+
+  public get size(): number { return this.#components().size; }
   public get(key: string): string | undefined {
     if (this.#changes.has(key)) {
       const value = this.#changes.get(key);
@@ -249,14 +230,6 @@ class ImmutableCustomPropertyEnvironment implements ReadonlyMap<string, string> 
     if (this.#changes.has(key)) return this.#changes.get(key) ?? undefined;
     return this.#parent?.componentValues(key);
   }
-  public componentValueMap(): ReadonlyMap<string, readonly ComponentValue[]> {
-    const values = new Map<string, readonly ComponentValue[]>();
-    for (const name of this.keys()) {
-      const value = this.componentValues(name);
-      if (value !== undefined) values.set(name, value);
-    }
-    return values;
-  }
   public static fromSerialized(values: ReadonlyMap<string, string>): ImmutableCustomPropertyEnvironment {
     const parsed = new Map<string, readonly ComponentValue[] | null>();
     for (const [name, value] of values) {
@@ -265,9 +238,9 @@ class ImmutableCustomPropertyEnvironment implements ReadonlyMap<string, string> 
     }
     return new ImmutableCustomPropertyEnvironment(null, parsed);
   }
-  public has(key: string): boolean { return this.get(key) !== undefined; }
+  public has(key: string): boolean { return this.componentValues(key) !== undefined; }
   public entries(): MapIterator<[string, string]> { return this.#values().entries(); }
-  public keys(): MapIterator<string> { return this.#values().keys(); }
+  public keys(): MapIterator<string> { return this.#components().keys(); }
   public values(): MapIterator<string> { return this.#values().values(); }
   public forEach(
     callbackfn: (value: string, key: string, map: ReadonlyMap<string, string>) => void,
@@ -279,46 +252,6 @@ class ImmutableCustomPropertyEnvironment implements ReadonlyMap<string, string> 
 }
 
 const EMPTY_CUSTOM_PROPERTIES = new ImmutableCustomPropertyEnvironment(null, new Map());
-
-class DiagnosticCollector {
-  readonly #values: StyleDiagnostic[] = [];
-  readonly #indices = new Map<string, number>();
-  readonly #limit: number;
-
-  public constructor(limit: number, initial: readonly StyleDiagnostic[]) {
-    this.#limit = limit;
-    for (const diagnostic of initial) {
-      for (let occurrence = 0; occurrence < diagnostic.occurrences; occurrence += 1) {
-        this.add(diagnostic.code, diagnostic.sourceUrl, diagnostic.detail);
-      }
-    }
-  }
-
-  public add(code: StyleDiagnosticCode, sourceUrl: string, detail: string): void {
-    const identity = `${code}\u0000${sourceUrl}\u0000${detail}`;
-    const index = this.#indices.get(identity);
-    if (index !== undefined) {
-      const current = this.#values[index];
-      if (current !== undefined) this.#values[index] = { ...current, occurrences: current.occurrences + 1 };
-      return;
-    }
-    if (this.#values.length >= this.#limit) return;
-    this.#indices.set(identity, this.#values.length);
-    this.#values.push({ code, sourceUrl, detail, occurrences: 1 });
-  }
-
-  public result(): readonly StyleDiagnostic[] {
-    return Object.freeze(this.#values.map((value) => Object.freeze(value)));
-  }
-}
-
-function budgets(overrides: Partial<StyleBudgets> | undefined): StyleBudgets {
-  const result = { ...DEFAULT_STYLE_BUDGETS, ...overrides };
-  for (const [name, value] of Object.entries(result)) {
-    if (!Number.isSafeInteger(value) || value < 1) throw new TypeError(`${name} must be a positive safe integer`);
-  }
-  return result;
-}
 
 function styleKey(node: DocumentNodeRef, pseudo: PseudoElementIdentity | null = null): string {
   return pseudo === null ? node : `${node}::${pseudo}`;
@@ -343,7 +276,8 @@ function outranks(left: CascadeCandidate, right: CascadeCandidate): boolean {
   if (left.important !== right.important) return left.important;
   if (left.origin !== right.origin) {
     if (left.important) return left.origin === "user-agent";
-    return left.origin === "author";
+    const rank = { "user-agent": 0, "author-presentational-hint": 1, author: 2 };
+    return rank[left.origin] > rank[right.origin];
   }
   if (left.elementAttached !== right.elementAttached) return left.elementAttached;
   if (left.layer !== right.layer) {
@@ -400,18 +334,6 @@ function selectorEnvironment(input: ResolveStylesInput): SelectorEnvironment<Web
         return filtered;
       }
     }
-    const control = document.control(node.ref);
-    const controlState = state.controls.get(node.ref);
-    if (control !== null && (control.kind === "checkbox" || control.kind === "radio")) {
-      const hasChecked = attributes.some((attribute) => attribute.namespace === null && attribute.localName === "checked");
-      const checked = controlState?.checked ?? control.defaultChecked;
-      if (checked && !hasChecked) attributes.push({ namespace: null, localName: "checked", value: "" });
-      if (!checked && hasChecked) {
-        const filtered = Object.freeze(attributes.filter((attribute) => attribute.namespace !== null || attribute.localName !== "checked"));
-        attributeCache.set(node.ref, filtered);
-        return filtered;
-      }
-    }
     const frozen = Object.freeze(attributes);
     attributeCache.set(node.ref, frozen);
     return frozen;
@@ -453,26 +375,19 @@ function selectorEnvironment(input: ResolveStylesInput): SelectorEnvironment<Web
         return node.children.map((child) => document.node(child));
       }
     },
-    documentMode: { syntax: "html", quirks: "no-quirks" },
-    defaultNamespace: { kind: "any" },
+    documentMode: { syntax: "html", quirks: document.documentMode },
+    get defaultNamespace() { return input.program.selectorRuntime.namespaces.defaultNamespace; },
     idValues(_node, element) {
       return element.attributes.filter((attribute) => attribute.namespace === null && attribute.localName === "id")
         .map((attribute) => attribute.value);
     },
     classNames(_node, element) {
       return element.attributes.filter((attribute) => attribute.namespace === null && attribute.localName === "class")
-        .flatMap((attribute) => attribute.value.split(/\s+/u).filter(Boolean));
+        .flatMap((attribute) => attribute.value.split(/[\t\n\f\r ]+/u).filter(Boolean));
     },
     resolveNamespacePrefix(prefix) {
-      const namespace: Readonly<Record<string, string>> = {
-        html: "http://www.w3.org/1999/xhtml",
-        svg: "http://www.w3.org/2000/svg",
-        math: "http://www.w3.org/1998/Math/MathML",
-        xlink: "http://www.w3.org/1999/xlink",
-        xml: "http://www.w3.org/XML/1998/namespace",
-        xmlns: "http://www.w3.org/2000/xmlns/"
-      };
-      const resolved = namespace[prefix.toLowerCase()];
+      const prefixes = input.program.selectorRuntime.namespaces.prefixes;
+      const resolved = prefixes.get(prefix);
       return resolved === undefined ? { status: "unknown" } : { status: "resolved", namespace: resolved };
     },
     attributeValueCaseSensitivity(_element, attribute) {
@@ -581,116 +496,18 @@ function selectorEnvironment(input: ResolveStylesInput): SelectorEnvironment<Web
   };
 }
 
-function splitMediaQueries(value: string): readonly string[] {
-  const queries: string[] = [];
-  let start = 0;
-  let depth = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    const character = value[index];
-    if (character === "(") depth += 1;
-    else if (character === ")") depth = Math.max(0, depth - 1);
-    else if (character === "," && depth === 0) {
-      queries.push(value.slice(start, index));
-      start = index + 1;
-    }
-  }
-  queries.push(value.slice(start));
-  return queries;
-}
-
-function mediaLengthPx(value: string): number | null {
-  const match = /^([+]?(?:\d+(?:\.\d+)?|\.\d+))(px|rem|em|ch)$/iu.exec(value.trim());
-  if (match?.[1] === undefined || match[2] === undefined) return null;
-  const number = Number(match[1]);
-  if (!Number.isFinite(number)) return null;
-  if (match[2].toLowerCase() === "px") return number;
-  if (match[2].toLowerCase() === "ch") return number * 8;
-  return number * 16;
-}
-
-function mediaFeature(feature: string, input: ResolveStylesInput): boolean | null {
-  const normalized = feature.replaceAll(/\/\*[\s\S]*?\*\//gu, "").trim().toLowerCase();
-  if (normalized === "prefers-reduced-motion" || /^prefers-reduced-motion\s*:\s*reduce$/u.test(normalized)) {
-    return input.environment.reducedMotion;
-  }
-  if (/^prefers-reduced-motion\s*:\s*no-preference$/u.test(normalized)) return !input.environment.reducedMotion;
-  if (/^prefers-color-scheme\s*:\s*dark$/u.test(normalized)) return input.environment.prefersColorScheme === "dark";
-  if (/^prefers-color-scheme\s*:\s*light$/u.test(normalized)) return input.environment.prefersColorScheme === "light";
-  if (normalized === "hover:hover" || normalized === "hover: hover") return input.environment.hover === "hover";
-  if (normalized === "hover:none" || normalized === "hover: none") return input.environment.hover === "none";
-  if (normalized === "pointer:fine" || normalized === "pointer: fine") return input.environment.pointer === "fine";
-  if (normalized === "pointer:coarse" || normalized === "pointer: coarse") return input.environment.pointer === "coarse";
-  if (normalized === "pointer:none" || normalized === "pointer: none") return input.environment.pointer === "none";
-  const legacy = /^(min-width|max-width|width)\s*:\s*(.+)$/u.exec(normalized);
-  if (legacy?.[1] !== undefined && legacy[2] !== undefined) {
-    const boundary = mediaLengthPx(legacy[2]);
-    if (boundary === null) return null;
-    if (legacy[1] === "min-width") return input.environment.viewportWidthCssPx >= boundary;
-    if (legacy[1] === "max-width") return input.environment.viewportWidthCssPx <= boundary;
-    return input.environment.viewportWidthCssPx === boundary;
-  }
-  const range = /^width\s*(<=|>=|<|>)\s*(.+)$/u.exec(normalized);
-  if (range?.[1] !== undefined && range[2] !== undefined) {
-    const boundary = mediaLengthPx(range[2]);
-    if (boundary === null) return null;
-    if (range[1] === "<=") return input.environment.viewportWidthCssPx <= boundary;
-    if (range[1] === ">=") return input.environment.viewportWidthCssPx >= boundary;
-    if (range[1] === "<") return input.environment.viewportWidthCssPx < boundary;
-    return input.environment.viewportWidthCssPx > boundary;
-  }
-  return null;
-}
-
-function mediaApplies(
-  value: string | null,
-  input: ResolveStylesInput,
-  diagnostics: DiagnosticCollector,
-  sourceUrl: string
-): boolean {
-  if (value === null || value.trim().length === 0) return true;
-  return splitMediaQueries(value).some((part) => {
-    let normalized = part.trim().toLowerCase();
-    const negated = normalized.startsWith("not ");
-    if (negated) normalized = normalized.slice(4).trim();
-    normalized = normalized.replace(/^only\s+/u, "");
-    const mediaType = normalized.match(/^(all|screen|print)\b/u)?.[1];
-    const conditionOnly = normalized.startsWith("(");
-    let applies = mediaType === "all" || mediaType === "screen" || conditionOnly;
-    if (mediaType === undefined && !conditionOnly) {
-      diagnostics.add("stylesheet-media", sourceUrl, `Unsupported media type: ${normalized.split(/\s+/u)[0] ?? ""}`);
-    }
-    for (const match of normalized.matchAll(/\(([^()]*)\)/gu)) {
-      const result = mediaFeature(match[1] ?? "", input);
-      if (result === null) {
-        diagnostics.add("stylesheet-media", sourceUrl, `Unsupported media feature: ${match[1] ?? ""}`);
-        applies = false;
-      } else applies &&= result;
-    }
-    return negated ? !applies : applies;
-  });
-}
-
-export function terminalMediaMayApply(value: string | null): boolean {
-  if (value === null || value.trim().length === 0) return true;
-  return splitMediaQueries(value).some((part) => {
-    const normalized = part.trim().toLowerCase();
-    if (normalized.startsWith("not ")) return true;
-    return !/(?:^|\s)print(?:\s|$)/u.test(normalized) || /(?:^|\s)(?:all|screen)(?:\s|$)/u.test(normalized);
-  });
-}
-
 function recordCandidate(
   candidates: CandidateMap,
   key: string,
   declaration: CssDeclaration,
   program: CompiledDeclarationProgram,
-  source: StylesheetProgramSource,
+  source: Pick<CascadeCandidate, "sourceUrl" | "origin">,
   specificity: SelectorSpecificity,
   sourceOrder: number,
   elementAttached: boolean,
   layer: CascadeLayerPosition | null
 ): void {
-  const property = canonicalProperty(declaration.name) ?? declaration.name.toLowerCase();
+  const property = program.property ?? declaration.name.toLowerCase();
   const byProperty = candidates.get(key) ?? new Map<string, CascadeCandidate[]>();
   const next: CascadeCandidate = {
     declaration,
@@ -727,10 +544,6 @@ function mergeCandidateMaps(target: CandidateMap, source: CandidateMap): void {
     }
     target.set(key, targetProperties);
   }
-}
-
-function declarationsOf(rule: CssQualifiedRule): readonly CssDeclaration[] {
-  return rule.block.items.filter((item): item is CssDeclaration => item.kind === "declaration");
 }
 
 function implementationSupportsDeclaration(source: string): boolean {
@@ -889,6 +702,7 @@ function implementationSupportsDeclaration(source: string): boolean {
     case "clear": return keyword("none", "left", "right", "both", "inline-start", "inline-end");
     case "clip": return parseLegacyClip(value) !== null;
     case "clip-path": return parseClipPath(value) !== null;
+    case "transform": return parseCssTranslations(value) !== undefined;
     case "content": {
       if (value === "none" || value === "normal") return true;
       const content = parseComponentValues(value);
@@ -913,18 +727,16 @@ const IMPLEMENTED_PSEUDO_CLASSES = new Set([
   "scope", "target", "visited", "where"
 ]);
 
-const IMPLEMENTED_NAMESPACE_PREFIXES = new Set(["html", "svg", "math", "xlink", "xml", "xmlns"]);
-
-function selectorImplementationSupported(selector: SelectorList): boolean {
+function selectorImplementationSupported(selector: SelectorList, namespaces: StylesheetNamespaces): boolean {
   const complexSupported = (complex: ComplexSelector): boolean => complex.compounds.every((compound) => {
     const typeNamespace = compound.type?.namespace ?? null;
     if (typeNamespace !== null && typeNamespace !== "*"
-      && typeNamespace !== "" && !IMPLEMENTED_NAMESPACE_PREFIXES.has(typeNamespace)) return false;
+      && typeNamespace !== "" && !namespaces.prefixes.has(typeNamespace)) return false;
     return compound.simples.every((simple) => {
-      if (simple.kind === "nesting") return false;
+      if (simple.kind === "nesting") return true;
       if (simple.kind === "attribute") {
         return simple.namespace === null || simple.namespace === "*" || simple.namespace === ""
-          || IMPLEMENTED_NAMESPACE_PREFIXES.has(simple.namespace);
+          || namespaces.prefixes.has(simple.namespace);
       }
       if (simple.kind === "pseudo-element") {
         return simple.argument.kind === "none" && ["before", "after", "marker"].includes(simple.name);
@@ -942,11 +754,11 @@ function selectorImplementationSupported(selector: SelectorList): boolean {
   return selector.selectors.every(complexSupported);
 }
 
-function supportsCondition(values: readonly ComponentValue[]): boolean {
+function supportsCondition(values: readonly ComponentValue[], namespaces: StylesheetNamespaces = EMPTY_NAMESPACES): boolean {
   const compact = values.filter((value) => value.kind !== "whitespace");
   if (compact[0]?.kind === "ident" && compact[0].value.toLowerCase() === "not") {
     return compact.length === 2 && compact[1] !== undefined
-      && !supportsCondition([compact[1]]);
+      && !supportsCondition([compact[1]], namespaces);
   }
   let operator: "and" | "or" | null = null;
   const groups: ComponentValue[][] = [[]];
@@ -960,7 +772,7 @@ function supportsCondition(values: readonly ComponentValue[]): boolean {
   }
   if (groups.length > 1) {
     if (groups.some((group) => group.length === 0)) return false;
-    const results = groups.map((group) => supportsCondition(group));
+    const results = groups.map((group) => supportsCondition(group, namespaces));
     return operator === "and" ? results.every(Boolean) : results.some(Boolean);
   }
   if (compact.length !== 1) return false;
@@ -969,11 +781,14 @@ function supportsCondition(values: readonly ComponentValue[]): boolean {
     const declaration = serializeCssComponentValues(condition.value).trim();
     return condition.value.some((value) => value.kind === "colon")
       ? implementationSupportsDeclaration(declaration)
-      : supportsCondition(condition.value);
+      : supportsCondition(condition.value, namespaces);
   }
   if (condition?.kind === "function-block" && condition.name.toLowerCase() === "selector") {
     const selector = parseSelectorListFromComponentValues(condition.value);
-    return selector.ok && selectorImplementationSupported(selector.value);
+    if (!selector.ok) return false;
+    const selectors = selector.value.selectors.map((entry) => bindSelectorNamespaces(entry, namespaces));
+    return selectors.every((entry) => entry !== null)
+      && selectorImplementationSupported({ ...selector.value, selectors }, namespaces);
   }
   return false;
 }
@@ -1009,7 +824,7 @@ function collectCandidates(
     if (previousState.controls !== input.state.controls) changedDependencies.add("checked-selected");
     if (previousState.open !== input.state.open) changedDependencies.add("disclosure-open");
   }
-  if (changedDependencies.has("checked-selected") || changedDependencies.has("disclosure-open")) {
+  if (changedDependencies.has("disclosure-open")) {
     selectorRuntime.authorSession = null;
     selectorRuntime.userAgentSession = null;
   }
@@ -1025,19 +840,22 @@ function collectCandidates(
     }
   }
   selectorRuntime.state = input.state;
-  if (selectorRuntime.sessionMaxSteps !== limits.maxSelectorSteps) {
-    selectorRuntime.authorSession = null;
-    selectorRuntime.userAgentSession = null;
-    selectorRuntime.sessionMaxSteps = limits.maxSelectorSteps;
-  }
+  const evaluationOptions = {
+    limits: { maxSteps: limits.maxSelectorSteps },
+    ...(input.signal === undefined ? {} : { signal: input.signal }),
+  };
+  selectorRuntime.authorSession?.beginEvaluation(evaluationOptions);
   const environment = selectorEnvironment(input);
   const root = input.program.document.node(input.program.document.root);
+  const scope = input.program.document.documentElement;
+  const scopes = new Set(scope === null ? [] : [input.program.document.node(scope)]);
   let sourceOrder = 0;
   let stylesheetOrdinal = 0;
   let queryCount = 0;
   let exhausted = false;
   const selectorExhaustion = new Set<"maxSelectorQueries" | "maxSelectorSteps">();
   const userAgentMatcher = selectorRuntime.userAgentSession ?? createSelectorMatchSession(root, environment, {
+      scopes,
       limits: {
         maxNodes: Math.max(1, totalNodes),
         maxDepth: Math.max(1, totalNodes),
@@ -1045,11 +863,16 @@ function collectCandidates(
       },
       ...(input.signal === undefined ? {} : { signal: input.signal })
     });
+  userAgentMatcher.beginEvaluation({
+    limits: { maxSteps: Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, totalNodes * 128)) },
+    ...(input.signal === undefined ? {} : { signal: input.signal }),
+  });
   selectorRuntime.userAgentSession = userAgentMatcher;
   const authorSelectorMatcher = (): SelectorMatchSession<WebDocumentNode> | null => {
     if (selectorRuntime.authorSession !== null) return selectorRuntime.authorSession;
     try {
       selectorRuntime.authorSession = createSelectorMatchSession(root, environment, {
+        scopes,
         limits: {
           maxNodes: Math.max(1, totalNodes),
           maxDepth: 2_048,
@@ -1057,6 +880,7 @@ function collectCandidates(
         },
         ...(input.signal === undefined ? {} : { signal: input.signal })
       });
+      selectorRuntime.authorSession.beginEvaluation(evaluationOptions);
     } catch (error) {
       input.signal?.throwIfAborted();
       if (!(error instanceof SyntaxResourceError)) throw error;
@@ -1109,52 +933,76 @@ function collectCandidates(
     if (parent === null) throw new Error("Cascade layer path must not be empty.");
     return parent;
   };
-  const layerPathFromSource = (value: string): CascadeLayerPath | null => {
-    const segments = value.trim().split(/\s*\.\s*/u);
-    return segments.length > 0 && segments.every((segment) => segment.length > 0)
-      ? Object.freeze(segments) : null;
-  };
   for (const source of sources) {
     if (selectorExhaustion.size > 0) break;
-    if (!source.mediaConditions.every((condition) => mediaApplies(condition, input, diagnostics, source.sourceUrl))) continue;
+    selectorRuntime.namespaces = source.namespaces;
+    if (!source.mediaConditions.every((condition) => mediaApplies(condition, input.environment, (detail) => { diagnostics.add("stylesheet-media", source.sourceUrl, detail); }))) continue;
     if (!source.supportsConditions.every(implementationSupportsCondition)) continue;
     for (const layer of source.predeclaredLayers) registerLayer(layer);
     const sourceLayer = source.layer === null ? null : registerLayer(source.layer);
     const sourceOrdinal = stylesheetOrdinal++;
     let anonymousLayer = 0;
-    const visitRules = (rules: readonly CssRule[], inheritedLayer: LayerNode | null): void => {
+    type MatchingByPseudo = Map<PseudoElementIdentity | null, Map<DocumentNodeRef, SelectorSpecificity>>;
+    const visitRules = (rules: readonly CssBlockItem[], inheritedLayer: LayerNode | null, inheritedMatching: MatchingByPseudo | null = null): void => {
       for (const rule of rules) {
         if (exhausted) return;
         input.signal?.throwIfAborted();
+        if (rule.kind === "declaration") {
+          if (inheritedMatching === null) continue;
+          const declaration = rule;
+          const compiled = input.program.compiledDeclarations.get(declaration)
+            ?? (() => { throw new Error("Missing compiled stylesheet declaration."); })();
+          const property = compiled.property;
+          if (compiled.validationStatus === "invalid") {
+            diagnostics.add("property-invalid", source.sourceUrl, `Invalid value for ${declaration.name}.`);
+            continue;
+          }
+          if (property === null) {
+            diagnostics.add("property-invalid", source.sourceUrl, `Unknown property ${declaration.name.toLowerCase()}.`);
+            continue;
+          }
+          if (!property.startsWith("--") && !SUPPORTED_PROPERTIES.has(property)) {
+            diagnostics.add("property-unsupported", source.sourceUrl, `Unsupported property ${property}.`);
+            continue;
+          }
+          sourceOrder += 1;
+          for (const [pseudo, matching] of inheritedMatching) {
+            for (const [ref, specificity] of matching) {
+              recordCandidate(
+                source.origin === "author" ? authorCandidates : candidates,
+                styleKey(ref, pseudo), declaration,
+                compiled,
+                source, specificity, sourceOrder, false,
+                inheritedLayer?.position ?? null
+              );
+            }
+          }
+          continue;
+        }
         if (rule.kind === "at-rule") {
           const name = rule.name.toLowerCase();
           if (name === "namespace" || name === "charset" || name === "import") continue;
           if (name === "media" && rule.block !== null) {
-            const media = serializeCssComponentValues(rule.prelude).trim();
-            if (mediaApplies(media, input, diagnostics, source.sourceUrl)) {
-              visitRules(rule.block.items.filter((item): item is CssRule => item.kind !== "declaration"), inheritedLayer);
+            if (mediaApplies(rule.prelude, input.environment, (detail) => { diagnostics.add("stylesheet-media", source.sourceUrl, detail); })) {
+              visitRules(rule.block.items, inheritedLayer, inheritedMatching);
             }
           } else if (name === "supports" && rule.block !== null) {
-            if (supportsCondition(rule.prelude)) {
-              visitRules(rule.block.items.filter((item): item is CssRule => item.kind !== "declaration"), inheritedLayer);
+            if (supportsCondition(rule.prelude, source.namespaces)) {
+              visitRules(rule.block.items, inheritedLayer, inheritedMatching);
             }
           } else if (name === "layer") {
-            const rawNames = splitCssComponentValues(serializeCssComponentValues(rule.prelude), "comma") ?? [];
+            const names = layerNames(rule.prelude);
             if (rule.block === null) {
-              for (const raw of rawNames) {
-                const local = layerPathFromSource(raw);
-                if (local !== null) registerLayer(Object.freeze([
-                  ...(inheritedLayer?.path ?? []),
-                  ...local
-                ]));
+              for (const local of names ?? []) {
+                registerLayer(Object.freeze([...(inheritedLayer?.path ?? []), ...local]));
               }
             } else {
-              const local = rawNames[0] === undefined
+              const local = rule.prelude.every((value) => value.kind === "whitespace")
                 ? Object.freeze([`__anonymous_layer_${String(sourceOrdinal)}_${String(anonymousLayer++)}`])
-                : layerPathFromSource(rawNames[0]);
+                : layerPath(rule.prelude);
               if (local === null) continue;
               const layer = registerLayer(Object.freeze([...(inheritedLayer?.path ?? []), ...local]));
-              visitRules(rule.block.items.filter((item): item is CssRule => item.kind !== "declaration"), layer);
+              visitRules(rule.block.items, layer, inheritedMatching);
             }
           } else diagnostics.add("unsupported-at-rule", source.sourceUrl, `Unsupported @${rule.name} rule.`);
           continue;
@@ -1172,7 +1020,8 @@ function collectCandidates(
                 exhausted = true;
                 break;
               }
-              let result = selectorRuntime.matches.get(compiled.fingerprint)?.result;
+              const identity = `${source.namespaces.fingerprint}\u0000${compiled.fingerprint}`;
+              let result = selectorRuntime.matches.get(identity)?.result;
               if (result === undefined) {
                 if (authorRule && queryCount >= limits.maxSelectorQueries) {
                   truncate("maxSelectorQueries");
@@ -1190,7 +1039,7 @@ function collectCandidates(
                     performance.now() - selectorStarted,
                   );
                 }
-                selectorRuntime.matches.set(compiled.fingerprint, Object.freeze({
+                selectorRuntime.matches.set(identity, Object.freeze({
                   dependencies: compiled.dependencies,
                   result,
                 }));
@@ -1228,30 +1077,7 @@ function collectCandidates(
           if (exhausted) break;
         }
         if (exhausted) return;
-        for (const declaration of declarationsOf(rule)) {
-          const property = canonicalProperty(declaration.name);
-          if (property === null) {
-            diagnostics.add("property-invalid", source.sourceUrl, `Unknown property ${declaration.name.toLowerCase()}.`);
-            continue;
-          }
-          if (!property.startsWith("--") && !SUPPORTED_PROPERTIES.has(property)) {
-            diagnostics.add("property-unsupported", source.sourceUrl, `Unsupported property ${property}.`);
-            continue;
-          }
-          sourceOrder += 1;
-          for (const [pseudo, matching] of matchingByPseudo) {
-            for (const [ref, specificity] of matching) {
-              recordCandidate(
-                source.origin === "author" ? authorCandidates : candidates,
-                styleKey(ref, pseudo), declaration,
-                input.program.compiledDeclarations.get(declaration)
-                  ?? (() => { throw new Error("Missing compiled stylesheet declaration."); })(),
-                source, specificity, sourceOrder, false,
-                inheritedLayer?.position ?? null
-              );
-            }
-          }
-        }
+        visitRules(rule.block.items, inheritedLayer, matchingByPseudo);
       }
     };
     visitRules(source.stylesheet.rules, sourceLayer);
@@ -1259,6 +1085,7 @@ function collectCandidates(
 
   const inlineSource: StylesheetProgramSource = {
     sourceUrl: "inline-style",
+    namespaces: EMPTY_NAMESPACES,
     origin: "author",
     stylesheet: sources[0]?.stylesheet ?? (() => { throw new Error("Missing UA stylesheet"); })(),
     mediaConditions: Object.freeze([]),
@@ -1268,7 +1095,13 @@ function collectCandidates(
   };
   for (const ref of selectorExhaustion.size === 0 ? styleNodes : []) {
     for (const item of input.program.inlineDeclarations.get(ref) ?? []) {
-      const property = canonicalProperty(item.name);
+      const compiled = input.program.compiledDeclarations.get(item)
+        ?? (() => { throw new Error("Missing compiled inline declaration."); })();
+      const property = compiled.property;
+      if (compiled.validationStatus === "invalid") {
+        diagnostics.add("property-invalid", "inline-style", `Invalid value for ${item.name}.`);
+        continue;
+      }
       if (property === null) {
         diagnostics.add("property-invalid", "inline-style", `Unknown property ${item.name.toLowerCase()}.`);
         continue;
@@ -1280,15 +1113,32 @@ function collectCandidates(
       sourceOrder += 1;
       recordCandidate(
         authorCandidates, styleKey(ref), item,
-        input.program.compiledDeclarations.get(item)
-          ?? (() => { throw new Error("Missing compiled inline declaration."); })(),
+        compiled,
         inlineSource, { a: 1, b: 0, c: 0 }, sourceOrder, true,
         null
       );
     }
   }
+  for (const [ref, hints] of selectorExhaustion.size === 0 ? input.program.presentationalHints : []) {
+    for (const declaration of hints) {
+      const compiled = input.program.compiledDeclarations.get(declaration)
+        ?? (() => { throw new Error("Missing compiled presentational hint."); })();
+      recordCandidate(authorCandidates, styleKey(ref), declaration, compiled,
+        { sourceUrl: "html-presentational-hint", origin: "author-presentational-hint" },
+        { a: 0, b: 0, c: 0 }, sourceOrder++, false, null);
+    }
+  }
+  for (const budget of selectorExhaustion) {
+    const consumed = budget === "maxSelectorQueries" ? queryCount : selectorRuntime.authorSession?.usage().steps ?? 0;
+    diagnostics.add("stylesheet-limit", "author-stylesheets",
+      `Style evaluation exhausted ${budget}: consumed=${String(consumed)}, limit=${String(limits[budget])}; fallback=user-agent-only.`);
+  }
   if (selectorExhaustion.size === 0) mergeCandidateMaps(candidates, authorCandidates);
-  return Object.freeze({ candidates, affectedDynamicNodes });
+  return Object.freeze({
+    candidates,
+    affectedDynamicNodes: selectorExhaustion.size === 0 ? affectedDynamicNodes : null,
+    fallback: selectorExhaustion.size === 0 ? null : "user-agent-only",
+  });
 }
 
 function cssValue(declaration: CssDeclaration): string {
@@ -1321,6 +1171,10 @@ function sameCascadeBucket(left: CascadeCandidate, right: CascadeCandidate): boo
     && left.layer?.identity === right.layer?.identity;
 }
 
+function sameRollbackOrigin(left: CascadeCandidate, right: CascadeCandidate): boolean {
+  return (left.origin === "user-agent") === (right.origin === "user-agent");
+}
+
 function cascadedCandidate(entries: readonly CascadeCandidate[]): CascadeCandidate | null {
   let remaining = [...entries];
   while (remaining.length > 0) {
@@ -1329,7 +1183,7 @@ function cascadedCandidate(entries: readonly CascadeCandidate[]): CascadeCandida
     const wide = cssWide(candidateValue(candidate));
     if (wide !== "revert" && wide !== "revert-layer") return candidate;
     remaining = wide === "revert"
-      ? remaining.filter((entry) => entry.origin !== candidate.origin)
+      ? remaining.filter((entry) => !sameRollbackOrigin(entry, candidate))
       : remaining.filter((entry) => !sameCascadeBucket(entry, candidate));
   }
   return null;
@@ -1344,6 +1198,7 @@ function customProperties(
     ? parent
     : ImmutableCustomPropertyEnvironment.fromSerialized(parent);
   const changes = new Map<string, readonly ComponentValue[] | null>();
+  const substitutions = new Set<string>();
   for (const [name, entries] of candidates ?? []) {
     if (!name.startsWith("--")) continue;
     const candidate = cascadedCandidate(entries);
@@ -1351,31 +1206,40 @@ function customProperties(
     const value = candidateValue(candidate);
     const wide = cssWide(value);
     if (wide === "initial") changes.set(name, null);
-    else if (wide === null) changes.set(name, candidate.program.value);
+    else if (wide === null) {
+      changes.set(name, candidate.program.value);
+      if (candidate.program.containsVariableReference) substitutions.add(name);
+    }
   }
   if (changes.size === 0) return inherited;
-  const unresolved = new ImmutableCustomPropertyEnvironment(inherited, changes);
+  const unresolved = substitutions.size === 0 ? inherited
+    : new ImmutableCustomPropertyEnvironment(inherited, changes);
   const resolvedChanges = new Map<string, readonly ComponentValue[] | null>();
   for (const [name, value] of changes) {
-    if (value === null) {
-      resolvedChanges.set(name, null);
-      continue;
+    // Compiled literal values are already immutable syntax. Only a variable
+    // expansion needs the resolver's materialized/rebased component-value tree.
+    let resolved = value;
+    if (value !== null && substitutions.has(name)) {
+      const started = instrumentation === undefined ? 0 : performance.now();
+      try {
+        resolved = resolveCssVariableValues(value, (name) => unresolved.componentValues(name));
+      } finally {
+        instrumentation?.record("custom-property-substitution", performance.now() - started);
+      }
     }
-    const started = instrumentation === undefined ? 0 : performance.now();
-    try {
-      resolvedChanges.set(name, resolveCssVariableValues(value, unresolved.componentValueMap()));
-    } finally {
-      instrumentation?.record("custom-property-substitution", performance.now() - started);
-    }
+    // Repeated universal resets often redeclare the exact inherited syntax.
+    // Keeping only effective overrides avoids duplicating inheritance layers.
+    if (resolved !== (inherited.componentValues(name) ?? null)) resolvedChanges.set(name, resolved);
   }
-  return new ImmutableCustomPropertyEnvironment(inherited, resolvedChanges);
+  return resolvedChanges.size === 0 ? inherited
+    : new ImmutableCustomPropertyEnvironment(inherited, resolvedChanges);
 }
 
 function validatedValue(
   candidates: ReadonlyMap<string, readonly CascadeCandidate[]> | undefined,
   names: string | readonly string[],
   variables: ReadonlyMap<string, string>,
-  diagnostics: DiagnosticCollector,
+  diagnostics: DiagnosticSink,
   validationSession: ResolveStylesInput["program"]["propertyValidation"],
   substitutionCache: ResolveStylesInput["program"]["substitutedValues"],
   instrumentation: ResolveStylesInput["instrumentation"],
@@ -1406,7 +1270,7 @@ function validatedValue(
         const environment = variables instanceof ImmutableCustomPropertyEnvironment
           ? variables
           : ImmutableCustomPropertyEnvironment.fromSerialized(variables);
-        const components = resolveCssVariableValues(candidate.program.value, environment.componentValueMap());
+        const components = resolveCssVariableValues(candidate.program.value, (name) => environment.componentValues(name));
         resolved = components === null ? null : Object.freeze({
           components,
           serializedValue: serializeCssComponentValues(components).trim(),
@@ -1423,7 +1287,7 @@ function validatedValue(
     const wide = cssWide(resolved.serializedValue);
     if (wide === "revert" || wide === "revert-layer") {
       entries = wide === "revert"
-        ? entries.filter((entry) => entry.origin !== candidate.origin)
+        ? entries.filter((entry) => !sameRollbackOrigin(entry, candidate))
         : entries.filter((entry) => !sameCascadeBucket(entry, candidate));
       continue;
     }
@@ -1442,7 +1306,9 @@ function validatedValue(
       return null;
     }
     if (!gridOwned) recordPropertyValidationValue(validationSession, value.length);
-    const validation = gridOwned ? { status: "valid" as const } : validationSession.validate(selectedName, components);
+    const validation = gridOwned ? { status: "valid" as const }
+      : candidate.program.containsVariableReference ? validationSession.validate(selectedName, components)
+        : { status: candidate.program.validationStatus };
     if (validation.status === "invalid") {
       diagnostics.add("property-invalid", candidate.sourceUrl, `Invalid value for ${selectedName}.`);
       return null;
@@ -1532,6 +1398,7 @@ function initialStyle(parent: ComputedStyle | null, replaced: boolean, htmlDirec
       clear: "none",
       legacyClip: { kind: "auto" },
       clipPath: { kind: "none" },
+      transform: null,
       gridTemplateColumns: GRID_NONE_TRACK_LIST,
       gridTemplateRows: GRID_NONE_TRACK_LIST,
       gridTemplateAreas: GRID_NONE_AREAS,
@@ -1959,7 +1826,7 @@ function parseColor(value: string, current: CssColor | null): CssColor | null | 
       a: expanded.length === 8 ? Number.parseInt(expanded.slice(6), 16) / 255 : 1
     };
   }
-  return parseCssFunctionalColor(value) ?? NAMED_COLORS[normalized];
+  return parseCssFunctionalColor(value) ?? namedColor(normalized);
 }
 
 function colorFromComponentValues(value: string, current: CssColor | null): CssColor | null | undefined {
@@ -1997,7 +1864,7 @@ function computeStyle(
   node: DocumentNodeRef,
   parent: ComputedStyle | null,
   candidates: ReadonlyMap<string, readonly CascadeCandidate[]> | undefined,
-  diagnostics: DiagnosticCollector,
+  diagnostics: DiagnosticSink,
   validationSession: ResolveStylesInput["program"]["propertyValidation"],
   substitutionCache: ResolveStylesInput["program"]["substitutedValues"],
   instrumentation: ResolveStylesInput["instrumentation"],
@@ -2790,6 +2657,14 @@ function computeStyle(
     if (computed === null) unsupported(clipPath);
     else style = { ...style, box: { ...style.box, clipPath: computed } };
   }
+  const translation = value("transform");
+  if (translation !== null) {
+    const wide = cssWide(translation.value);
+    const computed = wide === "inherit" ? parent?.box.transform ?? null
+      : wide === "initial" || wide === "unset" ? null : parseCssTranslations(translation.value);
+    if (computed === undefined) unsupported(translation);
+    else style = { ...style, box: { ...style.box, transform: computed } };
+  }
   const content = value("content");
   if (content !== null && pseudo !== null) {
     const wide = cssWide(content.value);
@@ -2821,21 +2696,25 @@ class ImmutableStyleSnapshot implements StyleSnapshot {
   readonly document: IndexedWebDocumentSnapshot;
   readonly environment: ResolveStylesInput["environment"];
   readonly diagnostics: readonly StyleDiagnostic[];
+  readonly omittedDiagnosticCount: number;
   readonly stylesheetCount: number;
   readonly outcome: StyleOutcome;
   readonly #styles: ReadonlyMap<DocumentNodeRef, ComputedStyle>;
   readonly #pseudos: ReadonlyMap<string, ComputedStyle>;
+  readonly #computedDiagnostics: ReadonlyMap<DocumentNodeRef, readonly ComputedDiagnosticContribution[]>;
 
   public constructor(
     input: ResolveStylesInput,
     styles: ReadonlyMap<DocumentNodeRef, ComputedStyle>,
     pseudos: ReadonlyMap<string, ComputedStyle>,
+    computedDiagnostics: ReadonlyMap<DocumentNodeRef, readonly ComputedDiagnosticContribution[]>,
     diagnostics: readonly StyleDiagnostic[],
     stylesheetCount: number,
     outcome: StyleOutcome,
     valueDependencies: StyleSnapshot["valueDependencies"] = {
       computedViewportInlineSize: true, computedViewportBlockSize: true, usedViewportBlockSize: true,
-    }
+    },
+    omittedDiagnosticCount = 0,
   ) {
     const textDependency = ([identity, style]: readonly [string, ComputedStyle]): readonly unknown[] => [
       identity, style.display, style.visibility, style.listStyleType, style.generatedContent,
@@ -2849,11 +2728,13 @@ class ImmutableStyleSnapshot implements StyleSnapshot {
     this.environment = Object.freeze({ ...input.environment });
     this.#styles = styles;
     this.#pseudos = pseudos;
+    this.#computedDiagnostics = computedDiagnostics;
     this.diagnostics = Object.freeze([...diagnostics]);
+    this.omittedDiagnosticCount = omittedDiagnosticCount;
     this.stylesheetCount = stylesheetCount;
     this.outcome = Object.freeze(outcome);
     Object.freeze(this);
-    registerRetainedOwner(this, () => [this.#styles, this.#pseudos]);
+    registerRetainedOwner(this, () => [this.#styles, this.#pseudos, this.#computedDiagnostics]);
   }
 
   public style(node: DocumentNodeRef): ComputedStyle {
@@ -2869,6 +2750,9 @@ class ImmutableStyleSnapshot implements StyleSnapshot {
   /** Style-owned retained maps used only for dynamic-selector incremental computation. */
   public retainedStyles(): ReadonlyMap<DocumentNodeRef, ComputedStyle> { return this.#styles; }
   public retainedPseudos(): ReadonlyMap<string, ComputedStyle> { return this.#pseudos; }
+  public retainedComputedDiagnostics(): ReadonlyMap<DocumentNodeRef, readonly ComputedDiagnosticContribution[]> {
+    return this.#computedDiagnostics;
+  }
 }
 
 function styleEnvironmentIdentity(environment: MediaEnvironment): string {
@@ -2884,24 +2768,13 @@ function styleEnvironmentIdentity(environment: MediaEnvironment): string {
 }
 
 export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
-  const mediaType: unknown = input.environment.mediaType;
-  const colorScheme: unknown = input.environment.prefersColorScheme;
-  const reducedMotion: unknown = input.environment.reducedMotion;
-  const hover: unknown = input.environment.hover;
-  const pointer: unknown = input.environment.pointer;
-  if (!Number.isFinite(input.environment.viewportWidthCssPx) || input.environment.viewportWidthCssPx <= 0
-    || !Number.isFinite(input.environment.viewportHeightCssPx) || input.environment.viewportHeightCssPx <= 0
-    || mediaType !== "screen"
-    || (colorScheme !== "light" && colorScheme !== "dark")
-    || typeof reducedMotion !== "boolean"
-    || (hover !== "none" && hover !== "hover")
-    || (pointer !== "none" && pointer !== "coarse" && pointer !== "fine")) {
-    return new ImmutableStyleSnapshot(input, new Map(), new Map(), [], 0, {
+  if (!isValidMediaEnvironment(input.environment)) {
+    return new ImmutableStyleSnapshot(input, new Map(), new Map(), new Map(), [], 0, {
       status: "rejected", reason: "invalid-environment"
     });
   }
-  const limits = budgets(input.budgets);
-  const diagnostics = new DiagnosticCollector(limits.maxDiagnostics, input.program.diagnostics);
+  const limits = styleBudgets(input.budgets);
+  const diagnostics = new DiagnosticCollector(limits.maxDiagnostics, input.program.diagnostics, input.program.omittedDiagnosticCount);
   const truncatedBudgets = new Set<keyof StyleBudgets>(input.program.truncatedBudgets);
   const truncate = (budget: keyof StyleBudgets): void => {
     truncatedBudgets.add(budget);
@@ -2953,6 +2826,36 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
   const pseudos = incremental
     ? new Map(previous.retainedPseudos())
     : new Map<string, ComputedStyle>();
+  const computedDiagnostics = incremental
+    ? new Map(previous.retainedComputedDiagnostics())
+    : new Map<DocumentNodeRef, readonly ComputedDiagnosticContribution[]>();
+  // Intern only descriptors reachable from the current nodes; the lookup is evaluation-local.
+  const diagnosticDescriptors = new Map<string, DiagnosticDescriptor>();
+  for (const [ref, contributions] of computedDiagnostics) {
+    input.signal?.throwIfAborted();
+    if (affected.has(ref)) {
+      computedDiagnostics.delete(ref);
+      continue;
+    }
+    for (const { descriptor } of contributions) {
+      diagnosticDescriptors.set(diagnosticIdentity(descriptor.code, descriptor.sourceUrl, descriptor.detail), descriptor);
+    }
+  }
+  // A node owns at most one count per distinct diagnostic from its fixed property
+  // evaluations and its pseudos. Share descriptors, and retain even omitted identities
+  // so reporting can change without recomputing otherwise unaffected styles.
+  const nodeDiagnostics = new Map<DiagnosticDescriptor, number>();
+  const diagnosticSink: DiagnosticSink = {
+    add: (code, sourceUrl, detail) => {
+      const identity = diagnosticIdentity(code, sourceUrl, detail);
+      let descriptor = diagnosticDescriptors.get(identity);
+      if (descriptor === undefined) {
+        descriptor = Object.freeze({ code, sourceUrl, detail });
+        diagnosticDescriptors.set(identity, descriptor);
+      }
+      nodeDiagnostics.set(descriptor, (nodeDiagnostics.get(descriptor) ?? 0) + 1);
+    },
+  };
   let computedNodes = 0;
   const retainedRootStyle = input.program.document.documentElement === null
     ? undefined
@@ -2964,6 +2867,7 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
     input.signal?.throwIfAborted();
     computedNodes += 1;
     if (incremental && !affected.has(ref)) continue;
+    nodeDiagnostics.clear();
     const parentNode = input.program.document.parent(ref);
     const parentStyle = parentNode?.kind === "element" ? styles.get(parentNode.ref) ?? null : null;
     let style = computeStyle(
@@ -2973,7 +2877,7 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
       ref,
       parentStyle,
       candidates.get(styleKey(ref)),
-      diagnostics,
+      diagnosticSink,
       input.program.propertyValidation,
       input.program.substitutedValues,
       input.instrumentation,
@@ -3010,7 +2914,7 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
         ref,
         style,
         pseudoCandidates,
-        diagnostics,
+        diagnosticSink,
         input.program.propertyValidation,
         input.program.substitutedValues,
         input.instrumentation,
@@ -3029,6 +2933,17 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
       }
       pseudos.set(styleKey(ref, pseudo), pseudoStyle);
     }
+    if (nodeDiagnostics.size > 0) {
+      computedDiagnostics.set(ref, Object.freeze([...nodeDiagnostics].map(([descriptor, occurrences]) =>
+        Object.freeze({ descriptor, occurrences }))));
+    }
+  }
+  // Replay current ownership in document order, applying the shared reporting bound once.
+  for (const ref of styleNodes.elements) {
+    input.signal?.throwIfAborted();
+    for (const { descriptor, occurrences } of computedDiagnostics.get(ref) ?? []) {
+      diagnostics.add(descriptor.code, descriptor.sourceUrl, descriptor.detail, occurrences);
+    }
   }
   const truncatedBudget = truncatedBudgets.values().next().value;
   const outcome: StyleOutcome = truncatedBudget === undefined
@@ -3037,16 +2952,19 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
         status: "truncated",
         computedNodes,
         budget: truncatedBudget,
-        limit: limits[truncatedBudget]
+        limit: limits[truncatedBudget],
+        fallback: candidateCollection.fallback,
       };
   const snapshot = new ImmutableStyleSnapshot(
     input,
     styles,
     pseudos,
+    computedDiagnostics,
     diagnostics.result(),
     Math.max(0, sources.length - 1),
     outcome,
-    valueDependencies
+    valueDependencies,
+    diagnostics.omittedDiagnosticCount,
   );
   selectorRuntime.computedSnapshot = snapshot;
   selectorRuntime.computedEnvironment = environmentIdentity;

@@ -1,4 +1,11 @@
 export type RenderStage =
+  | "worker-transport"
+  | "attachment-serialization"
+  | "document-hydration"
+  | "stylesheet-hydration"
+  | "artifact-accounting"
+  | "artifact-admission"
+  | "search-layout-projection"
   | "stylesheet-syntax-parsing"
   | "stylesheet-program-compilation"
   | "selector-matching"

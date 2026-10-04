@@ -31,6 +31,9 @@ export interface CssSignedEdges {
   readonly left: CssPixelLength;
 }
 
+/** Invalid numeric input at the layout boundary, distinct from internal invariants. */
+export class InvalidCssNumericInput extends RangeError {}
+
 const MAX_FIXED = Number.MAX_SAFE_INTEGER;
 const MIN_FIXED = Number.MIN_SAFE_INTEGER;
 
@@ -41,7 +44,7 @@ function saturate(value: number): number {
 
 function requireSafeFixed(value: number, name: string): void {
   if (!Number.isSafeInteger(value)) {
-    throw new RangeError(`${name} must be a safe fixed-point integer.`);
+    throw new InvalidCssNumericInput(`${name} must be a safe fixed-point integer.`);
   }
 }
 
@@ -63,7 +66,7 @@ function saturatedSubtract(left: number, right: number): number {
 
 function saturatedMultiply(value: number, factor: number): number {
   requireSafeFixed(value, "CSS fixed-point multiplicand");
-  if (!Number.isFinite(factor)) throw new RangeError("CSS fixed-point multiplier must be finite.");
+  if (!Number.isFinite(factor)) throw new InvalidCssNumericInput("CSS fixed-point multiplier must be finite.");
   if (value === 0 || factor === 0) return 0;
   const magnitude = Math.abs(factor);
   if (magnitude > MAX_FIXED / Math.abs(value)) {
@@ -73,7 +76,7 @@ function saturatedMultiply(value: number, factor: number): number {
 }
 
 export function cssPx(value: number): CssPixelLength {
-  if (!Number.isFinite(value)) throw new RangeError("CSS pixel value must be finite.");
+  if (!Number.isFinite(value)) throw new InvalidCssNumericInput("CSS pixel value must be finite.");
   if (value > MAX_FIXED / CSS_FIXED_SCALE) return MAX_FIXED as CssPixelLength;
   if (value < MIN_FIXED / CSS_FIXED_SCALE) return MIN_FIXED as CssPixelLength;
   return Math.round(value * CSS_FIXED_SCALE) as CssPixelLength;
@@ -85,12 +88,12 @@ export function cssCoordinate(value: CssPixelLength): CssCoordinate {
 }
 
 export function cssLengthFromFixed(value: number): CssPixelLength {
-  if (!Number.isFinite(value)) throw new RangeError("CSS fixed-point value must be finite.");
+  if (!Number.isFinite(value)) throw new InvalidCssNumericInput("CSS fixed-point value must be finite.");
   return saturate(value) as CssPixelLength;
 }
 
 export function cssCoordinateFromFixed(value: number): CssCoordinate {
-  if (!Number.isFinite(value)) throw new RangeError("CSS fixed-point coordinate must be finite.");
+  if (!Number.isFinite(value)) throw new InvalidCssNumericInput("CSS fixed-point coordinate must be finite.");
   return saturate(value) as CssCoordinate;
 }
 
@@ -116,7 +119,7 @@ export function cssNegate(value: CssPixelLength): CssPixelLength {
 }
 
 export function cssDivide(value: CssPixelLength, divisor: number): CssPixelLength {
-  if (!Number.isFinite(divisor) || divisor === 0) throw new RangeError("CSS fixed-point divisor must be finite and non-zero.");
+  if (!Number.isFinite(divisor) || divisor === 0) throw new InvalidCssNumericInput("CSS fixed-point divisor must be finite and non-zero.");
   requireSafeFixed(value, "CSS fixed-point dividend");
   if (value === 0) return 0 as CssPixelLength;
   if (Math.abs(divisor) < Math.abs(value) / MAX_FIXED) {

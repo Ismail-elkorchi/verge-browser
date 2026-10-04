@@ -76,7 +76,12 @@ function readerLines(snapshot: IndexedPageSnapshot): readonly string[] {
   return readerDocumentLines(buildReaderDocument(snapshot.document));
 }
 
-function diagnosticsLines(snapshot: IndexedPageSnapshot): readonly string[] {
+function diagnosticsLines(document: BrowserDocumentState): readonly string[] {
+  const snapshot = document.snapshot;
+  const summary = document.rendering.summary;
+  const issues = summary?.styleDiagnostics ?? snapshot.styleDiagnostics;
+  const shown = issues.slice(0, 24);
+  const omitted = issues.length - shown.length + (summary?.omittedStyleDiagnosticCount ?? 0);
   return [
     `URL: ${snapshot.finalUrl}`,
     `Status: ${String(snapshot.status)} ${snapshot.statusText}`,
@@ -89,10 +94,16 @@ function diagnosticsLines(snapshot: IndexedPageSnapshot): readonly string[] {
     `Parse errors: ${String(snapshot.diagnostics.parseErrorCount)}`,
     `Stylesheets: ${String(snapshot.diagnostics.stylesheetCount)}`,
     `Stylesheet load issues: ${String(snapshot.diagnostics.stylesheetLoadIssueCount)}`,
-    `Total ms: ${String(snapshot.diagnostics.totalDurationMs)}`,
-    ...snapshot.styleDiagnostics.slice(0, 12).map((issue) =>
+    `Navigation ms (fetch, parse, stylesheets): ${String(snapshot.diagnostics.totalDurationMs)}`,
+    `Rendering: ${document.rendering.status}`,
+    ...(summary?.styleOutcome.status === "truncated" && summary.styleOutcome.fallback !== null
+      ? [`Style fallback: ${summary.styleOutcome.fallback}`] : []),
+    ...(summary?.incomplete.map((reason) => `Incomplete: ${reason}`) ?? []),
+    ...(document.rendering.error === null ? [] : [`Render error: ${document.rendering.error}`]),
+    ...shown.map((issue) =>
       `CSS ${issue.code}${issue.occurrences > 1 ? ` ×${String(issue.occurrences)}` : ""}: ${issue.detail} (${issue.sourceUrl})`
-    )
+    ),
+    ...(omitted === 0 ? [] : [`Additional CSS diagnostics omitted: ${String(omitted)}`])
   ];
 }
 
@@ -668,7 +679,7 @@ export class BrowserController {
   }
 
   public detail(kind: Exclude<DetailKind, "help">, document: BrowserDocumentState): readonly string[] {
-    if (kind === "diagnostics") return diagnosticsLines(document.snapshot);
+    if (kind === "diagnostics") return diagnosticsLines(document);
     if (kind === "reader") return readerLines(document.snapshot);
     const cookies = this.#store.listCookies();
     return cookies.length === 0

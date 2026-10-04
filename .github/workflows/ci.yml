@@ -179,6 +179,17 @@ jobs:
       - name: Run release qualification
         run: npm run release:check
 
+      - name: Install isolated browser oracle
+        run: |
+          npm install --prefix "$RUNNER_TEMP/verge-oracle" --no-package-lock --ignore-scripts playwright@1.61.1
+          "$RUNNER_TEMP/verge-oracle/node_modules/.bin/playwright" install --with-deps chromium
+
+      - name: Compare browser parsing and rendering semantics
+        run: |
+          export PLAYWRIGHT_CORE_PATH="$RUNNER_TEMP/verge-oracle/node_modules/playwright-core/index.mjs"
+          export CHROMIUM_EXECUTABLE="$(node -p "require('$RUNNER_TEMP/verge-oracle/node_modules/playwright').chromium.executablePath()")"
+          node scripts/compat/chromium-oracle.mjs --check
+
       - name: Preserve qualification reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

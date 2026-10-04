@@ -1,4 +1,5 @@
 import {
+  InvalidCssNumericInput,
   cssAdd,
   cssDivide,
   cssMax,
@@ -353,13 +354,13 @@ function resolveLine<Identity>(
 /** Resolves order-modified flex lines and flexible main sizes in fixed-point CSS pixels. */
 export function resolveFlexLines<Identity>(input: ResolveFlexLinesInput<Identity>): readonly ResolvedFlexLine<Identity>[] {
   if (!Number.isFinite(input.gap) || input.gap < 0 || input.containerMainSize < 0) {
-    throw new RangeError("Flex container sizes and gaps must be non-negative fixed-point CSS lengths.");
+    throw new InvalidCssNumericInput("Flex container sizes and gaps must be non-negative fixed-point CSS lengths.");
   }
   for (const item of input.items) {
     if (!Number.isSafeInteger(item.sourceIndex) || !Number.isSafeInteger(item.order)
       || !Number.isFinite(item.flexGrow) || item.flexGrow < 0 || item.flexGrow > Number.MAX_SAFE_INTEGER
       || !Number.isFinite(item.flexShrink) || item.flexShrink < 0 || item.flexShrink > Number.MAX_SAFE_INTEGER) {
-      throw new RangeError("Flex item order and flex factors must be finite and valid.");
+      throw new InvalidCssNumericInput("Flex item order and flex factors must be finite and valid.");
     }
   }
   const limit = input.maxSizingWork ?? 2_000_000;

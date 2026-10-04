@@ -58,3 +58,22 @@ test("other dependencies retain exact public-registry version and integrity requ
   assert.throws(() => validateDependencyInstall(input), /exact source/u);
   assert.throws(() => validateDependencyInstall({ ...fixture(), name: input.name }), /exact/u);
 });
+
+for (const repository of ["html-parser", "css-parser", "http-client", "terminal-ui"]) {
+  test(`${repository} binds its own exact Git source and rejects cross-package substitution`, () => {
+    const input = fixture();
+    input.name = `@ismail-elkorchi/${repository}`;
+    input.dependencySpec = `git+https://github.com/Ismail-elkorchi/${repository}.git#${revision}`;
+    input.lockEntry.resolved = `git+ssh://git@github.com/Ismail-elkorchi/${repository}.git#${revision}`;
+    input.installedLockEntry = { ...input.lockEntry };
+    input.installedManifest.name = input.name;
+    assert.equal(validateDependencyInstall(input).revision, revision);
+    assert.throws(() => validateDependencyInstall({ ...input, installedManifest: { ...input.installedManifest, version: "0.0.0" } }), /installed/u);
+    for (const source of [
+      `git+https://github.com/Ismail-elkorchi/${repository}.git#main`,
+      `git+https://github.com/another/${repository}.git#${revision}`,
+      `git+https://example.test/Ismail-elkorchi/${repository}.git#${revision}`,
+      `git+https://github.com/Ismail-elkorchi/${repository === "html-parser" ? "css-parser" : "html-parser"}.git#${revision}`
+    ]) assert.throws(() => validateDependencyInstall({ ...input, dependencySpec: source }), /exact/u);
+  });
+}

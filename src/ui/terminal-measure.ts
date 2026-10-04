@@ -4,11 +4,8 @@ import {
 } from "@ismail-elkorchi/terminal-ui/text";
 
 import {
-  cssAdd,
-  cssMax,
   cssMultiply,
   cssPx,
-  cssSubtract,
   type CssPixelLength,
   type CssTextMeasurer,
   type UsedFontMetrics
@@ -43,24 +40,23 @@ export function terminalCssTextMeasurer(
 ): CssTextMeasurer {
   const cells = terminalCellMeasurer(ambiguousWidth);
   const metrics = (fontSize: CssPixelLength): UsedFontMetrics => {
-    const scale = fontSize / cssPx(16);
-    const ascent = cssMultiply(cssPx(12), scale);
-    const descent = cssMultiply(cssPx(4), scale);
-    const natural = cssAdd(ascent, descent);
-    const lineGap = cssMax(cssPx(0), cssSubtract(cssMultiply(rowHeightCssPx, scale), natural));
+    const visible = fontSize > 0;
+    const ascent = visible ? cssMultiply(rowHeightCssPx, 0.75) : cssPx(0);
+    const descent = visible ? cssMultiply(rowHeightCssPx, 0.25) : cssPx(0);
+    const lineGap = cssPx(0);
     return Object.freeze({
       fontSize,
       ascent,
       descent,
       lineGap,
       baseline: ascent,
-      xHeight: cssMultiply(fontSize, 0.5),
-      chAdvance: cssMultiply(cellWidthCssPx, scale)
+      xHeight: visible ? cssMultiply(rowHeightCssPx, 0.5) : cssPx(0),
+      chAdvance: visible ? cellWidthCssPx : cssPx(0)
     });
   };
   return {
     measure(text, fontSize) {
-      return cssMultiply(cssMultiply(cellWidthCssPx, cells.width(text)), fontSize / cssPx(16));
+      return fontSize > 0 ? cssMultiply(cellWidthCssPx, cells.width(text)) : cssPx(0);
     },
     fontMetrics: metrics,
     defaultFontMetrics() {

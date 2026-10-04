@@ -5,12 +5,8 @@ import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import {
-  HTML_PARSER_PACKAGE_NAME,
-  validateParserPackageContract
-} from "./parser-package-contract.mjs";
-
 const SHARED_RUNTIME_DEPENDENCIES = Object.freeze([
+  "@ismail-elkorchi/html-parser",
   "@ismail-elkorchi/css-parser",
   "@ismail-elkorchi/http-client",
   "@ismail-elkorchi/terminal-ui"
@@ -218,20 +214,6 @@ await session.close();
   }
 
   const consumerLock = await readJson(join(consumerRoot, "package-lock.json"));
-  const installedParser = await readJson(
-    join(
-      consumerRoot,
-      "node_modules",
-      "@ismail-elkorchi",
-      "html-parser",
-      "package.json"
-    )
-  );
-  const parserEvidence = validateParserPackageContract({
-    dependencySpec: installedVerge.dependencies?.[HTML_PARSER_PACKAGE_NAME],
-    lockEntry: consumerLock.packages?.[`node_modules/${HTML_PARSER_PACKAGE_NAME}`],
-    installedManifest: installedParser
-  });
   const sharedDependencies = await Promise.all(SHARED_RUNTIME_DEPENDENCIES.map((name) =>
     validateInstalledDependency(name, installedVerge, workspaceManifest, consumerLock, consumerRoot)
   ));
@@ -248,8 +230,7 @@ await session.close();
   run("npx", ["--no-install", "tsc", "-p", "tsconfig.json"], { cwd: consumerRoot });
   process.stdout.write(
     `packed consumer verified: ${workspaceManifest.name}@${workspaceManifest.version} (${String(packedFileCount)} files) -> ` +
-      `${parserEvidence.name}@${parserEvidence.version} ${parserEvidence.integrity}; `
-      + `${sharedDependencies.map((entry) => `${entry.name}@${entry.revision ?? entry.version}`).join("; ")}\n`
+      `${sharedDependencies.map((entry) => `${entry.name}@${entry.revision ?? entry.version}`).join("; ")}\n`
   );
 } finally {
   await rm(temporaryRoot, { recursive: true, force: true });
