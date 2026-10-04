@@ -62,7 +62,7 @@
     "unicode:generate": "node scripts/unicode/generate-unicode-data.mjs"
   },
   "dependencies": {
-    "@ismail-elkorchi/css-parser": "github:Ismail-elkorchi/css-parser#1df72584ed447b9d6317c9e21a0b9b72a7cd2ea9",
+    "@ismail-elkorchi/css-parser": "github:Ismail-elkorchi/css-parser#bb3c03409a299681075c809290b8bd9888f58abf",
     "@ismail-elkorchi/html-parser": "git+https://github.com/Ismail-elkorchi/html-parser.git#994a5d8e070285bcb0a91b6a62c488b3657f6445",
     "@ismail-elkorchi/http-client": "0.1.1",
     "@ismail-elkorchi/terminal-ui": "github:Ismail-elkorchi/terminal-ui#dbedb6d5b4c4224d31ad97125672f8254a08a06e",
