@@ -7,6 +7,7 @@ import { createDocumentState, parseWebDocument } from "../../dist/document/index
 import { buildFormattingTree } from "../../dist/presentation/formatting/index.js";
 import {
   CSS_FIXED_SCALE,
+  InvalidCssNumericInput,
   buildLayoutFragmentTree,
   cssAdd,
   cssCoordinate,
@@ -51,6 +52,8 @@ import {
   terminalCellMeasurer,
   terminalCssTextMeasurer
 } from "../../dist/ui/terminal-measure.js";
+
+import { paintedSourceUnits, sourceUnitPainted } from "../../scripts/compat/paint-coverage.mjs";
 
 const CELL_WIDTH = cssPx(8);
 const ROW_HEIGHT = cssPx(16);
@@ -136,7 +139,7 @@ function terminalViewport(displayList, options = {}) {
 }
 
 function renderFormatting(formattingTree, columns, rows = 24, budgets = {}, capabilities = {}) {
-  const textMeasurer = terminalCssTextMeasurer(CELL_WIDTH, ROW_HEIGHT);
+  const textMeasurer = terminalCssTextMeasurer(CELL_WIDTH, ROW_HEIGHT, capabilities.ambiguousWidth ?? 1);
   const inlineItemStreams = buildInlineItemStreamSet(formattingTree);
   const searchIndex = buildTextSearchIndex(formattingTree, inlineItemStreams);
   const layout = buildLayoutFragmentTree({
@@ -278,7 +281,7 @@ test("fixed-point arithmetic saturates and invalid layout inputs are rejected by
     inlineItemStreams,
     context: {
       ...context,
-      textMeasurer: { ...textMeasurer, measure() { throw new RangeError("invalid metric"); } }
+      textMeasurer: { ...textMeasurer, measure() { return Number.NaN; } }
     }
   });
   assert.deepEqual(invalidMeasurement.outcome, { status: "rejected", reason: "invalid-fixed-point-input" });
@@ -514,7 +517,7 @@ test("line boxes calculate ascent, descent, height, baseline, and vertical align
   const compactLine = principalFragment(compact, elementById(compact, "p")).lineBoxes[0];
   assert.ok(compactLine);
   assert.equal(cssPixels(compactLine.rect.height), 10);
-  assert.equal(cssPixels(compactLine.baseline - compactLine.rect.y), 7);
+  assert.equal(cssPixels(compactLine.baseline - compactLine.rect.y), 9);
 });
 
 test("text alignment is resolved independently for each line box", () => {
@@ -2025,7 +2028,7 @@ test("terminal budget validation keeps zero as no-work and rejects malformed lim
 });
 
 test("terminal actual values preserve every grapheme at all supported CSS font sizes", () => {
-  const sizes = [0, 1, 4, 8, 12, 16, 24, 32];
+  const sizes = [1, 4, 8, 12, 13, 14, 14.5, 15, 16, 17, 24, 32];
   for (const size of sizes) {
     const result = render(`<span style="font-size:${String(size)}px">abcdef</span>`, 80, 10);
     const text = result.terminal.cellBuffer.rows.flatMap((row) => row.cells)
@@ -2410,4 +2413,197 @@ test("terminal index budgets preserve deterministic box-derived prefixes", () =>
     "maxRetainedDocumentRectangles",
     "maxRetainedScrollAnchors"
   ]) assert.ok(first.terminal.truncations.some((entry) => entry.budget === budget), budget);
+});
+
+function assertCompleteTextPaint(result) {
+  assert.equal(result.layout.outcome.status, "complete");
+  assert.equal(result.displayList.outcome.status, "complete");
+  assert.equal(result.terminal.cellBuffer.outcome.status, "complete");
+  const painted = paintedSourceUnits(result.terminal.cellBuffer.rows, result.displayList.commands, result.layout);
+  assert.deepEqual(painted.malformedSpans, []);
+  const pending = [result.formatting.root];
+  while (pending.length > 0) {
+    const node = result.formatting.node(pending.pop());
+    pending.push(...node.children);
+    if (node.kind !== "text-sequence" && node.kind !== "generated-text") continue;
+    const units = result.inlineItemStreams.textForFormattingNode(node.id)?.units ?? [];
+    for (const unit of units) {
+      if (unit.kind !== "text" || /^[\s\p{Default_Ignorable_Code_Point}]*$/u.test(unit.text)) continue;
+      const expected = {
+        formattingNode: node.id, documentNode: node.source,
+        contentStartCodeUnit: unit.contentStartCodeUnit, contentEndCodeUnit: unit.contentEndCodeUnit,
+        sourceRange: node.kind === "text-sequence" && node.source !== null
+          ? result.formatting.document.textSourceRange(node.source, unit.contentStartCodeUnit, unit.contentEndCodeUnit)
+          : node.sourceRange,
+        text: unit.text
+      };
+      assert.ok(sourceUnitPainted(expected, painted.units), `Missing source grapheme ${JSON.stringify(expected)}`);
+    }
+  }
+}
+
+function normalizedPaintRows(result) {
+  return result.terminal.cellBuffer.rows.map((row) => row.text.trimEnd()).filter((row) => row.length > 0);
+}
+
+test("numeric boundary errors are typed while layout invariant failures remain visible", () => {
+  assert.throws(() => cssPx(Number.NaN), InvalidCssNumericInput);
+  const result = render("<p>hello</p>");
+  const input = { formatting: result.formatting, inlineItemStreams: result.inlineItemStreams, context: result.layout.context };
+  assert.throws(() => buildLayoutFragmentTree({ ...input, context: {
+    ...input.context, textMeasurer: { ...input.context.textMeasurer, measure() { throw new RangeError("invariant"); } }
+  } }), /invariant/u);
+  assert.throws(() => buildLayoutFragmentTree({ ...input, inlineItemStreams: {
+    ...input.inlineItemStreams, formatting: input.formatting,
+    stream() { throw new RangeError("missing owned stream"); },
+    textForFormattingNode: input.inlineItemStreams.textForFormattingNode.bind(input.inlineItemStreams)
+  } }), /missing owned stream/u);
+});
+
+for (const display of ["block", "flex", "grid"]) {
+  for (const position of ["static", "absolute", "fixed"]) {
+    for (const markup of ["<svg id='atomic'></svg>", "<img id='atomic' alt='image'>", "<input id='atomic' value='input'>", "<textarea id='atomic'>textarea</textarea>"]) {
+      test(`atomic stream ownership: ${display}, ${position}, ${markup.slice(1, 9)}`, () => {
+        const result = render(`<style>body{margin:0}#parent{display:${display};position:relative}#atomic{position:${position};width:40px;height:32px;padding:0;border:0}</style><div id='parent'>${markup}</div>`);
+        assert.equal(result.layout.outcome.status, "complete");
+        const ref = elementById(result, "atomic");
+        const fragments = result.layout.forDocumentNode(ref).filter((entry) => entry.kind === "control" || entry.kind === "replaced");
+        assert.equal(fragments.length, 1);
+        const fragment = fragments[0];
+        assert.equal(fragment.contentRect.width, cssPx(40));
+        assert.equal(fragment.contentRect.height, cssPx(32));
+        const stream = result.inlineItemStreams.stream(fragment.formattingNode, [fragment.formattingNode]);
+        assert.equal(stream.items.filter((item) => item.kind === "atomic-inline").length, 1);
+      });
+    }
+  }
+}
+
+test("terminal advances preserve complete sources across font sizes, wraps, fractional offsets, and inline splits", () => {
+  const samples = ["boundary", "alpha beta gamma delta", "界e\u0301 👍🏽 word", "abc אבג xyz"];
+  for (const size of [1, 8, 13, 14, 14.5, 15, 16, 17, 24, 32]) {
+    for (const columns of [12, 20]) {
+      for (const offset of [0, 0.5]) {
+        for (const sample of samples) {
+          const css = `<style>body{margin:0;font-size:${size}px;line-height:normal}p{margin:0 0 0 ${offset}px;overflow-wrap:anywhere}</style>`;
+          const merged = render(`${css}<p>${sample}</p>`, columns, 30);
+          const split = render(`${css}<p>${[...new Intl.Segmenter("en", { granularity: "grapheme" }).segment(sample)].map(({ segment }) => `<span>${segment}</span>`).join("")}</p>`, columns, 30);
+          assertCompleteTextPaint(merged);
+          assertCompleteTextPaint(split);
+          assert.deepEqual(normalizedPaintRows(split), normalizedPaintRows(merged));
+          if (sample === "boundary") assert.deepEqual(normalizedPaintRows(merged), ["boundary"]);
+        }
+      }
+    }
+  }
+});
+
+test("fixed terminal metrics keep authored CSS font and relative length values", () => {
+  const result = render("<style>html{font-size:20px}body{margin:0}#x{font-size:14px;width:2em;height:2rem;padding:1ch}</style><div id='x'>word</div>");
+  const ref = elementById(result, "x");
+  assert.equal(result.formatting.styles.style(ref).text.fontSize.value, 14);
+  const fragment = principalFragment(result, ref);
+  assert.equal(fragment.contentRect.width, cssPx(28));
+  assert.equal(fragment.contentRect.height, cssPx(40));
+  assert.equal(fragment.paddingRect.width, cssPx(44));
+  for (const size of [cssPx(1), cssPx(14), cssPx(24)]) {
+    const measurer = terminalCssTextMeasurer(CELL_WIDTH, ROW_HEIGHT);
+    assert.equal(measurer.measure("abcd", size), cssPx(32));
+    assert.equal(measurer.fontMetrics(size).fontSize, size);
+    assert.equal(measurer.fontMetrics(size).ascent + measurer.fontMetrics(size).descent, ROW_HEIGHT);
+  }
+});
+
+test("mixed-size action runs preserve source coverage, search and targets after resizing and scrolling", () => {
+  const html = "<style>body{margin:0}p{margin:0}</style><p><a id='a' href='/a' style='font-size:14px'>alpha</a> <a id='b' href='/b' style='font-size:24px'>bravo</a></p><p>tail</p>";
+  for (const columns of [14, 40]) {
+    const result = render(html, columns, 20);
+    assertCompleteTextPaint(result);
+    for (const [id, label] of [["a", "alpha"], ["b", "bravo"]]) {
+      const ref = elementById(result, id);
+      assert.ok(result.terminal.focusMap.forNode(ref)?.rects.length > 0);
+      assert.ok(result.terminal.hitTestIndex.regions.some((region) => region.action.node === ref));
+      assert.ok(search(result, label).ranges.length > 0);
+    }
+    const scrolled = terminalViewport(result.displayList, { scrollRow: 1, viewportRows: 20 });
+    assert.equal(scrolled.cellBuffer.outcome.status, "complete");
+  }
+});
+
+test("zero font size suppresses glyphs while logical search text remains available", () => {
+  for (const value of ["0", "0px"]) {
+    const result = render(`<style>body{margin:0}</style><span style='font-size:${value}'>hiddenword</span><span>visible</span>`);
+    assert.equal(result.searchIndex.search("hiddenword", 10).matches.length, 1);
+    assert.equal(search(result, "hiddenword").ranges.length, 0);
+    assert.equal(renderedText(result).trim(), "visible");
+  }
+});
+
+test("authored compact line heights and positioned overlap are not expanded to avoid collisions", () => {
+  const compact = render("<style>body{margin:0}p{margin:0;line-height:8px}</style><p>first</p><p>second</p>");
+  const text = compact.displayList.commands.filter((command) => command.kind === "text");
+  assert.equal(text[1].rect.y - text[0].rect.y, cssPx(8));
+  const overlapping = render("<style>body{margin:0}span{position:absolute;left:0;top:0}</style><span>first</span><span>later</span>");
+  assert.equal(normalizedPaintRows(overlapping)[0], "later");
+});
+
+test("split inline styles and destinations preserve painted cell signatures", () => {
+  const css = "<style>body{margin:0;font-size:24px}</style>";
+  const original = render(`${css}<a href='/x' style='color:red'>alpha beta</a>`);
+  const split = render(`${css}<a href='/x' style='color:red'><span>alpha</span><span> </span><span>beta</span></a>`);
+  assertCompleteTextPaint(original);
+  assertCompleteTextPaint(split);
+  const signature = (result) => result.terminal.cellBuffer.rows.map((row) => row.cells.map((cell) => {
+    const command = result.displayList.commands.find((entry) => entry.id === cell.command);
+    return { column: cell.column, text: cell.text, style: command.style, action: command.action?.kind };
+  }));
+  assert.deepEqual(signature(split), signature(original));
+});
+
+test("ambiguous glyph width policy is shared by measurement and rasterization", () => {
+  for (const ambiguousWidth of [1, 2]) {
+    const result = render("<style>body{margin:0;font-size:14px}</style><p>·α界👍🏽</p>", 30, 10, {}, { ambiguousWidth });
+    assertCompleteTextPaint(result);
+    const text = result.displayList.commands.filter((command) => command.kind === "text");
+    for (const command of text) {
+      for (const cluster of command.clusters) {
+        assert.equal(cluster.advance, cssPx(8 * terminalCellMeasurer(ambiguousWidth).width(cluster.text)));
+      }
+    }
+  }
+});
+
+test("atomic visual fallback stays inside its content box while accessible labels remain complete", () => {
+  const result = render("<style>body{margin:0}input{position:fixed;left:0;top:0;width:18px;height:16px;padding:0;border:0}</style><input id='x' aria-label='Complete accessible label' value='abcdef'><p style='margin-top:80px'>tail</p>");
+  const ref = elementById(result, "x");
+  const controlText = (terminal) => terminal.cellBuffer.rows.flatMap((row) => row.cells).filter((cell) => terminal.commandById.get(cell.command)?.documentNode === ref).map((cell) => cell.text).join("");
+  assert.equal(controlText(result.terminal), "Co");
+  assert.equal(result.documentGeometry.accessibilityForNode(ref)?.name, "Complete accessible label");
+  const scrolled = terminalViewport(result.displayList, { scrollRow: 2, viewportRows: 10 });
+  assert.equal(controlText(scrolled), "Co");
+});
+
+test("atomic flex min-content is indivisible and translated offscreen menus do not leak labels", () => {
+  const narrow = render("<style>body{margin:0}#row{display:flex;width:40px}select{padding:0;border:0}</style><div id='row'><select id='select'><option>Dark auto</option></select></div>");
+  const control = narrow.layout.forDocumentNode(elementById(narrow, "select")).find((fragment) => fragment.kind === "control");
+  assert.ok(control);
+  const measured = control.visualClusters.reduce((sum, cluster) => sum + cluster.advance, 0);
+  assert.equal(control.contentRect.width, measured);
+  const item = narrow.layout.parent(control.id);
+  assert.ok(item.contentRect.width >= measured);
+  const result = render("<style>body{margin:0}#menu{position:fixed;left:0;top:0;width:300px;transform:translateX(calc(-100% - 10px));display:flex}select{padding:0;border:0}</style><div id='menu'><select><option>Dark auto</option></select></div><p>visible page</p>");
+  assert.equal(result.layout.outcome.status, "complete");
+  assert.deepEqual(normalizedPaintRows(result), ["visible page"]);
+});
+
+test("explicit zero-sized atomic content is not expanded to a terminal cell", () => {
+  const result = render("<style>body{margin:0}#row{display:flex}#row>*{padding:0;border:0}#image,#input{width:0;height:16px}</style><div id='row'><svg id='svg' width='0' height='16'></svg><img id='image' alt='image'><input id='input' value='input'><span>visible</span></div>");
+  for (const id of ["svg", "image", "input"]) {
+    const ref = elementById(result, id);
+    const fragment = result.layout.forDocumentNode(ref).find((entry) => entry.kind === "control" || entry.kind === "replaced");
+    assert.ok(fragment);
+    assert.equal(fragment.contentRect.width, ZERO);
+    assert.ok(!result.terminal.cellBuffer.rows.some((row) => row.spans.some((span) => span.documentNode === ref)));
+  }
+  assert.equal(normalizedPaintRows(result).join(""), "visible");
 });

@@ -1,4 +1,4 @@
-import { estimatedRetainedCost, RenderBudgetExceededError } from "../../memory/retained-cost.js";
+import { estimatedRetainedCost, RetainedCostAccounting, RenderBudgetExceededError, type RetainedCostOwner } from "../../memory/retained-cost.js";
 import { buildFormattingTree } from "../formatting/index.js";
 import {
   buildLayoutFragmentTree,
@@ -12,6 +12,7 @@ import {
   type TextSearchLayoutProjection,
 } from "../search/index.js";
 import { compileStylesheetProgram, resolveStyles, type SelectorStateDependency } from "../style/index.js";
+import { clearTextSearchQueryCache, textSearchQueryCache } from "../search/text-search-index.js";
 import { buildInlineItemStreamSet } from "../text/index.js";
 import {
   buildDisplayListSpatialIndex,
@@ -43,6 +44,10 @@ interface AttachedDocument {
   readonly documentRevision: number;
   readonly program: ReturnType<typeof compileStylesheetProgram>;
   readonly budgets: AttachDocumentArtifactsInput["budgets"];
+  readonly attachmentOwner: RetainedCostOwner;
+  stateOwner: RetainedCostOwner;
+  cacheOwners: readonly RetainedCostOwner[];
+  readonly queryOwners: Map<DocumentRenderArtifacts["textSearchIndex"], { readonly owner: RetainedCostOwner; readonly revision: number }>;
   state: AttachDocumentArtifactsInput["state"];
   stateRevision: number;
   analysisStateRevision: number;
@@ -55,11 +60,13 @@ interface AttachedDocument {
 
 interface RetainedAnalysis {
   readonly artifacts: DocumentRenderArtifacts;
+  readonly owner: RetainedCostOwner;
   lastUsed: number;
 }
 
 interface RetainedSearchProjection {
   readonly projection: TextSearchLayoutProjection;
+  readonly owner: RetainedCostOwner;
   lastUsed: number;
 }
 
@@ -158,6 +165,7 @@ function changedSelectorDependency(change: DocumentStateDependencyChange): Selec
 /** Worker-owned store with no scroll-keyed complete render results. */
 export class RenderArtifactStore {
   readonly #documents = new Map<string, AttachedDocument>();
+  readonly #accounting = new RetainedCostAccounting();
   readonly #maximumCost: number;
   readonly #instrumentation: RenderArtifactStoreOptions["instrumentation"];
   #clock = 0;
@@ -173,6 +181,10 @@ export class RenderArtifactStore {
   }
 
   public attach(input: AttachDocumentArtifactsInput): void {
+    try { this.#attach(input); } finally { this.#accounting.endBatch(); }
+  }
+
+  #attach(input: AttachDocumentArtifactsInput): void {
     input.signal?.throwIfAborted();
     const program = measured(this.#instrumentation, "stylesheet-program-compilation", () =>
       compileStylesheetProgram({
@@ -183,7 +195,17 @@ export class RenderArtifactStore {
         ...(input.signal === undefined ? {} : { signal: input.signal }),
       })
     );
+    const cacheRoots = [program.selectorRuntime, program.substitutedValues, program.propertyValidation];
+    const attachmentOwner = measured(this.#instrumentation, "artifact-accounting", () => {
+      this.#accounting.immutable(input.document, new Set(), input.signal);
+      for (const source of program.sources) this.#accounting.immutable(source.stylesheet, new Set(), input.signal, true);
+      return this.#accounting.immutable(program, new Set(cacheRoots), input.signal);
+    });
     const attachment: AttachedDocument = {
+      attachmentOwner,
+      stateOwner: this.#accounting.immutable(input.state, new Set(), input.signal),
+      cacheOwners: cacheRoots.map((root) => this.#accounting.mutable(root, input.signal)),
+      queryOwners: new Map(),
       documentId: input.documentId,
       documentRevision: input.documentRevision,
       program,
@@ -196,6 +218,7 @@ export class RenderArtifactStore {
       analyses: new Map(),
       searches: new Map(),
     };
+    this.#accounting.endBatch();
     const previous = this.#documents.get(input.documentId);
     this.#documents.set(input.documentId, attachment);
     try { this.#admit(input.signal); }
@@ -210,7 +233,8 @@ export class RenderArtifactStore {
   public updateState(input: UpdateDocumentArtifactsStateInput): void {
     const document = this.#document(input.documentId, input.documentRevision);
     if (input.stateRevision < document.stateRevision) throw new RangeError("Document state revision cannot regress.");
-    const previous = { state: document.state, stateRevision: document.stateRevision, analysisStateRevision: document.analysisStateRevision, textStateRevision: document.textStateRevision };
+    const previous = { state: document.state, stateOwner: document.stateOwner, stateRevision: document.stateRevision, analysisStateRevision: document.analysisStateRevision, textStateRevision: document.textStateRevision };
+    document.stateOwner = measured(this.#instrumentation, "artifact-accounting", () => this.#accounting.immutable(input.state));
     document.state = input.state;
     document.stateRevision = input.stateRevision;
     const changesTextState = input.changed.has("control-content") || input.changed.has("checked-selected") || input.changed.has("disclosure-open");
@@ -220,16 +244,19 @@ export class RenderArtifactStore {
       if (selectorDependency === null || !document.program.stateDependencies.has(selectorDependency)) return false;
       return true;
     });
-    if (invalidates) {
-      document.analysisStateRevision = input.stateRevision;
-      document.analyses.clear();
-      document.searches.clear();
-    }
+    if (invalidates) document.analysisStateRevision = input.stateRevision;
     try { this.#admit(); }
     catch (error) {
       Object.assign(document, previous);
       this.#measureRetainedCost();
       throw error;
+    }
+    if (invalidates) {
+      document.analyses.clear();
+      document.searches.clear();
+      this.#pruneQueryOwners(document);
+      this.#refreshProgramCosts(document);
+      this.#measureRetainedCost();
     }
   }
 
@@ -257,23 +284,20 @@ export class RenderArtifactStore {
     request: DocumentAnalysisRequest,
     instrumentation: RenderArtifactStoreOptions["instrumentation"],
   ): DocumentRenderArtifacts {
-    const previousCost = this.#retainedCost;
     try { return this.#analyze(request, instrumentation); }
     catch (error) {
       const document = this.#documents.get(request.documentId);
       if (document !== undefined) this.#clearProgramCaches(document);
-      // Cancellation removed the unadmitted analysis and program caches. The previous
-      // admitted cost is a conservative bound until metrics or admission recounts roots.
-      if (request.signal?.aborted) this.#retainedCost = previousCost;
-      else this.#measureRetainedCost();
+      this.#measureRetainedCost();
       throw error;
-    }
+    } finally { this.#accounting.endBatch(); }
   }
 
   #clearProgramCaches(document: AttachedDocument): void {
     document.program.selectorRuntime.clear();
     document.program.substitutedValues.clear();
     document.program.propertyValidation.clear();
+    this.#refreshProgramCosts(document);
   }
 
   #analyze(
@@ -381,14 +405,23 @@ export class RenderArtifactStore {
       displayListSpatialIndex,
       documentGeometry,
     };
+    const artifactOwner = measured(instrumentation, "artifact-accounting", () => {
+      // Assign upstream immutable owners separately so resize shares only the resources it uses.
+      for (const root of [computedStyles, boxTree, inlineItemStreams, textSearchIndex,
+        documentLayout, documentDisplayList, displayListSpatialIndex, documentGeometry]) {
+        this.#accounting.immutable(root, new Set([textSearchQueryCache(textSearchIndex).values]), request.signal);
+      }
+      this.#refreshProgramCosts(document, request.signal);
+      return this.#accounting.immutable(incomplete, new Set(), request.signal);
+    });
     const artifacts: DocumentRenderArtifacts = Object.freeze({
       ...incomplete,
-      retainedCost: estimatedRetainedCost([incomplete], request.signal),
+      retainedCost: this.#accounting.total([artifactOwner, ...document.cacheOwners]),
     });
     request.signal?.throwIfAborted();
     const previousLogicalText = document.logicalText;
     this.#retainLogicalText(document, artifacts);
-    document.analyses.set(identity, { artifacts, lastUsed: ++this.#clock });
+    document.analyses.set(identity, { artifacts, owner: artifactOwner, lastUsed: ++this.#clock });
     try { this.#admit(request.signal); }
     catch (error) { document.analyses.delete(identity); document.logicalText = previousLogicalText; throw error; }
     if (!document.analyses.has(identity)) {
@@ -537,6 +570,7 @@ export class RenderArtifactStore {
     document.analyses.clear();
     document.searches.clear();
     document.logicalText = null;
+    document.queryOwners.clear();
     this.#documents.delete(documentId);
     this.#measureRetainedCost();
   }
@@ -554,6 +588,7 @@ export class RenderArtifactStore {
       retainedAnalyses,
       retainedCost: this.#retainedCost,
       evictions: this.#evictions,
+      accountedAllocations: this.#accounting.measuredAllocations,
     });
   }
 
@@ -572,40 +607,105 @@ export class RenderArtifactStore {
     limit: number,
     signal?: AbortSignal,
   ): TextSearchLayoutProjection {
+    signal?.throwIfAborted();
     const bounded = query.slice(0, 1_024);
     const identity = `${keyIdentity(artifacts.key)}\u0000${String(limit)}\u0000${bounded}`;
-    const retained = document.searches.get(identity);
+    const retained = document.searches.get(identity) ?? [...document.searches].find(([key, value]) =>
+      key.startsWith(`${keyIdentity(artifacts.key)}\u0000`) && value.projection.query === bounded
+        && !value.projection.truncated && value.projection.matches.length <= limit)?.[1];
     if (retained !== undefined) {
       retained.lastUsed = ++this.#clock;
       return retained.projection;
     }
-    const projection = projectTextSearchToLayout(
-      artifacts.textSearchIndex,
-      artifacts.documentLayout,
-      bounded,
-      limit,
-      signal,
-    );
-    document.searches.set(identity, { projection, lastUsed: ++this.#clock });
-    while (document.searches.size > MAX_RETAINED_SEARCH_PROJECTIONS_PER_DOCUMENT) {
-      let oldest: { readonly identity: string; readonly lastUsed: number } | null = null;
-      for (const [searchIdentity, search] of document.searches) {
-        if (oldest === null || search.lastUsed < oldest.lastUsed) {
-          oldest = { identity: searchIdentity, lastUsed: search.lastUsed };
+    try {
+      const projection = measured(this.#instrumentation, "search-layout-projection", () => projectTextSearchToLayout(
+        artifacts.textSearchIndex, artifacts.documentLayout, bounded, limit, signal,
+      ));
+      const owner = measured(this.#instrumentation, "artifact-accounting", () => {
+        this.#refreshQueryCosts(document, artifacts.textSearchIndex, signal);
+        return this.#accounting.immutable(projection, new Set(), signal);
+      });
+      signal?.throwIfAborted();
+      document.searches.set(identity, { projection, owner, lastUsed: ++this.#clock });
+      while (document.searches.size > MAX_RETAINED_SEARCH_PROJECTIONS_PER_DOCUMENT) {
+        let oldest: { readonly identity: string; readonly lastUsed: number } | null = null;
+        for (const [searchIdentity, search] of document.searches) {
+          if (oldest === null || search.lastUsed < oldest.lastUsed) {
+            oldest = { identity: searchIdentity, lastUsed: search.lastUsed };
+          }
         }
+        if (oldest === null) break;
+        document.searches.delete(oldest.identity);
       }
-      if (oldest === null) break;
-      document.searches.delete(oldest.identity);
-    }
-    this.#admit();
-    return projection;
+      this.#admit(signal);
+      return projection;
+    } catch (error) {
+      document.searches.delete(identity);
+      clearTextSearchQueryCache(artifacts.textSearchIndex);
+      this.#refreshQueryCosts(document, artifacts.textSearchIndex);
+      this.#pruneQueryOwners(document);
+      this.#measureRetainedCost();
+      throw error;
+    } finally { this.#accounting.endBatch(); }
+  }
+
+  #refreshProgramCosts(document: AttachedDocument, signal?: AbortSignal): void {
+    document.cacheOwners = [document.program.selectorRuntime, document.program.substitutedValues,
+      document.program.propertyValidation].map((root) => this.#accounting.mutable(root, signal));
+  }
+
+  #refreshQueryCosts(document: AttachedDocument, index: DocumentRenderArtifacts["textSearchIndex"], signal?: AbortSignal): void {
+    const cache = textSearchQueryCache(index);
+    if (document.queryOwners.get(index)?.revision === cache.revision) return;
+    for (const result of cache.values.values()) this.#accounting.immutable(result, new Set(), signal, true);
+    document.queryOwners.set(index, {
+      owner: this.#accounting.mutable(cache.values, signal), revision: cache.revision,
+    });
+  }
+
+  #pruneQueryOwners(document: AttachedDocument): void {
+    const retained = new Set([...document.analyses.values()].map(({ artifacts }) => artifacts.textSearchIndex));
+    if (document.logicalText !== null) retained.add(document.logicalText.index);
+    for (const index of document.queryOwners.keys()) if (!retained.has(index)) document.queryOwners.delete(index);
   }
 
   #measureRetainedCost(signal?: AbortSignal): void {
-    this.#retainedCost = estimatedRetainedCost([...this.#documents.values()], signal);
+    signal?.throwIfAborted();
+    const owners: RetainedCostOwner[] = [];
+    let bookkeeping = 0;
+    for (const document of this.#documents.values()) {
+      const indexes = new Set([...document.analyses.values()].map(({ artifacts }) => artifacts.textSearchIndex));
+      if (document.logicalText !== null) indexes.add(document.logicalText.index);
+      for (const index of indexes) this.#refreshQueryCosts(document, index, signal);
+      owners.push(document.attachmentOwner, document.stateOwner, ...document.cacheOwners,
+        ...[...document.queryOwners.values()].map((entry) => entry.owner));
+      if (document.logicalText !== null) owners.push(this.#accounting.immutable(document.logicalText.index));
+      for (const analysis of document.analyses.values()) owners.push(analysis.owner);
+      for (const search of document.searches.values()) owners.push(search.owner);
+      // Covers store records, dependency keys, map entries and owner ledger records conservatively.
+      bookkeeping += 2048 + document.documentId.length * 2;
+      for (const identity of document.analyses.keys()) bookkeeping += 2048 + identity.length * 2;
+      for (const identity of document.searches.keys()) bookkeeping += 1024 + identity.length * 2;
+    }
+    this.#retainedCost = bookkeeping + this.#accounting.total(owners);
+    this.#accounting.endBatch();
+  }
+
+  /** Expensive diagnostic oracle for tests and explicit qualification, never used for admission. */
+  public recountRetainedCost(): number {
+    return estimatedRetainedCost([...this.#documents.values()].map((document) => ({
+      program: document.program, state: document.state, budgets: document.budgets,
+      logicalText: document.logicalText,
+      analyses: [...document.analyses.values()].map(({ artifacts }) => artifacts),
+      searches: [...document.searches.values()].map(({ projection }) => projection),
+    })));
   }
 
   #admit(signal?: AbortSignal): void {
+    measured(this.#instrumentation, "artifact-admission", () => { this.#admitOwners(signal); });
+  }
+
+  #admitOwners(signal?: AbortSignal): void {
     this.#measureRetainedCost(signal);
     while (this.#retainedCost > this.#maximumCost) {
       let oldest: { document: AttachedDocument; identity: string; lastUsed: number } | null = null;
@@ -621,6 +721,7 @@ export class RenderArtifactStore {
       for (const identity of oldest.document.searches.keys()) {
         if (identity.startsWith(`${oldest.identity}\u0000`)) oldest.document.searches.delete(identity);
       }
+      this.#pruneQueryOwners(oldest.document);
       this.#clearProgramCaches(oldest.document);
       this.#evictions += 1;
       this.#measureRetainedCost(signal);

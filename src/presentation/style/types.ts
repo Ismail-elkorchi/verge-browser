@@ -5,6 +5,7 @@ import type {
   CssStylesheet,
   PropertyValidationSession,
   SelectorList,
+  SelectorDefaultNamespace,
   SelectorMatchSession,
   SelectorQueryResult,
   SelectorSpecificity,
@@ -147,6 +148,11 @@ export interface ComputedTextStyle {
   readonly verticalAlign: ComputedVerticalAlign;
 }
 
+export interface CssTranslation {
+  readonly x: CssLength;
+  readonly y: CssLength;
+}
+
 export interface ComputedBoxStyle {
   readonly margin: CssEdges;
   readonly padding: CssEdges;
@@ -186,6 +192,8 @@ export interface ComputedBoxStyle {
   readonly clear: "none" | "left" | "right" | "both";
   readonly legacyClip: CssLegacyClip;
   readonly clipPath: CssClipPath;
+  /** null is none; a nonempty list, including zero translations, establishes a transform. */
+  readonly transform: readonly CssTranslation[] | null;
   readonly gridTemplateColumns: CssGridTrackList;
   readonly gridTemplateRows: CssGridTrackList;
   readonly gridTemplateAreas: CssGridTemplateAreas;
@@ -221,7 +229,13 @@ export type PseudoElementIdentity = "before" | "after" | "marker";
 /** A qualified cascade-layer name, ordered one nesting level at a time. */
 export type CascadeLayerPath = readonly string[];
 
+export type StylesheetSource =
+  | { readonly kind: "text"; readonly text: string }
+  | { readonly kind: "bytes"; readonly bytes: Uint8Array; readonly transportEncodingLabel: string | null };
+
 export interface StylesheetResource {
+  /** Compact source shared by cascade occurrences and rendering-worker transport. */
+  readonly source: StylesheetSource;
   readonly sourceKind: "embedded" | "linked" | "imported";
   readonly owner: DocumentNodeRef;
   readonly requestUrl: string;
@@ -265,6 +279,7 @@ export type StylesheetDependencyInspection =
       readonly imports: readonly StylesheetImportDependency[];
       readonly parsedRules: number;
       readonly syntax: CssStylesheet;
+      readonly source: StylesheetSource;
       readonly byteSize: number;
       readonly contentFingerprint: string;
       readonly parserDiagnostics: readonly string[];
@@ -360,9 +375,17 @@ export interface CompiledDeclarationProgram {
   readonly value: readonly ComponentValue[];
   readonly serializedValue: string;
   readonly containsVariableReference: boolean;
+  readonly validationStatus: "valid" | "invalid" | "unsupported" | "deferred";
+}
+
+export interface StylesheetNamespaces {
+  readonly defaultNamespace: SelectorDefaultNamespace;
+  readonly prefixes: ReadonlyMap<string, string | null>;
+  readonly fingerprint: string;
 }
 
 export interface StylesheetProgramSource {
+  readonly namespaces: StylesheetNamespaces;
   readonly sourceUrl: string;
   readonly origin: "user-agent" | "author";
   readonly stylesheet: CssStylesheet;
@@ -381,12 +404,14 @@ export interface StylesheetProgram {
   readonly propertyValidation: PropertyValidationSession;
   readonly substitutedValues: CustomPropertySubstitutionCache;
   readonly inlineDeclarations: ReadonlyMap<DocumentNodeRef, readonly CssDeclaration[]>;
+  readonly presentationalHints: ReadonlyMap<DocumentNodeRef, readonly CssDeclaration[]>;
   readonly elementNodes: readonly DocumentNodeRef[];
   readonly totalNodes: number;
   readonly stateDependencies: ReadonlySet<SelectorStateDependency>;
   readonly authorStateDependencies: ReadonlySet<SelectorStateDependency>;
   readonly dependencies: StylesheetProgramDependencies;
   readonly diagnostics: readonly StyleDiagnostic[];
+  readonly omittedDiagnosticCount: number;
   readonly fingerprint: string;
   readonly truncatedBudgets: ReadonlySet<keyof StyleBudgets>;
 }
@@ -397,10 +422,10 @@ export interface RetainedSelectorMatchSet {
 }
 
 export interface StylesheetSelectorRuntime {
+  namespaces: StylesheetNamespaces;
   state: DocumentState | null;
   authorSession: SelectorMatchSession<WebDocumentNode> | null;
   userAgentSession: SelectorMatchSession<WebDocumentNode> | null;
-  sessionMaxSteps: number;
   readonly matches: Map<string, RetainedSelectorMatchSet>;
   computedSnapshot: StyleSnapshot | null;
   computedEnvironment: string | null;
@@ -432,6 +457,7 @@ export interface CompileStylesheetProgramInput {
   readonly document: IndexedWebDocumentSnapshot;
   readonly resources: readonly StylesheetResource[];
   readonly initialDiagnostics?: readonly StyleDiagnostic[];
+  readonly initialOmittedDiagnosticCount?: number;
   readonly budgets?: Partial<StyleBudgets>;
   readonly signal?: AbortSignal;
 }
@@ -449,6 +475,7 @@ export interface StyleSnapshot {
   readonly document: IndexedWebDocumentSnapshot;
   readonly environment: MediaEnvironment;
   readonly diagnostics: readonly StyleDiagnostic[];
+  readonly omittedDiagnosticCount: number;
   readonly stylesheetCount: number;
   readonly outcome: StyleOutcome;
   /** Total for every element retained by the document snapshot. */

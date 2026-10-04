@@ -258,7 +258,7 @@ function inheritedAttachment(
   while (current !== null) {
     const attachment = layout.scrollAttachment(current);
     if (attachment !== null) return attachment;
-    current = layout.parent(current)?.id ?? null;
+    current = layout.scrollAttachmentParent(current)?.id ?? null;
   }
   return null;
 }

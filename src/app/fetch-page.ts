@@ -75,20 +75,14 @@ const UTF8_ENCODER = new TextEncoder();
 /** Local text-file reader used for `file://` snapshots and tests. */
 export type LocalFileReader = (path: string) => Promise<string>;
 
-async function defaultReadLocalFileText(path: string): Promise<string> {
-  const nodeFs = await import("node:fs/promises");
-  return nodeFs.readFile(path, "utf8");
-}
-
-async function readDefaultLocalFileTextBounded(
+async function readDefaultLocalFileBytesBounded(
   path: string,
   requestUrl: string,
   maxContentBytes: number
-): Promise<string> {
+): Promise<Uint8Array> {
   const nodeFs = await import("node:fs/promises");
   const handle = await nodeFs.open(path, "r");
-  const decoder = new TextDecoder();
-  const chunks: string[] = [];
+  const chunks: Uint8Array[] = [];
   let receivedBytes = 0;
   try {
     const file = await handle.stat();
@@ -104,10 +98,12 @@ async function readDefaultLocalFileTextBounded(
       if (receivedBytes > maxContentBytes) {
         throw fileSizeLimitError(requestUrl, maxContentBytes);
       }
-      chunks.push(decoder.decode(buffer.subarray(0, bytesRead), { stream: true }));
+      chunks.push(buffer.subarray(0, bytesRead));
     }
-    chunks.push(decoder.decode());
-    return chunks.join("");
+    const result = new Uint8Array(receivedBytes);
+    let offset = 0;
+    for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength; }
+    return result;
   } finally {
     await handle.close();
   }
@@ -289,16 +285,16 @@ function fileSizeLimitError(requestUrl: string, maxContentBytes: number): Networ
 
 async function fetchFileUrl(
   requestUrl: string,
-  readLocalFileText: LocalFileReader,
+  readLocalFileText: LocalFileReader | undefined,
   maxContentBytes: number
 ): Promise<FetchPageResult> {
   const fileUrl = new URL(requestUrl);
   assertAllowedProtocol(fileUrl);
   const filePath = fileURLToPath(fileUrl);
-  const html = readLocalFileText === defaultReadLocalFileText
-    ? await readDefaultLocalFileTextBounded(filePath, requestUrl, maxContentBytes)
+  const source = readLocalFileText === undefined
+    ? await readDefaultLocalFileBytesBounded(filePath, requestUrl, maxContentBytes)
     : await readLocalFileText(filePath);
-  if (utf8ByteLength(html) > maxContentBytes) {
+  if ((typeof source === "string" ? utf8ByteLength(source) : source.byteLength) > maxContentBytes) {
     throw fileSizeLimitError(requestUrl, maxContentBytes);
   }
 
@@ -308,7 +304,7 @@ async function fetchFileUrl(
     status: 200,
     statusText: "OK",
     contentType: "text/html",
-    html,
+    ...(typeof source === "string" ? { html: source } : { bytes: source }),
     responseFields: new HttpFields([
       { name: "content-type", value: "text/html" }
     ]),
@@ -342,31 +338,6 @@ function hasProtocol(requestUrl: string, protocol: string): boolean {
     return new URL(requestUrl).protocol === protocol;
   } catch {
     return false;
-  }
-}
-
-/**
- * Reads a UTF-8 byte stream into a single string.
- *
- * @param stream Stream of response bytes.
- * @returns Fully decoded UTF-8 text.
- */
-export async function readByteStreamToText(stream: ReadableStream<Uint8Array>): Promise<string> {
-  const reader = stream.getReader();
-  const textDecoder = new TextDecoder();
-  let html = "";
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
-      html += textDecoder.decode(value, { stream: true });
-    }
-    html += textDecoder.decode();
-    return html;
-  } finally {
-    reader.releaseLock();
   }
 }
 
@@ -725,7 +696,7 @@ async function fetchPageWithClient(
   timeoutMs = DEFAULT_TIMEOUT_MS,
   securityPolicy: SecurityPolicyOptions = DEFAULT_SECURITY_POLICY,
   requestOptions: PageRequestOptions = {},
-  readLocalFileText: LocalFileReader = defaultReadLocalFileText
+  readLocalFileText?: LocalFileReader
 ): Promise<FetchPageResult> {
   requestOptions.signal?.throwIfAborted();
   pageRequestMethod(requestOptions);
@@ -783,21 +754,23 @@ async function fetchPageWithClient(
     throw networkFailure(error, requestUrl);
   }
 
-  let html = "";
+  let bytes: Uint8Array;
   try {
-    html = await readByteStreamToText(networkResult.body);
+    bytes = await readByteStream(networkResult.body);
   } catch (error) {
     if (requestOptions.signal?.aborted === true) throw requestOptions.signal.reason;
     throw networkFailure(error, networkResult.finalUrl);
   }
 
+  const transportEncodingLabel = contentTypeEncoding(networkResult.contentType);
   return {
     requestUrl: networkResult.requestUrl,
     finalUrl: networkResult.finalUrl,
     status: networkResult.status,
     statusText: networkResult.statusText,
     contentType: networkResult.contentType,
-    html,
+    bytes,
+    ...(transportEncodingLabel === undefined ? {} : { transportEncodingLabel }),
     responseFields: networkResult.responseFields,
     fetchedAtIso: networkResult.fetchedAtIso,
     networkOutcome: outcomeFromHttpStatus(networkResult.finalUrl, networkResult.status, networkResult.statusText)
@@ -820,7 +793,7 @@ async function fetchStylesheetWithClient(
     maxContentBytes: 512 * 1024
   },
   requestOptions: Pick<PageRequestOptions, "headers" | "signal"> = {},
-  readLocalFileText: LocalFileReader = defaultReadLocalFileText
+  readLocalFileText?: LocalFileReader
 ): Promise<FetchStylesheetResult> {
   requestOptions.signal?.throwIfAborted();
   assertTimeout(timeoutMs);
@@ -832,10 +805,10 @@ async function fetchStylesheetWithClient(
     const fileUrl = new URL(requestUrl);
     assertAllowedProtocol(fileUrl);
     const filePath = fileURLToPath(fileUrl);
-    const css = readLocalFileText === defaultReadLocalFileText
-      ? await readDefaultLocalFileTextBounded(filePath, requestUrl, policy.maxContentBytes)
+    const css = readLocalFileText === undefined
+      ? await readDefaultLocalFileBytesBounded(filePath, requestUrl, policy.maxContentBytes)
       : await readLocalFileText(filePath);
-    const bytes = UTF8_ENCODER.encode(css);
+    const bytes = typeof css === "string" ? UTF8_ENCODER.encode(css) : css;
     if (bytes.byteLength > policy.maxContentBytes) {
       throw fileSizeLimitError(requestUrl, policy.maxContentBytes);
     }
@@ -847,7 +820,7 @@ async function fetchStylesheetWithClient(
       responseFields: new HttpFields([
         { name: "content-type", value: "text/css" }
       ]),
-      transportEncodingLabel: "utf-8"
+      ...(typeof css === "string" ? { transportEncodingLabel: "utf-8" } : {})
     };
   }
   let result: NetworkFetchResult;
@@ -917,7 +890,7 @@ async function fetchPageStreamWithClient(
   timeoutMs = DEFAULT_TIMEOUT_MS,
   securityPolicy: SecurityPolicyOptions = DEFAULT_SECURITY_POLICY,
   requestOptions: PageRequestOptions = {},
-  readLocalFileText: LocalFileReader = defaultReadLocalFileText
+  readLocalFileText?: LocalFileReader
 ): Promise<FetchPageStreamResult> {
   requestOptions.signal?.throwIfAborted();
   pageRequestMethod(requestOptions);
@@ -965,25 +938,16 @@ async function fetchPageStreamWithClient(
       policy.maxContentBytes
     );
     requestOptions.signal?.throwIfAborted();
-    const fileBytes = utf8ByteLength(filePage.html);
-    if (fileBytes > policy.maxContentBytes) {
-      throw new NetworkFetchError(
-        createNetworkOutcome("size_limit", {
-          finalUrl: filePage.finalUrl,
-          detailCode: "MAX_CONTENT_BYTES",
-          detailMessage: `Response exceeded maxContentBytes=${String(policy.maxContentBytes)}`
-        })
-      );
-    }
+    const bytes = "html" in filePage ? UTF8_ENCODER.encode(filePage.html) : filePage.bytes;
     return {
       requestUrl: filePage.requestUrl,
       finalUrl: filePage.finalUrl,
       status: filePage.status,
       statusText: filePage.statusText,
       contentType: filePage.contentType,
-      stream: streamFromUtf8(filePage.html),
+      stream: new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } }),
       responseFields: filePage.responseFields,
-      transportEncodingLabel: "utf-8",
+      ...("html" in filePage ? { transportEncodingLabel: "utf-8" } : {}),
       fetchedAtIso: filePage.fetchedAtIso,
       networkOutcome: filePage.networkOutcome
     };
@@ -1086,7 +1050,7 @@ export class PageNetworkClient {
     timeoutMs = DEFAULT_TIMEOUT_MS,
     securityPolicy: SecurityPolicyOptions = DEFAULT_SECURITY_POLICY,
     requestOptions: PageRequestOptions = {},
-    readLocalFileText: LocalFileReader = defaultReadLocalFileText
+    readLocalFileText?: LocalFileReader
   ): Promise<FetchPageResult> {
     const session = navigationHttpSession(
       this.#session,
@@ -1108,7 +1072,7 @@ export class PageNetworkClient {
     timeoutMs = DEFAULT_TIMEOUT_MS,
     securityPolicy: SecurityPolicyOptions = DEFAULT_SECURITY_POLICY,
     requestOptions: PageRequestOptions = {},
-    readLocalFileText: LocalFileReader = defaultReadLocalFileText
+    readLocalFileText?: LocalFileReader
   ): Promise<FetchPageResult> {
     return fetchPageWithClient(
       (url, options) => this.#fetchNavigation(url, options),
@@ -1129,7 +1093,7 @@ export class PageNetworkClient {
       maxContentBytes: 512 * 1024
     },
     requestOptions: Pick<PageRequestOptions, "headers" | "signal"> = {},
-    readLocalFileText: LocalFileReader = defaultReadLocalFileText
+    readLocalFileText?: LocalFileReader
   ): Promise<FetchStylesheetResult> {
     const documentUrl = (requestOptions as typeof requestOptions & {
       readonly [DOCUMENT_STYLESHEET_URL]?: string;
@@ -1153,7 +1117,7 @@ export class PageNetworkClient {
     timeoutMs = DEFAULT_TIMEOUT_MS,
     securityPolicy: SecurityPolicyOptions = DEFAULT_SECURITY_POLICY,
     requestOptions: PageRequestOptions = {},
-    readLocalFileText: LocalFileReader = defaultReadLocalFileText
+    readLocalFileText?: LocalFileReader
   ): Promise<FetchPageStreamResult> {
     const session = navigationHttpSession(
       this.#session,
@@ -1175,7 +1139,7 @@ export class PageNetworkClient {
     timeoutMs = DEFAULT_TIMEOUT_MS,
     securityPolicy: SecurityPolicyOptions = DEFAULT_SECURITY_POLICY,
     requestOptions: PageRequestOptions = {},
-    readLocalFileText: LocalFileReader = defaultReadLocalFileText
+    readLocalFileText?: LocalFileReader
   ): Promise<FetchPageStreamResult> {
     return fetchPageStreamWithClient(
       (url, options) => this.#fetchNavigation(url, options),
@@ -1243,7 +1207,7 @@ export async function fetchPage(
   timeoutMs = DEFAULT_TIMEOUT_MS,
   securityPolicy: SecurityPolicyOptions = DEFAULT_SECURITY_POLICY,
   requestOptions: PageRequestOptions = {},
-  readLocalFileText: LocalFileReader = defaultReadLocalFileText
+  readLocalFileText?: LocalFileReader
 ): Promise<FetchPageResult> {
   const client = new PageNetworkClient();
   try {
@@ -1268,7 +1232,7 @@ export async function fetchStylesheet(
     maxContentBytes: 512 * 1024
   },
   requestOptions: Pick<PageRequestOptions, "headers" | "signal"> = {},
-  readLocalFileText: LocalFileReader = defaultReadLocalFileText
+  readLocalFileText?: LocalFileReader
 ): Promise<FetchStylesheetResult> {
   const client = new PageNetworkClient();
   try {
@@ -1290,7 +1254,7 @@ export async function fetchPageStream(
   timeoutMs = DEFAULT_TIMEOUT_MS,
   securityPolicy: SecurityPolicyOptions = DEFAULT_SECURITY_POLICY,
   requestOptions: PageRequestOptions = {},
-  readLocalFileText: LocalFileReader = defaultReadLocalFileText
+  readLocalFileText?: LocalFileReader
 ): Promise<FetchPageStreamResult> {
   const client = new PageNetworkClient();
   try {

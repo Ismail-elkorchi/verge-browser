@@ -83,6 +83,26 @@ function foldText(value: string): {
   });
 }
 
+interface QueryCacheOwner {
+  readonly values: Map<string, TextSearchResult>;
+  revision: number;
+}
+const queryCaches = new WeakMap<TextSearchIndex, QueryCacheOwner>();
+
+/** Mutable query ownership is separate from the immutable logical text allocation. */
+export function textSearchQueryCache(index: TextSearchIndex): { readonly values: ReadonlyMap<string, TextSearchResult>; readonly revision: number } {
+  const cache = queryCaches.get(index);
+  if (cache === undefined) throw new TypeError("Unknown text search index owner.");
+  return cache;
+}
+
+export function clearTextSearchQueryCache(index: TextSearchIndex): void {
+  const cache = queryCaches.get(index);
+  if (cache === undefined) return;
+  cache.values.clear();
+  cache.revision += 1;
+}
+
 class ImmutableTextSearchIndex implements TextSearchIndex {
   readonly #queries = new Map<string, TextSearchResult>();
   readonly text: string;
@@ -95,6 +115,7 @@ class ImmutableTextSearchIndex implements TextSearchIndex {
     segments: readonly TextSearchSegment[]
   ) {
     this.text = text;
+    queryCaches.set(this, { values: this.#queries, revision: 0 });
     this.#segments = Object.freeze(segments.map((segment) => Object.freeze(segment)));
     const folded = foldText(text);
     this.#foldedText = folded.text;
@@ -181,6 +202,8 @@ class ImmutableTextSearchIndex implements TextSearchIndex {
     const result = Object.freeze({ matches: Object.freeze(matches), truncated });
     signal?.throwIfAborted();
     this.#queries.set(identity, result);
+    const cache = queryCaches.get(this);
+    if (cache !== undefined) cache.revision += 1;
     while (this.#queries.size > 32) {
       const oldest = this.#queries.keys().next().value;
       if (oldest === undefined) break;

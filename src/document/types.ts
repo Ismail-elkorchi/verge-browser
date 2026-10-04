@@ -1,3 +1,4 @@
+import type { HtmlDocumentMode } from "@ismail-elkorchi/html-parser";
 import type {
   HtmlTableCellMetadata,
   HtmlTableColumnGroupMetadata,
@@ -378,6 +379,7 @@ export interface DocumentState {
 
 /** Deliberate read-only document structure exposed by navigation snapshots. */
 export interface WebDocumentSnapshot {
+  readonly documentMode: HtmlDocumentMode;
   readonly root: DocumentNodeRef;
   readonly documentElement: DocumentNodeRef | null;
   readonly head: DocumentNodeRef | null;

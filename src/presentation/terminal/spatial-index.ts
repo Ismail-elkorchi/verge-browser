@@ -153,7 +153,7 @@ class ImmutableDisplayListSpatialIndex implements DisplayListSpatialIndex {
         path.push(current);
         attachment = list.layout.scrollAttachment(current);
         if (attachment !== null) break;
-        current = list.layout.parent(current)?.id ?? null;
+        current = list.layout.scrollAttachmentParent(current)?.id ?? null;
       }
       for (const id of path) attachmentByFragment.set(id, attachment);
       return attachment;

@@ -591,6 +591,18 @@ function inlineControlGroup(
   return labelledBrowserControl(id, focusNode, first.label, control);
 }
 
+/** Projects document cells into the same clipped surface used for painting. */
+function documentCellBounds(rect: Rect, content: Rect, viewport: Rect): Rect | null {
+  const row = Math.max(content.row + rect.row, content.row, viewport.row);
+  const column = Math.max(content.column + rect.column, content.column, viewport.column);
+  const bottom = Math.min(content.row + rect.row + rect.height,
+    content.row + content.height, viewport.row + viewport.height);
+  const right = Math.min(content.column + rect.column + rect.width,
+    content.column + content.width, viewport.column + viewport.width);
+  return bottom > row && right > column
+    ? { row, column, height: bottom - row, width: right - column } : null;
+}
+
 function browserDocumentChildBounds(
   document: BrowserDocumentComponentModel,
   bounds: Rect,
@@ -739,34 +751,27 @@ const browserDocumentComponent = defineComponent<BrowserDocumentComponentOptions
       ]
     };
   },
-  focusTargets({ model, bounds }) {
+  focusTargets({ model, bounds, viewport: visibleBounds }) {
     if (bounds.width <= 0 || bounds.height <= 0) return [];
-    const document = model.document;
-    const terminalRender = document.terminalRender;
     const contentBounds = documentContentBounds(bounds);
-    return terminalRender.focusMap.targets
+    return model.document.terminalRender.focusMap.targets
       .filter((target) => target.action.kind !== "form-control")
-      .map((target) => {
-      let row = target.rects[0]?.row ?? 0;
-      let column = target.rects[0]?.column ?? 0;
-      let bottom = row;
-      let edge = column;
-      for (const rect of target.rects) {
-        row = Math.min(row, rect.row);
-        column = Math.min(column, rect.column);
-        bottom = Math.max(bottom, rect.row + rect.height);
-        edge = Math.max(edge, rect.column + rect.width);
-      }
-      return {
-        id: documentActionId(target.action),
-        bounds: {
-          row: contentBounds.row + row,
-          column: contentBounds.column + column,
-          width: target.rects.length === 0
-            ? 0 : Math.max(1, Math.min(edge - column, contentBounds.width - column)),
-          height: target.rects.length === 0 ? 0 : Math.max(1, bottom - row)
+      .flatMap((target) => {
+        const rectangles = target.rects.flatMap((rect) => {
+          const clipped = documentCellBounds(rect, contentBounds, visibleBounds);
+          return clipped === null ? [] : [clipped];
+        });
+        const first = rectangles[0];
+        if (first === undefined) return [];
+        let row = first.row;
+        let column = first.column;
+        let bottom = row;
+        let edge = column;
+        for (const rect of rectangles) {
+          row = Math.min(row, rect.row); column = Math.min(column, rect.column);
+          bottom = Math.max(bottom, rect.row + rect.height); edge = Math.max(edge, rect.column + rect.width);
         }
-      };
+        return [{ id: documentActionId(target.action), bounds: { row, column, width: edge - column, height: bottom - row } }];
       });
   },
   onFocus(event) {
@@ -787,20 +792,14 @@ const browserDocumentComponent = defineComponent<BrowserDocumentComponentOptions
     const terminalRender = document.terminalRender;
     const contentBounds = documentContentBounds(bounds);
     return terminalRender.hitTestIndex.regions
-      .filter((placement) => placement.action.kind !== "form-control"
-        && contentBounds.row + placement.rect.row < visibleBounds.row + visibleBounds.height
-        && contentBounds.row + placement.rect.row + placement.rect.height > visibleBounds.row)
-      .map((placement) => {
+      .filter((placement) => placement.action.kind !== "form-control")
+      .flatMap((placement) => {
+        const clipped = documentCellBounds(placement.rect, contentBounds, visibleBounds);
+        if (clipped === null) return [];
         const placementActionId = documentActionId(placement.action);
-        const columnIndex = Math.min(contentBounds.width - 1, placement.rect.column);
-        return {
+        return [{
           id: `activate:${placementActionId}:${placement.id}`,
-          bounds: {
-            row: contentBounds.row + placement.rect.row,
-            column: contentBounds.column + columnIndex,
-            width: Math.max(1, Math.min(placement.rect.width, contentBounds.width - columnIndex)),
-            height: Math.max(1, placement.rect.height)
-          },
+          bounds: clipped,
           accepts: placement.action.kind === "link"
             ? ["click" as const, "contextMenu" as const, "pointerDown" as const]
             : ["click" as const, "pointerDown" as const],
@@ -825,7 +824,7 @@ const browserDocumentComponent = defineComponent<BrowserDocumentComponentOptions
                       ? "newForeground"
                       : "current"
                 }
-        };
+        }];
       });
   }
 });

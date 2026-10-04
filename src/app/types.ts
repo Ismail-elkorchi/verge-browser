@@ -27,18 +27,23 @@ export interface NetworkOutcome {
   readonly detailMessage: string;
 }
 
-/** Fully buffered HTML fetch result returned by `fetchPage()`. */
-export interface FetchPageResult {
+/** Response metadata shared by buffered page sources. */
+interface BufferedPageMetadata {
   readonly requestUrl: string;
   readonly finalUrl: string;
   readonly status: number;
   readonly statusText: string;
   readonly contentType: string | null;
-  readonly html: string;
   readonly responseFields: HttpFields;
   readonly fetchedAtIso: string;
   readonly networkOutcome: NetworkOutcome;
 }
+
+/** Network bytes retain encoding evidence; supplied strings are already decoded. */
+export type FetchPageResult = BufferedPageMetadata & (
+  | { readonly html: string }
+  | { readonly bytes: Uint8Array; readonly transportEncodingLabel?: string }
+);
 
 /** Streaming HTML fetch result returned by `fetchPageStream()`. */
 export interface FetchPageStreamResult {

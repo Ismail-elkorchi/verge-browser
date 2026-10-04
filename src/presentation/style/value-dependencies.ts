@@ -16,6 +16,7 @@ export function recordUsedValueDependencies(style: ComputedStyle, dependencies: 
     || usesLengthUnit(box, "vh") || usesLengthUnit(style.text, "vh")
     || [box.height, box.minHeight, box.maxHeight, box.inset.top, box.inset.bottom,
       box.rowGap, box.gridTemplateRows, box.gridAutoRows,
+      ...(box.transform?.map((translation) => translation.y) ?? []),
       ...(box.flexDirection.startsWith("column") ? [box.flexBasis] : []),
     ].some((value) => usesLengthUnit(value, "%"));
 }

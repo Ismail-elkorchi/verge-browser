@@ -143,6 +143,7 @@ export interface RenderArtifactStoreMetrics {
   readonly retainedAnalyses: number;
   readonly retainedCost: number;
   readonly evictions: number;
+  readonly accountedAllocations: number;
 }
 
 export interface RenderArtifactStoreOptions {

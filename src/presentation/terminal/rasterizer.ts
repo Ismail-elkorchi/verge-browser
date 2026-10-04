@@ -140,7 +140,10 @@ function snapUnclippedCssRect(rect: CssRect, list: RasterizationDisplayList): Te
 }
 
 function textClip(command: Extract<TerminalPaintCommand, { readonly kind: "text" }>, list: RasterizationDisplayList, budgets: TerminalPaintBudgets): TerminalCellRect {
-  return snapCssRect(command.clipRect, command.clipRect, list, budgets);
+  const fragment = list.layout.fragment(command.layoutFragment);
+  const clip = fragment.kind === "control" || fragment.kind === "replaced"
+    ? cssIntersection(command.clipRect, command.rect) : command.clipRect;
+  return snapCssRect(clip, clip, list, budgets);
 }
 
 interface PaintUnitGenerationState {
@@ -179,7 +182,9 @@ function* textUnits(
   const clipEdge = safeAdd(clip.column, clip.width);
   let previousCodeUnit = 0;
   let cssCursor = command.rect.x;
-  let previousEnd = Math.floor(command.rect.x / list.context.cellWidthCssPx);
+  const fragment = list.layout.fragment(command.layoutFragment);
+  const confinesText = fragment.kind === "control" || fragment.kind === "replaced";
+  const contentEdge = cssCoordinateAdd(command.rect.x, command.rect.width);
   for (const grapheme of command.clusters) {
     if (!reservePaintUnit(generation)) return;
     cancellationCheckpoint(generation, signal);
@@ -202,10 +207,8 @@ function* textUnits(
     }
     previousCodeUnit = grapheme.visualEndCodeUnit;
     const width = Math.max(1, cells);
-    const desiredStart = Math.floor(cssCursor / list.context.cellWidthCssPx);
-    const column = Math.max(previousEnd, desiredStart);
+    const column = Math.floor(cssCursor / list.context.cellWidthCssPx);
     const end = safeAdd(column, width);
-    previousEnd = end;
     cssCursor = cssCoordinateAdd(cssCursor, grapheme.advance);
     yield {
       command,
@@ -219,6 +222,7 @@ function* textUnits(
       contentEndCodeUnit: grapheme.contentEndCodeUnit,
       sourceRange: grapheme.sourceRange,
       visible: rowVisible && column >= clip.column && end <= clipEdge
+        && (!confinesText || cssCursor <= contentEdge)
     };
   }
   if (previousCodeUnit !== command.text.length) throw new InvalidTerminalCellMeasurement();

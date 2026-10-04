@@ -1,93 +1,181 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
+
+import { DEFAULT_VARIANTS, ROW_HEIGHT_CSS_PX, fixtureRequestUrl, fixtureResources, mediaEnvironment } from "./environment.mjs";
+import { compareOracleCase } from "./oracle-comparison.mjs";
+import { collectVisibleBrowserText } from "./browser-text.mjs";
+import { openFixture, renderSnapshot, principalRectangle, paintExpectations } from "./run.mjs";
 
 const executablePath = process.env.CHROMIUM_EXECUTABLE;
 if (!executablePath) throw new Error("Set CHROMIUM_EXECUTABLE to an installed local Chromium executable.");
 let chromium;
 try {
-  ({ chromium } = await import("playwright-core"));
+  ({ chromium } = await import(process.env.PLAYWRIGHT_CORE_PATH ?? "playwright-core"));
 } catch {
-  throw new Error("Optional oracle requires a developer-installed playwright-core package; it is not a Verge dependency.");
+  throw new Error("Optional oracle requires a developer-installed playwright-core package (or PLAYWRIGHT_CORE_PATH); it is not a Verge dependency.");
+}
+const options = { check: false, classifyScriptRequired: false, report: "reports/compatibility-chromium.json", fixture: null };
+for (const argument of process.argv.slice(2)) {
+  if (argument === "--check") options.check = true;
+  else if (argument === "--classify-script-required") options.classifyScriptRequired = true;
+  else if (argument.startsWith("--report=")) options.report = argument.slice("--report=".length);
+  else if (argument.startsWith("--fixture=")) options.fixture = argument.slice("--fixture=".length);
+  else throw new Error(`Unsupported Chromium oracle argument: ${argument}`);
 }
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const corpus = JSON.parse(await readFile(resolve(scriptDirectory, "corpus.json"), "utf8"));
+const fixtures = corpus.fixtures.filter((fixture) => options.fixture === null || fixture.id === options.fixture);
+if (fixtures.length === 0) throw new Error(`Unknown fixture: ${options.fixture}`);
+
+async function checkedBytes(entry) {
+  const bytes = await readFile(resolve(scriptDirectory, entry.file));
+  const hash = createHash("sha256").update(bytes).digest("hex");
+  if (hash !== entry.sha256) throw new Error(`Fixture/resource checksum mismatch for ${entry.file}: ${hash}`);
+  return bytes;
+}
+
+function cssColor(color) {
+  if (color === null) return "rgba(0, 0, 0, 0)";
+  return color.a === 1 ? `rgb(${color.r}, ${color.g}, ${color.b})` : `rgba(${color.r}, ${color.g}, ${color.b}, ${color.a})`;
+}
+
+function nativeStyle(style) {
+  const fontSize = style.text.fontSize.kind === "zero" ? 0 : style.text.fontSize.value;
+  const lineHeight = style.text.lineHeight.kind === "normal" ? "normal"
+    : style.text.lineHeight.kind === "number" ? `${style.text.lineHeight.value * fontSize}px`
+    : `${style.text.lineHeight.value.kind === "zero" ? 0 : style.text.lineHeight.value.value}px`;
+  const display = style.display.box !== "principal" ? style.display.box
+    : style.display.internal ?? (style.display.inner === "flow" ? style.display.outer : style.display.inner);
+  return { display, visibility: style.visibility, fontSize: `${fontSize}px`, lineHeight,
+    color: cssColor(style.text.color), backgroundColor: cssColor(style.text.background),
+    direction: style.text.direction, whiteSpace: style.text.whiteSpace, fontWeight: String(style.text.fontWeight) };
+}
+
+function nativeInspection(fixture, variant, snapshot, pipeline) {
+  const ids = new Set([...(fixture.oracle?.styles ?? []), ...(fixture.oracle?.geometry ?? [])].map((entry) => entry.id));
+  return {
+    paintExpectations: paintExpectations(fixture, variant).map((entry) => typeof entry === "string" ? entry : entry.text),
+    paintedPhrases: pipeline.evidence.paintedPhrases,
+    zeroFontPainted: pipeline.evidence.paintCoverage.zeroFont.painted.length,
+    logicalText: pipeline.artifacts.textSearchIndex.text,
+    byId: Object.fromEntries([...ids].map((id) => {
+      const node = snapshot.document.elementById(id);
+      return [id, node === null ? null : { rectangle: principalRectangle(snapshot, pipeline, id), style: nativeStyle(pipeline.artifacts.computedStyles.style(node)) }];
+    }))
+  };
+}
+
 const browser = await chromium.launch({ executablePath, headless: true });
-const defaultVariants = [{ id: "medium", columns: 80, rows: 90, scrollRow: 0 }];
 const inspect = async (javaScriptEnabled) => {
-  const context = await browser.newContext({ javaScriptEnabled });
+  const context = await browser.newContext({ javaScriptEnabled, locale: "en-US", timezoneId: "UTC", colorScheme: "light", reducedMotion: "no-preference", isMobile: false, hasTouch: false });
   const values = [];
-  for (const fixture of corpus.fixtures) {
-    const path = resolve(scriptDirectory, fixture.file);
-    for (const variant of fixture.variants ?? defaultVariants) {
-      const page = await context.newPage();
-      await page.setViewportSize({ width: variant.columns * 8, height: variant.rows * 16 });
-      const resources = fixture.resources ?? corpus.resourceSets?.[fixture.resourceSet] ?? [];
+  try {
+    for (const fixture of fixtures) {
+      const html = await checkedBytes(fixture);
       const resourceByUrl = new Map();
-      for (const resource of resources) {
-        resourceByUrl.set(resource.requestUrl, resource);
-        if (resource.finalUrl !== undefined) resourceByUrl.set(resource.finalUrl, { ...resource, requestUrl: resource.finalUrl });
+      for (const resource of fixtureResources(fixture, corpus)) {
+        const entry = { ...resource, bytes: await checkedBytes(resource) };
+        resourceByUrl.set(resource.requestUrl, entry);
+        if (resource.finalUrl !== undefined) resourceByUrl.set(resource.finalUrl, { ...entry, requestUrl: resource.finalUrl });
       }
-      await page.route("https://compat.verge.test/**", async (route) => {
-        const resource = resourceByUrl.get(route.request().url());
-        if (resource === undefined) {
-          await route.abort("blockedbyclient");
-          return;
+      for (const variant of fixture.variants ?? DEFAULT_VARIANTS) {
+        const environment = mediaEnvironment(variant);
+        const page = await context.newPage();
+        try {
+          await page.setViewportSize({ width: environment.viewportWidthCssPx, height: environment.viewportHeightCssPx });
+          await page.emulateMedia({ media: environment.mediaType });
+          const stylesheetRequests = [];
+          const blockedRequests = [];
+          const requestUrl = fixtureRequestUrl(fixture);
+          await page.route("**/*", async (route) => {
+            const url = route.request().url();
+            if (url === requestUrl) {
+              await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: html });
+              return;
+            }
+            const resource = resourceByUrl.get(url);
+            if (resource === undefined) {
+              blockedRequests.push(url);
+              await route.abort("blockedbyclient");
+              return;
+            }
+            stylesheetRequests.push(url);
+            if (resource.finalUrl !== undefined && url !== resource.finalUrl) {
+              await route.fulfill({ status: 302, headers: { location: resource.finalUrl }, body: "" });
+              return;
+            }
+            await route.fulfill({ status: 200, contentType: resource.transportEncodingLabel === undefined ? "text/css" : `text/css; charset=${resource.transportEncodingLabel}`, body: resource.bytes });
+          });
+          await page.goto(requestUrl, { waitUntil: "load" });
+          await page.evaluate((scrollY) => globalThis.scrollTo(0, scrollY), variant.scrollRow * ROW_HEIGHT_CSS_PX);
+          const inspection = await page.evaluate(() => {
+            const document = globalThis.document;
+            const computedStyle = globalThis.getComputedStyle;
+            const elements = [...document.querySelectorAll("body *")];
+            const visible = (element) => {
+              const style = computedStyle(element);
+              const rect = element.getBoundingClientRect();
+              return style.display !== "none" && style.visibility === "visible" && rect.width > 0 && rect.height > 0;
+            };
+            const box = (element) => {
+              const rect = element.getBoundingClientRect();
+              const style = computedStyle(element);
+              return { tag: element.tagName.toLowerCase(), id: element.id,
+                rectangle: { x: rect.x + globalThis.scrollX, y: rect.y + globalThis.scrollY, width: rect.width, height: rect.height },
+                style: Object.fromEntries(["display", "visibility", "fontSize", "lineHeight", "color", "backgroundColor", "direction", "whiteSpace", "fontWeight"].map((property) => [property, style[property]])) };
+            };
+            return {
+              url: document.URL, compatibilityMode: document.compatMode,
+              headings: [...document.querySelectorAll("h1,h2,h3,h4,h5,h6")].filter(visible).map((element) => element.textContent?.trim() ?? ""),
+              landmarks: elements.filter((element) => ["HEADER", "NAV", "MAIN", "ASIDE", "FOOTER", "FORM"].includes(element.tagName) && visible(element)).map((element) => element.getAttribute("role") ?? element.tagName.toLowerCase()),
+              links: [...document.links].filter(visible).map((element) => ({ text: element.textContent?.trim() ?? "", href: element.href })),
+              controls: [...document.querySelectorAll("input,select,textarea,button")].filter(visible).map((element) => ({ tag: element.tagName.toLowerCase(), name: element.getAttribute("name") ?? "" })),
+              principalBoxes: elements.filter(visible).map(box),
+              byId: Object.fromEntries(elements.filter((element) => element.id).map((element) => [element.id, box(element)])),
+              stylesheets: [...document.styleSheets].map((sheet) => sheet.href ?? "embedded")
+            };
+          });
+          Object.assign(inspection, await page.evaluate(collectVisibleBrowserText));
+          let native = null;
+          let comparison = null;
+          if (!javaScriptEnabled) {
+            const snapshot = await openFixture(fixture, html.toString("utf8"), [], corpus);
+            const pipeline = renderSnapshot(snapshot, variant, paintExpectations(fixture, variant));
+            native = nativeInspection(fixture, variant, snapshot, pipeline);
+            comparison = compareOracleCase(fixture, variant, native, inspection);
+          }
+          values.push({ id: `${fixture.id}:${variant.id}`, fixture: fixture.id, variant, environment, inspection, stylesheetRequests, blockedRequests, native, comparison });
+        } finally {
+          await page.close();
         }
-        if (resource.finalUrl !== undefined && route.request().url() !== resource.finalUrl) {
-          await route.fulfill({ status: 302, headers: { location: resource.finalUrl }, body: "" });
-          return;
-        }
-        await route.fulfill({
-          status: 200,
-          contentType: "text/css",
-          body: await readFile(resolve(scriptDirectory, resource.file))
-        });
-      });
-      await page.goto(pathToFileURL(path).href, { waitUntil: "load" });
-      await page.evaluate((scrollY) => globalThis.scrollTo(0, scrollY), variant.scrollRow * 16);
-      const inspection = await page.evaluate(() => {
-      const browserDocument = globalThis.document;
-      const computedStyle = globalThis.getComputedStyle;
-      const visible = (element) => {
-        const style = computedStyle(element);
-        const rect = element.getBoundingClientRect();
-        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
-      };
-      const elements = [...browserDocument.querySelectorAll("body *")];
-      return {
-        meaningfulVisibleText: elements.filter(visible).map((element) => element.childElementCount === 0 ? element.textContent?.trim() ?? "" : "").filter(Boolean),
-        headings: [...browserDocument.querySelectorAll("h1,h2,h3,h4,h5,h6")].filter(visible).map((element) => element.textContent?.trim() ?? ""),
-        landmarks: elements.filter((element) => ["HEADER", "NAV", "MAIN", "ASIDE", "FOOTER", "FORM"].includes(element.tagName) && visible(element)).map((element) => element.getAttribute("role") ?? element.tagName.toLowerCase()),
-        links: [...browserDocument.links].filter(visible).map((element) => ({ text: element.textContent?.trim() ?? "", href: element.href })),
-        controls: [...browserDocument.querySelectorAll("input,select,textarea,button")].filter(visible).map((element) => ({ tag: element.tagName.toLowerCase(), name: element.getAttribute("name") ?? "" })),
-        readingOrder: elements.filter(visible).map((element) => element.childElementCount === 0 ? element.textContent?.trim() ?? "" : "").filter(Boolean),
-        principalBoxes: elements.filter(visible).map((element) => {
-          const rect = element.getBoundingClientRect();
-          const style = computedStyle(element);
-          return { tag: element.tagName.toLowerCase(), id: element.id, x: rect.x, y: rect.y, width: rect.width, height: rect.height, display: style.display, visibility: style.visibility };
-        }),
-        stylesheets: [...browserDocument.styleSheets].map((sheet) => sheet.href ?? "embedded")
-      };
-    });
-      values.push({ id: `${fixture.id}:${variant.id}`, fixture: fixture.id, variant, inspection });
-      await page.close();
+      }
     }
+  } finally {
+    await context.close();
   }
-  await context.close();
   return values;
 };
-const scriptingDisabled = await inspect(false);
-const scriptingEnabled = process.argv.includes("--classify-script-required") ? await inspect(true) : null;
-await browser.close();
+let scriptingDisabled;
+let scriptingEnabled;
+try {
+  scriptingDisabled = await inspect(false);
+  scriptingEnabled = options.classifyScriptRequired ? await inspect(true) : null;
+} finally {
+  await browser.close();
+}
+const failures = scriptingDisabled.flatMap((entry) => entry.comparison.failures.map((failure) => ({ case: entry.id, ...failure })));
 const result = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   chromiumExecutableHash: createHash("sha256").update(await readFile(executablePath)).digest("hex"),
-  scriptingDisabled,
-  scriptingEnabled
+  chromiumVersion: browser.version(),
+  comparisonScope: "Layout-visible DOM text (not pixel occlusion) versus complete native painted-source coverage; expected text and explicit controlled computed-style/geometry assertions; no pixel equality or terminal font-metric equality.",
+  summary: { caseCount: scriptingDisabled.length, comparedTextPhrases: scriptingDisabled.reduce((sum, entry) => sum + entry.comparison.comparedTextPhrases, 0), failures },
+  scriptingDisabled, scriptingEnabled
 };
-const reportPath = resolve("reports/compatibility-chromium.json");
+const reportPath = resolve(options.report);
 await mkdir(dirname(reportPath), { recursive: true });
 await writeFile(reportPath, `${JSON.stringify(result, null, 2)}\n`, "utf8");
-process.stdout.write(`${reportPath}\n`);
+process.stdout.write(`${reportPath}\n${JSON.stringify(result.summary)}\n`);
+if (options.check && failures.length > 0) throw new Error("Chromium compatibility comparisons failed; inspect the machine-readable report.");

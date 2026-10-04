@@ -2,6 +2,7 @@ import { estimatedRetainedCost, RenderBudgetExceededError } from "../../memory/r
 import { setTimeout, clearTimeout } from "node:timers";
 import { Worker } from "node:worker_threads";
 
+import { measured, RenderStageMetrics } from "../../presentation/renderer/instrumentation.js";
 import type { BrowserDocumentState } from "../model.js";
 import type { RenderWorkerResponse } from "./protocol.js";
 import { renderDocumentAttachment } from "./document-transfer.js";
@@ -52,6 +53,7 @@ function cancellationState(): DocumentCancellationState {
 /** Long-lived interactive renderer client. Heavy browser artifacts never leave its worker. */
 export class RenderWorkerClient {
   readonly #worker: Pick<Worker, "postMessage" | "on" | "terminate">;
+  readonly #metrics = new RenderStageMetrics();
   readonly #summaries = new Map<string, RenderDocumentSummary>();
   readonly #summaryCosts = new WeakMap<RenderDocumentSummary, number>();
   readonly #viewportCosts = new WeakMap<ViewportRenderPayload, number>();
@@ -90,7 +92,7 @@ export class RenderWorkerClient {
       this.#pending.delete(response.requestId);
       try {
         if (response.kind === "budget-exceeded") {
-          pending.reject(new RenderBudgetExceededError(response.budget, response.estimatedBytes, response.limit));
+          pending.reject(new RenderBudgetExceededError(response.budget, response.estimatedBytes, response.limit, response.owner));
         } else if (response.kind === "render-failed") {
           const error = new Error(response.message);
           error.name = response.name;
@@ -161,7 +163,7 @@ export class RenderWorkerClient {
     const limit = this.#clientBudget - this.#cleanupReserve;
     if (peak > limit) {
       this.#summaries.delete(payload.documentId);
-      throw new RenderBudgetExceededError("retained-cost", peak, limit);
+      throw new RenderBudgetExceededError("retained-cost", peak, limit, "viewport-client");
     }
     this.#viewports.set(payload.documentId, payload);
     this.#clientRetainedCost = this.#viewportCost();
@@ -183,7 +185,7 @@ export class RenderWorkerClient {
     await this.#acknowledge({
       kind: "attach-document",
       requestId: this.#nextRequestId(),
-      attachment: renderDocumentAttachment(document),
+      attachment: measured(this.#metrics, "attachment-serialization", () => renderDocumentAttachment(document)),
       documentGeneration: Atomics.load(state.document, 0),
       documentCancellation: state.document.buffer as SharedArrayBuffer,
     });
@@ -305,7 +307,7 @@ export class RenderWorkerClient {
   public async metrics(collectGarbage = false): Promise<Extract<RenderWorkerResponse, { readonly kind: "artifact-metrics" }>["metrics"]> {
     const response = await this.#send({ kind: "metrics", collectGarbage, requestId: this.#nextRequestId() });
     if (response.kind !== "artifact-metrics") throw new Error("The rendering worker returned unexpected metrics.");
-    return { ...response.metrics, clientRetainedCost: this.#clientRetainedCost, pendingTransferCost: this.#pendingTransferCost(), pendingRequests: this.#pending.size, queuedRequests: this.#queue.length };
+    return { ...response.metrics, stages: Object.freeze([...response.metrics.stages, ...this.#metrics.snapshot()]), clientRetainedCost: this.#clientRetainedCost, pendingTransferCost: this.#pendingTransferCost(), pendingRequests: this.#pending.size, queuedRequests: this.#queue.length };
   }
 
   public async release(documentId: string): Promise<void> {
@@ -391,7 +393,7 @@ export class RenderWorkerClient {
     const transferCost = estimatedRetainedCost([request]);
     const pendingCost = this.#pendingTransferCost();
     const limit = this.#clientBudget - (cleanup ? 0 : this.#cleanupReserve);
-    if (transferCost + pendingCost + this.#clientRetainedCost > limit) return Promise.reject(new RenderBudgetExceededError("working-set", transferCost + pendingCost + this.#clientRetainedCost, limit));
+    if (transferCost + pendingCost + this.#clientRetainedCost > limit) return Promise.reject(new RenderBudgetExceededError("working-set", transferCost + pendingCost + this.#clientRetainedCost, limit, "worker-transport"));
     if (this.#pending.size >= (cleanup ? 128 : 120)) return Promise.reject(new RangeError("Rendering worker queue budget exceeded."));
     return new Promise((resolve, reject) => {
       this.#pending.set(request.requestId, { request, transferCost, resolve, reject });
@@ -417,9 +419,9 @@ export class RenderWorkerClient {
     this.#activeRequest = id;
     try {
       const request = pending.request;
-      this.#worker.postMessage(request.kind === "request-viewport" ? {
+      measured(this.#metrics, "worker-transport", () => { this.#worker.postMessage(request.kind === "request-viewport" ? {
         ...request, heldSummaryIdentity: this.#summaries.get(request.documentId)?.identity ?? null,
-      } : request);
+      } : request); });
     } catch (error) {
       this.#pending.delete(id);
       this.#activeRequest = null;

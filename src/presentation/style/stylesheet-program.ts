@@ -1,3 +1,8 @@
+import { nestedPrelude, nestingContext, resolveNesting, withImplicitNesting, type NestingContext } from "./nesting.js";
+import { DiagnosticCollector } from "./diagnostics.js";
+import { presentationalHints } from "./presentational-hints.js";
+import { EMPTY_NAMESPACES, stylesheetNamespaces, bindSelectorNamespaces } from "./namespaces.js";
+import { styleBudgets } from "./budgets.js";
 import { registerRetainedOwner } from "../../memory/retained-cost.js";
 import {
   parseBlockContents,
@@ -10,6 +15,7 @@ import {
   type ComplexSelector,
   type ComponentValue,
   type CssDeclaration,
+  type CssBlockItem,
   type CssQualifiedRule,
   type CssRule,
   type SelectorList,
@@ -28,6 +34,7 @@ import type {
   StyleDiagnostic,
   StylesheetProgram,
   StylesheetProgramSource,
+  StylesheetNamespaces,
   StylesheetProgramDependencies,
   StylesheetSelectorRuntime,
   CustomPropertySubstitutionCache,
@@ -40,15 +47,6 @@ const validationValueSizes = new WeakMap<PropertyValidationSession, number>();
 export function recordPropertyValidationValue(session: PropertyValidationSession, codeUnits: number): void {
   validationValueSizes.set(session, Math.max(validationValueSizes.get(session) ?? 0, codeUnits));
 }
-
-const DEFAULT_STYLE_BUDGETS: StyleBudgets = Object.freeze({
-  maxStylesheetSources: 64,
-  maxStylesheetBytes: 2 * 1024 * 1024,
-  maxInlineStylesheetBytes: 512 * 1024,
-  maxSelectorQueries: 4_096,
-  maxSelectorSteps: 500_000,
-  maxDiagnostics: 128,
-});
 
 const USER_AGENT_SYNTAX = (() => {
   const result = parseStylesheet(USER_AGENT_STYLESHEET);
@@ -87,30 +85,22 @@ class BoundedSubstitutionCache implements CustomPropertySubstitutionCache {
 function selectorRuntime(): StylesheetSelectorRuntime {
   return {
     state: null,
+    namespaces: EMPTY_NAMESPACES,
     authorSession: null,
     userAgentSession: null,
-    sessionMaxSteps: 0,
     matches: new Map(),
     computedSnapshot: null,
     computedEnvironment: null,
     clear() {
       this.state = null;
+      this.namespaces = EMPTY_NAMESPACES;
       this.authorSession = null;
       this.userAgentSession = null;
-      this.sessionMaxSteps = 0;
       this.matches.clear();
       this.computedSnapshot = null;
       this.computedEnvironment = null;
     },
   };
-}
-
-function normalizedBudgets(overrides: Partial<StyleBudgets> | undefined): StyleBudgets {
-  const result = { ...DEFAULT_STYLE_BUDGETS, ...overrides };
-  for (const [name, value] of Object.entries(result)) {
-    if (!Number.isSafeInteger(value) || value < 1) throw new TypeError(`${name} must be a positive safe integer`);
-  }
-  return result;
 }
 
 function fingerprintText(seed: number, value: string): number {
@@ -165,15 +155,20 @@ function containsVariableReference(values: readonly ComponentValue[]): boolean {
   return false;
 }
 
-function compileDeclaration(declaration: CssDeclaration): CompiledDeclarationProgram {
+function compileDeclaration(declaration: CssDeclaration, validationSession: PropertyValidationSession): CompiledDeclarationProgram {
+  const serializedValue = serializeCssComponentValues(declaration.value).trim();
+  const variable = containsVariableReference(declaration.value);
+  if (!variable) recordPropertyValidationValue(validationSession, serializedValue.length);
+  const validationStatus = variable ? "deferred" : validationSession.validate(declaration.name, declaration.value).status;
   return Object.freeze({
     declaration,
     property: declaration.name.startsWith("--")
       ? declaration.name
       : resolveCssProperty(declaration.name.toLowerCase())?.name ?? null,
     value: declaration.value,
-    serializedValue: serializeCssComponentValues(declaration.value).trim(),
-    containsVariableReference: containsVariableReference(declaration.value),
+    serializedValue,
+    containsVariableReference: variable,
+    validationStatus,
   });
 }
 
@@ -210,10 +205,13 @@ function selectorSemanticFingerprint(selector: ComplexSelector): string {
 function compileSelectorRule(
   rule: CssQualifiedRule,
   sourceUrl: string,
+  namespaces: StylesheetNamespaces,
   addDiagnostic: (diagnostic: StyleDiagnostic) => void,
+  parent: NestingContext | null,
+  identity: (key: string) => string,
   signal?: AbortSignal,
 ): readonly CompiledSelectorProgram[] {
-  const parsed = parseSelectorListFromComponentValues(rule.prelude, {
+  const parsed = parseSelectorListFromComponentValues(parent === null ? rule.prelude : nestedPrelude(rule.prelude), {
     ...(signal === undefined ? {} : { signal }),
   });
   if (!parsed.ok) {
@@ -233,18 +231,25 @@ function compileSelectorRule(
       occurrences: 1,
     }));
   }
-  return Object.freeze(parsed.value.selectors.map((selector) => {
-    const target = selectorTarget(selector);
+  const selectors = parsed.value.selectors.map((selector) => bindSelectorNamespaces(selector, namespaces));
+  if (selectors.some((selector) => selector === null)) {
+    addDiagnostic(Object.freeze({ code: "selector-parse", sourceUrl, detail: "Unbound stylesheet namespace prefix.", occurrences: 1 }));
+    return Object.freeze([]);
+  }
+  return Object.freeze((selectors as ComplexSelector[]).map((selector) => {
+    const normalized = parent === null ? selector : withImplicitNesting(selector);
+    const expanded = parent === null ? normalized : resolveNesting(normalized, parent);
+    const target = selectorTarget(expanded);
     const list: SelectorList = Object.freeze({
       ...parsed.value,
       selectors: Object.freeze([target.selector]),
     });
     return Object.freeze({
       selector: list,
-      fingerprint: selectorSemanticFingerprint(target.selector),
+      fingerprint: identity(`${parent?.identity ?? "root"}\u0000${selectorSemanticFingerprint(selectorTarget(normalized).selector)}`),
       pseudoElement: target.pseudoElement,
-      specificity: specificityOfComplexSelector(selector),
-      dependencies: selectorDependencies(selector),
+      specificity: specificityOfComplexSelector(normalized, parent === null ? {} : { nesting: parent.specificity }),
+      dependencies: new Set([...selectorDependencies(normalized), ...(parent?.dependencies ?? [])]),
     });
   }));
 }
@@ -308,24 +313,15 @@ function stylesheetDependencies(
 
 /** Compiles immutable stylesheet selectors and inline declarations once per document snapshot. */
 export function compileStylesheetProgram(input: CompileStylesheetProgramInput): StylesheetProgram {
-  const limits = normalizedBudgets(input.budgets);
-  const diagnostics: StyleDiagnostic[] = [];
-  const diagnosticIndex = new Map<string, number>();
+  const limits = styleBudgets(input.budgets);
+  const propertyValidation = createPropertyValidationSession({ maxEntries: 2_048 });
+  const diagnostics = new DiagnosticCollector(limits.maxDiagnostics, input.initialDiagnostics, input.initialOmittedDiagnosticCount);
   const addDiagnostic = (diagnostic: StyleDiagnostic): void => {
-    const key = `${diagnostic.code}\u0000${diagnostic.sourceUrl}\u0000${diagnostic.detail}`;
-    const index = diagnosticIndex.get(key);
-    if (index !== undefined) {
-      const current = diagnostics[index];
-      if (current !== undefined) diagnostics[index] = Object.freeze({ ...current, occurrences: current.occurrences + diagnostic.occurrences });
-      return;
-    }
-    if (diagnostics.length >= limits.maxDiagnostics) return;
-    diagnosticIndex.set(key, diagnostics.length);
-    diagnostics.push(diagnostic);
+    diagnostics.add(diagnostic.code, diagnostic.sourceUrl, diagnostic.detail, diagnostic.occurrences);
   };
-  for (const diagnostic of input.initialDiagnostics ?? []) addDiagnostic(diagnostic);
   const sources: StylesheetProgramSource[] = [Object.freeze({
     sourceUrl: USER_AGENT_STYLESHEET_SOURCE,
+    namespaces: stylesheetNamespaces(USER_AGENT_SYNTAX),
     origin: "user-agent",
     stylesheet: USER_AGENT_SYNTAX,
     mediaConditions: Object.freeze([]),
@@ -342,14 +338,20 @@ export function compileStylesheetProgram(input: CompileStylesheetProgramInput): 
     input.signal?.throwIfAborted();
     if (sources.length - 1 >= limits.maxStylesheetSources) {
       truncatedBudgets.add("maxStylesheetSources");
+      diagnostics.add("stylesheet-limit", resource.finalUrl,
+        `Stylesheet compilation exhausted maxStylesheetSources: consumed=${String(sources.length - 1)}, limit=${String(limits.maxStylesheetSources)}; fallback=admitted-stylesheets.`);
       break;
     }
     if (resource.sourceKind === "embedded" && resource.byteSize > limits.maxInlineStylesheetBytes) {
       truncatedBudgets.add("maxInlineStylesheetBytes");
+      diagnostics.add("stylesheet-limit", resource.finalUrl,
+        `Embedded stylesheet exceeds maxInlineStylesheetBytes: bytes=${String(resource.byteSize)}, limit=${String(limits.maxInlineStylesheetBytes)}; fallback=source-omitted.`);
       continue;
     }
     if (stylesheetByteSize + resource.byteSize > limits.maxStylesheetBytes) {
       truncatedBudgets.add("maxStylesheetBytes");
+      diagnostics.add("stylesheet-limit", resource.finalUrl,
+        `Stylesheet compilation exceeds maxStylesheetBytes: bytes=${String(stylesheetByteSize + resource.byteSize)}, admitted=${String(stylesheetByteSize)}, limit=${String(limits.maxStylesheetBytes)}; fallback=admitted-stylesheets.`);
       break;
     }
     for (const detail of resource.parserDiagnostics) addDiagnostic(Object.freeze({
@@ -360,6 +362,7 @@ export function compileStylesheetProgram(input: CompileStylesheetProgramInput): 
     }));
     sources.push(Object.freeze({
       sourceUrl: resource.finalUrl,
+      namespaces: stylesheetNamespaces(resource.syntax),
       origin: "author",
       stylesheet: resource.syntax,
       mediaConditions: resource.mediaConditions,
@@ -373,30 +376,47 @@ export function compileStylesheetProgram(input: CompileStylesheetProgramInput): 
   const compiledDeclarations = new Map<CssDeclaration, CompiledDeclarationProgram>();
   const stateDependencies = new Set<SelectorStateDependency>();
   const authorStateDependencies = new Set<SelectorStateDependency>();
-  const visit = (rules: readonly CssRule[], source: StylesheetProgramSource): void => {
-    for (const rule of rules) {
+  const selectorIdentities = new Map<string, string>();
+  const identity = (key: string): string => {
+    const retained = selectorIdentities.get(key);
+    if (retained !== undefined) return retained;
+    const created = String(selectorIdentities.size);
+    selectorIdentities.set(key, created);
+    return created;
+  };
+  const visit = (items: readonly CssBlockItem[], source: StylesheetProgramSource, parent: NestingContext | null): void => {
+    for (const item of items) {
       input.signal?.throwIfAborted();
-      if (rule.kind === "qualified-rule") {
-        const compiled = compileSelectorRule(rule, source.sourceUrl, addDiagnostic, input.signal);
-        compiledSelectors.set(rule, compiled);
+      if (item.kind === "declaration") {
+        if (parent !== null) compiledDeclarations.set(item, compileDeclaration(item, propertyValidation));
+        continue;
+      }
+      if (item.kind === "qualified-rule") {
+        const compiled = compileSelectorRule(item, source.sourceUrl, source.namespaces, addDiagnostic, parent, identity, input.signal);
+        compiledSelectors.set(item, compiled);
         for (const selector of compiled) {
           for (const dependency of selector.dependencies) stateDependencies.add(dependency);
           if (source.origin === "author") {
             for (const dependency of selector.dependencies) authorStateDependencies.add(dependency);
           }
         }
-        for (const item of rule.block.items) {
-          if (item.kind === "declaration") compiledDeclarations.set(item, compileDeclaration(item));
-        }
-      }
-      if (rule.block !== null) {
-        visit(rule.block.items.filter((item): item is CssRule => item.kind !== "declaration"), source);
-      }
+        const context = nestingContext(compiled, identity(`context:${compiled.map((selector) => `${selector.fingerprint}:${selector.pseudoElement ?? "element"}`).join(",")}`));
+        visit(item.block.items, source, context);
+      } else if (item.block !== null) visit(item.block.items, source, parent);
     }
   };
-  for (const source of sources) visit(source.stylesheet.rules, source);
+  for (const source of sources) visit(source.stylesheet.rules, source, null);
   const nodes = styleNodes(input);
   const inlineDeclarations = new Map<DocumentNodeRef, readonly CssDeclaration[]>();
+  const hints = new Map<DocumentNodeRef, readonly CssDeclaration[]>();
+  for (const ref of nodes.elements) {
+    const node = input.document.node(ref);
+    if (node.kind !== "element") continue;
+    const declarations = presentationalHints(node);
+    if (declarations.length === 0) continue;
+    hints.set(ref, declarations);
+    for (const declaration of declarations) compiledDeclarations.set(declaration, compileDeclaration(declaration, propertyValidation));
+  }
   let inlineBytes = 0;
   let inlineFingerprint = 0x811c9dc5;
   for (const node of nodes.elements) {
@@ -406,6 +426,8 @@ export function compileStylesheetProgram(input: CompileStylesheetProgramInput): 
     inlineFingerprint = fingerprintText(inlineFingerprint, `${node}\u0000${source}\u0000`);
     if (inlineBytes > limits.maxInlineStylesheetBytes) {
       truncatedBudgets.add("maxInlineStylesheetBytes");
+      diagnostics.add("stylesheet-limit", "inline-style",
+        `Inline declaration compilation exceeds maxInlineStylesheetBytes: bytes=${String(inlineBytes)}, limit=${String(limits.maxInlineStylesheetBytes)}; fallback=admitted-inline-declarations.`);
       break;
     }
     const parsed = parseBlockContents(source, { ...(input.signal === undefined ? {} : { signal: input.signal }) });
@@ -420,7 +442,7 @@ export function compileStylesheetProgram(input: CompileStylesheetProgramInput): 
     }
     inlineDeclarations.set(node, Object.freeze(parsed.value.filter((item) => item.kind === "declaration")));
     for (const item of parsed.value) {
-      if (item.kind === "declaration") compiledDeclarations.set(item, compileDeclaration(item));
+      if (item.kind === "declaration") compiledDeclarations.set(item, compileDeclaration(item, propertyValidation));
     }
   }
   const fingerprint = [
@@ -435,15 +457,17 @@ export function compileStylesheetProgram(input: CompileStylesheetProgramInput): 
     compiledSelectors,
     compiledDeclarations,
     selectorRuntime: selectorRuntime(),
-    propertyValidation: createPropertyValidationSession({ maxEntries: 2_048 }),
+    propertyValidation,
     substitutedValues: new BoundedSubstitutionCache(4_096),
     inlineDeclarations,
+    presentationalHints: hints,
     elementNodes: nodes.elements,
     totalNodes: nodes.totalNodes,
     stateDependencies,
     authorStateDependencies,
     dependencies,
-    diagnostics: Object.freeze(diagnostics),
+    diagnostics: diagnostics.result(),
+    omittedDiagnosticCount: diagnostics.omittedDiagnosticCount,
     fingerprint,
     truncatedBudgets,
   });

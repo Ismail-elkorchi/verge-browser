@@ -17,6 +17,7 @@ export type LayoutFragmentId = string & { readonly __layoutFragmentId: unique sy
 export type LineBoxId = string & { readonly __lineBoxId: unique symbol };
 
 export interface UsedFontMetrics {
+  /** Resolved CSS size; the output device may use fixed-size glyphs. */
   readonly fontSize: CssPixelLength;
   readonly ascent: CssPixelLength;
   readonly descent: CssPixelLength;
@@ -27,6 +28,7 @@ export interface UsedFontMetrics {
 }
 
 export interface CssTextMeasurer {
+  /** Advance of the actual output glyphs in CSS coordinates. */
   measure(text: string, fontSize: CssPixelLength): CssPixelLength;
   fontMetrics(fontSize: CssPixelLength): UsedFontMetrics;
   defaultFontMetrics(): UsedFontMetrics;
@@ -309,6 +311,7 @@ export interface LayoutFragmentTree {
   children(id: LayoutFragmentId): readonly LayoutFragment[];
   stacking(id: LayoutFragmentId): LayoutStackingMetadata;
   /** Root attachment metadata; descendants inherit the nearest attached root. */
+  scrollAttachmentParent(id: LayoutFragmentId): LayoutFragment | null;
   scrollAttachment(id: LayoutFragmentId): LayoutScrollAttachment | null;
   forFormattingNode(node: FormattingNodeId): readonly LayoutFragment[];
   forDocumentNode(node: DocumentNodeRef): readonly LayoutFragment[];

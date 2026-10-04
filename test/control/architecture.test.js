@@ -157,10 +157,19 @@ test("interactive rendering has one retained viewport path", async () => {
 test("stylesheet programs consume retained parser trees without selector serialization", async () => {
   const program = await source("src/presentation/style/stylesheet-program.ts");
   const cascade = await source("src/presentation/style/cascade.ts");
-  assert.match(program, /parseSelectorListFromComponentValues\(rule\.prelude/u);
+  const nesting = await source("src/presentation/style/nesting.ts");
+  assert.match(program, /parseSelectorListFromComponentValues\(/u);
   assert.match(cascade, /parseSelectorListFromComponentValues\(condition\.value/u);
-  assert.doesNotMatch(program, /parseSelectorList\(serializeCssComponentValues/u);
-  assert.doesNotMatch(cascade, /parseSelectorList\(serializeCssComponentValues/u);
+  assert.doesNotMatch(program, /\bparseSelectorList\s*\(/u);
+  assert.doesNotMatch(cascade, /\bparseSelectorList\s*\(/u);
+  assert.doesNotMatch(nesting, /parseComponentValues|serializeCssComponentValues/u);
+  const { parseComponentValues } = await import("@ismail-elkorchi/css-parser");
+  const { nestedPrelude } = await import("../../dist/presentation/style/nesting.js");
+  const parsed = parseComponentValues("> p, &.active");
+  assert.equal(parsed.ok, true);
+  const prepared = nestedPrelude(parsed.value);
+  assert.equal(prepared.length, parsed.value.length + 1);
+  for (const value of parsed.value) assert.ok(prepared.includes(value), "nesting must retain each original component value");
 });
 
 test("Unicode text analysis has one pinned internal ownership path", async () => {

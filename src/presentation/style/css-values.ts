@@ -10,7 +10,8 @@ import type {
   CssColor,
   CssLength,
   CssLengthPercentageExpression,
-  CssLengthUnit
+  CssLengthUnit,
+  CssTranslation
 } from "./types.js";
 
 const LENGTH_UNITS = new Set<CssLengthUnit>(["px", "em", "rem", "ch", "%", "vw", "vh"]);
@@ -295,7 +296,7 @@ function variableNameAndFallback(value: CssFunction): {
 
 function substituteVariableValues(
   values: readonly ComponentValue[],
-  properties: ReadonlyMap<string, readonly ComponentValue[]>,
+  properties: (name: string) => readonly ComponentValue[] | undefined,
   stack: ReadonlySet<string>
 ): readonly ComponentValue[] | null {
   const result: ComponentValue[] = [];
@@ -303,7 +304,7 @@ function substituteVariableValues(
     if (value.kind === "function-block" && value.name.toLowerCase() === "var") {
       const reference = variableNameAndFallback(value);
       if (reference === null || stack.has(reference.name)) return null;
-      const raw = properties.get(reference.name);
+      const raw = properties(reference.name);
       const replacement = raw ?? reference.fallback;
       if (replacement === null) return null;
       const nested = substituteVariableValues(replacement, properties, new Set([...stack, reference.name]));
@@ -331,7 +332,7 @@ function substituteVariableValues(
 /** Substitutes custom properties as component values, including nested fallbacks and cycle detection. */
 export function resolveCssVariableValues(
   values: readonly ComponentValue[],
-  properties: ReadonlyMap<string, readonly ComponentValue[]>
+  properties: (name: string) => readonly ComponentValue[] | undefined
 ): readonly ComponentValue[] | null {
   const substituted = substituteVariableValues(values, properties, new Set());
   return substituted === null ? null : cloneCssComponentValues(substituted);
@@ -398,4 +399,28 @@ export function parseCssFunctionalColor(source: string): CssColor | undefined {
     }
   }
   return undefined;
+}
+
+/** The supported two-dimensional translation subset, preserving an authored zero transform. */
+export function parseCssTranslations(source: string): readonly CssTranslation[] | null | undefined {
+  if (source.trim().toLowerCase() === "none") return null;
+  const parsed = parseComponentValues(source);
+  if (!parsed.ok) return undefined;
+  const values = compact(parsed.value);
+  if (values.length === 0) return undefined;
+  const translations: CssTranslation[] = [];
+  for (const value of values) {
+    if (value.kind !== "function-block") return undefined;
+    const name = value.name.toLowerCase();
+    if (name !== "translate" && name !== "translatex" && name !== "translatey") return undefined;
+    const argumentsList = splitArguments(value.value);
+    if (argumentsList.length < 1 || argumentsList.length > (name === "translate" ? 2 : 1)) return undefined;
+    const lengths = argumentsList.map((argument) => parseCssLength(serializeCssComponentValues(argument), { allowAuto: false, allowNegative: true }));
+    const first = lengths[0];
+    if (first === null || first === undefined || lengths.some((length) => length === null)) return undefined;
+    const zero: CssLength = Object.freeze({ kind: "zero" });
+    translations.push(Object.freeze({ x: name === "translatey" ? zero : first,
+      y: name === "translatey" ? first : lengths[1] ?? zero }));
+  }
+  return Object.freeze(translations);
 }

@@ -492,9 +492,9 @@ test("root, embedded, imported, redirected, and repeated stylesheet sources reta
   assert.deepEqual(requests, [
     "https://order.example/first.css",
     "https://order.example/shared.css",
-    "https://order.example/second.css",
-    "https://order.example/shared.css"
+    "https://order.example/second.css"
   ]);
+  assert.equal(snapshot.stylesheets[0].syntax, snapshot.stylesheets[3].syntax);
   assert.deepEqual(snapshot.stylesheets.map((source) => [
     source.sourceKind, source.rootOrder, source.importDepth, source.importLayer, source.importedFrom
   ]), [

@@ -57,3 +57,64 @@ text, semantics, logical order, principal rectangles, computed display and
 visibility, and stylesheet resources. Passing `--classify-script-required`
 also records a separate scripting-enabled observation solely to classify
 script-dependent pages. Chromium never enters the native rendering path.
+
+## Complete painted-text evidence
+
+Paint recall requires every meaningful grapheme of one complete occurrence of
+an expected phrase to survive in the cell buffer. The assertion joins all
+viewport windows and verifies formatting-node identity, document-node identity,
+logical content intervals, decoded-source intervals, and the actual row text.
+It does not accept one surviving highlight, combine partial occurrences, or
+count a same-looking glyph owned by another source. Unicode grapheme sequences
+and odd-level bidi mirroring are checked without relying on visual reading
+order. Reports include each missing grapheme and its source interval.
+
+`font-size:0` is a separate suppression measurement: its logical source is not
+a missing-visible-text failure, but any painted glyph from that source fails.
+The reduced terminal fixtures exercise positive 1/8/14/16/24/32px sizes,
+line breaks, short viewport windows, inline boundaries, wide/combining/emoji
+text, links, and zero-sized parents with restored children. Controlled exact
+line-text assertions detect invented spaces as well as missing letters.
+Paired split/unsplit fixtures must retain identical painted rows, cell styles,
+and action destinations. Explicit compact line-height remains an intentional
+overlap fixture rather than being silently reclassified as text loss.
+
+Some original fixtures deliberately occlude or place text beyond the horizontal
+viewport. Only those authored cases have `expected.paintExceptions` (or
+`paintExceptionsByVariant`), each with a reason and mandatory visible fragments.
+A visible fragment can specify `{ "text": "...", "within": "element-id" }` to
+require the surviving source to belong to that exact subtree. Logical recall
+still requires the full original phrase. These declarations are reported, not
+a global allowance for incomplete phrases.
+
+## Differential oracle checks
+
+The existing Chromium oracle uses the same narrow/medium/wide variants (including
+fixture overrides), CSS viewport size, screen/light environment, and HTTP page
+URL as the native harness. HTML and all declared stylesheet bytes are
+checksum-verified and fulfilled offline at their real fixture URLs; undeclared
+requests are blocked. Redirect and transport-encoding evidence is retained.
+Text collection walks text nodes, including mixed text before/after inline
+children, and preserves adjacency across split inline elements.
+
+The report compares Chromium's layout-visible DOM text with complete native
+painted-source evidence. This is not a pixel-occlusion oracle. Explicit
+`oracle.styles` assertions compare controlled computed values;
+`oracle.geometry` compares declared rectangle properties with a specified
+CSS-pixel tolerance. Normal text geometry is intentionally not compared because
+terminal cell metrics differ from Chromium font metrics. No pixel equality is
+claimed. JavaScript-enabled inspection remains separate classification evidence.
+
+Use `node scripts/compat/chromium-oracle.mjs --check` after building to reject
+comparison failures. `--fixture=terminal-font-metrics` selects one fixture and
+`--report=/path/to/report.json` chooses the report. If `playwright-core` is
+installed outside this checkout, `PLAYWRIGHT_CORE_PATH` can identify its module
+entry point. `CHROMIUM_EXECUTABLE` is still required; no browser or Playwright
+package is added to production dependencies. A report without `--check` records
+failures without changing the exit code.
+
+Focused harness tests run with:
+
+```sh
+node --test test/control/compatibility-*.test.js
+```

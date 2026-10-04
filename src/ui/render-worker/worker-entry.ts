@@ -3,6 +3,7 @@ import { parentPort, workerData } from "node:worker_threads";
 
 import {
   AtomicCancellationSignal,
+  measured,
   RenderArtifactStore,
   RenderStageMetrics,
 } from "../../presentation/renderer/index.js";
@@ -17,7 +18,7 @@ import {
 import type { DocumentStateDependencyChange } from "../../presentation/renderer/index.js";
 import { documentActionId } from "../../presentation/formatting/index.js";
 import { terminalCellMeasurer, terminalCssTextMeasurer } from "../terminal-measure.js";
-import { hydrateRenderDocument } from "./document-transfer.js";
+import { hydrateRenderDocument, hydrateRenderStylesheets } from "./document-transfer.js";
 import {
   hydrateDocumentState,
   type RenderWorkerRequest,
@@ -39,7 +40,7 @@ function workingSetCheckpoint(): void {
   const bytes = memory.heapUsed + memory.external;
   peakHeapUsedBytes = Math.max(peakHeapUsedBytes, memory.heapUsed);
   peakWorkingSetBytes = Math.max(peakWorkingSetBytes, bytes);
-  if (bytes > budgets.maxWorkingSetBytes) throw new RenderBudgetExceededError("working-set", bytes, budgets.maxWorkingSetBytes);
+  if (bytes > budgets.maxWorkingSetBytes) throw new RenderBudgetExceededError("working-set", bytes, budgets.maxWorkingSetBytes, "render-worker");
 }
 let viewportRequests = 0;
 let completedViewportRequests = 0;
@@ -145,9 +146,9 @@ function receive(message: RenderWorkerRequest): void {
         documentId: message.attachment.documentId,
         documentRevision: message.attachment.documentRevision,
         stateRevision: message.attachment.stateRevision,
-        document: hydrateRenderDocument(message.attachment, documentSignal),
+        document: measured(workerMetrics, "document-hydration", () => hydrateRenderDocument(message.attachment, documentSignal)),
         state: hydrateDocumentState(message.attachment.state),
-        resources: message.attachment.stylesheets,
+        resources: measured(workerMetrics, "stylesheet-hydration", () => hydrateRenderStylesheets(message.attachment, documentSignal, workerMetrics)),
         styleDiagnostics: message.attachment.styleDiagnostics,
         signal: documentSignal,
       });
@@ -285,6 +286,8 @@ function receive(message: RenderWorkerRequest): void {
         identity: summaryKey,
         documentRowCount: result.documentExtentRows,
         incomplete: incompleteRenderingLabels(artifacts),
+        styleDiagnostics: artifacts.computedStyles.diagnostics,
+        omittedStyleDiagnosticCount: artifacts.computedStyles.omittedDiagnosticCount,
         scrollAnchors: Object.freeze(result.scrollAnchors.map((anchor) => Object.freeze({
           documentNode: anchor.documentNode,
           row: Math.max(0, Math.floor(
@@ -326,7 +329,7 @@ function receive(message: RenderWorkerRequest): void {
   } catch (error) {
     if (error instanceof RenderBudgetExceededError) {
       post({ kind: "budget-exceeded", requestId: message.requestId, budget: error.budget,
-        estimatedBytes: error.estimatedBytes, limit: error.limit });
+        estimatedBytes: error.estimatedBytes, limit: error.limit, owner: error.owner });
       return;
     }
     const cancelled = cancellationSignals.some((signal) => signal.aborted);

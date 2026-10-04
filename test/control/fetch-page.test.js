@@ -14,8 +14,7 @@ import {
   PageNetworkClient,
   closeClientWithStream,
   fetchPage,
-  fetchPageStream,
-  readByteStreamToText
+  fetchPageStream
 } from "../../dist/app/fetch-page.js";
 import {
   BrowserSession,
@@ -37,18 +36,6 @@ test("fetchPage supports about:help without network", async () => {
   assert.ok(page.html.includes("Ctrl+L"));
 });
 
-test("byte-stream text reading releases its reader after a stream failure", async () => {
-  const stream = new ReadableStream({
-    start(controller) {
-      controller.enqueue(new TextEncoder().encode("partial"));
-      controller.error(new Error("stream failed"));
-    }
-  });
-
-  await assert.rejects(readByteStreamToText(stream), /stream failed/u);
-  assert.equal(stream.locked, false);
-});
-
 test("fetchPage supports file URLs", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "verge-browser-"));
 
@@ -62,7 +49,7 @@ test("fetchPage supports file URLs", async () => {
     assert.equal(page.status, 200);
     assert.equal(page.finalUrl, fileUrl);
     assert.equal(page.networkOutcome.kind, "ok");
-    assert.ok(page.html.includes("Local file"));
+    assert.ok(new TextDecoder().decode(page.bytes).includes("Local file"));
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -87,7 +74,7 @@ test("local file navigation enforces the transport budget before returning conte
 test("fetchPageStream supports about:help without network", async () => {
   const page = await fetchPageStream("about:help");
   assert.equal(page.networkOutcome.kind, "ok");
-  const html = await readByteStreamToText(page.stream);
+  const html = await new globalThis.Response(page.stream).text();
   assert.equal(page.status, 200);
   assert.ok(html.includes("verge-browser"));
 });
@@ -124,7 +111,7 @@ test("operation-scoped stream completion releases the upstream reader lock", asy
     async destroy() { throw new Error("unexpected destroy"); }
   });
 
-  assert.equal(await readByteStreamToText(stream), "complete");
+  assert.equal(await new globalThis.Response(stream).text(), "complete");
   assert.equal(closeCalls, 1);
   assert.equal(upstream.locked, false);
 });
@@ -153,7 +140,7 @@ test("network clients allow direct local navigation but block local subresources
     );
     const page = await client.navigatePage(url);
     assert.equal(page.status, 200);
-    assert.match(page.html, /local/u);
+    assert.match(new TextDecoder().decode(page.bytes), /local/u);
   } finally {
     await client.close();
     await new Promise((resolve) => server.close(resolve));
@@ -425,7 +412,7 @@ test("fetchPageStream enforces maxContentBytes", async () => {
 
   try {
     const streamPage = await client.fetchPageStream(url, 15_000, { maxContentBytes: 64 });
-    await assert.rejects(readByteStreamToText(streamPage.stream), /maxContentBytes/);
+    await assert.rejects(new globalThis.Response(streamPage.stream).text(), /maxContentBytes/);
   } finally {
     await client.close();
     await new Promise((resolve) => server.close(resolve));
@@ -563,7 +550,7 @@ test("fetchPage marks HTTP failures as http_error while returning body", async (
     const page = await client.fetchPage(url);
     assert.equal(page.status, 403);
     assert.equal(page.networkOutcome.kind, "http_error");
-    assert.ok(page.html.includes("blocked"));
+    assert.ok(new TextDecoder().decode(page.bytes).includes("blocked"));
   } finally {
     await client.close();
     await new Promise((resolve) => server.close(resolve));
@@ -634,7 +621,7 @@ test("fetchPage preserves repeated response fields", async () => {
 
     assert.equal(page.status, 200);
     assert.equal(page.networkOutcome.kind, "ok");
-    assert.ok(page.html.includes("posted"));
+    assert.ok(new TextDecoder().decode(page.bytes).includes("posted"));
     assert.deepEqual(page.responseFields.all("set-cookie"), [
       "sid=abc; Path=/; HttpOnly",
       "theme=dark; Path=/"

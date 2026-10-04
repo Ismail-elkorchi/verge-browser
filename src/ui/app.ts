@@ -123,6 +123,12 @@ function replacementCommandSuggestions(
   })));
 }
 
+function actionCommandSuggestions(input: string) {
+  const query = input.trim().toLowerCase();
+  return replacementCommandSuggestions(input, ACTION_SUGGESTIONS.filter((suggestion) =>
+    suggestion.value.toLowerCase().includes(query)));
+}
+
 function resetCommandInput(
   current: BrowserTuiState["omnibox"],
   value: string,
@@ -1109,7 +1115,7 @@ function reduceBrowser(
         overlay: {
           kind: "actionPalette",
           state: createCommandInputState({
-            suggestions: replacementCommandSuggestions("", ACTION_SUGGESTIONS)
+            suggestions: actionCommandSuggestions("")
           })
         }
       }, { focus: { kind: "element", elementId: "browser-action-input" } });
@@ -1254,13 +1260,11 @@ function reduceBrowser(
     case "actionPaletteTransition": {
       if (state.overlay?.kind !== "actionPalette") return result(state);
       let palette = commandInputReducer(state.overlay.state, message.transition);
-      if (message.transition.kind !== "acceptSuggestion") {
+      if (message.transition.kind !== "acceptSuggestion"
+        && palette.editor.input.text !== state.overlay.state.editor.input.text) {
         palette = commandInputReducer(palette, {
           kind: "setSuggestions",
-          suggestions: replacementCommandSuggestions(
-            palette.editor.input.text,
-            ACTION_SUGGESTIONS
-          )
+          suggestions: actionCommandSuggestions(palette.editor.input.text)
         });
       }
       return result({

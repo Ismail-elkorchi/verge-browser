@@ -8,7 +8,6 @@ import { HttpFields } from "@ismail-elkorchi/http-client";
 import { BrowserSession } from "../../dist/app/session.js";
 import { createDocumentState } from "../../dist/document/index.js";
 import { RenderArtifactStore } from "../../dist/presentation/renderer/index.js";
-import { projectTextSearchToLayout } from "../../dist/presentation/search/index.js";
 import {
   cssCoordinate,
   cssLengthFromFixed,
@@ -17,17 +16,13 @@ import {
   cssRect
 } from "../../dist/presentation/layout/index.js";
 import { terminalCellMeasurer, terminalCssTextMeasurer } from "../../dist/ui/terminal-measure.js";
-import { buildViewportTerminalResult } from "../../dist/presentation/terminal/index.js";
+import { phrasePaintCoverage } from "./paint-coverage.mjs";
+import { CELL_WIDTH_CSS_PX, ROW_HEIGHT_CSS_PX, DEFAULT_VARIANTS, fixtureRequestUrl, fixtureResources, mediaEnvironment } from "./environment.mjs";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const corpusPath = resolve(scriptDirectory, "corpus.json");
-const CELL_WIDTH = cssPx(8);
-const ROW_HEIGHT = cssPx(16);
-const DEFAULT_VARIANTS = Object.freeze([
-  Object.freeze({ id: "narrow", columns: 40, rows: 120, scrollRow: 0 }),
-  Object.freeze({ id: "medium", columns: 80, rows: 90, scrollRow: 0 }),
-  Object.freeze({ id: "wide", columns: 120, rows: 70, scrollRow: 0 })
-]);
+const CELL_WIDTH = cssPx(CELL_WIDTH_CSS_PX);
+const ROW_HEIGHT = cssPx(ROW_HEIGHT_CSS_PX);
 
 function argumentsFor(argv) {
   let check = false;
@@ -72,9 +67,9 @@ async function loadResourceBytes(resource) {
   return bytes;
 }
 
-async function openFixture(fixture, html, requests) {
-  const requestUrl = fixture.requestUrl ?? `https://compat.verge.test/${fixture.id}/index.html`;
-  const declaredResources = fixture.resources ?? corpus.resourceSets?.[fixture.resourceSet] ?? [];
+export async function openFixture(fixture, html, requests, corpus) {
+  const requestUrl = fixtureRequestUrl(fixture);
+  const declaredResources = fixtureResources(fixture, corpus);
   const resources = new Map(declaredResources.map((resource) => [resource.requestUrl, resource]));
   const session = new BrowserSession({
     defaultParseMode: "text",
@@ -122,7 +117,17 @@ async function openFixture(fixture, html, requests) {
   }
 }
 
-function renderSnapshot(snapshot, variant, expectedText) {
+export function paintExpectations(fixture, variant) {
+  const exceptions = fixture.expected.paintExceptionsByVariant?.[variant.id] ?? fixture.expected.paintExceptions ?? [];
+  return fixture.expected.text.flatMap((text) => {
+    const exception = exceptions.find((entry) => entry.text === text);
+    if (exception === undefined) return [text];
+    if (!exception.reason || !Array.isArray(exception.visibleText)) throw new Error(`Invalid paint exception for ${fixture.id}: ${text}`);
+    return exception.visibleText;
+  });
+}
+
+export function renderSnapshot(snapshot, variant, expectedText) {
   const viewportWidth = cssLengthFromFixed(variant.columns * CELL_WIDTH);
   const viewportHeight = cssLengthFromFixed(variant.rows * ROW_HEIGHT);
   const scrollY = cssLengthFromFixed(variant.scrollRow * ROW_HEIGHT);
@@ -140,15 +145,7 @@ function renderSnapshot(snapshot, variant, expectedText) {
   const request = {
     documentId: "compatibility-document",
     documentRevision: 1,
-    mediaEnvironment: {
-      viewportWidthCssPx: cssPixels(viewportWidth),
-      viewportHeightCssPx: cssPixels(viewportHeight),
-      mediaType: "screen",
-      prefersColorScheme: "light",
-      reducedMotion: false,
-      hover: "hover",
-      pointer: "fine"
-    },
+    mediaEnvironment: mediaEnvironment(variant),
     layoutContext: {
       viewport: { width: viewportWidth, height: viewportHeight },
       textMeasurer: terminalCssTextMeasurer(CELL_WIDTH, ROW_HEIGHT),
@@ -188,28 +185,16 @@ function renderSnapshot(snapshot, variant, expectedText) {
     for (let scrollRow = 0; scrollRow < primary.documentExtentRows; scrollRow += variant.rows) {
       windows.push(scrollRow === variant.scrollRow ? primary : viewportAt(scrollRow));
     }
-    const paintedPhrases = Object.freeze(expectedText.filter((phrase) => {
-      const projection = projectTextSearchToLayout(
-        artifacts.textSearchIndex,
-        artifacts.documentLayout,
-        phrase,
-        10_000
-      );
-      return windows.some((entry) => buildViewportTerminalResult({
-        displayList: entry.displayList,
-        cellBuffer: entry.terminal.cellBuffer,
-        documentGeometry: artifacts.documentGeometry,
-        searchProjection: projection,
-        truncations: entry.terminal.truncations
-      }).search?.ranges.length > 0);
-    }));
+    const rows = Object.freeze(windows.flatMap((entry) => entry.terminal.cellBuffer.rows));
+    const paintCoverage = phrasePaintCoverage(artifacts, rows, expectedText);
     const evidence = Object.freeze({
-      rows: Object.freeze(windows.flatMap((entry) => entry.terminal.cellBuffer.rows)),
+      rows,
       accessibilityBounds: Object.freeze(windows.flatMap((entry) => entry.terminal.accessibilityBounds)),
       focusTargets: Object.freeze(windows.flatMap((entry) => entry.terminal.focusMap.targets)),
       cellBufferOutcomes: Object.freeze(windows.map((entry) => entry.terminal.cellBuffer.outcome)),
       terminalTruncations: Object.freeze(windows.flatMap((entry) => entry.terminal.truncations)),
-      paintedPhrases
+      paintedPhrases: paintCoverage.paintedPhrases,
+      paintCoverage
     });
     return Object.freeze({ artifacts, viewport: primary, evidence });
   } finally {
@@ -245,6 +230,7 @@ function stablePayload(snapshot, pipeline, requests) {
     logicalText: normalized(pipeline.artifacts.textSearchIndex.text),
     rows: pipeline.evidence.rows.map((row) => row.text),
     paintedPhrases: pipeline.evidence.paintedPhrases,
+    paintCoverage: pipeline.evidence.paintCoverage,
     style: pipeline.artifacts.computedStyles.outcome,
     layout: pipeline.artifacts.documentLayout.outcome,
     displayList: pipeline.artifacts.documentDisplayList.outcome,
@@ -253,7 +239,7 @@ function stablePayload(snapshot, pipeline, requests) {
   });
 }
 
-function principalRectangle(snapshot, pipeline, elementId) {
+export function principalRectangle(snapshot, pipeline, elementId) {
   const documentNode = snapshot.document.elementById(elementId);
   if (documentNode === undefined || documentNode === null) return null;
   const fragment = pipeline.artifacts.documentLayout.forDocumentNode(documentNode)
@@ -379,8 +365,12 @@ function caseResult(fixture, variant, hash, snapshot, pipeline, deterministic, r
   const controls = snapshot.document.controls.filter((entry) => controlNodes.has(entry.node)).map((entry) => entry.label);
   const expectedText = fixture.expected.text;
   const logicalTextRecall = recall(expectedText, [logicalText]);
-  const paintedPhrases = pipeline.evidence.paintedPhrases;
-  const paintedTextRecall = recall(expectedText, paintedPhrases, (expected, actual) => expected === actual);
+  const paintedExpected = paintExpectations(fixture, variant).map((entry) => typeof entry === "string" ? entry : entry.text);
+  const paintedTextRecall = {
+    matched: pipeline.evidence.paintCoverage.phrases.filter((entry) => entry.complete).length,
+    expected: paintedExpected.length,
+    ratio: paintedExpected.length === 0 ? 1 : pipeline.evidence.paintCoverage.phrases.filter((entry) => entry.complete).length / paintedExpected.length
+  };
   const heading = recall(fixture.expected.headings, headings);
   const landmark = recall(fixture.expected.landmarks, landmarks, (expected, actual) => expected === actual);
   const link = recall(fixture.expected.links, links);
@@ -409,10 +399,20 @@ function caseResult(fixture, variant, hash, snapshot, pipeline, deterministic, r
     license: "MIT",
     sha256: hash,
     scriptRequired: fixture.scriptRequired === true,
+    metamorphicGroup: fixture.metamorphicGroup ?? null,
+    ...(fixture.metamorphicGroup === undefined ? {} : { paintedRows: pipeline.evidence.rows.map((row) => ({
+      row: row.row,
+      text: row.text,
+      cells: row.cells.map((cell) => ({ column: cell.column, text: cell.text, width: cell.width, style: cell.style })),
+      actions: row.spans.filter((span) => span.action !== null).flatMap((span) => Array.from({ length: span.endCodeUnit - span.startCodeUnit }, (_, offset) => ({ offset: span.startCodeUnit + offset, kind: span.action.kind, destination: span.action.destination ?? null })))
+    })) }),
     stylesheetRequests: requests,
     metrics: {
       logicalMeaningfulTextRecall: logicalTextRecall,
       paintedCellMeaningfulTextRecall: paintedTextRecall,
+      paintedGraphemeCoverage: pipeline.evidence.paintCoverage,
+      declaredPaintExceptions: fixture.expected.paintExceptionsByVariant?.[variant.id] ?? fixture.expected.paintExceptions ?? [],
+      paintedLineTextFailures: (fixture.expected.paintedLineText ?? []).filter((line) => !pipeline.evidence.rows.some((row) => normalized(row.text) === normalized(line))),
       headingRecall: heading,
       landmarkRecall: landmark,
       linkRecall: link,
@@ -421,8 +421,8 @@ function caseResult(fixture, variant, hash, snapshot, pipeline, deterministic, r
       readingOrderAgreement: expectedText.length === 0 ? 1 : readingMatches / expectedText.length,
       blankPage: logicalText.length === 0 && paintedText.length === 0,
       clippedLogicalText: expectedText.filter((phrase) => !includesText(logicalText, phrase)),
-      clippedPaintedText: expectedText.filter((phrase) =>
-        includesText(logicalText, phrase) && !paintedPhrases.includes(phrase)),
+      clippedPaintedText: pipeline.evidence.paintCoverage.phrases
+        .filter((phrase) => includesText(logicalText, phrase.text) && !phrase.complete).map((phrase) => phrase.text),
       stylesheetRequestContract: {
         missing: (fixture.expected.requiredStylesheetRequests ?? []).filter((url) => !requests.includes(url)),
         incorrectlyRequested: (fixture.expected.avoidedStylesheetRequests ?? []).filter((url) => requests.includes(url))
@@ -461,6 +461,12 @@ function aggregate(results) {
     return values;
   };
   return {
+    metamorphicFailures: results.flatMap((entry, index) => {
+      if (entry.metamorphicGroup === null) return [];
+      const previous = results.slice(0, index).find((candidate) => candidate.metamorphicGroup === entry.metamorphicGroup && candidate.variant.id === entry.variant.id);
+      return previous === undefined || JSON.stringify(previous.paintedRows) === JSON.stringify(entry.paintedRows)
+        ? [] : [{ group: entry.metamorphicGroup, first: previous.id, second: entry.id, reason: "split-inline-changed-painted-rows" }];
+    }),
     logicalMeaningfulTextRecall: ratio((entry) => entry.metrics.logicalMeaningfulTextRecall),
     paintedCellMeaningfulTextRecall: ratio((entry) => entry.metrics.paintedCellMeaningfulTextRecall),
     headingRecall: ratio((entry) => entry.metrics.headingRecall),
@@ -473,6 +479,9 @@ function aggregate(results) {
     unexplainedBlankPages: results.filter((entry) => entry.metrics.blankPage && !entry.scriptRequired).map((entry) => entry.id),
     clippedLogicalText: results.flatMap((entry) => entry.metrics.clippedLogicalText.map((value) => ({ case: entry.id, text: value }))),
     clippedPaintedText: results.flatMap((entry) => entry.metrics.clippedPaintedText.map((value) => ({ case: entry.id, text: value }))),
+    paintedLineTextFailures: results.flatMap((entry) => entry.metrics.paintedLineTextFailures.map((text) => ({ case: entry.id, text }))),
+    paintedSourceOwnershipFailures: results.flatMap((entry) => entry.metrics.paintedGraphemeCoverage.malformedSpans.map((failure) => ({ case: entry.id, ...failure }))),
+    zeroFontPaintFailures: results.flatMap((entry) => entry.metrics.paintedGraphemeCoverage.zeroFont.painted.map((failure) => ({ case: entry.id, ...failure }))),
     stylesheetRequestContractFailures: results.flatMap((entry) => [
       ...entry.metrics.stylesheetRequestContract.missing.map((url) => ({ case: entry.id, kind: "missing", url })),
       ...entry.metrics.stylesheetRequestContract.incorrectlyRequested.map((url) => ({ case: entry.id, kind: "incorrectly-requested", url }))
@@ -507,63 +516,75 @@ function aggregate(results) {
   };
 }
 
-const options = argumentsFor(process.argv.slice(2));
-const corpus = JSON.parse(await readFile(corpusPath, "utf8"));
-const results = [];
-for (const fixture of corpus.fixtures) {
-  const path = resolve(scriptDirectory, fixture.file);
-  const html = await readFile(path, "utf8");
-  const hash = createHash("sha256").update(html).digest("hex");
-  if (fixture.sha256 !== hash) throw new Error(`Fixture checksum mismatch for ${fixture.id}: ${hash}`);
-  const variants = fixture.variants ?? DEFAULT_VARIANTS;
-  for (const variant of variants) {
-    const firstRequests = [];
-    const secondRequests = [];
-    const firstSnapshot = await openFixture(fixture, html, firstRequests);
-    const secondSnapshot = await openFixture(fixture, html, secondRequests);
-    const first = renderSnapshot(firstSnapshot, variant, fixture.expected.text);
-    const second = renderSnapshot(secondSnapshot, variant, fixture.expected.text);
-    const deterministic = stablePayload(firstSnapshot, first, firstRequests)
-      === stablePayload(secondSnapshot, second, secondRequests);
-    results.push(caseResult(fixture, variant, hash, firstSnapshot, first, deterministic, firstRequests));
+export async function runCompatibility(argv = process.argv.slice(2)) {
+  const options = argumentsFor(argv);
+  const corpus = JSON.parse(await readFile(corpusPath, "utf8"));
+  const results = [];
+  for (const fixture of corpus.fixtures) {
+    const path = resolve(scriptDirectory, fixture.file);
+    const html = await readFile(path, "utf8");
+    const hash = createHash("sha256").update(html).digest("hex");
+    if (fixture.sha256 !== hash) throw new Error(`Fixture checksum mismatch for ${fixture.id}: ${hash}`);
+    const variants = fixture.variants ?? DEFAULT_VARIANTS;
+    for (const variant of variants) {
+      const firstRequests = [];
+      const secondRequests = [];
+      const firstSnapshot = await openFixture(fixture, html, firstRequests, corpus);
+      const secondSnapshot = await openFixture(fixture, html, secondRequests, corpus);
+      const first = renderSnapshot(firstSnapshot, variant, paintExpectations(fixture, variant));
+      const second = renderSnapshot(secondSnapshot, variant, paintExpectations(fixture, variant));
+      const deterministic = stablePayload(firstSnapshot, first, firstRequests)
+        === stablePayload(secondSnapshot, second, secondRequests);
+      results.push(caseResult(fixture, variant, hash, firstSnapshot, first, deterministic, firstRequests));
+    }
   }
+  const summary = aggregate(results);
+  const report = {
+    schemaVersion: 3,
+    generatedAt: new Date().toISOString(),
+    corpusLicense: corpus.license,
+    fixtureCount: corpus.fixtures.length,
+    caseCount: results.length,
+    categories: [...new Set(results.map((entry) => entry.category))],
+    summary,
+    cases: results
+  };
+  await mkdir(dirname(resolve(options.report)), { recursive: true });
+  await writeFile(resolve(options.report), `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  process.stdout.write(`${JSON.stringify(summary)}\n`);
+  if (options.check) {
+    const gatesPass = summary.logicalMeaningfulTextRecall >= 0.95
+      && summary.paintedCellMeaningfulTextRecall >= 0.95
+      && summary.linkRecall >= 0.95
+      && summary.formControlRecall >= 0.95
+      && summary.headingRecall >= 0.95
+      && summary.landmarkRecall >= 0.95
+      && summary.sourceLinkedActionRecall >= 0.95
+      && summary.readingOrderAgreement === 1
+      && summary.unexplainedBlankPages.length === 0
+      && summary.clippedLogicalText.length === 0
+      && summary.clippedPaintedText.length === 0
+      && summary.paintedLineTextFailures.length === 0
+      && summary.metamorphicFailures.length === 0
+      && summary.paintedSourceOwnershipFailures.length === 0
+      && summary.zeroFontPaintFailures.length === 0
+      && summary.stylesheetRequestContractFailures.length === 0
+      && summary.unexpectedDiagnostics.length === 0
+      && summary.stylesheetAndResourceFailures.length === 0
+      && summary.nondeterministicCases.length === 0
+      && summary.layoutTruncations.length === 0
+      && summary.displayListTruncations.length === 0
+      && summary.cellBufferTruncations.length === 0
+      && summary.terminalTruncations.length === 0;
+    const structuralGatesPass = summary.boxRelationshipFailures.length === 0
+      && summary.tableHeaderRelationshipFailures.length === 0
+      && summary.collapsedBorderSegmentFailures.length === 0;
+    if (!gatesPass || !structuralGatesPass) throw new Error("Offline compatibility gates failed; inspect the machine-readable report.");
+  }
+
+  return report;
 }
-const summary = aggregate(results);
-const report = {
-  schemaVersion: 2,
-  generatedAt: new Date().toISOString(),
-  corpusLicense: corpus.license,
-  fixtureCount: corpus.fixtures.length,
-  caseCount: results.length,
-  categories: [...new Set(results.map((entry) => entry.category))],
-  summary,
-  cases: results
-};
-await mkdir(dirname(resolve(options.report)), { recursive: true });
-await writeFile(resolve(options.report), `${JSON.stringify(report, null, 2)}\n`, "utf8");
-process.stdout.write(`${JSON.stringify(summary)}\n`);
-if (options.check) {
-  const gatesPass = summary.logicalMeaningfulTextRecall >= 0.95
-    && summary.paintedCellMeaningfulTextRecall >= 0.95
-    && summary.linkRecall >= 0.95
-    && summary.formControlRecall >= 0.95
-    && summary.headingRecall >= 0.95
-    && summary.landmarkRecall >= 0.95
-    && summary.sourceLinkedActionRecall >= 0.95
-    && summary.readingOrderAgreement === 1
-    && summary.unexplainedBlankPages.length === 0
-    && summary.clippedLogicalText.length === 0
-    && summary.clippedPaintedText.length === 0
-    && summary.stylesheetRequestContractFailures.length === 0
-    && summary.unexpectedDiagnostics.length === 0
-    && summary.stylesheetAndResourceFailures.length === 0
-    && summary.nondeterministicCases.length === 0
-    && summary.layoutTruncations.length === 0
-    && summary.displayListTruncations.length === 0
-    && summary.cellBufferTruncations.length === 0
-    && summary.terminalTruncations.length === 0;
-  const structuralGatesPass = summary.boxRelationshipFailures.length === 0
-    && summary.tableHeaderRelationshipFailures.length === 0
-    && summary.collapsedBorderSegmentFailures.length === 0;
-  if (!gatesPass || !structuralGatesPass) throw new Error("Offline compatibility gates failed; inspect the machine-readable report.");
+
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await runCompatibility();
 }

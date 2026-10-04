@@ -2,6 +2,7 @@ import type { HttpSessionAdapter } from "@ismail-elkorchi/http-client";
 
 import {
   parseWebDocument,
+  parseWebDocumentBytes,
   parseWebDocumentStream,
   type DocumentNodeRef,
   type WebDocumentParseOptions,
@@ -426,6 +427,17 @@ export class BrowserSession {
     requestOptions: PageRequestOptions
   ): Promise<LoadedStylesheets> {
     const resources: StylesheetResource[] = [];
+    const fetchedSources = new Map<string, FetchStylesheetResult>();
+    const inspectedSources = new WeakMap<FetchStylesheetResult, StylesheetDependencyInspection>();
+    const embeddedSources = new Map<string, StylesheetDependencyInspection>();
+    const inspectFetched = (fetched: FetchStylesheetResult): StylesheetDependencyInspection => {
+      const retained = inspectedSources.get(fetched);
+      if (retained !== undefined) return retained;
+      const inspection = inspectStylesheetBytes(fetched.bytes, fetched.transportEncodingLabel ?? null,
+        requestOptions.signal, this.#instrumentation);
+      inspectedSources.set(fetched, inspection);
+      return inspection;
+    };
     const diagnostics: StyleDiagnostic[] = [];
     const externalRoots = document.stylesheets.filter((entry) => entry.kind === "external");
     if (externalRoots.length > this.#stylesheetPolicy.maxStylesheets) {
@@ -446,6 +458,13 @@ export class BrowserSession {
       externalRoots.slice(0, this.#stylesheetPolicy.maxStylesheets).map((entry) => entry.owner)
     );
     const fetchResource = async (target: URL, requestBudget: number): Promise<FetchStylesheetResult | null> => {
+      const retained = fetchedSources.get(target.toString());
+      if (retained !== undefined) {
+        if (retained.bytes.byteLength <= requestBudget) return retained;
+        diagnostics.push(stylesheetDiagnostic("stylesheet-limit", retained.finalUrl,
+          "Repeated stylesheet occurrence exceeded its remaining byte budget."));
+        return null;
+      }
       let fetched: FetchStylesheetResult;
       try {
         assertPageInitiatedNavigation(document.finalUrl, target.toString());
@@ -507,6 +526,7 @@ export class BrowserSession {
         ));
         return null;
       }
+      fetchedSources.set(target.toString(), fetched);
       return fetched;
     };
     const completeInspection = (
@@ -633,12 +653,7 @@ export class BrowserSession {
           ? mediaConditions : Object.freeze([...mediaConditions, dependency.media]);
         const nestedSupports = dependency.supports === null
           ? supportsConditions : Object.freeze([...supportsConditions, dependency.supports]);
-        const importedInspection = inspectStylesheetBytes(
-          fetched.bytes,
-          fetched.transportEncodingLabel ?? null,
-          requestOptions.signal,
-          this.#instrumentation,
-        );
+        const importedInspection = inspectFetched(fetched);
         const nextActive = new Set(active);
         nextActive.add(finalIdentity);
         if (!completeInspection(importedInspection, finalIdentity)) continue;
@@ -654,6 +669,7 @@ export class BrowserSession {
           finalUrl: fetched.finalUrl,
           contentType: fetched.contentType,
           syntax: importedInspection.syntax,
+          source: importedInspection.source,
           byteSize: importedInspection.byteSize,
           contentFingerprint: importedInspection.contentFingerprint,
           parserDiagnostics: importedInspection.parserDiagnostics,
@@ -673,7 +689,9 @@ export class BrowserSession {
       requestOptions.signal?.throwIfAborted();
       const rootMedia = reference.media === null ? Object.freeze([]) : Object.freeze([reference.media]);
       if (reference.kind === "embedded") {
-        const inspection = inspectStylesheetText(reference.cssText, requestOptions.signal, this.#instrumentation);
+        const inspection = embeddedSources.get(reference.cssText)
+          ?? inspectStylesheetText(reference.cssText, requestOptions.signal, this.#instrumentation);
+        embeddedSources.set(reference.cssText, inspection);
         const sourceUrl = `${document.finalUrl}#style-${String(reference.order)}`;
         if (!completeInspection(inspection, sourceUrl)) continue;
         await loadImported(
@@ -688,6 +706,7 @@ export class BrowserSession {
           finalUrl: sourceUrl,
           contentType: "text/css",
           syntax: inspection.syntax,
+        source: inspection.source,
           byteSize: inspection.byteSize,
           contentFingerprint: inspection.contentFingerprint,
           parserDiagnostics: inspection.parserDiagnostics,
@@ -719,12 +738,7 @@ export class BrowserSession {
       const fetched = await fetchResource(target, Math.min(this.#stylesheetPolicy.maxStylesheetBytes, remainingBytes));
       if (fetched === null) continue;
       totalBytes += fetched.bytes.byteLength;
-      const inspection = inspectStylesheetBytes(
-        fetched.bytes,
-        fetched.transportEncodingLabel ?? null,
-        requestOptions.signal,
-        this.#instrumentation,
-      );
+      const inspection = inspectFetched(fetched);
       if (!completeInspection(inspection, fetched.finalUrl)) continue;
       await loadImported(
         reference.owner, reference.order, fetched.finalUrl, inspection, 1, fetched.finalUrl,
@@ -738,6 +752,7 @@ export class BrowserSession {
         finalUrl: fetched.finalUrl,
         contentType: fetched.contentType,
         syntax: inspection.syntax,
+        source: inspection.source,
         byteSize: inspection.byteSize,
         contentFingerprint: inspection.contentFingerprint,
         parserDiagnostics: inspection.parserDiagnostics,
@@ -766,6 +781,12 @@ export class BrowserSession {
     const context = { requestUrl: fetchedPage.requestUrl, finalUrl: fetchedPage.finalUrl };
     if ("html" in fetchedPage) {
       return parseWebDocument(fetchedPage.html, context, { ...this.#parseOptions, signal });
+    }
+    if ("bytes" in fetchedPage) {
+      return parseWebDocumentBytes(fetchedPage.bytes, context, {
+        ...this.#parseOptions, signal,
+        ...(fetchedPage.transportEncodingLabel === undefined ? {} : { transportEncodingLabel: fetchedPage.transportEncodingLabel })
+      });
     }
     if (parseMode === "text") throw new Error("Text parse mode requires an HTML payload");
     return parseWebDocumentStream(fetchedPage.stream, context, {
