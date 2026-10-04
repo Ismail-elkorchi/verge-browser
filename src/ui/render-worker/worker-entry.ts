@@ -286,6 +286,7 @@ function receive(message: RenderWorkerRequest): void {
         identity: summaryKey,
         documentRowCount: result.documentExtentRows,
         incomplete: incompleteRenderingLabels(artifacts),
+        styleOutcome: artifacts.computedStyles.outcome,
         styleDiagnostics: artifacts.computedStyles.diagnostics,
         omittedStyleDiagnosticCount: artifacts.computedStyles.omittedDiagnosticCount,
         scrollAnchors: Object.freeze(result.scrollAnchors.map((anchor) => Object.freeze({

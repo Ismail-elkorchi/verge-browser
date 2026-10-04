@@ -2555,7 +2555,7 @@ test("split inline styles and destinations preserve painted cell signatures", ()
   assertCompleteTextPaint(split);
   const signature = (result) => result.terminal.cellBuffer.rows.map((row) => row.cells.map((cell) => {
     const command = result.displayList.commands.find((entry) => entry.id === cell.command);
-    return { column: cell.column, text: cell.text, style: command.style, action: command.action?.kind };
+    return { column: cell.column, text: cell.text, style: command.style, action: command.action?.kind, destination: command.action?.destination };
   }));
   assert.deepEqual(signature(split), signature(original));
 });

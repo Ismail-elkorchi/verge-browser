@@ -170,7 +170,7 @@ const result = {
   schemaVersion: 2,
   chromiumExecutableHash: createHash("sha256").update(await readFile(executablePath)).digest("hex"),
   chromiumVersion: browser.version(),
-  comparisonScope: "Layout-visible DOM text (not pixel occlusion) versus complete native painted-source coverage; expected text and explicit controlled computed-style/geometry assertions; no pixel equality or terminal font-metric equality.",
+  comparisonScope: "Layout-visible DOM text, CSSOM generated strings, and native control text (not pixel occlusion) versus complete native painted-source coverage; expected text and explicit controlled computed-style/geometry assertions; no pixel equality or terminal font-metric equality.",
   summary: { caseCount: scriptingDisabled.length, comparedTextPhrases: scriptingDisabled.reduce((sum, entry) => sum + entry.comparison.comparedTextPhrases, 0), failures },
   scriptingDisabled, scriptingEnabled
 };

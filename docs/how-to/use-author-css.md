@@ -41,7 +41,10 @@ rasterization. The currently supported CSS slice includes:
 - normal and important cascade layers, named and anonymous nested layers,
   unlayered author rules, `revert`, `revert-layer`, and implementation-backed
   `@supports` conditions;
-- `screen` and width media queries, using eight CSS pixels per terminal column;
+- nested style rules, `&`, stylesheet-local namespaces, and document-mode-aware
+  selector matching;
+- `screen`, width and height media queries, including grouped `and`, `or` and
+  `not` conditions, using eight CSS pixels per column and sixteen per row;
 - visibility, whitespace, colors, text emphasis, decoration, font size, line
   height, vertical alignment, text alignment, and text indentation;
 - margins (including negative and automatic values), padding, side-specific
@@ -65,11 +68,21 @@ rasterization. The currently supported CSS slice includes:
 - relative, absolute, fixed, and sticky positioning, insets, shrink-to-fit
   sizing, z-index stacking, left/right/logical floats, clearing, and line boxes
   shortened around floats;
-- bounded widths, heights, gaps, solid borders, functional RGB/HSL colors,
-  alpha composition, and overflow clipping.
+- `translate()`, `translateX()` and `translateY()` with length-percentage values,
+  shared paint/interaction geometry, and transformed containing blocks;
+- bounded widths, heights, gaps, solid borders, CSS named colors and functional
+  RGB/HSL colors, HTML `bgcolor` presentational hints, alpha composition, and
+  overflow clipping.
+
+The terminal text measurer uses its actual fixed-size glyph advances and normal
+line metrics. Computed CSS font sizes and font-relative lengths remain distinct;
+the rasterizer does not simulate smaller glyphs by overwriting adjacent text or
+larger glyphs by inserting spaces. Explicit compact line heights can still
+create authored overlap.
 
 The `grid` shorthand, subgrid, masonry, vertical writing modes, table
-fragmentation, multi-column layout, web fonts, raster image decoding, and page
+fragmentation, multi-column layout, rotated/scaled/3D transforms, web fonts,
+raster image decoding, and page
 JavaScript remain explicit gaps. The implemented `grid-template` shorthand
 does not imply support for the separate `grid` shorthand. Supported positioned clipping retains document
 semantics while its actual paint and pointer geometry stays clipped. Sticky

@@ -66,7 +66,7 @@ async function fixture(overrides = {}) {
     }),
   };
   const prepared = await prepareBrowserTui(url, options);
-  const runtime = createTuiRuntime({ app: prepared.app, host: createMemoryTerminalHost({ terminalSize }) });
+  const runtime = createTuiRuntime({ app: prepared.app, host: createMemoryTerminalHost({ terminalSize: overrides.terminalSize ?? terminalSize }) });
   await runtime.start();
   await waitUntil(runtime, () => ["ready", "failed"].includes(runtime.state().documents[0]?.rendering?.status));
   assert.equal(runtime.state().documents[0]?.rendering?.status, "ready");
@@ -314,6 +314,8 @@ test("one-shot rendering rejects a style-budget incomplete document", async () =
     assert.match(renderFramePlain(f.runtime.frame()), /rendering incomplete/u);
     await f.runtime.dispatch({ kind: "openDetail", detail: "diagnostics" });
     assert.ok(f.runtime.state().overlay.lines.some((line) => line === "Incomplete: style.maxSelectorQueries=4096"));
+    assert.ok(f.runtime.state().overlay.lines.includes("Style fallback: user-agent-only"));
+    assert.equal(f.runtime.state().documents[0].rendering.summary.styleOutcome.fallback, "user-agent-only");
     await assert.rejects(renderBrowserOnce(url, f.options, terminalSize), /One-shot rendering was incomplete \(style\.maxSelectorQueries=4096\)/u);
   } finally { await f.close(); }
 });
@@ -331,5 +333,28 @@ test("diagnostics show each stylesheet load issue once and count only omitted un
     assert.equal(issues.length, 24);
     assert.equal(new Set(issues).size, 24);
     assert.ok(lines.includes("Additional CSS diagnostics omitted: 6"), lines.join("\n"));
+  } finally { await f.close(); }
+});
+
+test("retained control children remain inside their document allocation while resizing", async () => {
+  const f = await fixture({ terminalSize: { columns: 120, rows: 30 }, html: `<!doctype html><title>Controls</title>
+    <p>Visible page</p><div style="position:absolute;left:760px;top:64px;width:200px">
+    <input aria-label="Query" value="retained"><textarea aria-label="Notes">notes</textarea><button>Submit</button></div>` });
+  try {
+    for (const columns of [80, 120, 40, 120]) {
+      await f.runtime.resize({ columns, rows: 30 });
+      const state = f.runtime.state();
+      const tree = layoutElement(browserView(state, { terminalSize: { columns, rows: 30 } }), { columns, rows: 30 });
+      const parent = findLayout(tree, `browser-${state.documents[0].id}`);
+      assert.ok(parent);
+      for (const child of parent.children) {
+        assert.ok(child.bounds.column >= parent.bounds.column);
+        assert.ok(child.bounds.column + child.bounds.width <= parent.bounds.column + parent.bounds.width);
+        assert.ok(child.bounds.row >= parent.bounds.row);
+        assert.ok(child.bounds.row + child.bounds.height <= parent.bounds.row + parent.bounds.height);
+      }
+      await waitUntil(f.runtime, () => f.runtime.state().documents[0].rendering.status === "ready");
+      assert.match(renderFramePlain(f.runtime.frame()), /Visible page/u);
+    }
   } finally { await f.close(); }
 });

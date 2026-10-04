@@ -175,6 +175,22 @@ test("repeated interaction and resize release source and artifact graphs after f
     return;
   }
   const { setImmediate } = await import("node:timers/promises");
+  async function collect() {
+    for (let index = 0; index < 5; index += 1) { await setImmediate(); globalThis.gc(); }
+  }
+  const live = fixture('<input value="before"><p>' + "alpha ".repeat(1000) + "</p>");
+  const retired = (() => new globalThis.WeakRef(live.store.analyze(request()).textSearchIndex))();
+  try {
+    const state = applyDocumentAction(live.document, live.state, { kind: "set-control-value",
+      target: live.document.controls[0].node, value: "after" });
+    live.store.updateState({ documentId: "owner", documentRevision: 1, stateRevision: 2,
+      state, changed: new Set(["control-content"]) });
+    live.store.analyze(request());
+    assertConservative(live.store);
+    await collect();
+    assert.equal(retired.deref(), undefined, "replacing the logical index releases it before another invalidation");
+    assert.equal(live.store.search(request(), "alpha").matches.length, 1000);
+  } finally { live.store.dispose(); }
   function exercise() {
     const f = fixture('<style>p{color:red}p:focus{color:blue}</style><input value="initial">' + '<p><a href="/target">repeated alpha</a></p>'.repeat(25));
     const weak = [new globalThis.WeakRef(f.document)];
@@ -195,7 +211,30 @@ test("repeated interaction and resize release source and artifact graphs after f
     return { store: f.store, weak };
   }
   const { store, weak } = exercise();
-  for (let index = 0; index < 5; index += 1) { await setImmediate(); globalThis.gc(); }
+  await collect();
   assert.ok(weak.every((reference) => reference.deref() === undefined));
   store.dispose();
+});
+
+test("reading custom properties cannot grow an already admitted immutable style owner", () => {
+  const properties = Array.from({ length: 200 }, (_, index) => `--p${index}:value${index}`).join(";");
+  const f = fixture(`<style>:root{${properties}}p{--local:blue}</style>${"<p>hello</p>".repeat(200)}`);
+  try {
+    const artifacts = f.store.analyze(request());
+    const before = f.store.recountRetainedCost();
+    const charged = f.store.metrics().retainedCost;
+    for (let iteration = 0; iteration < 2; iteration += 1) {
+      for (const style of artifacts.computedStyles.retainedStyles().values()) {
+        const properties = style.customProperties;
+        assert.equal(properties.size, [...properties.keys()].length);
+        assert.deepEqual([...properties.values()], [...properties].map((entry) => entry[1]));
+        const visited = [];
+        properties.forEach((value, key) => visited.push([key, value]));
+        assert.deepEqual(visited, [...properties.entries()]);
+      }
+      assert.equal(f.store.recountRetainedCost(), before);
+      assert.equal(f.store.metrics().retainedCost, charged);
+      assertConservative(f.store);
+    }
+  } finally { f.store.dispose(); }
 });

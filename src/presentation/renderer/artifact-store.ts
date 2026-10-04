@@ -254,7 +254,6 @@ export class RenderArtifactStore {
     if (invalidates) {
       document.analyses.clear();
       document.searches.clear();
-      this.#pruneQueryOwners(document);
       this.#refreshProgramCosts(document);
       this.#measureRetainedCost();
     }
@@ -643,7 +642,6 @@ export class RenderArtifactStore {
       document.searches.delete(identity);
       clearTextSearchQueryCache(artifacts.textSearchIndex);
       this.#refreshQueryCosts(document, artifacts.textSearchIndex);
-      this.#pruneQueryOwners(document);
       this.#measureRetainedCost();
       throw error;
     } finally { this.#accounting.endBatch(); }
@@ -674,6 +672,7 @@ export class RenderArtifactStore {
     const owners: RetainedCostOwner[] = [];
     let bookkeeping = 0;
     for (const document of this.#documents.values()) {
+      this.#pruneQueryOwners(document);
       const indexes = new Set([...document.analyses.values()].map(({ artifacts }) => artifacts.textSearchIndex));
       if (document.logicalText !== null) indexes.add(document.logicalText.index);
       for (const index of indexes) this.#refreshQueryCosts(document, index, signal);
@@ -696,6 +695,7 @@ export class RenderArtifactStore {
     return estimatedRetainedCost([...this.#documents.values()].map((document) => ({
       program: document.program, state: document.state, budgets: document.budgets,
       logicalText: document.logicalText,
+      queryIndexes: [...document.queryOwners.keys()],
       analyses: [...document.analyses.values()].map(({ artifacts }) => artifacts),
       searches: [...document.searches.values()].map(({ projection }) => projection),
     })));
@@ -721,7 +721,6 @@ export class RenderArtifactStore {
       for (const identity of oldest.document.searches.keys()) {
         if (identity.startsWith(`${oldest.identity}\u0000`)) oldest.document.searches.delete(identity);
       }
-      this.#pruneQueryOwners(oldest.document);
       this.#clearProgramCaches(oldest.document);
       this.#evictions += 1;
       this.#measureRetainedCost(signal);

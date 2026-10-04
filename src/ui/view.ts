@@ -603,6 +603,25 @@ function documentCellBounds(rect: Rect, content: Rect, viewport: Rect): Rect | n
     ? { row, column, height: bottom - row, width: right - column } : null;
 }
 
+function documentCellUnion(rectangles: readonly Rect[], content: Rect, viewport: Rect): Rect | null {
+  let combined: Rect | null = null;
+  for (const rect of rectangles) {
+    const clipped = documentCellBounds(rect, content, viewport);
+    if (clipped === null) continue;
+    if (combined === null) combined = clipped;
+    else {
+      const row = Math.min(combined.row, clipped.row);
+      const column = Math.min(combined.column, clipped.column);
+      combined = {
+        row, column,
+        height: Math.max(combined.row + combined.height, clipped.row + clipped.height) - row,
+        width: Math.max(combined.column + combined.width, clipped.column + clipped.width) - column
+      };
+    }
+  }
+  return combined;
+}
+
 function browserDocumentChildBounds(
   document: BrowserDocumentComponentModel,
   bounds: Rect,
@@ -616,27 +635,9 @@ function browserDocumentChildBounds(
     if (!entry) {
       return { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 };
     }
-    const rectangles = entry.controls.flatMap((control) => terminalRender.cellRectsForDocumentNode(control.node))
-      .filter((rect) => rect.width > 0 && rect.height > 0);
-    if (rectangles.length === 0) {
-      return { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 };
-    }
-    let row = rectangles[0]?.row ?? 0;
-    let column = rectangles[0]?.column ?? 0;
-    let bottom = row;
-    let edge = column;
-    for (const rect of rectangles) {
-      row = Math.min(row, rect.row);
-      column = Math.min(column, rect.column);
-      bottom = Math.max(bottom, rect.row + rect.height);
-      edge = Math.max(edge, rect.column + rect.width);
-    }
-    return {
-      row: contentBounds.row + row,
-      column: contentBounds.column + column,
-      width: Math.max(1, edge - column),
-      height: Math.max(1, bottom - row)
-    };
+    const rectangles = entry.controls.flatMap((control) => terminalRender.cellRectsForDocumentNode(control.node));
+    return documentCellUnion(rectangles, contentBounds, contentBounds)
+      ?? { row: contentBounds.row, column: contentBounds.column, width: 0, height: 0 };
   });
 }
 
@@ -757,21 +758,8 @@ const browserDocumentComponent = defineComponent<BrowserDocumentComponentOptions
     return model.document.terminalRender.focusMap.targets
       .filter((target) => target.action.kind !== "form-control")
       .flatMap((target) => {
-        const rectangles = target.rects.flatMap((rect) => {
-          const clipped = documentCellBounds(rect, contentBounds, visibleBounds);
-          return clipped === null ? [] : [clipped];
-        });
-        const first = rectangles[0];
-        if (first === undefined) return [];
-        let row = first.row;
-        let column = first.column;
-        let bottom = row;
-        let edge = column;
-        for (const rect of rectangles) {
-          row = Math.min(row, rect.row); column = Math.min(column, rect.column);
-          bottom = Math.max(bottom, rect.row + rect.height); edge = Math.max(edge, rect.column + rect.width);
-        }
-        return [{ id: documentActionId(target.action), bounds: { row, column, width: edge - column, height: bottom - row } }];
+        const bounds = documentCellUnion(target.rects, contentBounds, visibleBounds);
+        return bounds === null ? [] : [{ id: documentActionId(target.action), bounds }];
       });
   },
   onFocus(event) {

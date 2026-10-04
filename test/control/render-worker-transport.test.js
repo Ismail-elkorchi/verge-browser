@@ -59,6 +59,7 @@ function viewport(request, identity, summary) {
 }
 
 const summary = { identity: "layout-1", documentRowCount: 500, incomplete: [], scrollAnchors: [{ documentNode: "target", row: 300 }],
+  styleOutcome: { status: "complete", computedNodes: 1 }, styleDiagnostics: [], omittedStyleDiagnosticCount: 0,
   focusOrder: [{ node: "target", actionId: "link:target", actionKind: "link", topRow: 300, bottomRow: 301 }], authorStateDependencies: [] };
 
 test("summary receipt survives rejection of its viewport and acknowledges only held identity", async () => {

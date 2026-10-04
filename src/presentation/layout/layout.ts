@@ -754,9 +754,16 @@ function rootFontMetrics(input: BuildLayoutFragmentTreeInput): UsedFontMetrics {
   return checkedFontMetrics(input.context.textMeasurer.fontMetrics(size));
 }
 
+/** The authored table wrapper owns outer-box behavior; anonymous fixup boxes do not. */
+function ownsOuterBoxStyle(node: FormattingNode): boolean {
+  return node.kind === "table-wrapper"
+    ? node.source !== null
+    : node.appliesBoxStyle && node.kind !== "table";
+}
+
 /** Transforms apply to box-generating elements except non-replaced inline boxes and columns. */
 function hasTransform(tree: FormattingTree, node: FormattingNode, style: ComputedStyle | null): boolean {
-  return node.appliesBoxStyle && style?.box.transform != null
+  return ownsOuterBoxStyle(node) && style?.box.transform != null
     && node.kind !== "table-column" && node.kind !== "table-column-group"
     && (node.outer !== "inline" || isAtomicInlineBox(tree, node));
 }
@@ -767,6 +774,7 @@ class LayoutBuilder {
   readonly #budgets: LayoutBudgets;
   readonly #rootFontMetrics: UsedFontMetrics;
   readonly #fontMetricsCache = new Map<CssPixelLength, UsedFontMetrics>();
+  readonly #tableGridStyles = new Map<ComputedStyle, ComputedStyle>();
   readonly #textAdvanceCache = new Map<string, CssNonNegativeLength>();
   readonly #fragments = new Map<LayoutFragmentId, LayoutFragment>();
   readonly #clipChains = new Map<LayoutFragmentId, LayoutClipChain>();
@@ -797,7 +805,7 @@ class LayoutBuilder {
   readonly #intrinsicContributionCache: IntrinsicContributionCache;
   readonly #tableSlotGridCache = new Map<FormattingNodeId, TableSlotGrid>();
   readonly #positionedContainingBlocks = new Map<FormattingNodeId, CssRect>();
-  readonly #deferredPositioned: { readonly placeholder: LayoutFragmentId; readonly node: FormattingNode; readonly depth: number }[] = [];
+  readonly #deferredPositioned = new Map<LayoutFragmentId, { readonly node: FormattingNode; readonly depth: number }>();
   readonly #principalFragments = new Map<FormattingNodeId, LayoutFragmentId>();
   readonly #stackingMetadata = new Map<
     LayoutFragmentId,
@@ -906,12 +914,12 @@ class LayoutBuilder {
   }
 
   #hasTransform(node: FormattingNode): boolean {
-    return hasTransform(this.#formatting, node, this.#boxComputed(node));
+    return hasTransform(this.#formatting, node, this.#computed(node));
   }
 
   #establishesPositionedContainingBlock(node: FormattingNode): boolean {
     const style = this.#boxComputed(node);
-    return style !== null && (style.box.position !== "static" || this.#hasTransform(node));
+    return (style !== null && style.box.position !== "static") || this.#hasTransform(node);
   }
 
   #reserveInlineTextAnalysis(analysis: InlineTextAnalysis): void {
@@ -1337,7 +1345,34 @@ class LayoutBuilder {
   }
 
   #boxComputed(node: FormattingNode): ComputedStyle | null {
-    return node.appliesBoxStyle ? this.#computed(node) : null;
+    if (!node.appliesBoxStyle && !ownsOuterBoxStyle(node)) return null;
+    const style = this.#computed(node);
+    if (node.kind !== "table" || style === null) return style;
+    const cached = this.#tableGridStyles.get(style);
+    if (cached !== undefined) return cached;
+    // CSS Tables assigns these properties to the wrapper, around grid and
+    // captions. Keep the grid's sizing, padding, border, and paint inputs intact.
+    const zero = Object.freeze({ kind: "zero" as const });
+    const auto = Object.freeze({ kind: "auto" as const });
+    const grid = Object.freeze({
+      ...style,
+      box: Object.freeze({
+        ...style.box,
+        margin: Object.freeze({ top: zero, right: zero, bottom: zero, left: zero }),
+        position: "static" as const,
+        inset: Object.freeze({ top: auto, right: auto, bottom: auto, left: auto }),
+        zIndex: null,
+        float: "none" as const,
+        clear: "none" as const,
+        transform: null,
+        overflowX: "visible" as const,
+        overflowY: "visible" as const,
+        legacyClip: Object.freeze({ kind: "auto" as const }),
+        clipPath: Object.freeze({ kind: "none" as const }),
+      }),
+    });
+    this.#tableGridStyles.set(style, grid);
+    return grid;
   }
 
   #fontSize(style: ComputedStyle | null): CssPixelLength {
@@ -1534,8 +1569,9 @@ class LayoutBuilder {
     containingHeight: CssPixelLength | null,
     forcedContentWidth: CssPixelLength | null = null,
     distributeForcedAutoMargins = false,
+    styleOverride?: ComputedStyle | null,
   ): UsedDimensions {
-    const style = this.#boxComputed(node);
+    const style = styleOverride === undefined ? this.#boxComputed(node) : styleOverride;
     const { margin, padding, border } = this.#edges(style, containingWidth, node.id);
     const horizontalChrome = sum(
       padding.left,
@@ -2181,64 +2217,28 @@ class LayoutBuilder {
     rootTextHeight: CssPixelLength,
     rootBaseline: CssPixelLength,
   ): void {
-    const pending = [root];
-    while (pending.length > 0) {
-      const id = pending.pop();
-      if (id === undefined) continue;
-      const fragment = this.#fragments.get(id);
-      if (fragment === undefined) continue;
-      for (const child of fragment.children) pending.push(child);
-      const move = (rect: CssRect): CssRect =>
-        cssRect(
-          point(rect.x, inlineOffset),
-          point(rect.y, blockOffset),
-          rect.width,
-          rect.height,
-        );
-      const movedContent =
-        id === root && fragment.kind === "text"
-          ? cssRect(
-              point(fragment.contentRect.x, inlineOffset),
-              rootY,
-              fragment.contentRect.width,
-              rootTextHeight,
-            )
-          : move(fragment.contentRect);
-      const lineBoxes = fragment.lineBoxes.map((line) => {
-        const moved = Object.freeze({
-          ...line,
-          rect: move(line.rect),
-          baseline: cssAdd(line.baseline, blockOffset),
-        });
-        const position = this.#lineBoxPositions.get(line.id);
-        if (position !== undefined) this.#lineBoxes[position] = moved;
-        return moved;
-      });
-      const movedOverflow =
-        id === root && fragment.kind === "text"
-          ? movedContent
-          : move(fragment.overflowRect);
-      this.#fragments.set(id, {
-        ...fragment,
-        contentRect: movedContent,
-        paddingRect:
-          id === root && fragment.kind === "text"
-            ? movedContent
-            : move(fragment.paddingRect),
-        borderRect:
-          id === root && fragment.kind === "text"
-            ? movedContent
-            : move(fragment.borderRect),
-        marginRect:
-          id === root && fragment.kind === "text"
-            ? movedContent
-            : move(fragment.marginRect),
-        overflowRect: movedOverflow,
-        clipRect: cssIntersection(move(fragment.clipRect), containingClip),
-        lineBoxes: Object.freeze(lineBoxes),
-        ...(id === root ? { baseline: rootBaseline } : {}),
-      });
-    }
+    const fragment = this.#fragments.get(root);
+    if (fragment === undefined) return;
+    this.#translate(
+      { fragment: root, borderRect: fragment.borderRect, marginRect: fragment.marginRect },
+      inlineOffset,
+      blockOffset,
+      containingClip,
+    );
+    const moved = this.#fragments.get(root);
+    if (moved === undefined) return;
+    const textRect = cssRect(moved.contentRect.x, rootY, moved.contentRect.width, rootTextHeight);
+    this.#fragments.set(root, {
+      ...moved,
+      baseline: rootBaseline,
+      ...(moved.kind === "text" ? {
+        contentRect: textRect,
+        paddingRect: textRect,
+        borderRect: textRect,
+        marginRect: textRect,
+        overflowRect: textRect,
+      } : {}),
+    });
   }
 
   #finalizeLine(
@@ -4879,7 +4879,11 @@ class LayoutBuilder {
         },
         tableSlotGrid: (node) => this.#tableSlotGrid(node),
         dimensions: (node, containingWidth, containingHeight, forcedWidth) =>
-          this.#dimensions(node, containingWidth, containingHeight, forcedWidth, node.kind === "table"),
+          this.#dimensions(node, containingWidth, containingHeight, forcedWidth,
+            node.kind === "table" && wrapper.outer === "block"
+              && (this.#computed(wrapper)?.box.float ?? "none") === "none"
+              && !this.#outOfFlow(wrapper),
+            node.kind === "table" ? this.#computed(node) : undefined),
         intrinsicContributions: (id, availableInlineSize) =>
           this.#intrinsicContributions(id, availableInlineSize),
         layoutChild: (
@@ -5021,35 +5025,46 @@ class LayoutBuilder {
     containingClip: CssRect,
   ): LayoutResult {
     if (inlineOffset === 0 && blockOffset === 0) return result;
-    const move = (rect: CssRect): CssRect =>
-      cssRect(
-        point(rect.x, inlineOffset),
-        point(rect.y, blockOffset),
-        rect.width,
-        rect.height,
-      );
-    const rootFormatting = this.#fragments.get(result.fragment)?.formattingNode;
-    const pending = [result.fragment];
+    const translatedOffsets = new Map<FormattingNodeId, {
+      readonly inline: CssPixelLength;
+      readonly block: CssPixelLength;
+    }>();
+    const pending = [{ id: result.fragment, inline: inlineOffset, block: blockOffset }];
     while (pending.length > 0) {
-      const id = pending.pop();
-      if (id === undefined) continue;
+      const entry = pending.pop();
+      if (entry === undefined) continue;
+      const { id } = entry;
       const fragment = this.#fragments.get(id);
       if (fragment === undefined) continue;
-      if (id !== result.fragment && fragment.kind !== "text") {
+      let inline = entry.inline;
+      let block = entry.block;
+      if (id !== result.fragment && fragment.kind !== "text" && !this.#deferredPositioned.has(id)) {
         const node = this.#formatting.node(fragment.formattingNode);
-        const position = this.#boxComputed(node)?.box.position;
+        const style = this.#boxComputed(node);
+        const position = style?.box.position;
         if (position === "absolute" || position === "fixed") {
-          let owner = this.#positionedContainingNode(node, position === "fixed");
-          while (owner !== null && owner.id !== rootFormatting) owner = this.#formatting.parent(owner.id);
-          if (owner === null) continue;
+          const owner = this.#positionedContainingNode(node, position === "fixed");
+          const ownerOffset = owner === null ? undefined : translatedOffsets.get(owner.id);
+          // Auto insets retain the hypothetical normal-flow position on each axis.
+          // Explicit insets follow only their containing block, which may be outside
+          // this subtree (or move differently from an intervening positioned box).
+          const automatic = (side: keyof ComputedStyle["box"]["inset"]): boolean => {
+            const value = style?.box.inset[side];
+            return value === undefined || value.kind === "auto" || value.kind === "none";
+          };
+          if (!automatic("left") || !automatic("right")) inline = ownerOffset?.inline ?? ZERO;
+          if (!automatic("top") || !automatic("bottom")) block = ownerOffset?.block ?? ZERO;
         }
       }
-      for (const child of fragment.children) pending.push(child);
+      if (fragment.kind !== "text") translatedOffsets.set(fragment.formattingNode, { inline, block });
+      for (const child of fragment.children) pending.push({ id: child, inline, block });
+      const move = (rect: CssRect): CssRect =>
+        cssRect(point(rect.x, inline), point(rect.y, block), rect.width, rect.height);
       const lineBoxes = fragment.lineBoxes.map((line) => {
         const moved = Object.freeze({
           ...line,
           rect: move(line.rect),
-          baseline: cssAdd(line.baseline, blockOffset),
+          baseline: cssAdd(line.baseline, block),
         });
         const position = this.#lineBoxPositions.get(line.id);
         if (position !== undefined) this.#lineBoxes[position] = moved;
@@ -5176,7 +5191,7 @@ class LayoutBuilder {
       try {
         const empty = cssRect(staticX, staticY, ZERO, ZERO);
         const placeholder = this.#container(node, empty, empty, empty, empty, inheritedClip, [], []);
-        this.#deferredPositioned.push({ placeholder: placeholder.fragment, node, depth });
+        this.#deferredPositioned.set(placeholder.fragment, { node, depth });
         return placeholder;
       } finally {
         this.#reserved -= 1;
@@ -5343,8 +5358,16 @@ class LayoutBuilder {
       forcedHeight,
     );
     if (result === null) return null;
-    // Finalize the used block position from the laid-out border-box size for
-    // every inset combination, including an automatic height with bottom.
+    // Finalize offsets against the actual border box: intrinsic table/caption
+    // sizing can enlarge it beyond preliminary width or height predictions.
+    const targetBorderX = useLeftInset
+      ? point(containingBlock.x, sum(left, edges.margin.left))
+      : right !== null
+        ? point(
+            cssCoordinateAdd(containingBlock.x, containingBlock.width),
+            sum(negate(right), negate(edges.margin.right), negate(result.borderRect.width)),
+          )
+        : borderX;
     const targetBorderY =
       top !== null
         ? point(containingBlock.y, sum(top, edges.margin.top))
@@ -5360,7 +5383,7 @@ class LayoutBuilder {
           : borderY;
     const positioned = this.#translate(
       result,
-      ZERO,
+      cssCoordinateDifference(targetBorderX, result.borderRect.x),
       cssCoordinateDifference(targetBorderY, result.borderRect.y),
       viewportFixed
         ? this.#input.context.scrollport
@@ -5756,7 +5779,7 @@ class LayoutBuilder {
                   ),
                 ),
               );
-        const result = this.#tryLayoutNode(
+        let result = this.#tryLayoutNode(
           childId,
           initialX,
           point(floatY, childDimensions.margin.top),
@@ -5767,6 +5790,11 @@ class LayoutBuilder {
           floatContentWidth,
         );
         if (result === null) break;
+        if (childStyle.box.float === "right") {
+          result = this.#translate(result,
+            cssCoordinateDifference(range.end, point(result.marginRect.x, result.marginRect.width)),
+            ZERO, childClip);
+        }
         children.push(result.fragment);
         floatManager.add(
           childStyle.box.float,
@@ -7008,18 +7036,16 @@ class LayoutBuilder {
   }
 
   #resolveDeferredPositioned(): void {
-    for (let index = 0; index < this.#deferredPositioned.length; index += 1) {
+    for (const [placeholderId, deferred] of this.#deferredPositioned) {
       this.#input.signal?.throwIfAborted();
-      const deferred = this.#deferredPositioned[index];
-      if (deferred === undefined) continue;
-      const placeholder = this.#fragments.get(deferred.placeholder);
-      const parentId = this.#parentIndex.get(deferred.placeholder);
+      const placeholder = this.#fragments.get(placeholderId);
+      const parentId = this.#parentIndex.get(placeholderId);
       const parent = parentId === undefined ? undefined : this.#fragments.get(parentId);
       if (placeholder === undefined || parent === undefined) continue;
-      this.#discardLayoutSubtree(deferred.placeholder);
+      this.#discardLayoutSubtree(placeholderId);
       const result = this.#layoutOutOfFlow(deferred.node, placeholder.borderRect.x, placeholder.borderRect.y,
         placeholder.clipRect, deferred.depth);
-      const children = parent.children.flatMap((id) => id === deferred.placeholder
+      const children = parent.children.flatMap((id) => id === placeholderId
         ? result === null ? [] : [result.fragment] : [id]);
       this.#fragments.set(parent.id, { ...parent, children: Object.freeze(children) });
       if (result !== null) this.#parentIndex.set(result.fragment, parent.id);
@@ -7070,7 +7096,7 @@ class LayoutBuilder {
       );
       let current = this.#fragments.get(positioned.fragment);
       if (current !== undefined && current.kind !== "text" && this.#hasTransform(node)) {
-        const style = this.#boxComputed(node);
+        const style = this.#computed(node);
         let inlineOffset: CssPixelLength = ZERO;
         let blockOffset: CssPixelLength = ZERO;
         for (const translation of style?.box.transform ?? []) {
@@ -7238,7 +7264,7 @@ class LayoutBuilder {
       let chain = entry.inherited;
       let clipRect = entry.clipRect;
       const node = this.#formatting.node(fragment.formattingNode);
-      const position = fragment.kind !== "text" && node.appliesBoxStyle ? this.#boxComputed(node)?.box.position : undefined;
+      const position = fragment.kind !== "text" ? this.#boxComputed(node)?.box.position : undefined;
       if (position === "absolute" || position === "fixed") {
         // Overflow follows the containing block; explicit clips still follow ancestry.
         const ownerNode = this.#positionedContainingNode(node, position === "fixed");
@@ -7268,7 +7294,7 @@ class LayoutBuilder {
         }
         chain = filtered ?? canvas;
       }
-      if (fragment.kind !== "text" && node.appliesBoxStyle) {
+      if (fragment.kind !== "text" && this.#boxComputed(node) !== null) {
         for (const [kind, own] of [
           ["overflow", this.#overflowClip(node, fragment.paddingRect, canvas.rect)],
           ["clip", this.#explicitClip(node, fragment.borderRect, canvas.rect)],
@@ -7350,9 +7376,11 @@ class LayoutBuilder {
     this.#refreshInlineContinuationGeometry();
     if (this.#hasInFlowPositioning) {
       this.#applyFinalInFlowPositions(root.fragment);
-      this.#refreshInlineContinuationGeometry();
+      // Continuations describe the inline's own flow box. Translating an inline
+      // moves its existing continuations; rebuilding them from visually moved
+      // descendants would incorrectly move an unpositioned ancestor's decoration.
     }
-    if (this.#hasInFlowPositioning || this.#deferredPositioned.length > 0) this.#refreshOverflow(root.fragment);
+    if (this.#hasInFlowPositioning || this.#deferredPositioned.size > 0) this.#refreshOverflow(root.fragment);
     this.#buildClipChains(root.fragment);
     this.#buildStackingMetadata(root.fragment);
     const outcome: LayoutOutcome =
@@ -7629,7 +7657,7 @@ class ImmutableLayoutFragmentTree implements LayoutFragmentTree {
     const computed = (candidate: FormattingNode): ComputedStyle | null => candidate.styleNode === null ? null
       : candidate.pseudo === null ? this.formatting.styles.style(candidate.styleNode)
         : this.formatting.styles.pseudo(candidate.styleNode, candidate.pseudo) ?? this.formatting.styles.style(candidate.styleNode);
-    if (fragment.kind === "text" || !node.appliesBoxStyle || computed(node)?.box.position !== "fixed") return this.parent(id);
+    if (fragment.kind === "text" || !ownsOuterBoxStyle(node) || computed(node)?.box.position !== "fixed") return this.parent(id);
     let owner = this.formatting.parent(node.id);
     while (owner !== null) {
       if (hasTransform(this.formatting, owner, computed(owner))) {

@@ -1,5 +1,9 @@
 import type { StyleDiagnostic, StyleDiagnosticCode } from "./types.js";
 
+export function diagnosticIdentity(code: StyleDiagnosticCode, sourceUrl: string, detail: string): string {
+  return `${code}\u0000${sourceUrl}\u0000${detail}`;
+}
+
 /** Shared bounded diagnostics retain occurrence counts, including suppressed reports. */
 export class DiagnosticCollector {
   readonly #values: StyleDiagnostic[] = [];
@@ -14,7 +18,7 @@ export class DiagnosticCollector {
   }
   public get omittedDiagnosticCount(): number { return this.#omitted; }
   public add(code: StyleDiagnosticCode, sourceUrl: string, detail: string, occurrences = 1): void {
-    const identity = `${code}\u0000${sourceUrl}\u0000${detail}`;
+    const identity = diagnosticIdentity(code, sourceUrl, detail);
     const index = this.#indices.get(identity);
     if (index !== undefined) {
       const current = this.#values[index];

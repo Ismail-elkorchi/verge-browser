@@ -327,6 +327,8 @@ export type StyleOutcome =
       readonly computedNodes: number;
       readonly budget: keyof StyleBudgets;
       readonly limit: number;
+      /** Whether this evaluation discarded the author cascade after selector exhaustion. */
+      readonly fallback: "user-agent-only" | null;
     }
   | { readonly status: "rejected"; readonly reason: "invalid-environment" | "invalid-document" }
   | { readonly status: "unsupported"; readonly feature: string };

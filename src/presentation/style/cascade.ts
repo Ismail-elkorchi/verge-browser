@@ -1,4 +1,4 @@
-import { DiagnosticCollector } from "./diagnostics.js";
+import { DiagnosticCollector, diagnosticIdentity } from "./diagnostics.js";
 import { EMPTY_NAMESPACES, bindSelectorNamespaces } from "./namespaces.js";
 import { namedColor } from "./named-colors.js";
 import { mediaApplies } from "./media.js";
@@ -168,11 +168,18 @@ interface CascadeCandidate {
 }
 
 type CandidateMap = Map<string, Map<string, CascadeCandidate[]>>;
+type DiagnosticSink = Pick<DiagnosticCollector, "add">;
+type DiagnosticDescriptor = Omit<StyleDiagnostic, "occurrences">;
+interface ComputedDiagnosticContribution {
+  readonly descriptor: DiagnosticDescriptor;
+  readonly occurrences: number;
+}
 
 interface CandidateCollection {
   readonly candidates: CandidateMap;
   /** Null means no prior dynamic-state result can safely seed incremental computation. */
   readonly affectedDynamicNodes: ReadonlySet<DocumentNodeRef> | null;
+  readonly fallback: "user-agent-only" | null;
 }
 
 let nextCustomPropertyEnvironment = 1;
@@ -181,7 +188,6 @@ class ImmutableCustomPropertyEnvironment implements ReadonlyMap<string, string> 
   readonly identity = nextCustomPropertyEnvironment++;
   readonly #parent: ImmutableCustomPropertyEnvironment | null;
   readonly #changes: ReadonlyMap<string, readonly ComponentValue[] | null>;
-  #materialized: ReadonlyMap<string, string> | null = null;
 
   public constructor(
     parent: ImmutableCustomPropertyEnvironment | null,
@@ -189,22 +195,30 @@ class ImmutableCustomPropertyEnvironment implements ReadonlyMap<string, string> 
   ) {
     this.#parent = parent;
     this.#changes = changes;
-    registerRetainedOwner(this, () => [this.#parent, this.#changes, this.#materialized]);
+    registerRetainedOwner(this, [this.#parent, this.#changes]);
     Object.freeze(this);
   }
 
-  #values(): ReadonlyMap<string, string> {
-    if (this.#materialized !== null) return this.#materialized;
-    const values = new Map<string, string>(this.#parent ?? []);
-    for (const [name, value] of this.#changes) {
-      if (value === null) values.delete(name);
-      else values.set(name, serializeCssComponentValues(value));
+  #components(): ReadonlyMap<string, readonly ComponentValue[]> {
+    const layers: ImmutableCustomPropertyEnvironment[] = [this];
+    for (let parent = this.#parent; parent !== null; parent = parent.#parent) layers.push(parent);
+    const values = new Map<string, readonly ComponentValue[]>();
+    for (let index = layers.length - 1; index >= 0; index -= 1) {
+      const layer = layers[index];
+      if (layer === undefined) continue;
+      for (const [name, value] of layer.#changes) {
+        if (value === null) values.delete(name);
+        else values.set(name, value);
+      }
     }
-    this.#materialized = values;
     return values;
   }
 
-  public get size(): number { return this.#values().size; }
+  #values(): ReadonlyMap<string, string> {
+    return new Map([...this.#components()].map(([name, value]) => [name, serializeCssComponentValues(value)]));
+  }
+
+  public get size(): number { return this.#components().size; }
   public get(key: string): string | undefined {
     if (this.#changes.has(key)) {
       const value = this.#changes.get(key);
@@ -224,9 +238,9 @@ class ImmutableCustomPropertyEnvironment implements ReadonlyMap<string, string> 
     }
     return new ImmutableCustomPropertyEnvironment(null, parsed);
   }
-  public has(key: string): boolean { return this.get(key) !== undefined; }
+  public has(key: string): boolean { return this.componentValues(key) !== undefined; }
   public entries(): MapIterator<[string, string]> { return this.#values().entries(); }
-  public keys(): MapIterator<string> { return this.#values().keys(); }
+  public keys(): MapIterator<string> { return this.#components().keys(); }
   public values(): MapIterator<string> { return this.#values().values(); }
   public forEach(
     callbackfn: (value: string, key: string, map: ReadonlyMap<string, string>) => void,
@@ -1120,7 +1134,11 @@ function collectCandidates(
       `Style evaluation exhausted ${budget}: consumed=${String(consumed)}, limit=${String(limits[budget])}; fallback=user-agent-only.`);
   }
   if (selectorExhaustion.size === 0) mergeCandidateMaps(candidates, authorCandidates);
-  return Object.freeze({ candidates, affectedDynamicNodes: selectorExhaustion.size === 0 ? affectedDynamicNodes : null });
+  return Object.freeze({
+    candidates,
+    affectedDynamicNodes: selectorExhaustion.size === 0 ? affectedDynamicNodes : null,
+    fallback: selectorExhaustion.size === 0 ? null : "user-agent-only",
+  });
 }
 
 function cssValue(declaration: CssDeclaration): string {
@@ -1211,7 +1229,7 @@ function validatedValue(
   candidates: ReadonlyMap<string, readonly CascadeCandidate[]> | undefined,
   names: string | readonly string[],
   variables: ReadonlyMap<string, string>,
-  diagnostics: DiagnosticCollector,
+  diagnostics: DiagnosticSink,
   validationSession: ResolveStylesInput["program"]["propertyValidation"],
   substitutionCache: ResolveStylesInput["program"]["substitutedValues"],
   instrumentation: ResolveStylesInput["instrumentation"],
@@ -1836,7 +1854,7 @@ function computeStyle(
   node: DocumentNodeRef,
   parent: ComputedStyle | null,
   candidates: ReadonlyMap<string, readonly CascadeCandidate[]> | undefined,
-  diagnostics: DiagnosticCollector,
+  diagnostics: DiagnosticSink,
   validationSession: ResolveStylesInput["program"]["propertyValidation"],
   substitutionCache: ResolveStylesInput["program"]["substitutedValues"],
   instrumentation: ResolveStylesInput["instrumentation"],
@@ -2673,11 +2691,13 @@ class ImmutableStyleSnapshot implements StyleSnapshot {
   readonly outcome: StyleOutcome;
   readonly #styles: ReadonlyMap<DocumentNodeRef, ComputedStyle>;
   readonly #pseudos: ReadonlyMap<string, ComputedStyle>;
+  readonly #computedDiagnostics: ReadonlyMap<DocumentNodeRef, readonly ComputedDiagnosticContribution[]>;
 
   public constructor(
     input: ResolveStylesInput,
     styles: ReadonlyMap<DocumentNodeRef, ComputedStyle>,
     pseudos: ReadonlyMap<string, ComputedStyle>,
+    computedDiagnostics: ReadonlyMap<DocumentNodeRef, readonly ComputedDiagnosticContribution[]>,
     diagnostics: readonly StyleDiagnostic[],
     stylesheetCount: number,
     outcome: StyleOutcome,
@@ -2698,12 +2718,13 @@ class ImmutableStyleSnapshot implements StyleSnapshot {
     this.environment = Object.freeze({ ...input.environment });
     this.#styles = styles;
     this.#pseudos = pseudos;
+    this.#computedDiagnostics = computedDiagnostics;
     this.diagnostics = Object.freeze([...diagnostics]);
     this.omittedDiagnosticCount = omittedDiagnosticCount;
     this.stylesheetCount = stylesheetCount;
     this.outcome = Object.freeze(outcome);
     Object.freeze(this);
-    registerRetainedOwner(this, () => [this.#styles, this.#pseudos]);
+    registerRetainedOwner(this, () => [this.#styles, this.#pseudos, this.#computedDiagnostics]);
   }
 
   public style(node: DocumentNodeRef): ComputedStyle {
@@ -2719,6 +2740,9 @@ class ImmutableStyleSnapshot implements StyleSnapshot {
   /** Style-owned retained maps used only for dynamic-selector incremental computation. */
   public retainedStyles(): ReadonlyMap<DocumentNodeRef, ComputedStyle> { return this.#styles; }
   public retainedPseudos(): ReadonlyMap<string, ComputedStyle> { return this.#pseudos; }
+  public retainedComputedDiagnostics(): ReadonlyMap<DocumentNodeRef, readonly ComputedDiagnosticContribution[]> {
+    return this.#computedDiagnostics;
+  }
 }
 
 function styleEnvironmentIdentity(environment: MediaEnvironment): string {
@@ -2746,7 +2770,7 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
     || typeof reducedMotion !== "boolean"
     || (hover !== "none" && hover !== "hover")
     || (pointer !== "none" && pointer !== "coarse" && pointer !== "fine")) {
-    return new ImmutableStyleSnapshot(input, new Map(), new Map(), [], 0, {
+    return new ImmutableStyleSnapshot(input, new Map(), new Map(), new Map(), [], 0, {
       status: "rejected", reason: "invalid-environment"
     });
   }
@@ -2803,6 +2827,36 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
   const pseudos = incremental
     ? new Map(previous.retainedPseudos())
     : new Map<string, ComputedStyle>();
+  const computedDiagnostics = incremental
+    ? new Map(previous.retainedComputedDiagnostics())
+    : new Map<DocumentNodeRef, readonly ComputedDiagnosticContribution[]>();
+  // Intern only descriptors reachable from the current nodes; the lookup is evaluation-local.
+  const diagnosticDescriptors = new Map<string, DiagnosticDescriptor>();
+  for (const [ref, contributions] of computedDiagnostics) {
+    input.signal?.throwIfAborted();
+    if (affected.has(ref)) {
+      computedDiagnostics.delete(ref);
+      continue;
+    }
+    for (const { descriptor } of contributions) {
+      diagnosticDescriptors.set(diagnosticIdentity(descriptor.code, descriptor.sourceUrl, descriptor.detail), descriptor);
+    }
+  }
+  // A node owns at most one count per distinct diagnostic from its fixed property
+  // evaluations and its pseudos. Share descriptors, and retain even omitted identities
+  // so reporting can change without recomputing otherwise unaffected styles.
+  const nodeDiagnostics = new Map<DiagnosticDescriptor, number>();
+  const diagnosticSink: DiagnosticSink = {
+    add: (code, sourceUrl, detail) => {
+      const identity = diagnosticIdentity(code, sourceUrl, detail);
+      let descriptor = diagnosticDescriptors.get(identity);
+      if (descriptor === undefined) {
+        descriptor = Object.freeze({ code, sourceUrl, detail });
+        diagnosticDescriptors.set(identity, descriptor);
+      }
+      nodeDiagnostics.set(descriptor, (nodeDiagnostics.get(descriptor) ?? 0) + 1);
+    },
+  };
   let computedNodes = 0;
   const retainedRootStyle = input.program.document.documentElement === null
     ? undefined
@@ -2814,6 +2868,7 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
     input.signal?.throwIfAborted();
     computedNodes += 1;
     if (incremental && !affected.has(ref)) continue;
+    nodeDiagnostics.clear();
     const parentNode = input.program.document.parent(ref);
     const parentStyle = parentNode?.kind === "element" ? styles.get(parentNode.ref) ?? null : null;
     let style = computeStyle(
@@ -2823,7 +2878,7 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
       ref,
       parentStyle,
       candidates.get(styleKey(ref)),
-      diagnostics,
+      diagnosticSink,
       input.program.propertyValidation,
       input.program.substitutedValues,
       input.instrumentation,
@@ -2860,7 +2915,7 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
         ref,
         style,
         pseudoCandidates,
-        diagnostics,
+        diagnosticSink,
         input.program.propertyValidation,
         input.program.substitutedValues,
         input.instrumentation,
@@ -2879,6 +2934,17 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
       }
       pseudos.set(styleKey(ref, pseudo), pseudoStyle);
     }
+    if (nodeDiagnostics.size > 0) {
+      computedDiagnostics.set(ref, Object.freeze([...nodeDiagnostics].map(([descriptor, occurrences]) =>
+        Object.freeze({ descriptor, occurrences }))));
+    }
+  }
+  // Replay current ownership in document order, applying the shared reporting bound once.
+  for (const ref of styleNodes.elements) {
+    input.signal?.throwIfAborted();
+    for (const { descriptor, occurrences } of computedDiagnostics.get(ref) ?? []) {
+      diagnostics.add(descriptor.code, descriptor.sourceUrl, descriptor.detail, occurrences);
+    }
   }
   const truncatedBudget = truncatedBudgets.values().next().value;
   const outcome: StyleOutcome = truncatedBudget === undefined
@@ -2887,12 +2953,14 @@ export function resolveStyles(input: ResolveStylesInput): StyleSnapshot {
         status: "truncated",
         computedNodes,
         budget: truncatedBudget,
-        limit: limits[truncatedBudget]
+        limit: limits[truncatedBudget],
+        fallback: candidateCollection.fallback,
       };
   const snapshot = new ImmutableStyleSnapshot(
     input,
     styles,
     pseudos,
+    computedDiagnostics,
     diagnostics.result(),
     Math.max(0, sources.length - 1),
     outcome,

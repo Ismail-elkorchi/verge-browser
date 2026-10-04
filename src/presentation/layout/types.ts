@@ -310,8 +310,9 @@ export interface LayoutFragmentTree {
   parent(id: LayoutFragmentId): LayoutFragment | null;
   children(id: LayoutFragmentId): readonly LayoutFragment[];
   stacking(id: LayoutFragmentId): LayoutStackingMetadata;
-  /** Root attachment metadata; descendants inherit the nearest attached root. */
+  /** Attachment ancestry follows the containing block for locally fixed descendants. */
   scrollAttachmentParent(id: LayoutFragmentId): LayoutFragment | null;
+  /** Root attachment metadata; descendants inherit the nearest attached root. */
   scrollAttachment(id: LayoutFragmentId): LayoutScrollAttachment | null;
   forFormattingNode(node: FormattingNodeId): readonly LayoutFragment[];
   forDocumentNode(node: DocumentNodeRef): readonly LayoutFragment[];

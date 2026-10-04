@@ -2,6 +2,7 @@ import type {
   SelectorStateDependency,
   StylesheetResource,
   StyleDiagnostic,
+  StyleOutcome,
 } from "../../presentation/style/index.js";
 import type {
   DisplayListSpatialQueryMetrics,
@@ -96,6 +97,7 @@ export interface RenderDocumentSummary {
   readonly identity: string;
   readonly documentRowCount: number;
   readonly incomplete: readonly string[];
+  readonly styleOutcome: StyleOutcome;
   readonly styleDiagnostics: readonly StyleDiagnostic[];
   readonly omittedStyleDiagnosticCount: number;
   readonly scrollAnchors: readonly RenderScrollAnchorEntry[];

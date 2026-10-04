@@ -907,7 +907,8 @@ test("style work exhaustion is a typed truncation and retains already-computed U
     status: "truncated",
     computedNodes: styles.outcome.computedNodes,
     budget: "maxSelectorQueries",
-    limit: 1
+    limit: 1,
+    fallback: "user-agent-only",
   });
   assert.equal(styles.style(named(document, "p")).display.box, "principal");
   assert.equal(styles.style(named(document, "p")).text.color, null);

@@ -144,7 +144,8 @@ function captionSequence(
   const fragments: TableLayoutOperationResult[] = [];
   let currentY = y;
   for (const id of ids) {
-    const laidOut = host.layoutChild(id, x, currentY, width, clip, depth + 1, null, null, null);
+    const dimensions = host.dimensions(host.formattingNode(id), width, null);
+    const laidOut = host.layoutChild(id, x, point(currentY, dimensions.margin.top), width, clip, depth + 1, null, null, null);
     if (laidOut === null) break;
     const free = cssMax(ZERO, sum(width, cssNegate(laidOut.marginRect.width)));
     const result = free > 0
@@ -438,10 +439,12 @@ export function layoutTableContainer(
     const hasActiveColumns = widthResult.columns.some((column) => !column.collapsed);
     const hasActiveRows = rows.rows.some((row) => !row.collapsed);
     const outerX = point(input.x, dimensions.marginLeft);
-    const top = captionSequence(host, captions.top, outerX, input.y, sum(widthResult.usedGridWidth, dimensions.padding.left, dimensions.padding.right, dimensions.border.left, dimensions.border.right), input.clip, input.depth);
-    const tableMarginY = top.nextY;
+    // Like other layout contexts, input.y is the wrapper's border-box start;
+    // its caller places the wrapper margins in flow, float, or positioned space.
+    const outerY = input.y;
+    const top = captionSequence(host, captions.top, outerX, outerY, sum(widthResult.usedGridWidth, dimensions.padding.left, dimensions.padding.right, dimensions.border.left, dimensions.border.right), input.clip, input.depth);
     const borderX = outerX;
-    const borderY = point(tableMarginY, dimensions.margin.top);
+    const borderY = top.nextY;
     const paddingX = point(borderX, dimensions.border.left);
     const paddingY = point(borderY, dimensions.border.top);
     const contentX = point(paddingX, dimensions.padding.left);
@@ -462,12 +465,6 @@ export function layoutTableContainer(
       sum(paddingRect.width, dimensions.border.left, dimensions.border.right),
       sum(paddingRect.height, dimensions.border.top, dimensions.border.bottom),
     );
-    const tableMarginRect = cssRect(
-      input.x,
-      tableMarginY,
-      sum(borderRect.width, dimensions.marginLeft, dimensions.marginRight),
-      sum(borderRect.height, dimensions.margin.top, dimensions.margin.bottom),
-    );
     const tableClip = host.clip(table, paddingRect, borderRect, input.clip);
     for (const [owner, segments] of buildCollapsedTableBorderSegments(
       host,
@@ -483,7 +480,7 @@ export function layoutTableContainer(
     )) {
       host.registerCollapsedBorderSegments(owner, segments);
     }
-    if (style.box.position !== "static") host.registerPositionedContainingBlock(table.id, paddingRect);
+    if ((host.boxComputed(table)?.box.position ?? "static") !== "static") host.registerPositionedContainingBlock(table.id, paddingRect);
     const cellsByRow = new Map<number, typeof grid.cells[number][]>();
     for (const cell of grid.cells) {
       const cells = cellsByRow.get(cell.row) ?? [];
@@ -497,7 +494,7 @@ export function layoutTableContainer(
     ): readonly TableLayoutOperationResult[] => {
       const fragments: TableLayoutOperationResult[] = [];
       const ownerNode = host.formattingNode(owner);
-      const ownerEstablishesContainingBlock = host.computed(ownerNode)?.box.position !== "static";
+      const ownerEstablishesContainingBlock = (host.boxComputed(ownerNode)?.box.position ?? "static") !== "static";
       for (const entry of grid.outOfFlow) {
         if (entry.containingTableBox !== owner) continue;
         const node = host.formattingNode(entry.formattingNode);
@@ -804,15 +801,28 @@ export function layoutTableContainer(
       structuralChildren.push(
         ...layoutOwnedOutOfFlow(table.id, paddingRect, input.depth + 2),
       );
-      return host.container(table, contentRect, paddingRect, borderRect, tableMarginRect, tableClip, structuralChildren.map((entry) => entry.fragment), []);
+      return host.container(table, contentRect, paddingRect, borderRect, borderRect, tableClip, structuralChildren.map((entry) => entry.fragment), []);
     };
     const root = host.tryContainerReservation(buildRoot);
-    const bottomStart = point(tableMarginRect.y, tableMarginRect.height);
+    const bottomStart = point(borderRect.y, borderRect.height);
     const bottom = root === null
       ? Object.freeze({ fragments: Object.freeze([]), nextY: bottomStart })
       : captionSequence(host, captions.bottom, outerX, bottomStart, borderRect.width, input.clip, input.depth);
     const all = root === null ? [...top.fragments] : [...top.fragments, root, ...bottom.fragments];
-    const wrapperRect = cssUnion(all.map((entry) => entry.marginRect), cssRect(input.x, input.y, ZERO, ZERO));
-    return host.container(input.wrapper, wrapperRect, wrapperRect, wrapperRect, wrapperRect, cssIntersection(input.clip, wrapperRect), all.map((entry) => entry.fragment), []);
+    const empty = cssRect(outerX, outerY, ZERO, ZERO);
+    // Table margins belong outside the wrapper, around both grid and captions.
+    // Its block extent includes caption margins, but its inline size is the
+    // grid's border-edge width even when a caption overflows that width.
+    // This is also the percentage-transform reference and positioned owner box.
+    const wrapperBounds = cssUnion(all.map((entry) => entry === root ? entry.borderRect : entry.marginRect), empty);
+    const wrapperRect = all.length === 0 ? empty
+      : cssRect(borderRect.x, wrapperBounds.y, borderRect.width, wrapperBounds.height);
+    const wrapperMarginRect = cssRect(
+      input.x,
+      point(input.y, cssNegate(dimensions.margin.top)),
+      sum(wrapperRect.width, dimensions.marginLeft, dimensions.marginRight),
+      sum(wrapperRect.height, dimensions.margin.top, dimensions.margin.bottom),
+    );
+    return host.container(input.wrapper, wrapperRect, wrapperRect, wrapperRect, wrapperMarginRect, cssIntersection(input.clip, wrapperRect), all.map((entry) => entry.fragment), []);
   });
 }

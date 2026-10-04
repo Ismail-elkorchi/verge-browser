@@ -133,7 +133,7 @@ The value stages remain separate:
 - the cell rasterizer produces actual values after terminal snapping and device
   constraints.
 
-Terminal dimensions enter layout only through the CSS viewport:
+Device geometry enters layout through the CSS viewport and text measurer:
 
 ```text
 viewport width  = terminal columns × cell width in CSS pixels
@@ -141,9 +141,11 @@ viewport height = terminal rows × row height in CSS pixels
 ```
 
 `LayoutContext` carries that viewport, the initial containing block, the
-CSS-pixel text measurer, and layout budgets. Layout derives root font metrics
-(including ascent, descent, baseline, x-height, line gap, and `ch` advance)
-from the computed root-element font size after style resolution. The root
+CSS-pixel text measurer, and layout budgets. Layout asks the measurer for font
+metrics (including ascent, descent, baseline, x-height, line gap, and `ch`
+advance) after style resolution. The terminal measurer supplies realizable
+fixed-cell advances and normal line metrics rather than scaling physical glyphs
+with CSS font size. Computed font sizes still determine font-relative lengths. The root
 element resolves `rem` in its own `font-size` against the initial font size;
 descendants resolve `rem` against that computed root size. One minimal
 cancellation contract is passed through style resolution, box generation,

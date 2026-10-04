@@ -96,6 +96,8 @@ function diagnosticsLines(document: BrowserDocumentState): readonly string[] {
     `Stylesheet load issues: ${String(snapshot.diagnostics.stylesheetLoadIssueCount)}`,
     `Navigation ms (fetch, parse, stylesheets): ${String(snapshot.diagnostics.totalDurationMs)}`,
     `Rendering: ${document.rendering.status}`,
+    ...(summary?.styleOutcome.status === "truncated" && summary.styleOutcome.fallback !== null
+      ? [`Style fallback: ${summary.styleOutcome.fallback}`] : []),
     ...(summary?.incomplete.map((reason) => `Incomplete: ${reason}`) ?? []),
     ...(document.rendering.error === null ? [] : [`Render error: ${document.rendering.error}`]),
     ...shown.map((issue) =>

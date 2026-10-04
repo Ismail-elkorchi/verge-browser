@@ -256,6 +256,140 @@ test("translate(0) establishes a stacking context and containing block while non
   assert.equal(untransformed.layout.scrollAttachment(fragment(untransformed, "fixed").id)?.kind, "fixed");
 });
 
+for (const [layout, container, expectedInline, expectedBlock] of [
+  ["row flex", "display:flex;align-items:center", 0, 64],
+  ["column flex", "display:flex;flex-direction:column;align-items:center", null, 0],
+  ["grid", "display:grid;align-items:center;justify-items:center", 80, 64],
+]) {
+  for (const position of ["absolute", "fixed"]) {
+    test(`${layout} alignment moves only the static-position axes of external ${position} descendants`, () => {
+      for (const [insets, x, y] of [
+        ["", expectedInline, expectedBlock],
+        ["left:8px", 8, expectedBlock],
+        ["right:8px", 616, expectedBlock],
+        ["top:16px", expectedInline, 16],
+        ["bottom:16px", expectedInline, 352],
+        ["left:8px;top:16px", 8, 16],
+      ]) {
+        const result = render(`<div style="${container};width:240px;height:160px">
+          <div id="inner" style="width:80px;height:32px"><div>
+            <a id="target" href="/target" style="position:${position};${insets};width:16px;height:16px">
+              <span id="leaf" style="position:absolute;left:0;top:0;width:8px;height:16px">X</span>
+            </a></div></div></div>`);
+        const innerX = cssPixels(fragment(result, "inner").borderRect.x);
+        if (expectedInline === null) assert.ok(innerX > 0, "column cross-axis alignment moves the normal-flow item");
+        else assert.equal(innerX, expectedInline);
+        assert.equal(cssPixels(fragment(result, "inner").borderRect.y), expectedBlock);
+        for (const id of ["target", "leaf"]) {
+          assert.deepEqual(rectangle(fragment(result, id).borderRect), {
+            x: x ?? innerX, y, width: id === "target" ? 16 : 8, height: 16,
+          }, `${insets || "auto"}: ${id}`);
+        }
+      }
+    });
+  }
+}
+
+for (const position of ["absolute", "fixed"]) {
+  test(`atomic inline alignment preserves external ${position} explicit insets and moves static axes`, () => {
+    const result = render(`<div style="line-height:100px;text-align:center;width:240px">
+      <span id="inner" style="display:inline-block;vertical-align:bottom;width:80px;height:32px">
+        <a id="automatic" href="/auto" style="position:${position};width:8px;height:16px">A</a>
+        <a id="horizontal" href="/horizontal" style="position:${position};left:8px;width:8px;height:16px">H</a>
+        <a id="vertical" href="/vertical" style="position:${position};top:16px;width:8px;height:16px">V</a>
+        <a id="explicit" href="/explicit" style="position:${position};left:8px;top:16px;width:8px;height:16px">E</a>
+      </span></div>`);
+    assert.equal(cssPixels(fragment(result, "inner").borderRect.x), 80);
+    assert.equal(cssPixels(fragment(result, "inner").borderRect.y), 68);
+    for (const [id, x, y] of [["automatic", 80, 68], ["horizontal", 8, 68], ["vertical", 80, 16], ["explicit", 8, 16]]) {
+      assert.deepEqual(rectangle(fragment(result, id).borderRect), { x, y, width: 8, height: 16 }, id);
+    }
+  });
+}
+
+for (const ownerStyle of ["position:relative", "transform:translate(16px,32px)"]) {
+  test(`aligned deferred descendants use static positions and final ${ownerStyle} containing blocks`, () => {
+    for (const position of ["absolute", "fixed"]) {
+      const result = render(`<div id="owner" style="${ownerStyle};display:grid;align-items:center;justify-items:center;width:240px;height:160px">
+        <div id="inner" style="width:80px;height:32px"><div>
+          <span id="automatic" style="position:${position};width:16px;height:16px">A</span>
+          <span id="horizontal" style="position:${position};left:8px;width:16px;height:16px">H</span>
+          <span id="vertical" style="position:${position};top:16px;width:16px;height:16px">V</span>
+          <span id="explicit" style="position:${position};right:8px;bottom:16px;width:16px;height:16px">E</span>
+        </div></div></div>`);
+      const inner = rectangle(fragment(result, "inner").borderRect);
+      const owner = position === "fixed" && ownerStyle === "position:relative"
+        ? { x: 0, y: 0, width: 640, height: 384 }
+        : rectangle(fragment(result, "owner").paddingRect);
+      for (const [id, x, y] of [
+        ["automatic", inner.x, inner.y],
+        ["horizontal", owner.x + 8, inner.y],
+        ["vertical", inner.x, owner.y + 16],
+        ["explicit", owner.x + owner.width - 24, owner.y + owner.height - 32],
+      ]) {
+        assert.deepEqual(rectangle(fragment(result, id).borderRect), { x, y, width: 16, height: 16 }, `${position}: ${id}`);
+      }
+    }
+  });
+}
+
+for (const display of ["inline-block", "inline-flex", "inline-grid"]) {
+  for (const [ownerStyle, position] of [["position:relative", "absolute"], ["transform:translate(0)", "fixed"]]) {
+    test(`${display} line alignment updates the containing block used by deferred ${position} descendants`, () => {
+      const result = render(`<div style="line-height:100px;text-align:center;width:240px">
+        <span id="owner" style="display:${display};vertical-align:bottom;width:80px;height:32px;${ownerStyle}">
+          <div style="height:16px"><a id="target" href="/target" style="position:${position};top:0;left:0;width:8px;height:16px">X</a></div>
+        </span></div>`);
+      const owner = fragment(result, "owner");
+      assert.equal(cssPixels(owner.borderRect.x), 80);
+      assert.equal(cssPixels(owner.borderRect.y), 68);
+      assert.equal(fragment(result, "target").borderRect.x, owner.paddingRect.x);
+      assert.equal(fragment(result, "target").borderRect.y, owner.paddingRect.y);
+    });
+  }
+}
+
+test("relative ancestors move fixed static positions without capturing explicit fixed insets", () => {
+  for (const transform of ["none", "translate(16px,32px)"]) {
+    const result = render(`<div id="owner" style="width:240px;height:160px;transform:${transform}">
+      <div id="relative" style="position:relative;left:24px;top:32px;width:80px;height:32px">
+        <div><a id="automatic" href="/auto" style="position:fixed;width:8px;height:16px">A</a>
+          <a id="horizontal" href="/horizontal" style="position:fixed;left:8px;width:8px;height:16px">H</a>
+          <a id="vertical" href="/vertical" style="position:fixed;top:16px;width:8px;height:16px">V</a>
+          <a id="explicit" href="/explicit" style="position:fixed;left:8px;top:16px;width:8px;height:16px">E</a>
+        </div></div></div>`);
+    const relative = rectangle(fragment(result, "relative").borderRect);
+    const owner = rectangle(fragment(result, "owner").paddingRect);
+    for (const [id, x, y] of [
+      ["automatic", relative.x, relative.y],
+      ["horizontal", owner.x + 8, relative.y],
+      ["vertical", relative.x, owner.y + 16],
+      ["explicit", owner.x + 8, owner.y + 16],
+    ]) {
+      assert.deepEqual(rectangle(fragment(result, id).borderRect), { x, y, width: 8, height: 16 }, `${transform}: ${id}`);
+    }
+  }
+});
+
+test("aligned fixed static positions retain viewport paint and interaction geometry while scrolling", () => {
+  const result = render(`<div style="display:grid;align-items:center;justify-items:center;width:240px;height:160px">
+    <div style="width:80px;height:32px"><a id="fixed" href="/fixed" style="position:fixed;width:8px;height:16px">F</a>
+      <a id="absolute" href="/absolute" style="position:absolute;margin-left:16px;width:8px;height:16px">A</a>
+    </div></div><div style="height:1000px"></div>`, 40, 8);
+  for (const scrollRow of [0, 2, 5]) {
+    const scrolled = viewport(result, scrollRow);
+    const fixed = node(result, "fixed");
+    const expected = { row: scrollRow + 4, column: 10, width: 1, height: 1 };
+    const command = scrolled.displayList.commands.find((value) => value.kind === "text" && value.text === "F");
+    assert.ok(command);
+    assert.equal(cssPixels(command.rect.y), expected.row * 16);
+    assert.equal(scrolled.terminal.hitTestIndex.at(expected.row, expected.column)?.action.node, fixed);
+    assert.deepEqual(scrolled.terminal.focusMap.forNode(fixed)?.rects[0], expected);
+    assert.deepEqual(scrolled.terminal.accessibilityBounds.find((value) => value.documentNode === fixed)?.rect, expected);
+    assert.equal(scrolled.terminal.hitTestIndex.regions.some((value) => value.action.node === node(result, "absolute")), scrollRow <= 4);
+  }
+});
+
 test("transformed contexts contain high z-index descendants below a higher sibling context", () => {
   const source = (transform) => `<div id="owner" style="width:80px;height:16px;transform:${transform}">
       <div id="nested" style="position:relative;z-index:99;background:red">nested</div></div>
