@@ -109,3 +109,71 @@ for (const failures of [[], ["services"], ["flush"], ["services", "flush"], ["se
     }
   });
 }
+
+async function stalledOutputHook(directory) {
+  const source = `import { createNodeTerminalHost as createHost } from ${JSON.stringify(hostUrl)};
+import { EventEmitter } from "node:events";
+import { appendFileSync } from "node:fs";
+import { setInterval, clearInterval } from "node:timers";
+export function createNodeTerminalHost(options) {
+  const input = Object.assign(new EventEmitter(), {
+    isTTY: true, isRaw: false, pause() {}, resume() {}, unref() {},
+    setRawMode(enabled) { this.isRaw = enabled; }
+  });
+  const output = Object.assign(new EventEmitter(), {
+    isTTY: true, columns: 80, rows: 24,
+    write() { return true; }
+  });
+  const host = createHost({ ...options, stdin: input, stdout: output, env: { TERM: "dumb" } });
+  const keepalive = process.env.CLI_KEEP_ALIVE === "1" ? setInterval(() => {}, 1000) : undefined;
+  const dispose = host.dispose.bind(host);
+  host.dispose = async (context) => {
+    appendFileSync(process.env.CLI_EVENTS, "dispose\\n");
+    context?.signal?.addEventListener("abort", () => {
+      appendFileSync(process.env.CLI_EVENTS,
+        "aborted=" + context.signal.aborted + " raw=" + input.isRaw + "\\n");
+    }, { once: true });
+    try { await dispose(context); }
+    finally { clearInterval(keepalive); }
+  };
+  return host;
+}`;
+  const hook = join(directory, "stalled-output-hook.mjs");
+  const moduleUrl = `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
+  await writeFile(hook, `import { registerHooks } from "node:module";
+registerHooks({ resolve(specifier, context, next) {
+  if (context.parentURL === ${JSON.stringify(cliUrl.href)} && specifier === "@ismail-elkorchi/terminal-ui/host")
+    return { url: ${JSON.stringify(moduleUrl)}, shortCircuit: true };
+  return next(specifier, context);
+} });`, "utf8");
+  return hook;
+}
+
+for (const keepAlive of [false, true]) {
+  test(`actual CLI bounds stalled Node output disposal with ${keepAlive ? "an active handle" : "only pending promises"}`, async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), "verge-cli-stalled-disposal-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const hook = await stalledOutputHook(directory);
+    const events = join(directory, "events.txt");
+    const result = spawnSync(process.execPath, ["--import", pathToFileURL(hook).href,
+      fileURLToPath(cliUrl), "about:newtab"], {
+      encoding: "utf8",
+      timeout: 10_000,
+      env: {
+        ...process.env,
+        XDG_STATE_HOME: join(directory, "state"),
+        CLI_EVENTS: events,
+        CLI_KEEP_ALIVE: keepAlive ? "1" : "0"
+      }
+    });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(result.stdout, "");
+    assert.ok(result.stderr.startsWith("Fatal error: Terminal protocol is unavailable: alternateScreen."), result.stderr);
+    assert.ok(result.stderr.includes("Cleanup: TUI finalization timed out: flush."), result.stderr);
+    assert.ok(result.stderr.includes("Terminal host cleanup timed out."), result.stderr);
+    assert.equal(result.stderr.split("Terminal host cleanup timed out.").length - 1, 1);
+    assert.ok(!result.stderr.includes("After verifying your terminal configuration and transport"), result.stderr);
+    assert.equal(await readFile(events, "utf8"), "dispose\naborted=true raw=false\n");
+  });
+}

@@ -81,13 +81,18 @@ async function verifyCliHostOwnership() {
   const hook = join(directory, "host-hook.mjs");
   const events = join(directory, "events.txt");
   const hostModule = `import { appendFileSync } from "node:fs";
+import { createNodeTerminalHost as createHost } from ${JSON.stringify(import.meta.resolve("@ismail-elkorchi/terminal-ui/host"))};
 export function createNodeTerminalHost(options) {
   if (options.cellPresentation.qualification !== process.env.CLI_PRESENTATION) throw new Error("invalid presentation qualification");
   appendFileSync(process.env.CLI_EVENTS, "create\\n");
-  return { async dispose() {
+  const host = createHost(options);
+  const dispose = host.dispose.bind(host);
+  host.dispose = async (context) => {
     appendFileSync(process.env.CLI_EVENTS, "dispose\\n");
+    await dispose(context);
     if (process.env.CLI_DISPOSE_FAIL === "1") throw new Error("injected disposal failure");
-  } };
+  };
+  return host;
 }`;
   const runModule = `import { appendFileSync } from "node:fs";
 export async function runBrowserTui(target, options) {

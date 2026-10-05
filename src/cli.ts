@@ -5,7 +5,7 @@ import { createNodeBrowserServices } from "./runtime/node-browser-services.js";
 import { renderBrowserOnce, runBrowserTui } from "./ui/run.js";
 import type { HttpSessionAdapter } from "@ismail-elkorchi/http-client";
 import { createNodeTerminalHost, type TerminalCellPresentationQualification } from "@ismail-elkorchi/terminal-ui/host";
-import { TuiRunError } from "@ismail-elkorchi/terminal-ui/tui";
+import { defaultTuiLifecyclePolicy, TuiRunError } from "@ismail-elkorchi/terminal-ui/tui";
 
 interface CliFlags {
   readonly initialTarget: string | null;
@@ -85,10 +85,24 @@ async function main(): Promise<void> {
   } catch (error) {
     failures.push(error);
   }
+  const disposalController = new AbortController();
+  const timerController = new AbortController();
   try {
-    await host.dispose();
+    await Promise.race([
+      host.dispose({ signal: disposalController.signal }),
+      // The host clock keeps Node alive until cleanup settles or its deadline fires.
+      host.clock.sleep(defaultTuiLifecyclePolicy.hostDisposalTimeoutMs, timerController.signal).then((outcome) => {
+        if (outcome === "aborted") return;
+        const error = new Error("Terminal host cleanup timed out.");
+        disposalController.abort(error);
+        throw error;
+      })
+    ]);
   } catch (error) {
+    disposalController.abort(error);
     failures.push(error);
+  } finally {
+    timerController.abort();
   }
   if (failures.length === 1) throw failures[0];
   if (failures.length > 1) {
