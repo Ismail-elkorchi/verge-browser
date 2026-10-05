@@ -99,7 +99,7 @@ registerHooks({ resolve(specifier, context, next) {
     for (const [fail, disposeFail] of [[false, false], [true, false], [false, true], [true, true]]) {
       await writeFile(events, "", "utf8");
       const result = spawnSync(process.execPath, [
-        "--import", hook, "dist/cli.js", "--terminal-cell-presentation=explicit", "about:newtab"
+        "--import", pathToFileURL(hook).href, "dist/cli.js", "--terminal-cell-presentation=explicit", "about:newtab"
       ], { encoding: "utf8", timeout: 8_000, env: {
         ...process.env, CLI_EVENTS: events, CLI_FAIL: fail ? "1" : "0",
         CLI_DISPOSE_FAIL: disposeFail ? "1" : "0",

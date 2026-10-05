@@ -52,11 +52,14 @@ preserves cell order. That configuration can use the same declaration:
 ghostty -e verge --terminal-cell-presentation=explicit https://example.com
 ```
 
-WezTerm's unrecognized alternate-screen query does not by itself negate its
-set/reset support. This is covered by response fixtures for commit `2afb8364`;
-the exact `20260912-133823-2afb8364` binary and Ubuntu 26.04 Ptyxis configuration
-have not been natively qualified here. These checks do not establish support
-for multiplexer or remote-session configurations.
+WezTerm `20260912-133823-2afb8364`, built from its unmodified source on Debian 13,
+starts without the declaration: standard mode 8 reports explicit presentation.
+Its unrecognized alternate-screen query does not negate working set/reset
+support. Native startup, mixed-direction editing, interruption and terminal
+restoration were checked. Ubuntu 26.04 Ptyxis could not be launched in the test
+runtime because of GTK incompatibility and a terminal-helper permission failure.
+These checks do not establish support for every Ubuntu package, multiplexer or
+remote-session configuration.
 
 ## Browser keys
 
