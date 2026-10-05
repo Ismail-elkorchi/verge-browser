@@ -53,8 +53,7 @@ export async function prepareBrowserTui(initialTarget: string, options: BrowserT
       app: createBrowserApp(state, controller, options.instrumentation)
     };
   } catch (error) {
-    await controller.close();
-    throw error;
+    return closeAfterFailure(controller, error);
   }
 }
 
@@ -75,9 +74,10 @@ export async function runBrowserTui(initialTarget: string, options: BrowserTuiOp
           elementId: `browser-${prepared.state.documents[prepared.state.activeDocumentIndex]?.id ?? ""}`
         }
     });
-  } finally {
-    await prepared.controller.close();
+  } catch (error) {
+    return closeAfterFailure(prepared.controller, error);
   }
+  await prepared.controller.close();
 }
 
 export async function renderBrowserOnce(
@@ -86,6 +86,7 @@ export async function renderBrowserOnce(
   terminalSize: TerminalSize
 ): Promise<string> {
   const prepared = await prepareBrowserTui(initialTarget, options);
+  let output: string;
   try {
     const selectedTab = prepared.state.documents[prepared.state.activeDocumentIndex] ?? prepared.state.documents[0];
     if (selectedTab === undefined) throw new Error("One-shot rendering requires an open document.");
@@ -139,12 +140,23 @@ export async function renderBrowserOnce(
         document.id === selected.id ? renderedDocument : document
       ),
     };
-    return renderFramePlain(renderElementFrame(
+    output = renderFramePlain(renderElementFrame(
       browserView(renderedState, { terminalSize }),
       terminalSize,
       { textPresentation: prepared.textPresentation }
     ));
-  } finally {
-    await prepared.controller.close();
+  } catch (error) {
+    return closeAfterFailure(prepared.controller, error);
   }
+  await prepared.controller.close();
+  return output;
+}
+
+async function closeAfterFailure(controller: BrowserController, error: unknown): Promise<never> {
+  try {
+    await controller.close();
+  } catch (cleanupError) {
+    throw new AggregateError([error, cleanupError], "Browser operation and cleanup both failed.", { cause: error });
+  }
+  throw error;
 }

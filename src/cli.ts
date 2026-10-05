@@ -4,26 +4,31 @@ import { BrowserStore } from "./app/storage.js";
 import { createNodeBrowserServices } from "./runtime/node-browser-services.js";
 import { renderBrowserOnce, runBrowserTui } from "./ui/run.js";
 import type { HttpSessionAdapter } from "@ismail-elkorchi/http-client";
-import { createNodeTerminalHost } from "@ismail-elkorchi/terminal-ui/host";
+import { createNodeTerminalHost, type TerminalCellPresentationQualification } from "@ismail-elkorchi/terminal-ui/host";
+import { TuiRunError } from "@ismail-elkorchi/terminal-ui/tui";
 
 interface CliFlags {
   readonly initialTarget: string | null;
   readonly runOnce: boolean;
-  readonly explicitCellPresentation: boolean;
+  readonly terminalPresentation: TerminalCellPresentationQualification["qualification"] | null;
 }
 
 function parseCliFlags(argv: readonly string[]): CliFlags {
   let initialTarget: string | null = null;
   let runOnce = false;
-  let explicitCellPresentation = false;
+  let terminalPresentation: CliFlags["terminalPresentation"] = null;
 
   for (const token of argv) {
     if (token === "--once") {
       runOnce = true;
       continue;
     }
-    if (token === "--terminal-cell-presentation=explicit") {
-      explicitCellPresentation = true;
+    if (token === "--terminal-cell-presentation=existing") {
+      terminalPresentation = "existing";
+      continue;
+    }
+    if (token === "--terminal-cell-presentation=mode-8-reset") {
+      terminalPresentation = "mode-8-reset";
       continue;
     }
     if (token.startsWith("--")) {
@@ -37,7 +42,7 @@ function parseCliFlags(argv: readonly string[]): CliFlags {
   return {
     initialTarget,
     runOnce,
-    explicitCellPresentation
+    terminalPresentation
   };
 }
 
@@ -67,33 +72,66 @@ async function main(): Promise<void> {
     return;
   }
 
-  const host = cliFlags.explicitCellPresentation
-    ? createNodeTerminalHost({ initialState: { cellPresentation: "explicit" } })
-    : undefined;
+  const host = createNodeTerminalHost({
+    ...(cliFlags.terminalPresentation === null ? {}
+      : { cellPresentation: { qualification: cliFlags.terminalPresentation } })
+  });
   const failures: unknown[] = [];
   try {
     await runBrowserTui(initialTarget, {
       ...browserOptions,
-      ...(host === undefined ? {} : { host })
+      host
     });
   } catch (error) {
     failures.push(error);
   }
   try {
-    await host?.dispose();
+    await host.dispose();
   } catch (error) {
     failures.push(error);
   }
   if (failures.length === 1) throw failures[0];
   if (failures.length > 1) {
-    throw new AggregateError(failures, failures.map((error) =>
-      error instanceof Error ? error.message : String(error)
-    ).join(" Cleanup: "));
+    throw new AggregateError(failures, "Browser operation and terminal cleanup both failed.", { cause: failures[0] });
   }
 }
 
+function failureMessage(error: unknown): string {
+  const pending = [error];
+  const seen = new Set<unknown>();
+  const messages: string[] = [];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (seen.has(current)) continue;
+    seen.add(current);
+    if (current instanceof AggregateError && current.errors.length > 0) {
+      for (let index = current.errors.length - 1; index >= 0; index -= 1) pending.push(current.errors[index]);
+    } else {
+      messages.push(current instanceof Error ? current.message : String(current));
+    }
+  }
+  return messages.length > 0 ? messages.join(" Cleanup: ")
+    : error instanceof Error ? error.message : String(error);
+}
+
+function presentationGuidance(error: unknown): string | undefined {
+  const seen = new Set<Error>();
+  for (let current = error; current instanceof Error && !seen.has(current); current = current.cause) {
+    seen.add(current);
+    if (!(current instanceof TuiRunError)) continue;
+    if (current.primaryDiagnostic?.code !== "HOST_CELL_PRESENTATION_UNQUALIFIED") return undefined;
+    return "Verge needs application-ordered left-to-right cells and matching input coordinates. "
+      + "After verifying your terminal configuration and transport, use --terminal-cell-presentation=existing "
+      + "if that guarantee already holds, or --terminal-cell-presentation=mode-8-reset if it holds after a verified mode-8 reset. "
+      + "These declarations do not configure character direction. Kitty also needs force_ltr=yes. "
+      + "See https://github.com/Ismail-elkorchi/verge-browser/blob/main/docs/reference/cli.md#terminal-presentation";
+  }
+  return undefined;
+}
+
 main().catch((error: unknown) => {
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(`Fatal error: ${message}`);
+  console.error(`Fatal error: ${failureMessage(error)}`);
+  const guidance = presentationGuidance(error);
+  if (guidance !== undefined) console.error(guidance);
   process.exit(1);
 });

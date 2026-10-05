@@ -3,7 +3,7 @@
 ## Usage
 
 ```text
-verge [initial-target] [--once] [--terminal-cell-presentation=explicit]
+verge [initial-target] [--once] [--terminal-cell-presentation=existing|mode-8-reset]
 ```
 
 - An explicit target opens in a fresh browser workspace.
@@ -16,50 +16,70 @@ verge [initial-target] [--once] [--terminal-cell-presentation=explicit]
 The interactive CLI is a Node.js npm distribution. Deno and Bun support applies
 to the package’s library primitives.
 
-Interactive startup requires a terminal host that can establish explicit
-visual-cell presentation: Verge orders page and editor text, and the terminal
-must preserve that order. Unknown or unsupported state fails startup rather
-than guessing from `TERM`. The full-screen session acquires a fresh owned screen
-and restores its original known mode on exit. `--once` does not acquire terminal
-modes. See [Unicode text layout](../architecture/unicode-text.md) for the host
-contract.
+## Terminal presentation
 
-Graphics protocol support alone does not satisfy this text-presentation contract.
-When the terminal is independently configured to preserve application-ordered
-cells but cannot report standard mode 8, pass
-`--terminal-cell-presentation=explicit`. This declares the current state through
-the host's existing initial-state contract; it does not change terminal settings
-or suppress contradictory observed state. Never use it for an unqualified
-terminal or transport.
+Verge resolves bidirectional text before painting. Interactive startup requires
+application-ordered left-to-right physical cells, with matching cursor, pointer
+and arrow-key coordinates. Standard mode 8 reports bidirectional processing;
+it does **not** establish character direction or the complete presentation
+contract. An explicit RTL character path can mirror the entire canvas even
+when mode 8 reports reset.
 
-Kitty 0.45.0 needs `force_ltr=yes` for this configuration:
+Use one invocation-scoped declaration only after qualifying the actual terminal
+configuration and transport:
+
+- `--terminal-cell-presentation=existing` declares that the full contract already
+  holds. It does not configure the terminal or override contradictory evidence.
+- `--terminal-cell-presentation=mode-8-reset` declares that the full contract holds
+  after a verified reset of standard mode 8, including an independently known
+  LTR character path. The host requires a known restoration baseline and verifies
+  any mode change before rendering.
+
+The qualification applies throughout the host lifetime, including suspend and
+resume. External terminal use must preserve its qualified preconditions. A new
+mode query refreshes raw mode evidence; it cannot verify an unreported character
+path. Terminal names, graphics support, and a successful write do not establish
+this guarantee. Unknown presentation fails before a frame is published.
+
+The old `explicit` value is rejected. `--once` produces plain output and does not
+acquire terminal state, regardless of a declaration.
+
+### Qualified configurations
+
+Kitty 0.45.0 needs `force_ltr=yes`; its stock behavior changes RTL glyph order.
+The option alone does not configure Kitty:
 
 ```sh
-kitty -o force_ltr=yes verge --terminal-cell-presentation=explicit https://example.com
+kitty -o force_ltr=yes verge --terminal-cell-presentation=existing https://example.com
 ```
 
-The upstream 0.45.0 Linux binary was checked directly on Debian 13. Its stock
-`force_ltr=no` configuration reorders RTL words and is not qualified. Both
-configurations report standard mode 8 as unrecognized. This is not a claim
-about every Ubuntu package, font, multiplexer, or remote transport. Terminal
-startup errors retain the failed operation's reason and restoration diagnostics.
-
-Ghostty 1.3.1 was also built from its signed source and checked on Debian 13.
-Its standard mode 8 query is ignored, while the checked default configuration
-preserves cell order. That configuration can use the same declaration:
+Ghostty 1.3.1's tested configuration preserves application cell order but does
+not report standard mode 8:
 
 ```sh
-ghostty -e verge --terminal-cell-presentation=explicit https://example.com
+ghostty -e verge --terminal-cell-presentation=existing https://example.com
 ```
 
-WezTerm `20260912-133823-2afb8364`, built from its unmodified source on Debian 13,
-starts without the declaration: standard mode 8 reports explicit presentation.
-Its unrecognized alternate-screen query does not negate working set/reset
-support. Native startup, mixed-direction editing, interruption and terminal
-restoration were checked. Ubuntu 26.04 Ptyxis could not be launched in the test
-runtime because of GTK incompatibility and a terminal-helper permission failure.
-These checks do not establish support for every Ubuntu package, multiplexer or
-remote-session configuration.
+VTE/Ptyxis and WezTerm also have an independent character-path setting. In a
+qualified LTR configuration, use `mode-8-reset` to permit the observed, verified
+bidirectional-mode transition. A mode-8 reset reply alone is insufficient; do
+not use the declaration to conceal an unknown or inherited RTL direction.
+
+The application does not force SCP LTR and then restore SCP default: default
+is not necessarily the inherited state, and these inspected versions expose no
+verified exact restoration path. The full-screen session restores the raw modes
+it actually owns. See [Unicode text layout](../architecture/unicode-text.md).
+
+Qualification records distinguish native versions, configuration, fonts and
+transport. Debian checks of Kitty 0.45.0, Ghostty 1.3.1 and WezTerm
+`20260912-133823-2afb8364` are not universal Ubuntu or multiplexer guarantees.
+Final-source checks covered missing-declaration rejection, qualified startup,
+pointer targeting within Hebrew text, physical Right/Left caret movement, mixed-text
+edits, partial redraw and Ctrl-C in these three terminals and Xfce/VTE 0.80.1.
+All eight admission cases restored termios exactly. VTE inherited RTL rejection
+was also observed visually; no equivalent WezTerm visual-reversal claim is made.
+Cooperative suspension/resume is covered by runtime tests, not a native CLI
+job-control claim. Full native Ubuntu Ptyxis qualification remains separate.
 
 ## Browser keys
 
