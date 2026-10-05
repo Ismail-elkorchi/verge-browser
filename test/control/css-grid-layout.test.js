@@ -851,3 +851,58 @@ test("intrinsic Grid constraints limit spanning min-content contributions by fix
   assert.deepEqual(fractionalSizes(tracks, [contribution("span", 0, 2, 300, 400, 800)], null,
     { sizingConstraint: "min-content" }), [150, 150]);
 });
+
+test("non-spanning automatic Grid minima use limited min-content only under intrinsic constraints", () => {
+  const fixedMaximum = { kind: "minmax", minimum: { kind: "auto" },
+    maximum: { kind: "length", value: { kind: "length", unit: "px", value: 100 } } };
+  const fitContent = { kind: "fit-content", limit: { kind: "length", unit: "px", value: 100 } };
+  for (const sizingConstraint of ["min-content", "max-content"]) {
+    const options = { sizingConstraint };
+    assert.deepEqual(fractionalSizes([autoTrack()], [contribution("auto", 0, 1, 0, 80, 160)], null, options),
+      [sizingConstraint === "min-content" ? 80 : 160]);
+    for (const track of [fixedMaximum, fitContent]) {
+      assert.deepEqual(fractionalSizes([track], [contribution("limited", 0, 1, 0, 160, 200)], null, options), [100]);
+      assert.deepEqual(fractionalSizes([track], [contribution("minimum-floor", 0, 1, 140, 160, 200)], null, options), [140]);
+    }
+  }
+  for (const track of [autoTrack(), fixedMaximum, fitContent]) {
+    assert.deepEqual(fractionalSizes([track], [contribution("shrink", 0, 1, 0, 160, 200)], 50), [50]);
+    assert.deepEqual(fractionalSizes([track], [contribution("minimum", 0, 1, 70, 160, 200)], 50), [70]);
+  }
+});
+
+test("non-spanning and spanning automatic Grid minima agree under intrinsic constraints", () => {
+  for (const sizingConstraint of ["min-content", "max-content"]) {
+    const options = { sizingConstraint };
+    const single = fractionalSizes([autoTrack()], [contribution("single", 0, 1, 0, 80, 160)], null, options);
+    const spanning = fractionalSizes([autoTrack(), autoTrack()], [contribution("spanning", 0, 2, 0, 80, 160)], null, options);
+    assert.equal(single[0], spanning[0] + spanning[1]);
+  }
+  const fixedMaximum = (value) => ({ kind: "minmax", minimum: { kind: "auto" },
+    maximum: { kind: "length", value: { kind: "length", unit: "px", value } } });
+  for (const minimum of [0, 140]) {
+    const options = { sizingConstraint: "min-content" };
+    const single = fractionalSizes([fixedMaximum(100)], [contribution("single", 0, 1, minimum, 160, 200)], null, options);
+    const spanning = fractionalSizes([fixedMaximum(50), fixedMaximum(50)],
+      [contribution("spanning", 0, 2, minimum, 160, 200)], null, options);
+    assert.equal(single[0], spanning[0] + spanning[1]);
+  }
+});
+
+test("nested Grid intrinsic columns retain non-spanning content with an explicit zero minimum", () => {
+  for (const mode of ["min-content", "max-content"]) {
+    for (const [template, expected] of [["auto", 160], ["minmax(auto,100px)", 100], ["fit-content(100px)", 100]]) {
+      const result = render(`<style>body{margin:0}
+        #outer{display:grid;width:300px;grid-template-columns:${mode} 1fr}
+        #inner{display:grid;grid-template-columns:${template}}#item{min-width:0}
+        </style><div id=outer><div id=inner><div id=item><div style="width:160px;height:10px"></div></div></div>
+        <div id=sibling></div></div>`);
+      const rect = (id) => result.layout.forDocumentNode(result.document.elementById(id))
+        .find((value) => value.kind !== "text").borderRect;
+      assert.equal(cssPixels(rect("inner").width), expected, `${mode} / ${template}`);
+      assert.equal(cssPixels(rect("item").width), expected, `${mode} / ${template}`);
+      assert.equal(cssPixels(rect("sibling").x), expected, `${mode} / ${template}`);
+      assert.equal(cssPixels(rect("sibling").width), 300 - expected, `${mode} / ${template}`);
+    }
+  }
+});

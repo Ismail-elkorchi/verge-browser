@@ -1,7 +1,19 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Nested Grid</title><style>
 #outer-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}#nested-grid{display:grid;grid-template-columns:80px 1fr;gap:8px}
+.intrinsic-outer{display:grid;width:300px;grid-template-columns:min-content 1fr}
+.intrinsic-max{grid-template-columns:max-content 1fr}
+.intrinsic-inner{display:grid;grid-template-columns:auto}.intrinsic-fixed{grid-template-columns:minmax(auto,100px)}
+.intrinsic-fit{grid-template-columns:fit-content(100px)}.intrinsic-item{min-width:0}.intrinsic-content{width:160px;height:10px}
 </style></head><body><main><h1>Team directory</h1><section id="outer-grid">
 <article id="profile"><h2>Engineering</h2><div id="nested-grid"><strong id="role">Maintainer</strong><a id="person" href="/ada">Ada</a></div></article>
 <article id="support"><h2>Support</h2><p>Weekday coverage</p></article>
-</section></main></body></html>
+</section>
+<!-- Fixed-size descendants isolate nested intrinsic track sizing from font metrics. -->
+<div id="min-auto" class="intrinsic-outer"><div id="min-auto-inner" class="intrinsic-inner"><div class="intrinsic-item"><div class="intrinsic-content"></div></div></div><div id="min-auto-sibling"></div></div>
+<div id="max-auto" class="intrinsic-outer intrinsic-max"><div id="max-auto-inner" class="intrinsic-inner"><div class="intrinsic-item"><div class="intrinsic-content"></div></div></div><div id="max-auto-sibling"></div></div>
+<div id="min-fixed" class="intrinsic-outer"><div id="min-fixed-inner" class="intrinsic-inner intrinsic-fixed"><div class="intrinsic-item"><div class="intrinsic-content"></div></div></div><div id="min-fixed-sibling"></div></div>
+<div id="max-fixed" class="intrinsic-outer intrinsic-max"><div id="max-fixed-inner" class="intrinsic-inner intrinsic-fixed"><div class="intrinsic-item"><div class="intrinsic-content"></div></div></div><div id="max-fixed-sibling"></div></div>
+<div id="min-fit" class="intrinsic-outer"><div id="min-fit-inner" class="intrinsic-inner intrinsic-fit"><div class="intrinsic-item"><div class="intrinsic-content"></div></div></div><div id="min-fit-sibling"></div></div>
+<div id="max-fit" class="intrinsic-outer intrinsic-max"><div id="max-fit-inner" class="intrinsic-inner intrinsic-fit"><div class="intrinsic-item"><div class="intrinsic-content"></div></div></div><div id="max-fit-sibling"></div></div>
+</main></body></html>

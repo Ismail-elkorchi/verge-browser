@@ -280,10 +280,21 @@ function growthSpanSize(
   return result;
 }
 
-function baseTarget(track: MutableTrack, item: GridItemContribution): CssNonNegativeLength | null {
+function baseTarget(
+  track: MutableTrack,
+  item: GridItemContribution,
+  input: GridTrackSizingInput
+): CssNonNegativeLength | null {
   if (track.minimumCategory === "fixed" || track.maximumCategory === "flexible") return null;
   if (track.minimum.kind === "max-content") return item.maxContent;
   if (track.minimum.kind === "min-content") return item.minContent;
+  if (input.sizingConstraint === "min-content" || input.sizingConstraint === "max-content") {
+    // Automatic minima use the limited min-content contribution under either
+    // intrinsic constraint, including a definite fit-content() argument.
+    const limit = track.fitContentLimit ?? breadthLength(track.maximum, input);
+    return nonNegative(cssMax(item.minimumContribution,
+      limit === null ? item.minContent : cssMin(item.minContent, limit)));
+  }
   return item.minimumContribution;
 }
 
@@ -305,7 +316,7 @@ function resolveNonSpanningItems(
     if (!validContribution(item, tracks.length) || item.end - item.start !== 1) continue;
     const track = tracks[item.start];
     if (track === undefined || track.collapsed) continue;
-    const base = baseTarget(track, item);
+    const base = baseTarget(track, item, work.input);
     if (base !== null) baseCandidates[track.index] = nonNegative(cssMax(baseCandidates[track.index] ?? ZERO, base));
     const growth = growthTarget(track, item);
     if (growth !== null) {
