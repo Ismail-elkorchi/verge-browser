@@ -67,12 +67,29 @@ async function main(): Promise<void> {
     return;
   }
 
-  await runBrowserTui(initialTarget, {
-    ...browserOptions,
-    ...(cliFlags.explicitCellPresentation ? {
-      host: createNodeTerminalHost({ initialState: { cellPresentation: "explicit" } })
-    } : {})
-  });
+  const host = cliFlags.explicitCellPresentation
+    ? createNodeTerminalHost({ initialState: { cellPresentation: "explicit" } })
+    : undefined;
+  const failures: unknown[] = [];
+  try {
+    await runBrowserTui(initialTarget, {
+      ...browserOptions,
+      ...(host === undefined ? {} : { host })
+    });
+  } catch (error) {
+    failures.push(error);
+  }
+  try {
+    await host?.dispose();
+  } catch (error) {
+    failures.push(error);
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) {
+    throw new AggregateError(failures, failures.map((error) =>
+      error instanceof Error ? error.message : String(error)
+    ).join(" Cleanup: "));
+  }
 }
 
 main().catch((error: unknown) => {
