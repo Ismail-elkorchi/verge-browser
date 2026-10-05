@@ -16,7 +16,6 @@ import { fetchPage, fetchPageStream, fetchStylesheet } from "../../dist/app/fetc
 import { PageAcquisition } from "../../dist/app/page-acquisition.js";
 import { BrowserSession } from "../../dist/app/session.js";
 import { BrowserStore } from "../../dist/app/storage.js";
-import { documentContentBounds } from "../../dist/ui/document-layout.js";
 import { prepareBrowserTui, renderBrowserOnce } from "../../dist/ui/run.js";
 import { browserView } from "../../dist/ui/view.js";
 
@@ -110,7 +109,7 @@ test("document focus and mouse regions use the exact visible intersection on eve
       const tree = layoutElement(browserView(original, { terminalSize }), terminalSize);
       const allocation = findLayout(tree, `browser-${document.id}`);
       assert.ok(allocation);
-      const content = documentContentBounds(allocation.bounds);
+      const content = allocation.bounds;
       const visible = allocation.viewport;
       const top = Math.max(0, visible.row - content.row);
       const bottom = Math.min(content.height, visible.row + visible.height - content.row);

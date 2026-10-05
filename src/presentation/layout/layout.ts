@@ -4649,20 +4649,28 @@ class LayoutBuilder {
   #gridItemMinimumInlineContribution(
     id: FormattingNodeId,
     contributions: IntrinsicSizeContributions,
+    automaticMinimum: boolean,
   ): CssNonNegativeLength {
     const node = this.#formatting.node(id);
     const style = this.#itemComputed(node);
-    if (
-      style?.box.minWidth.kind !== "auto" ||
-      !isScrollableOverflow(style.box.overflowX)
-    )
+    if (style === null) return contributions.borderBox.minContentInlineSize;
+    const chrome = nonNegative(sum(
+      contributions.borderBox.minContentInlineSize,
+      negate(contributions.contentBox.minContentInlineSize),
+    ));
+    // A definite preferred size supplies the minimum contribution. Otherwise
+    // substitute the used minimum size, rather than the min-content width.
+    if (this.#usedLength(style.box.width, null, style) !== null)
       return contributions.borderBox.minContentInlineSize;
-    return nonNegative(
-      sum(
-        contributions.borderBox.minContentInlineSize,
-        negate(contributions.contentBox.minContentInlineSize),
-      ),
-    );
+    if (style.box.minWidth.kind === "auto")
+      return !automaticMinimum || isScrollableOverflow(style.box.overflowX)
+        ? chrome
+        : contributions.borderBox.minContentInlineSize;
+    const minimum = this.#usedLength(style.box.minWidth, null, style);
+    if (minimum === null) return contributions.borderBox.minContentInlineSize;
+    return nonNegative(style.box.boxSizing === "border-box"
+      ? cssMax(chrome, minimum)
+      : sum(chrome, minimum));
   }
 
   #intrinsicBlockSize(
@@ -5194,8 +5202,8 @@ class LayoutBuilder {
       edges: (style, containingWidth) => this.#edges(style, containingWidth),
       intrinsicContributions: (id, availableInlineSize) =>
         this.#intrinsicContributions(id, availableInlineSize),
-      gridItemMinimumInlineContribution: (id, contributions) =>
-        this.#gridItemMinimumInlineContribution(id, contributions),
+      gridItemMinimumInlineContribution: (id, contributions, automaticMinimum) =>
+        this.#gridItemMinimumInlineContribution(id, contributions, automaticMinimum),
       intrinsicOuterBlockSize: (id, availableInlineSize, depth) =>
         this.#intrinsicOuterBlockSize(id, availableInlineSize, depth),
       withGridBudget: <T>(operation: () => T): T => this.#gridBudget(operation),
@@ -6202,8 +6210,8 @@ class LayoutBuilder {
         isOutOfFlow: (candidate) => this.#outOfFlow(candidate),
         intrinsicContributions: (id, availableInlineSize) =>
           this.#intrinsicContributions(id, availableInlineSize),
-        gridItemMinimumInlineContribution: (id, contributions) =>
-          this.#gridItemMinimumInlineContribution(id, contributions),
+        gridItemMinimumInlineContribution: (id, contributions, automaticMinimum) =>
+          this.#gridItemMinimumInlineContribution(id, contributions, automaticMinimum),
         edges: (computed, containingWidth) =>
           this.#edges(computed, containingWidth),
         clip: (candidate, paddingRect, borderRect, inheritedClip) =>

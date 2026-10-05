@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createDocumentState, parseWebDocument } from "../../dist/document/index.js";
+import { RenderArtifactStore } from "../../dist/presentation/renderer/index.js";
 import { buildFormattingTree } from "../../dist/presentation/formatting/index.js";
 import {
   buildLayoutFragmentTree,
@@ -697,4 +698,156 @@ test("Grid track distribution checks deterministic work and cancellation boundar
     (error) => error === cancellation
   );
   assert.equal(cancellationChecks, 250);
+});
+
+function fractionalTrack(minimum, factor = 1) {
+  return {
+    kind: "minmax",
+    minimum: typeof minimum === "number"
+      ? { kind: "length", value: { kind: "length", unit: "px", value: minimum } }
+      : { kind: minimum },
+    maximum: { kind: "flex", factor }
+  };
+}
+
+function fractionalSizes(tracks, contributions, availableSize, options = {}) {
+  return sizeGridTracks({
+    tracks,
+    contributions,
+    availableSize: availableSize === null ? null : cssLength(availableSize),
+    gap: cssLength(options.gap ?? 0),
+    resolveLength: (value, basis) => value.kind !== "length" ? null
+      : value.unit === "px" ? cssLength(value.value)
+        : value.unit === "%" && basis !== null ? cssLength(cssPixels(basis) * value.value / 100) : null,
+    alignment: { value: "start", overflow: "default" },
+    sizingConstraint: options.sizingConstraint ?? "none",
+    maxWork: 20_000,
+    signal: undefined
+  }).tracks.map((track) => cssPixels(track.baseSize));
+}
+
+test("fixed fractional minima ignore intrinsic image contributions in definite space", () => {
+  const tracks = [fractionalTrack(0, 0.95), fractionalTrack(304, 1.05)];
+  const items = [contribution("text", 0, 1, 88, 88, 240), contribution("image", 1, 2, 1402, 1402, 1402)];
+  const sizes = fractionalSizes(tracks, items, 932, { gap: 56 });
+  assert.ok(Math.abs(sizes[0] - 416.1) < 1 / 32);
+  assert.ok(Math.abs(sizes[1] - 459.9) < 1 / 32);
+  assert.deepEqual(fractionalSizes([fractionalTrack(0), fractionalTrack(0)], items, 400), [200, 200]);
+  assert.deepEqual(fractionalSizes([fractionalTrack(0), fractionalTrack(304)], items, 400), [96, 304]);
+  assert.deepEqual(fractionalSizes([fractionalTrack(0), fractionalTrack(304)], items, 200), [0, 304]);
+});
+
+test("flexible track minimum phases distinguish automatic, min-content, max-content and zero flex", () => {
+  const item = [contribution("content", 0, 1, 20, 80, 160)];
+  assert.deepEqual(fractionalSizes([fractionalTrack("auto")], item, 10), [20]);
+  assert.deepEqual(fractionalSizes([fractionalTrack("min-content")], item, 10), [80]);
+  assert.deepEqual(fractionalSizes([fractionalTrack("max-content")], item, 10), [160]);
+  assert.deepEqual(fractionalSizes([fractionalTrack(0, 0)], item, 400), [0]);
+  assert.deepEqual(fractionalSizes([fractionalTrack("auto", 0)], item, 400), [20]);
+});
+
+test("spanning flexible items grow only eligible intrinsic minima and retain planned increases", () => {
+  const tracks = [fractionalTrack(30), fractionalTrack("min-content", 2), autoTrack()];
+  const items = [contribution("span", 0, 3, 50, 150, 240), contribution("single", 1, 2, 20, 80, 160)];
+  for (const order of [items, [...items].reverse()]) {
+    assert.deepEqual(fractionalSizes(tracks, order, 100), [30, 120, 0]);
+  }
+  assert.deepEqual(fractionalSizes([fractionalTrack(0), fractionalTrack(0)],
+    [contribution("span", 0, 2, 1400, 1400, 1400)], 400), [200, 200]);
+  assert.deepEqual(fractionalSizes([fractionalTrack("min-content", 1), fractionalTrack("min-content", 3)],
+    [contribution("span", 0, 2, 0, 200, 300)], 100), [50, 150]);
+  assert.deepEqual(fractionalSizes([fractionalTrack("min-content", 0.1), fractionalTrack("min-content", 0.3)],
+    [contribution("span", 0, 2, 0, 200, 300)], 100), [80, 120]);
+  assert.deepEqual(fractionalSizes([fractionalTrack("min-content", 0.25), fractionalTrack("min-content", 0)],
+    [contribution("span", 0, 2, 0, 100, 100)], 0), [62.5, 37.5]);
+});
+
+test("indefinite fractional sizing uses max-content while min-content constraints suppress flex expansion", () => {
+  const items = [contribution("image", 0, 1, 20, 80, 160)];
+  assert.deepEqual(fractionalSizes([fractionalTrack(0)], items, null), [160]);
+  assert.deepEqual(fractionalSizes([fractionalTrack(0)], items, null, { sizingConstraint: "min-content" }), [0]);
+  assert.deepEqual(fractionalSizes([fractionalTrack("auto")], items, null, { sizingConstraint: "min-content" }), [80]);
+  assert.deepEqual(fractionalSizes([fractionalTrack("auto")], items, null, { sizingConstraint: "max-content" }), [160]);
+  // Sub-unit factors do not divide the base-size candidate and inflate siblings.
+  assert.deepEqual(fractionalSizes([fractionalTrack(100, 0.25), fractionalTrack(0, 2)], [], null), [100, 200]);
+  assert.deepEqual(fractionalSizes([fractionalTrack(0, 0.25), fractionalTrack(0, 0.25)],
+    [contribution("span", 0, 2, 0, 100, 200)], null), [50, 50]);
+});
+
+test("explicit Grid item minima supply the minimum contribution without forcing min-content width", () => {
+  for (const [style, expected] of [["min-width:0", 50], ["min-width:70px", 70],
+    ["min-width:0;padding:4px;border:1px solid;box-sizing:border-box", 50], ["overflow:auto", 50]]) {
+    const result = render(`<style>body{margin:0}#grid{display:grid;width:100px;grid-template-columns:1fr 1fr}
+      #item{${style}}</style><div id=grid><div id=item>abcdefghijklmnopqrst</div><div></div></div>`);
+    assert.equal(rectangle(result, "item").width, expected, style);
+  }
+  const automatic = render(`<style>body{margin:0}#grid{display:grid;width:100px;grid-template-columns:1fr 1fr}
+    </style><div id=grid><div id=item>abcdefghijklmnopqrst</div><div></div></div>`);
+  assert.equal(rectangle(automatic, "item").width, 160);
+});
+
+test("fractional Grid stays bounded when retained image metadata arrives", () => {
+  for (const template of ["minmax(0,.95fr) minmax(304px,1.05fr)", "repeat(2,minmax(0,1fr))"]) {
+    const document = parseWebDocument(`<style>body{margin:0}*{box-sizing:border-box}
+      #grid{display:grid;width:932px;gap:56px;grid-template-columns:${template};align-items:center}
+      figure{margin:0}img{display:block;width:100%;height:auto;max-width:100%;border:1px solid}
+      </style><div id=grid><div id=text>Comprendre, choisir, avancer.</div>
+      <figure id=figure><img id=image src=/hero.png alt=""></figure></div>`,
+    { requestUrl: "https://grid.example/", finalUrl: "https://grid.example/" });
+    const store = new RenderArtifactStore();
+    const imageId = "https://grid.example/hero.png";
+    const metadata = (width, height) => ({ id: imageId, requestUrl: imageId,
+      owners: [document.elementById("image")], width, height });
+    store.attach({ documentId: "fractional-image", documentRevision: 1, stateRevision: 1,
+      document, state: createDocumentState(document), resources: embeddedStylesheetSources(document),
+      images: [metadata(null, null)] });
+    const viewport = cssRect(cssPx(0), cssPx(0), cssPx(960), cssPx(640));
+    const request = { documentId: "fractional-image", documentRevision: 1,
+      mediaEnvironment: { viewportWidthCssPx: 960, viewportHeightCssPx: 640, mediaType: "screen",
+        prefersColorScheme: "light", reducedMotion: false, hover: "hover", pointer: "fine" },
+      layoutContext: { viewport, initialContainingBlock: viewport, scrollport: viewport,
+        controlMeasurer: terminalCssControlMeasurer(), textMeasurer: terminalCssTextMeasurer(CELL_WIDTH, ROW_HEIGHT) },
+      terminalContext: { columns: 120, rows: 40, cellWidthCssPx: CELL_WIDTH, rowHeightCssPx: ROW_HEIGHT,
+        unicode: true, ambiguousWidth: 1, colorDepth: 24, cellMeasurer: terminalCellMeasurer() } };
+    const box = (artifacts, id) => artifacts.documentLayout.forDocumentNode(document.elementById(id))
+      .find((value) => value.kind !== "text").borderRect;
+    try {
+      const before = store.analyze(request);
+      assert.equal(store.updateImages({ documentId: "fractional-image", documentRevision: 1,
+        images: [metadata(1400, 980)] }), "layout");
+      const after = store.analyze(request);
+      assert.notEqual(after.documentLayout, before.documentLayout);
+      assert.equal(after.computedStyles, before.computedStyles);
+      assert.equal(after.textSearchIndex, before.textSearchIndex);
+      assert.equal(after.documentLayout.outcome.status, "complete");
+      for (const id of ["text", "figure", "image"]) assert.equal(box(after, id).width, box(before, id).width);
+      const expectedWidth = template.startsWith("repeat") ? 438 : 459.9;
+      assert.ok(Math.abs(cssPixels(box(after, "image").width) - expectedWidth) < 1 / 32);
+      assert.ok(cssPixels(box(after, "image").height) < 324);
+      assert.ok(box(after, "image").x + box(after, "image").width <= box(after, "grid").width);
+      assert.equal(store.updateImages({ documentId: "fractional-image", documentRevision: 1,
+        images: [metadata(1400, 980)] }), "none");
+      assert.equal(store.analyze(request).documentLayout, after.documentLayout);
+    } finally { store.dispose(); }
+  }
+});
+
+test("spanning automatic minima do not expand fractional tracks but intrinsic minima still do", () => {
+  for (const [template, expected] of [["1fr 1fr", 100], ["minmax(min-content,1fr) minmax(min-content,1fr)", 160]]) {
+    const result = render(`<style>body{margin:0}#grid{display:grid;width:100px;grid-template-columns:${template}}
+      #item{grid-column:1/3}</style><div id=grid><div id=item>abcdefghijklmnopqrst</div></div>`);
+    assert.equal(rectangle(result, "item").width, expected, template);
+  }
+});
+
+
+test("intrinsic Grid constraints limit spanning min-content contributions by fixed maxima", () => {
+  const tracks = Array.from({ length: 2 }, () => ({ kind: "minmax", minimum: { kind: "auto" },
+    maximum: { kind: "length", value: { kind: "length", unit: "px", value: 100 } } }));
+  assert.deepEqual(fractionalSizes(tracks, [contribution("span", 0, 2, 0, 400, 800)], null,
+    { sizingConstraint: "min-content" }), [100, 100]);
+  assert.deepEqual(fractionalSizes(tracks, [contribution("span", 0, 2, 0, 400, 800)], null,
+    { sizingConstraint: "min-content", gap: 20 }), [100, 100]);
+  assert.deepEqual(fractionalSizes(tracks, [contribution("span", 0, 2, 300, 400, 800)], null,
+    { sizingConstraint: "min-content" }), [150, 150]);
 });

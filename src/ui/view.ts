@@ -54,8 +54,7 @@ import { documentActionId } from "../presentation/formatting/index.js";
 import {
   BROWSER_SIDE_PANEL_COLUMNS,
   BROWSER_SIDE_PANEL_MIN_COLUMNS,
-  committedDocumentScrollRow,
-  documentContentBounds
+  committedDocumentScrollRow
 } from "./document-layout.js";
 import type {
   ActionPaletteOverlay,
@@ -349,13 +348,19 @@ function inlineControlGroup(
 
 }
 
+/** The only page-local to terminal translation, shared by every page layer. */
+function documentCellRect(rect: Rect, page: Rect): Rect {
+  return { ...rect, row: page.row + rect.row, column: page.column + rect.column };
+}
+
 /** Projects document cells into the same clipped surface used for painting. */
 function documentCellBounds(rect: Rect, content: Rect, viewport: Rect): Rect | null {
-  const row = Math.max(content.row + rect.row, content.row, viewport.row);
-  const column = Math.max(content.column + rect.column, content.column, viewport.column);
-  const bottom = Math.min(content.row + rect.row + rect.height,
+  const projected = documentCellRect(rect, content);
+  const row = Math.max(projected.row, content.row, viewport.row);
+  const column = Math.max(projected.column, content.column, viewport.column);
+  const bottom = Math.min(projected.row + projected.height,
     content.row + content.height, viewport.row + viewport.height);
-  const right = Math.min(content.column + rect.column + rect.width,
+  const right = Math.min(projected.column + projected.width,
     content.column + content.width, viewport.column + viewport.width);
   return bottom > row && right > column
     ? { row, column, height: bottom - row, width: right - column } : null;
@@ -386,15 +391,12 @@ function browserDocumentChildBounds(
   childCount: number
 ): readonly Rect[] {
   const terminalRender = document.terminalRender;
-  const contentBounds = documentContentBounds(bounds);
   const entries = document.controlGroups;
   return Array.from({ length: childCount }, (_, index) => {
     const control = entries[index]?.controls[0];
     const geometry = terminalRender.controls.find((candidate) => candidate.node === control?.node);
     if (geometry === undefined) throw new Error("A retained control slot requires its committed geometry.");
-    return { ...geometry.visible,
-      row: contentBounds.row + geometry.visible.row,
-      column: contentBounds.column + geometry.visible.column };
+    return documentCellRect(geometry.visible, bounds);
   });
 }
 
@@ -415,6 +417,7 @@ const browserImageComponent = defineComponent<{
   },
   render({ model, bounds, target }) {
     const { document, placement } = model;
+    const page = { ...bounds, row: bounds.row - placement.clip.row, column: bounds.column - placement.clip.column };
     // Keep the ordinary cells beneath the graphic for unsupported terminals and
     // rejected graphics commits, including where an earlier editor was mounted.
     for (const row of document.terminalRender.cellBuffer.rows) {
@@ -422,16 +425,15 @@ const browserImageComponent = defineComponent<{
       // The child target clips the shared styled row to this image allocation.
       // Reusing the document projection preserves search and link decoration in
       // fallback cells instead of replacing them with authored styles alone.
-      target.write(bounds.row + row.row - placement.clip.row, bounds.column - placement.clip.column,
-        rowSegments(document, row, row.row));
+      const origin = documentCellRect({ row: row.row, column: 0, width: document.terminalRender.cellBuffer.columns, height: 1 }, page);
+      target.write(origin.row, origin.column, rowSegments(document, row, row.row));
     }
     const resource = document.source.snapshot.images?.find((entry) => entry.id === placement.resourceId);
     if (resource === undefined || resource.width !== placement.naturalWidth || resource.height !== placement.naturalHeight) return;
     const image = browserRasterImage(resource);
     if (image === null) return;
     target.placeGraphic({ id: `${document.source.id}:${placement.id}`, image, fit: "fill", clip: bounds,
-      bounds: { ...placement.bounds, row: bounds.row + placement.bounds.row - placement.clip.row,
-        column: bounds.column + placement.bounds.column - placement.clip.column } });
+      bounds: documentCellRect(placement.bounds, page) });
   },
   accessibility({ id }) {
     // The document owns the single semantic image/alt identity.
@@ -503,25 +505,24 @@ const browserDocumentComponent = defineComponent<BrowserDocumentComponentOptions
         bounds,
         slots.count("controls")
       ),
-      images: model.document.terminalRender.cellBuffer.images.map((image) => ({ ...image.clip,
-        row: bounds.row + image.clip.row, column: bounds.column + image.clip.column }))
+      images: model.document.terminalRender.cellBuffer.images.map((image) => documentCellRect(image.clip, bounds))
     };
   },
   renderBeforeChildren({ model, bounds, viewport: visibleBounds, target }) {
     if (bounds.width <= 0 || bounds.height <= 0) return;
     const document = model.document;
     const terminalRender = document.terminalRender;
-    const contentBounds = documentContentBounds(bounds);
-    const startIndex = Math.max(0, visibleBounds.row - contentBounds.row);
+    const startIndex = Math.max(0, visibleBounds.row - bounds.row);
     // Canvas underpaint is already bounded to the retained viewport window.
     // It deliberately extends past the last semantic/document row.
-    const endIndexExclusive = visibleBounds.row + visibleBounds.height - contentBounds.row;
+    const endIndexExclusive = visibleBounds.row + visibleBounds.height - bounds.row;
     for (const cellRow of terminalRender.cellBuffer.rows) {
       const rowIndex = cellRow.row;
       if (rowIndex < startIndex || rowIndex >= endIndexExclusive) continue;
+      const origin = documentCellRect({ row: rowIndex, column: 0, width: terminalRender.cellBuffer.columns, height: 1 }, bounds);
       target.write(
-        contentBounds.row + rowIndex,
-        contentBounds.column,
+        origin.row,
+        origin.column,
         rowSegments(document, cellRow, rowIndex)
       );
     }
@@ -529,13 +530,12 @@ const browserDocumentComponent = defineComponent<BrowserDocumentComponentOptions
   accessibility({ id, model, bounds, viewport: visibleBounds, focusedTargetId, slots }) {
     const document = model.document;
     const terminalRender = document.terminalRender;
-    const contentBounds = documentContentBounds(bounds);
     const startIndex = Math.min(
-      Math.max(0, visibleBounds.row - contentBounds.row),
+      Math.max(0, visibleBounds.row - bounds.row),
       terminalRender.documentRowCount
     );
     const endIndexExclusive = Math.min(
-      Math.max(startIndex, visibleBounds.row + visibleBounds.height - contentBounds.row),
+      Math.max(startIndex, visibleBounds.row + visibleBounds.height - bounds.row),
       terminalRender.documentRowCount
     );
     const visibleSemantic = terminalRender.accessibilityBounds.filter((entry) => {
@@ -545,7 +545,7 @@ const browserDocumentComponent = defineComponent<BrowserDocumentComponentOptions
       if (entry.rect.width === 0 || entry.rect.height === 0) {
         return entry.rect.row >= startIndex && entry.rect.row < endIndexExclusive;
       }
-      return entry.rect.row < endIndexExclusive && entry.rect.row + entry.rect.height > startIndex;
+      return documentCellBounds(entry.rect, bounds, visibleBounds) !== null;
     });
     return {
       id,
@@ -577,12 +577,11 @@ const browserDocumentComponent = defineComponent<BrowserDocumentComponentOptions
   },
   focusTargets({ model, bounds, viewport: visibleBounds }) {
     if (bounds.width <= 0 || bounds.height <= 0) return [];
-    const contentBounds = documentContentBounds(bounds);
     return model.document.terminalRender.focusMap.targets
       .filter((target) => target.action.kind !== "form-control")
       .flatMap((target) => {
-        const bounds = documentCellUnion(target.rects, contentBounds, visibleBounds);
-        return bounds === null ? [] : [{ id: documentActionId(target.action), bounds }];
+        const projected = documentCellUnion(target.rects, bounds, visibleBounds);
+        return projected === null ? [] : [{ id: documentActionId(target.action), bounds: projected }];
       });
   },
   onFocus(event) {
@@ -601,10 +600,9 @@ const browserDocumentComponent = defineComponent<BrowserDocumentComponentOptions
     if (bounds.width <= 0 || bounds.height <= 0) return [];
     const document = model.document;
     const terminalRender = document.terminalRender;
-    const contentBounds = documentContentBounds(bounds);
     const scrollTargets = terminalRender.scrollPorts.flatMap((port) => {
       if (!port.userScrollInline && !port.userScrollBlock) return [];
-      const clipped = documentCellBounds(port.rect, contentBounds, visibleBounds);
+      const clipped = documentCellBounds(port.rect, bounds, visibleBounds);
       return clipped === null ? [] : [{
         id: `scroll-owner:${port.node}`,
         bounds: clipped,
@@ -625,7 +623,7 @@ const browserDocumentComponent = defineComponent<BrowserDocumentComponentOptions
     return [rootScrollTarget, ...scrollTargets, ...terminalRender.hitTestIndex.regions
       .filter((placement) => placement.action.kind !== "form-control" && !placement.id.startsWith("viewport-image-hit:"))
       .flatMap((placement) => {
-        const clipped = documentCellBounds(placement.rect, contentBounds, visibleBounds);
+        const clipped = documentCellBounds(placement.rect, bounds, visibleBounds);
         if (clipped === null) return [];
         const placementActionId = documentActionId(placement.action);
         return [{

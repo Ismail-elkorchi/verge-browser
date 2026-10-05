@@ -4,19 +4,26 @@ import { BrowserStore } from "./app/storage.js";
 import { createNodeBrowserServices } from "./runtime/node-browser-services.js";
 import { renderBrowserOnce, runBrowserTui } from "./ui/run.js";
 import type { HttpSessionAdapter } from "@ismail-elkorchi/http-client";
+import { createNodeTerminalHost } from "@ismail-elkorchi/terminal-ui/host";
 
 interface CliFlags {
   readonly initialTarget: string | null;
   readonly runOnce: boolean;
+  readonly explicitCellPresentation: boolean;
 }
 
 function parseCliFlags(argv: readonly string[]): CliFlags {
   let initialTarget: string | null = null;
   let runOnce = false;
+  let explicitCellPresentation = false;
 
   for (const token of argv) {
     if (token === "--once") {
       runOnce = true;
+      continue;
+    }
+    if (token === "--terminal-cell-presentation=explicit") {
+      explicitCellPresentation = true;
       continue;
     }
     if (token.startsWith("--")) {
@@ -29,7 +36,8 @@ function parseCliFlags(argv: readonly string[]): CliFlags {
 
   return {
     initialTarget,
-    runOnce
+    runOnce,
+    explicitCellPresentation
   };
 }
 
@@ -59,7 +67,12 @@ async function main(): Promise<void> {
     return;
   }
 
-  await runBrowserTui(initialTarget, browserOptions);
+  await runBrowserTui(initialTarget, {
+    ...browserOptions,
+    ...(cliFlags.explicitCellPresentation ? {
+      host: createNodeTerminalHost({ initialState: { cellPresentation: "explicit" } })
+    } : {})
+  });
 }
 
 main().catch((error: unknown) => {

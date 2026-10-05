@@ -28,8 +28,7 @@ type ContributionPhase =
   | "content-based-minimum"
   | "max-content-minimum"
   | "intrinsic-maximum"
-  | "max-content-maximum"
-  | "flexible-crossing-minimum";
+  | "max-content-maximum";
 
 interface MutableTrack {
   readonly index: number;
@@ -90,7 +89,7 @@ function requiresPercentageBasis(value: CssLength): boolean {
 
 function breadthLength(
   breadth: CssGridTrackBreadth,
-  input: GridTrackSizingInput
+  input: Pick<GridTrackSizingInput, "availableSize" | "resolveLength">
 ): CssNonNegativeLength | null {
   if (breadth.kind !== "length") return null;
   const value = input.resolveLength(breadth.value, input.availableSize);
@@ -117,6 +116,24 @@ function breadthCategory(
   if (breadth.kind === "auto") return "automatic";
   if (breadth.kind !== "length") return "content-based";
   return resolved === null && requiresPercentageBasis(breadth.value) ? "automatic" : "fixed";
+}
+
+/** CSS Grid 6.6: automatic item minima require an auto-min track and no multi-track flex span. */
+export function gridItemHasAutomaticMinimum(
+  tracks: readonly CssGridTrackSizingFunction[],
+  start: number,
+  end: number,
+  input: Pick<GridTrackSizingInput, "availableSize" | "resolveLength">
+): boolean {
+  let automatic = false;
+  for (let index = start; index < end; index += 1) {
+    const track = tracks[index];
+    if (track === undefined) continue;
+    if (end - start > 1 && maximumBreadth(track).kind === "flex") return false;
+    const minimum = minimumBreadth(track);
+    if (breadthCategory(minimum, breadthLength(minimum, input)) === "automatic") automatic = true;
+  }
+  return automatic;
 }
 
 function flexFactor(sizing: CssGridTrackSizingFunction): number {
@@ -264,7 +281,7 @@ function growthSpanSize(
 }
 
 function baseTarget(track: MutableTrack, item: GridItemContribution): CssNonNegativeLength | null {
-  if (track.minimumCategory === "fixed" || track.flexFactor > 0) return null;
+  if (track.minimumCategory === "fixed" || track.maximumCategory === "flexible") return null;
   if (track.minimum.kind === "max-content") return item.maxContent;
   if (track.minimum.kind === "min-content") return item.minContent;
   return item.minimumContribution;
@@ -312,9 +329,16 @@ function resolveNonSpanningItems(
   }
 }
 
-function phaseTarget(phase: ContributionPhase, item: GridItemContribution): CssNonNegativeLength {
+function phaseTarget(
+  phase: ContributionPhase,
+  item: GridItemContribution,
+  sizingConstraint: GridTrackSizingInput["sizingConstraint"]
+): CssNonNegativeLength {
   if (phase === "max-content-minimum" || phase === "max-content-maximum") return item.maxContent;
   if (phase === "content-based-minimum" || phase === "intrinsic-maximum") return item.minContent;
+  if (sizingConstraint === "min-content" || sizingConstraint === "max-content") {
+    return item.minContent;
+  }
   return item.minimumContribution;
 }
 
@@ -336,14 +360,13 @@ function participates(
   sizingConstraint: GridTrackSizingInput["sizingConstraint"]
 ): boolean {
   if (track.collapsed) return false;
-  if (phase === "flexible-crossing-minimum") return track.flexFactor > 0;
   if (phase === "intrinsic-minimum") return intrinsicMinimum(track);
   if (phase === "content-based-minimum") {
     return track.minimum.kind === "min-content" || track.minimum.kind === "max-content";
   }
   if (phase === "max-content-minimum") {
     return track.minimum.kind === "max-content"
-      || (sizingConstraint === "max-content" && track.minimum.kind === "auto");
+      || (sizingConstraint === "max-content" && track.minimumCategory === "automatic");
   }
   if (phase === "intrinsic-maximum") return intrinsicMaximum(track);
   return track.infinitelyGrowable || maxContentMaximum(track);
@@ -392,24 +415,22 @@ function distributeToFlexibleTracks(
   work: TrackSizingWork
 ): ReadonlyMap<MutableTrack, CssNonNegativeLength> {
   const increases = new Map<MutableTrack, CssNonNegativeLength>();
-  const flexible = selectTracks(candidates, (track) => track.flexFactor > 0, work);
-  if (flexible.length === 0) return distributeEqually(amount, candidates, roomForBase, work);
   let factorSum = 0;
-  for (const track of flexible) {
+  for (const track of candidates) {
     consume(work);
     factorSum += track.flexFactor;
   }
   const divisor = Math.max(1, factorSum);
   for (const track of candidates) increases.set(track, ZERO);
   let distributed: CssPixelLength = ZERO;
-  for (const track of flexible) {
+  for (const track of candidates) {
     const increase = nonNegative(cssMultiply(cssDivide(amount, divisor), track.flexFactor));
     increases.set(track, increase);
     distributed = sum(distributed, increase);
   }
   const remaining = nonNegative(difference(amount, distributed));
   if (remaining > 0 && factorSum < 1) {
-    for (const [track, increase] of distributeEqually(remaining, flexible, () => null, work)) {
+    for (const [track, increase] of distributeEqually(remaining, candidates, () => null, work)) {
       increases.set(track, nonNegative(sum(increases.get(track) ?? ZERO, increase)));
     }
   }
@@ -477,13 +498,15 @@ function incurredIncreases(
   boundaries: readonly boolean[],
   gap: CssPixelLength,
   sizingConstraint: GridTrackSizingInput["sizingConstraint"],
-  work: TrackSizingWork
+  work: TrackSizingWork,
+  flexibleOnly: boolean
 ): IncurredIncreases {
   const size = affectedSize(phase);
   const spanned = tracksForItem(tracks, item, work);
   const affected = selectTracks(
     spanned,
-    (track) => participates(track, phase, sizingConstraint),
+    (track) => (!flexibleOnly || track.maximumCategory === "flexible")
+      && participates(track, phase, sizingConstraint),
     work
   );
   const affectedSet = new Set(affected);
@@ -492,16 +515,28 @@ function incurredIncreases(
   const current = size === "growth"
     ? growthSpanSize(tracks, item, boundaries, gap, work)
     : baseSpanSize(tracks, item, boundaries, gap, work);
-  let remaining = nonNegative(difference(phaseTarget(phase, item), current));
+  let target = phaseTarget(phase, item, sizingConstraint);
+  if (phase === "intrinsic-minimum"
+    && (sizingConstraint === "min-content" || sizingConstraint === "max-content")) {
+    let limit = gutterTotal(boundaries, gap, item.start, item.end, work);
+    let allFixed = true;
+    for (const track of spanned) {
+      consume(work);
+      if (track.maximumCategory !== "fixed") { allFixed = false; break; }
+      limit = sum(limit, breadthLength(track.maximum, work.input) ?? ZERO);
+    }
+    if (allFixed) target = nonNegative(cssMax(item.minimumContribution, cssMin(target, limit)));
+  }
+  let remaining = nonNegative(difference(target, current));
   if (remaining <= 0) return { affected, increases };
 
-  const initial = phase === "flexible-crossing-minimum"
+  const initial = flexibleOnly
     ? distributeToFlexibleTracks(remaining, affected, work)
     : distributeEqually(remaining, affected, (track) => increaseLimit(track, size), work);
   remaining = nonNegative(difference(remaining, addIncreases(increases, initial)));
 
   const unaffected = selectTracks(spanned, (track) => !affectedSet.has(track), work);
-  if (remaining > 0 && unaffected.length > 0) {
+  if (!flexibleOnly && remaining > 0 && unaffected.length > 0) {
     const distributed = distributeEqually(
       remaining,
       unaffected,
@@ -514,7 +549,7 @@ function incurredIncreases(
   if (remaining > 0) {
     const beyond = beyondLimitCandidates(affected, phase, work);
     if (beyond.length > 0) {
-      const distributed = phase === "flexible-crossing-minimum"
+      const distributed = flexibleOnly
         ? distributeToFlexibleTracks(remaining, beyond, work)
         : distributeEqually(remaining, beyond, () => null, work);
       addIncreases(increases, distributed);
@@ -529,7 +564,8 @@ function examineSpanningPhase(
   phase: ContributionPhase,
   boundaries: readonly boolean[],
   gap: CssPixelLength,
-  work: TrackSizingWork
+  work: TrackSizingWork,
+  flexibleOnly = false
 ): void {
   const affectedTracks = new Set<MutableTrack>();
   for (const track of tracks) {
@@ -545,7 +581,8 @@ function examineSpanningPhase(
       boundaries,
       gap,
       work.input.sizingConstraint,
-      work
+      work,
+      flexibleOnly
     );
     for (const track of incurred.affected) affectedTracks.add(track);
     for (const [track, increase] of incurred.increases) {
@@ -591,7 +628,7 @@ function resolveSpanningItems(
   for (const item of contributions) {
     consume(work);
     if (!validContribution(item, tracks.length)) continue;
-    const crossesFlexible = tracksForItem(tracks, item, work).some((track) => track.flexFactor > 0);
+    const crossesFlexible = tracksForItem(tracks, item, work).some((track) => track.maximumCategory === "flexible");
     if (crossesFlexible) flexible.push(item);
     else if (item.end - item.start > 1) {
       const span = item.end - item.start;
@@ -613,8 +650,14 @@ function resolveSpanningItems(
       examineSpanningPhase(tracks, group, phase, boundaries, gap, work);
     }
   }
-  if (flexible.length > 0)
-    examineSpanningPhase(tracks, flexible, "flexible-crossing-minimum", boundaries, gap, work);
+  // Flexible maxima do not turn fixed minima into intrinsic minima. Repeat
+  // the same minimum phases, restricting distribution to flexible tracks.
+  // https://www.w3.org/TR/css-grid-1/#algo-spanning-flex-items
+  if (flexible.length > 0) {
+    for (const phase of ["intrinsic-minimum", "content-based-minimum", "max-content-minimum"] as const) {
+      examineSpanningPhase(tracks, flexible, phase, boundaries, gap, work, true);
+    }
+  }
   for (const track of tracks) {
     if (track.growthLimit.kind === "infinite" && track.maximumCategory !== "flexible") {
       track.growthLimit = Object.freeze({ kind: "finite", value: track.baseSize });
@@ -660,7 +703,7 @@ function maximizeTracks(
   let free = nonNegative(difference(input.availableSize, totalBaseSize(tracks, boundaries, input.gap, work)));
   let growable = selectTracks(
     tracks,
-    (track) => !track.collapsed && track.flexFactor === 0
+    (track) => !track.collapsed && track.maximumCategory !== "flexible"
       && (track.growthLimit.kind === "infinite" || track.baseSize < track.growthLimit.value),
     work
   );
@@ -718,7 +761,7 @@ function expandFlexibleTracks(
   work: TrackSizingWork
 ): void {
   const flexible = selectTracks(tracks, (track) => !track.collapsed && track.flexFactor > 0, work);
-  if (flexible.length === 0) return;
+  if (flexible.length === 0 || input.sizingConstraint === "min-content") return;
   let fraction: CssPixelLength = ZERO;
   if (input.availableSize !== null) {
     fraction = findFlexFraction(
@@ -729,7 +772,7 @@ function expandFlexibleTracks(
   } else {
     for (const track of flexible) {
       consume(work);
-      fraction = cssMax(fraction, cssDivide(track.baseSize, track.flexFactor));
+      fraction = cssMax(fraction, cssDivide(track.baseSize, Math.max(1, track.flexFactor)));
     }
     for (const item of contributions) {
       consume(work);

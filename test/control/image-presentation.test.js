@@ -17,7 +17,6 @@ import { prepareBrowserTui } from "../../dist/ui/run.js";
 import { browserView } from "../../dist/ui/view.js";
 import { renderDocumentAttachment } from "../../dist/ui/render-worker/document-transfer.js";
 
-const terminalSize = { columns: 50, rows: 16 };
 function readyImage(id = "https://images.test/a.png") {
   return Object.freeze({ id, requestUrl: id, owners: [], width: 2, height: 2,
     status: "ready", mimeType: "image/png", pixels: new Uint8Array(16).fill(255) });
@@ -50,7 +49,8 @@ test("one-time worker attachment transfers image metadata without readiness, pix
 });
 
 async function fixture(html, { staleDimensions = false, graphics = "none", graphicsBudget,
-  imageFailed = false, searchQuery = null, activeMatchIndex = 0 } = {}) {
+  imageFailed = false, imagePending = false, searchQuery = null, activeMatchIndex = 0,
+  terminalSize = { columns: 50, rows: 16 }, sidePanel = null, scrollRow = 0, scrollColumn = 0 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "verge-image-presentation-"));
   const store = await BrowserStore.open({ statePath: join(directory, "state.json") });
   const prepared = await prepareBrowserTui("https://images.test/", { store,
@@ -65,11 +65,12 @@ async function fixture(html, { staleDimensions = false, graphics = "none", graph
   const ready = readyImage();
   const resource = imageFailed ? { id: ready.id, requestUrl: ready.requestUrl, owners: ready.owners,
     width: ready.width, height: ready.height, mimeType: ready.mimeType, status: "failed",
-    failure: "decode-failed", reason: "Fixture decode failure." } : ready;
+    failure: "decode-failed", reason: "Fixture decode failure." } : imagePending ? { ...ready, status: "pending", pixels: undefined } : ready;
   prepareBrowserImage(resource);
   document = { ...document, snapshot: { ...document.snapshot, images: staleDimensions ? [{ ...resource, width: null, height: null, status: "pending", pixels: undefined }] : [resource] } };
-  const size = browserPageSize(prepared.state, terminalSize);
-  const payload = await prepared.controller.renderViewport(document, 1, { ...size, scrollRow: 0, scrollColumn: 0,
+  const screenState = { ...prepared.state, sidePanel };
+  const size = browserPageSize(screenState, terminalSize);
+  const payload = await prepared.controller.renderViewport(document, 1, { ...size, scrollRow, scrollColumn,
     scrollOffsets: [], overscanBefore: 1, overscanAfter: 1, preferences: browserRenderPreferences(), searchQuery });
   document = { ...document, snapshot: { ...document.snapshot, images: [resource] }, rendering: { ...document.rendering,
     viewport: payload, previousViewport: null, summary: payload.summary, status: "ready", committedViewportRevision: 1,
@@ -77,12 +78,12 @@ async function fixture(html, { staleDimensions = false, graphics = "none", graph
     search: searchQuery === null ? null : { query: searchQuery, activeMatchIndex, matches: payload.search.matches,
       anchors: new Map(), documentRevision: document.documentRevision, stateRevision: document.stateRevision,
       layoutRevision: payload.layoutRevision, requestGeneration: 1, truncated: false } };
-  const state = { ...prepared.state, documents: [document] }, messages = [];
+  const state = { ...screenState, documents: [document] }, messages = [];
   const host = createMemoryTerminalHost({ terminalSize, capabilities: {
     graphics: { kitty: "supported", sixel: "unsupported", kittyTransport: "direct", cellPixels: { width: 8, height: 16 } },
   } });
   const runtime = createTuiRuntime({ graphics, ...(graphicsBudget === undefined ? {} : { graphicsBudget }), app: defineTui({ id: "image-order", init: () => ({ state }),
-    update(current, message) { messages.push(message); return { state: current }; }, view: browserView }),
+    update(current, message) { messages.push(message); return { state: message.kind === "fixtureState" ? message.state : current }; }, view: browserView }),
     textPresentation: prepared.textPresentation, host });
   await runtime.start();
   return { runtime, messages, host, prepared, document, size, async close() { await runtime.dispose(); await prepared.controller.close(); await rm(directory, { recursive: true, force: true }); } };
@@ -188,5 +189,107 @@ test("controller resource-only state preparation retains definite image layout a
     const abort = new globalThis.AbortController(); abort.abort();
     await assert.rejects(value.prepared.controller.renderViewport(document, 3, parameters, abort.signal), { name: "AbortError" });
     assert.equal(next.scrollRow, previous.scrollRow);
+  } finally { await value.close(); }
+});
+
+const widePage = '<style>body{margin:0;background:white;color:black;min-width:2400px}'
+  + 'p{margin:0;height:16px}img{position:absolute;left:640px;top:32px;width:160px;height:64px}'
+  + 'input{position:absolute;left:800px;top:96px;width:160px;height:32px;padding:0;border:0}</style>'
+  + '<a href="/target"><img src="/a.png" alt="IMAGE_MARKER"></a><input id=q value="EDIT_MARKER">'
+  + Array.from({ length: 70 }, (_, index) => `<p>Paragraph ${index} visible text</p>`).join('');
+
+function markerPositions(frame, marker) {
+  return renderFramePlain(frame).split('\n').flatMap((line, row) => {
+    const positions = [];
+    for (let column = line.indexOf(marker); column !== -1; column = line.indexOf(marker, column + 1)) {
+      positions.push({ row: row + 1, column: column + 1 });
+    }
+    return positions;
+  });
+}
+
+function assertPageProjection(value, { graphics = true } = {}) {
+  const frame = value.runtime.frame();
+  const document = value.runtime.state().documents[value.runtime.state().activeDocumentIndex];
+  const payload = document.rendering.viewport ?? document.rendering.previousViewport;
+  const image = payload.cellBuffer.images[0];
+  const target = frame.hitTargets.find((entry) => entry.id === 'image');
+  assert.ok(image);
+  assert.ok(target);
+  const origin = { row: 3 - payload.scrollRow, column: 1 - payload.scrollColumn };
+  assert.deepEqual(target.bounds, { ...image.clip, row: origin.row + image.clip.row,
+    column: origin.column + image.clip.column });
+  assert.deepEqual(markerPositions(frame, 'IMAGE_MARKER'), [{ row: target.bounds.row, column: target.bounds.column }],
+    'the fallback has one copy at the same origin as the image target');
+  const control = payload.controls.find((entry) => entry.node === document.snapshot.document.elementById('q'));
+  const editor = frame.hitTargets.find((entry) => entry.id === `${control.node}:text`);
+  assert.ok(editor);
+  assert.equal(editor.bounds.column, origin.column + control.visible.column);
+  assert.equal(editor.bounds.row, origin.row + control.visible.row);
+  assert.deepEqual(markerPositions(frame, 'EDIT_MARKER'), [{ row: editor.bounds.row, column: editor.bounds.column + 2 }]);
+  assert.equal(frame.graphics.length, graphics ? 1 : 0);
+  if (graphics) assert.deepEqual(frame.graphics[0].clip, target.bounds);
+  assert.ok(JSON.stringify(frame.accessibility).includes('IMAGE_MARKER'));
+  return target;
+}
+
+for (const status of ['ready', 'pending', 'failed']) {
+  for (const options of [{}, { sidePanel: 'history' }, { scrollRow: 2 }, { scrollColumn: 20 },
+    { sidePanel: 'history', scrollRow: 2, scrollColumn: 20 }]) {
+    test(`wide page has one text, image, control and hit origin: ${status} ${JSON.stringify(options)}`, async () => {
+      const value = await fixture(widePage, { ...options, terminalSize: { columns: 240, rows: 20 },
+        imagePending: status === 'pending', imageFailed: status === 'failed' });
+      try {
+        assert.equal(value.size.columns, options.sidePanel ? 198 : 239);
+        assert.equal(value.document.rendering.viewport.cellBuffer.columns, value.size.columns);
+        const target = assertPageProjection(value, { graphics: status === 'ready' });
+        for (const action of ['press', 'release']) await value.runtime.handleInput({ kind: 'mouse', sequence: '', encoding: 'sgr', action,
+          button: 'left', row: target.bounds.row, column: target.bounds.column, rawCode: 0,
+          modifiers: { shift: false, alt: false, ctrl: false } });
+        assert.ok(value.messages.some((message) => message.kind === 'activateActionAt'
+          && message.actionId === `link:${value.document.snapshot.document.links[0].node}`));
+        assert.doesNotMatch(value.host.output(), /_Ga=t,/u, 'graphics disabled preserves ordinary fallback without uploads');
+      } finally { await value.close(); }
+    });
+  }
+}
+
+test('pending resize retains accepted image, editor, semantics and hit geometry until the new canvas arrives', async () => {
+  const value = await fixture(widePage, { terminalSize: { columns: 160, rows: 20 } });
+  try {
+    const before = assertPageProjection(value).bounds;
+    const document = value.document;
+    await value.runtime.dispatch({ kind: 'fixtureState', state: { ...value.runtime.state(), documents: [{ ...document,
+      rendering: { ...document.rendering, status: 'rendering', viewport: null, previousViewport: document.rendering.viewport } }] } });
+    for (const columns of [240, 140, 240]) {
+      await value.runtime.resize({ columns, rows: 20 });
+      assert.deepEqual(assertPageProjection(value).bounds, before);
+      assert.equal(value.runtime.state().documents[0].rendering.previousViewport.cellBuffer.columns, 159);
+    }
+    const payload = await value.prepared.controller.renderViewport(document, 2, {
+      ...browserPageSize(value.runtime.state(), { columns: 240, rows: 20 }), scrollRow: 0, scrollColumn: 0,
+      scrollOffsets: [], overscanBefore: 1, overscanAfter: 1, preferences: browserRenderPreferences(), searchQuery: null });
+    await value.runtime.dispatch({ kind: 'fixtureState', state: { ...value.runtime.state(), documents: [{ ...document,
+      rendering: { ...document.rendering, status: 'ready', viewport: payload, previousViewport: null, summary: payload.summary } }] } });
+    assert.equal(payload.cellBuffer.columns, 239);
+    assert.deepEqual(assertPageProjection(value).bounds, before);
+  } finally { await value.close(); }
+});
+
+test('physical clipping during pending shrink agrees for graphics, fallback, semantics and clicks', async () => {
+  const value = await fixture(widePage, { terminalSize: { columns: 240, rows: 20 } });
+  try {
+    await value.runtime.resize({ columns: 90, rows: 20 });
+    const frame = value.runtime.frame();
+    const target = frame.hitTargets.find((entry) => entry.id === 'image');
+    assert.deepEqual(target.bounds, { row: 5, column: 81, width: 9, height: 4 });
+    assert.deepEqual(frame.graphics[0].clip, target.bounds);
+    assert.equal(renderFramePlain(frame).split('\n')[4].slice(80, 89), 'IMAGE_MAR');
+    assert.ok(JSON.stringify(frame.accessibility).includes('IMAGE_MARKER'));
+    await value.runtime.resize({ columns: 80, rows: 20 });
+    const clipped = value.runtime.frame();
+    assert.equal(clipped.hitTargets.some((entry) => entry.id === 'image'), false);
+    assert.equal(clipped.graphics.length, 0);
+    assert.doesNotMatch(JSON.stringify(clipped.accessibility), /IMAGE_MARKER/u);
   } finally { await value.close(); }
 });

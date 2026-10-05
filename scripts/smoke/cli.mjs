@@ -51,6 +51,12 @@ async function runSmokeCheck() {
     if (once.stdout.includes("\u001b")) {
       throw new Error("CLI --once emitted terminal control sequences.");
     }
+    const declared = spawnSync(process.execPath, [
+      "dist/cli.js", "--terminal-cell-presentation=explicit", "--once", target
+    ], { encoding: "utf8", timeout: 8_000 });
+    if (declared.status !== 0 || declared.stdout !== once.stdout) {
+      throw new Error("Explicit terminal state must not change plain one-shot output.");
+    }
   } finally {
     await rm(fixtureDirectory, { recursive: true, force: true });
   }
@@ -63,6 +69,12 @@ try {
   });
   if (invalidOption.status !== 1 || !invalidOption.stderr.includes("Unknown option: --unknown-option")) {
     throw new Error("CLI did not reject an unknown option");
+  }
+  const invalidPresentation = spawnSync(process.execPath, [
+    "dist/cli.js", "--terminal-cell-presentation=implicit"
+  ], { encoding: "utf8" });
+  if (invalidPresentation.status !== 1 || !invalidPresentation.stderr.includes("Unknown option:")) {
+    throw new Error("CLI must reject unsupported terminal-state declarations.");
   }
   process.stdout.write("cli smoke ok\n");
 } catch (error) {
