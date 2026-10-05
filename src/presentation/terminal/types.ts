@@ -1,7 +1,7 @@
 import type { ValueSequence } from "../../memory/packed.js";
 import type { StyleSnapshot } from "../style/types.js";
 import type { DocumentScrollOffset, ViewportGeometryProjection } from "./viewport-geometry.js";
-import type { DocumentNodeRef, DocumentSemanticEntry, DocumentSourceRange } from "../../document/index.js";
+import type { DocumentImageMetadata, DocumentNodeRef, DocumentSemanticEntry, DocumentSourceRange } from "../../document/index.js";
 import type { DocumentActionIdentity, FormattingNodeId } from "../formatting/index.js";
 import type {
   CssEdges, CssPixelLength, CssRect, LayoutFragmentId,
@@ -22,6 +22,7 @@ export interface TerminalCellMeasurer {
 
 export interface TerminalPaintBudgets {
   readonly maxDisplayListCommands: number;
+  readonly maxRetainedImagePlacements: number;
   readonly maxGeneratedPaintUnits: number;
   readonly maxRetainedPaintCells: number;
   readonly maxRetainedCellBufferRows: number;
@@ -91,7 +92,32 @@ export interface TerminalBorderSidePaintCommand extends TerminalPaintCommandBase
   readonly borderWidths: CssEdges;
 }
 
-export type TerminalPaintCommand = TerminalBackgroundPaintCommand | TerminalBorderSidePaintCommand | TerminalTextPaintCommand;
+export interface TerminalImagePaintCommand extends TerminalPaintCommandBase {
+  /** Existing canonical fragment-paint ordinal, independent of command count. */
+  readonly paintGroup: number;
+  readonly kind: "image";
+  readonly resourceId: string;
+  readonly naturalWidth: number | null;
+  readonly naturalHeight: number | null;
+  /** Logical alternative text remains available when graphics are unsupported. */
+  readonly text: string;
+  readonly clusters: LayoutTextClusters;
+}
+
+export type TerminalPaintCommand = TerminalBackgroundPaintCommand | TerminalBorderSidePaintCommand | TerminalTextPaintCommand | TerminalImagePaintCommand;
+
+/** Disjoint topmost cell coverage derived from the canonical painter's owner grid. */
+export interface TerminalImagePlacement {
+  readonly layoutFragment: LayoutFragmentId;
+  readonly paintGroup: number;
+  readonly action: DocumentActionIdentity | null;
+  readonly id: string;
+  readonly resourceId: string;
+  readonly naturalWidth: number | null;
+  readonly naturalHeight: number | null;
+  readonly bounds: TerminalCellRect;
+  readonly clip: TerminalCellRect;
+}
 
 export type DocumentDisplayListOutcome =
   | { readonly status: "complete"; readonly commands: number }
@@ -222,6 +248,7 @@ export type ViewportCellBufferOutcome =
 export type TerminalTruncation = {
   readonly budget:
     | "maxDisplayListCommands"
+    | "maxRetainedImagePlacements"
     | "maxGeneratedPaintUnits"
     | "maxRetainedPaintCells"
     | "maxRetainedCellBufferRows"
@@ -237,6 +264,7 @@ export type TerminalTruncation = {
 
 /** Cell rows retained only for the requested viewport window and overscan. */
 export interface ViewportCellBuffer {
+  readonly images: readonly TerminalImagePlacement[];
   readonly windowStartColumn?: number;
   readonly columns: number;
   readonly documentRowCount: number;
@@ -318,6 +346,7 @@ export interface DocumentGeometryEntry {
 }
 
 export interface DocumentControlGeometry {
+  readonly paintGroup: number;
   readonly node: DocumentNodeRef;
   readonly fragment: LayoutFragmentId;
   readonly rect: CssRect;
@@ -338,6 +367,7 @@ export interface TerminalScrollPort {
 }
 
 export interface TerminalControlGeometry {
+  readonly paintGroup: number;
   readonly node: DocumentNodeRef;
   readonly layoutFragment: LayoutFragmentId;
   /** Full allocation, kept independent of clipping so editors retain their geometry. */
@@ -408,6 +438,7 @@ export interface ViewportTerminalResult {
 }
 
 export interface BuildDocumentDisplayListInput {
+  readonly images?: readonly DocumentImageMetadata[];
   readonly layout: LayoutFragmentTree;
   /** Current paint inputs after a verified background-only style transition. */
   readonly styles: StyleSnapshot;

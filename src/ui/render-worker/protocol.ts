@@ -20,6 +20,7 @@ import type {
 import {
   snapshotDocumentState,
   type DocumentControlState,
+  type DocumentImageMetadata,
   type DocumentNodeRef,
   type DocumentState,
   type IndexedWebDocumentSnapshot,
@@ -61,6 +62,7 @@ export function hydrateDocumentState(state: TransferredDocumentState): DocumentS
 }
 
 export interface RenderDocumentAttachment {
+  readonly images?: readonly DocumentImageMetadata[];
   readonly documentId: string;
   readonly documentRevision: number;
   readonly stateRevision: number;
@@ -166,6 +168,12 @@ export type RenderWorkerRequest = {
   readonly documentGeneration: number;
   readonly documentCancellation: SharedArrayBuffer;
 } | {
+  readonly kind: "update-document-images";
+  readonly requestId: number;
+  readonly documentId: string;
+  readonly documentRevision: number;
+  readonly images: readonly DocumentImageMetadata[];
+} | {
   readonly kind: "search-document";
   readonly stateRevision: number;
   readonly requestGeneration: number;
@@ -222,6 +230,10 @@ export type RenderWorkerResponse = {
   readonly estimatedBytes: number;
   readonly limit: number;
   readonly owner: string;
+} | {
+  readonly kind: "images-updated";
+  readonly requestId: number;
+  readonly change: "none" | "paint" | "layout";
 } | {
   readonly kind: "acknowledged";
   readonly requestId: number;

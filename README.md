@@ -124,11 +124,22 @@ fixup, automatic or fixed column layout, row and rowspan distribution, top and
 bottom captions, separated or collapsed borders, RTL geometry, and source-owned
 explicit, transitive, scoped, and automatic header associations. Verge does not
 cover subgrid, masonry, vertical writing
-modes, table fragmentation, animation, web fonts, raster image decoding, or
+modes, table fragmentation, animation, web fonts, CSS image masks, or
 page JavaScript. Client-rendered
 sites, anti-bot challenges, media, and unsupported form encodings may therefore
 be unavailable. Network access remains constrained by the package’s protocol,
 redirect, content-type, timeout, and size policies.
+The interactive view progressively loads opaque static PNG/JPEG `img` resources
+through the same document-scoped network policy. Decoding runs in a bounded,
+cancellable worker; supported terminals use terminal-ui's Kitty/SIXEL graphics.
+Plain output, unsupported terminals, transparent images, interlaced PNG,
+unsupported color profiles and failed resources retain alternative text.
+SVG, CSS background images and image masks are not enabled by this support.
+Image diagnostics distinguish pending, ready and failed resources. The default
+activation admits at most 32 image resources, 2 MiB per encoded response,
+8 MiB total encoded data, 2,097,152 pixels per image and 32 MiB decoded data.
+The UI separately reserves at most 64 MiB for decoded pixels and their terminal
+raster copies across tabs and history. Images do not delay first document acceptance.
 Interactive form indexing is capped at 256 forms per page, 2,000 controls per
 form, and 2,000 options per select to keep hostile documents responsive.
 

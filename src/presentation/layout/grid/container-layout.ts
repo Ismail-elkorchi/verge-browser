@@ -1,3 +1,4 @@
+import type { LayoutContainingBlock } from "../containing-block.js";
 import type { FormattingNode, FormattingNodeId } from "../../formatting/index.js";
 import type {
   ComputedStyle,
@@ -73,6 +74,9 @@ export interface GridUsedEdges {
 }
 
 export interface GridContainerLayoutHost {
+  containingBlock(owner: FormattingNodeId, rect: CssRect, width: CssPixelLength | null, height: CssPixelLength | null): LayoutContainingBlock;
+  transferBlockDefiniteness(parent: LayoutContainingBlock, child: LayoutContainingBlock): void;
+  dependOnBlockSize(owner: LayoutContainingBlock): void;
   readonly budgets: LayoutBudgets;
   readonly signal: AbortSignal | undefined;
   formattingNode(id: FormattingNodeId): FormattingNode;
@@ -84,8 +88,8 @@ export interface GridContainerLayoutHost {
     containingHeight: CssPixelLength | null,
     forcedContentWidth: CssPixelLength | null
   ): GridUsedDimensions;
-  usedGap(value: CssGap, percentageBasis: CssPixelLength | null, style: ComputedStyle): CssPixelLength | null;
-  usedLength(value: CssLength, percentageBasis: CssPixelLength | null, style: ComputedStyle | null): CssPixelLength | null;
+  usedGap(value: CssGap, percentageBasis: CssPixelLength | null, style: ComputedStyle, owner?: LayoutContainingBlock): CssPixelLength | null;
+  usedLength(value: CssLength, percentageBasis: CssPixelLength | null, style: ComputedStyle | null, owner?: LayoutContainingBlock): CssPixelLength | null;
   isOutOfFlow(node: FormattingNode): boolean;
   intrinsicContributions(id: FormattingNodeId, availableInlineSize: CssPixelLength | null): IntrinsicSizeContributions;
   gridItemMinimumInlineContribution(
@@ -102,9 +106,10 @@ export interface GridContainerLayoutHost {
     width: CssPixelLength,
     clip: CssRect,
     depth: number,
-    containingHeight: CssPixelLength,
+    containingBlock: LayoutContainingBlock,
     forcedContentWidth: CssPixelLength,
-    forcedContentHeight: CssPixelLength | null
+    forcedContentHeight: CssPixelLength | null,
+    forcedContentHeightIsDefinite: boolean
   ): GridLayoutOperationResult | null;
   translate(
     result: GridLayoutOperationResult,
@@ -141,6 +146,8 @@ export interface GridContainerLayoutInput {
   readonly width: CssPixelLength;
   readonly clip: CssRect;
   readonly depth: number;
+  readonly containingBlock: LayoutContainingBlock;
+  readonly forcedContentHeightIsDefinite: boolean;
   readonly forcedContentWidth: CssPixelLength | null;
   readonly forcedContentHeight: CssPixelLength | null;
 }
@@ -227,17 +234,24 @@ export function layoutGridContainer(
   const { node } = input;
   const style = host.boxComputed(node) ?? host.computed(node);
   if (style === null) throw new RangeError("A grid container must have a computed style.");
-  const dimensions = host.dimensions(node, input.width, null, input.forcedContentWidth);
+  const dimensions = host.dimensions(node, input.width, input.containingBlock.percentageHeight, input.forcedContentWidth);
   const borderX = point(input.x, dimensions.marginLeft);
   const contentX = point(borderX, sum(dimensions.border.left, dimensions.padding.left));
   const contentY = point(input.y, sum(dimensions.border.top, dimensions.padding.top));
   const contentWidth = dimensions.contentWidth;
-  const specifiedHeight = input.forcedContentHeight ?? dimensions.specifiedHeight;
+  const specifiedHeight = input.forcedContentHeight !== null && !input.forcedContentHeightIsDefinite
+    ? null : input.forcedContentHeight ?? dimensions.specifiedHeight;
+  const blockSizeOwner = host.containingBlock(node.id,
+    cssRect(contentX, contentY, contentWidth, specifiedHeight ?? ZERO), contentWidth, specifiedHeight);
+  if (input.forcedContentHeight !== null && !input.forcedContentHeightIsDefinite)
+    host.transferBlockDefiniteness(input.containingBlock, blockSizeOwner);
   return host.withGridBudget(() => {
     const columnGap = nonNegative(host.usedGap(style.box.columnGap, contentWidth, style) ?? ZERO);
-    let rowGap = nonNegative(host.usedGap(style.box.rowGap, specifiedHeight, style) ?? ZERO);
+    let rowGap = nonNegative(host.usedGap(style.box.rowGap, specifiedHeight, style, blockSizeOwner) ?? ZERO);
     const resolveLength = (value: CssLength, basis: CssPixelLength | null): CssPixelLength | null =>
       host.usedLength(value, basis, style);
+    const resolveBlockLength = (value: CssLength, basis: CssPixelLength | null): CssPixelLength | null =>
+      host.usedLength(value, basis, style, blockSizeOwner);
     const explicitColumns = expandExplicitGridAxis({
       list: style.box.gridTemplateColumns,
       areas: style.box.gridTemplateAreas,
@@ -257,7 +271,8 @@ export function layoutGridContainer(
       availableSize: specifiedHeight,
       gap: rowGap,
       limits: host.budgets,
-      resolveLength,
+      resolveLength: resolveBlockLength,
+      onIndefiniteSize: () => { host.dependOnBlockSize(blockSizeOwner); },
       signal: host.signal
     });
     const gridItems: FormattingNodeId[] = [];
@@ -353,12 +368,12 @@ export function layoutGridContainer(
       contributions: rowContributions,
       availableSize: specifiedHeight,
       gap: rowGap,
-      resolveLength,
+      resolveLength: resolveBlockLength,
       alignment: usedContentAlignment(style.box.alignContent),
       maxWork: host.budgets.maxGridTrackSizingWork,
       signal: host.signal
     });
-    const contentHeight = constrainedSize(
+    const contentHeight = input.forcedContentHeight ?? constrainedSize(
       sizedRows.usedSize,
       specifiedHeight,
       dimensions.minHeight,
@@ -380,6 +395,7 @@ export function layoutGridContainer(
       });
     }
     const contentRect = cssRect(contentX, contentY, contentWidth, contentHeight);
+    blockSizeOwner.rect = contentRect;
     const paddingRect = cssRect(
       point(contentX, negate(dimensions.padding.left)),
       point(contentY, negate(dimensions.padding.top)),
@@ -556,9 +572,12 @@ export function layoutGridContainer(
         area.width,
         finalClip,
         input.depth + 1,
-        area.height,
+        host.containingBlock(node.id, cssRect(
+          point(contentX, style.text.direction === "rtl" ? sum(contentWidth, negate(area.x), negate(area.width)) : area.x),
+          point(contentY, area.y), area.width, area.height), area.width, area.height),
         forcedWidth,
-        forcedHeight
+        forcedHeight,
+        true
       );
       if (result === null) break;
       const inlineAlignment = alignGridItem({

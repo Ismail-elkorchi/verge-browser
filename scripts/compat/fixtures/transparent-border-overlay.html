@@ -1,0 +1,9 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Transparent border paint ownership</title>
+<style>
+html,body{margin:0;padding:0;font:16px/16px monospace}
+#stage{position:relative;width:256px;height:48px;background:white;color:black}
+#cover{position:absolute;top:0;left:0;width:160px;height:16px;border:1px solid transparent}
+</style>
+<div id="stage"><span id="text">UNDERLYING TEXT REMAINS</span><div id="cover"></div></div>

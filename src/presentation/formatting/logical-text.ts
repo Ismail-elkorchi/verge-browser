@@ -7,6 +7,6 @@ export function formattingNodeLogicalText(node: FormattingNode, tree: Formatting
     return node.text;
   }
   if (node.kind === "form-control") return controlDisplayText(node, tree).text;
-  if (node.kind === "replaced-element" || node.kind === "image-fallback") return node.fallbackText;
+  if (node.kind === "replaced-element" || node.kind === "image") return node.fallbackText;
   return null;
 }

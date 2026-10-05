@@ -1,3 +1,4 @@
+import { imageClipsAboveControls } from "./image-projection.js";
 import { createLayoutPaintResolver } from "../layout/paint-style.js";
 import { cssRect, cssMin } from "../layout/index.js";
 import type { DocumentNodeRef } from "../../document/index.js";
@@ -427,7 +428,7 @@ export function buildViewportTerminalResult(input: BuildViewportTerminalResultIn
     const background = under?.background ?? current.background;
     const foreground = current.foreground ?? under?.foreground ?? (background === null ? null
       : { r: 0, g: 0, b: 0, a: 1 });
-    controls.push(Object.freeze({ node: control.node, layoutFragment: control.fragment, allocation,
+    controls.push(Object.freeze({ node: control.node, layoutFragment: control.fragment, allocation, paintGroup: control.paintGroup,
       visible: Object.freeze({ column: visibleColumn, row: visibleRow, width: right - visibleColumn, height: bottom - visibleRow }),
       outer: input.displayList.projection.rect(control.fragment, fragment.borderRect),
       content: input.displayList.projection.rect(control.fragment, fragment.contentRect),
@@ -435,9 +436,31 @@ export function buildViewportTerminalResult(input: BuildViewportTerminalResultIn
         underline: current.underline, strikethrough: current.strikethrough }),
     }));
   }
+  const imageProjection = imageClipsAboveControls(input.cellBuffer.images, controls.map((control) => ({
+    visible: control.visible, paintGroup: control.paintGroup,
+  })), budgets.maxRetainedImagePlacements, input.signal);
+  if (imageProjection.truncated) truncations.push(Object.freeze({ budget: "maxRetainedImagePlacements", limit: budgets.maxRetainedImagePlacements }));
+  const imageFragments = new Set(input.displayList.commands.filter((command) => command.kind === "image")
+    .map((command) => command.layoutFragment));
+  const visibleHitRegions = hitRegions.filter((region) => !imageFragments.has(region.layoutFragment));
+  for (const image of imageProjection.images) {
+    if (image.action === null) continue;
+    if (visibleHitRegions.length >= budgets.maxRetainedHitTestRegions) {
+      truncations.push(Object.freeze({ budget: "maxRetainedHitTestRegions", limit: budgets.maxRetainedHitTestRegions }));
+      break;
+    }
+    visibleHitRegions.push(Object.freeze({ id: `viewport-image-hit:${image.id}`, action: image.action,
+      layoutFragment: image.layoutFragment, rect: image.clip }));
+  }
+  const cellBuffer = Object.freeze({ ...input.cellBuffer, images: imageProjection.images,
+    ...(imageProjection.truncated && input.cellBuffer.outcome.status !== "rejected" ? { outcome: Object.freeze({
+      status: "truncated" as const, cells: input.cellBuffer.outcome.cells, rows: input.cellBuffer.outcome.rows,
+      truncations: Object.freeze(truncations),
+    }) } : {}),
+  });
   return Object.freeze({
-    cellBuffer: input.cellBuffer,
-    hitTestIndex: new ViewportHitTestIndex(hitRegions),
+    cellBuffer,
+    hitTestIndex: new ViewportHitTestIndex(visibleHitRegions),
     focusMap: new ViewportFocusMap(focusTargets),
     accessibilityBounds: Object.freeze(accessibilityBounds),
     search: input.searchProjection === undefined || input.searchProjection === null

@@ -76,6 +76,19 @@ test("intrinsic contribution caching reports cycles and capacity without substit
   ), { status: "truncated", limit: 1 });
 });
 
+test("intrinsic contributions and natural planning share one sizing-record budget", () => {
+  const cache = new IntrinsicContributionCache(3);
+  const request = { formattingNode: "intrinsic-node", availableInlineSize: null, inlineSizing: "contribution" };
+  assert.equal(cache.reservePlanningEntries(2), true);
+  cache.resolve(request, () => ({ status: "cycle" }));
+  assert.equal(cache.reservePlanningEntries(1), false, "intrinsic entries occupy shared capacity");
+  cache.clear();
+  cache.resolve(request, () => ({ status: "cycle" }));
+  assert.equal(cache.reservePlanningEntries(1), false, "clearing contributions preserves live planning reservations");
+  cache.releasePlanningEntries(2);
+  assert.equal(cache.reservePlanningEntries(2), true);
+});
+
 function media(columns, rows) {
   return {
     viewportWidthCssPx: columns * 8,
@@ -1533,6 +1546,81 @@ test("flex line cross sizes apply stretch, align-content, and column wrapping", 
     cssPixels(stretchedParagraph.contentRect.height),
     stretchedParagraph.lineBoxes.reduce((height, line) => height + cssPixels(line.rect.height), 0)
   );
+});
+
+function assertLiveLineIndexes(layout) {
+  const reached = reachableFragments(layout);
+  const lines = new Map(layout.lineBoxes.map((line) => [line.id, line]));
+  assert.equal(lines.size, layout.lineBoxes.length, "live line IDs are unique after relayout");
+  assert.equal(layout.outcome.lineBoxes, lines.size);
+  const owned = new Set();
+  for (const id of reached) {
+    const fragment = layout.fragment(id);
+    for (const line of fragment.lineBoxes) {
+      owned.add(line.id);
+      assert.deepEqual(lines.get(line.id), line, "translated owner lines match the compacted index");
+    }
+  }
+  assert.equal(owned.size, lines.size, "no discarded or unowned lines survive");
+  for (const line of lines.values()) {
+    assert.ok(reached.has(line.containingFragment));
+    assert.ok(line.fragments.every((id) => reached.has(id)));
+    assert.ok(line.visualOrder.every((id) => reached.has(id)));
+  }
+}
+
+test("exhausted natural planning capacity truncates before rendering uncached flex subtrees", () => {
+  for (const [depth, prefixCount, limit] of [[6, 150, 500], [8, 150, 500], [10, 150, 500], [12, 150, 500],
+    [12, 0, 100], [12, 0, 200]]) {
+    let chain = "<span>hello</span>";
+    for (let index = 0; index < depth; index += 1)
+      chain = `<div style="display:flex;flex-wrap:wrap"><div style="height:50%">x</div>${chain}</div>`;
+    const prefix = '<div style="display:flex;flex-wrap:wrap">p</div>'.repeat(prefixCount);
+    const result = render(`<style>html,body{margin:0}</style>${prefix}${chain}`, 80, 24,
+      { layout: { maxIntrinsicContributionCacheEntries: limit } });
+    assert.equal(result.layout.outcome.status, "truncated");
+    assert.equal(result.layout.outcome.budget, "maxIntrinsicContributionCacheEntries");
+    const work = result.layout.textAnalysisWork;
+    assert.ok(work.inlineBuilds + work.inlineReuses <= prefixCount + 2 * depth * depth, JSON.stringify(work));
+    assertLiveLineIndexes(result.layout);
+    assert.equal(reachableFragments(result.layout).size, result.layout.outcome.fragments, "all retained fragments are owned");
+  }
+});
+
+test("batched flex stretch replaces every item's lines within the live-line budget", () => {
+  const count = 256;
+  const html = `<style>html,body,p{margin:0}</style><p>before</p>
+    <div style="display:flex;flex-wrap:wrap;width:800px">${"<span>item</span>".repeat(count)}</div><p>after</p>`;
+  const result = render(html, 100, 80, { layout: { maxLineBoxes: count + 2 } });
+  assert.equal(result.layout.outcome.status, "complete");
+  assert.equal(result.layout.lineBoxes.length, count + 2);
+  assertLiveLineIndexes(result.layout);
+  const text = (line) => line.fragments.map((id) => result.layout.fragment(id).text ?? "").join("");
+  assert.deepEqual(result.layout.lineBoxes.map(text), ["before", ...Array(count).fill("item"), "after"]);
+
+  const truncated = render(html, 100, 80, { layout: { maxLineBoxes: count + 1 } });
+  assert.equal(truncated.layout.outcome.status, "truncated");
+  assert.equal(truncated.layout.outcome.budget, "maxLineBoxes");
+  assert.ok(truncated.layout.lineBoxes.length <= count + 1);
+  assertLiveLineIndexes(truncated.layout);
+});
+
+test("nested stretch batches preserve unaffected lines, percentage bases, and translated indexes", () => {
+  const count = 24;
+  const result = render(`<style>html,body,p{margin:0}</style><p>before</p>
+    <div style="display:flex;flex-wrap:wrap;width:320px;align-content:stretch">${Array.from({ length: count }, (_, index) =>
+      `<section style="display:flex;width:80px"><div style="width:40px"><p id="percentage-${String(index)}" style="height:50%">a</p></div>
+      <div style="width:40px;height:32px;align-self:start;position:relative;top:3px">b</div></section>`).join("")}</div><p>after</p>`,
+  50, 80, { layout: { maxLineBoxes: count * 2 + 2 } });
+  assert.equal(result.layout.outcome.status, "complete");
+  assert.equal(result.layout.lineBoxes.length, count * 2 + 2);
+  assertLiveLineIndexes(result.layout);
+  for (let index = 0; index < count; index += 1) {
+    const percentage = principalFragment(result, elementById(result, `percentage-${String(index)}`));
+    assert.equal(cssPixels(percentage.contentRect.height), 16);
+  }
+  assert.equal(result.layout.lineBoxes[0].fragments.map((id) => result.layout.fragment(id).text ?? "").join(""), "before");
+  assert.equal(result.layout.lineBoxes.at(-1).fragments.map((id) => result.layout.fragment(id).text ?? "").join(""), "after");
 });
 
 test("flexible-length resolution has deterministic work and cancellation boundaries", () => {

@@ -297,7 +297,7 @@ test("form controls, replaced content, flex, and grid retain structural node kin
   const kinds = nodes(formatting).map((node) => node.kind);
   assert.ok(kinds.includes("flex-container") && kinds.includes("flex-item"));
   assert.ok(kinds.includes("grid-container") && kinds.includes("grid-item"));
-  assert.ok(kinds.includes("image-fallback"));
+  assert.ok(kinds.includes("image"));
   assert.ok(kinds.filter((kind) => kind === "form-control").length >= 2);
 });
 

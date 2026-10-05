@@ -17,6 +17,9 @@ export function resolveTableSizing(
   table: FormattingNode,
   style: ComputedStyle,
   availableInlineSize: CssPixelLength,
+  containingHeight: CssPixelLength | null = null,
+  forcedContentWidth: CssPixelLength | null = null,
+  forcedContentHeight: CssPixelLength | null = null,
 ) {
   const grid = host.tableSlotGrid(table);
   const collapsedWinners = style.box.borderCollapse === "collapse"
@@ -27,7 +30,7 @@ export function resolveTableSizing(
       availableInlineSize,
     )
     : Object.freeze([]);
-  const initialDimensions = host.dimensions(table, availableInlineSize, null, null);
+  const initialDimensions = host.dimensions(table, availableInlineSize, containingHeight, forcedContentWidth);
   const spacing = usedTableBorderSpacing(host, style, initialDimensions.contentWidth);
   const fixedLayout = style.box.tableLayout === "fixed" && host.usedLength(style.box.width, availableInlineSize, style) !== null;
   const measures = measureTableColumns(
@@ -51,8 +54,8 @@ export function resolveTableSizing(
     spacing.horizontal,
     captionMinimum,
   );
-  const dimensions = host.dimensions(table, availableInlineSize, null, widthResult.usedGridWidth);
-  let tableBlockSize = cssMax(initialDimensions.specifiedHeight ?? ZERO, initialDimensions.minHeight);
+  const dimensions = host.dimensions(table, availableInlineSize, containingHeight, widthResult.usedGridWidth);
+  let tableBlockSize = cssMax(forcedContentHeight ?? initialDimensions.specifiedHeight ?? ZERO, initialDimensions.minHeight);
   if (initialDimensions.maxHeight !== null) tableBlockSize = cssMin(tableBlockSize, initialDimensions.maxHeight);
   const rows = sizeTableRows(
     host,
@@ -60,11 +63,11 @@ export function resolveTableSizing(
     widthResult.columns,
     spacing.horizontal,
     spacing.vertical,
-    initialDimensions.specifiedHeight === null && initialDimensions.minHeight === 0
+    forcedContentHeight === null && initialDimensions.specifiedHeight === null && initialDimensions.minHeight === 0
     ? null
     : cssNonNegativeLength(tableBlockSize),
   );
-  let contentHeight = cssMax(rows.usedGridHeight, dimensions.specifiedHeight ?? ZERO, dimensions.minHeight);
+  let contentHeight = cssMax(rows.usedGridHeight, forcedContentHeight ?? dimensions.specifiedHeight ?? ZERO, dimensions.minHeight);
   if (dimensions.maxHeight !== null) contentHeight = cssMin(contentHeight, dimensions.maxHeight);
   return { grid, collapsedWinners, spacing, captions, widthResult, dimensions, rows,
     contentHeight: cssNonNegativeLength(contentHeight) };

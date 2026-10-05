@@ -44,12 +44,13 @@ export function fragmentSnapshot(snapshot: IndexedPageSnapshot, target: string):
 const snapshotCosts = new WeakMap<IndexedPageSnapshot["document"], number>();
 export function retainedSnapshotBytes(snapshot: IndexedPageSnapshot): number {
   const retained = snapshotCosts.get(snapshot.document);
-  if (retained !== undefined) return retained;
+  const imageBytes = snapshot.images === undefined ? 0 : estimatedRetainedCost([snapshot.images]);
+  if (retained !== undefined) return retained + imageBytes;
   // URLs/provenance belong to entries, not this shared acquisition owner.
   const bytes = estimatedRetainedCost([snapshot.document, snapshot.stylesheets, snapshot.styleDiagnostics,
     snapshot.diagnostics, snapshot.responseFields]);
   snapshotCosts.set(snapshot.document, bytes);
-  return bytes;
+  return bytes + imageBytes;
 }
 const entryMetadata = new WeakMap<NavigationEntry, object>();
 function metadata(entry: NavigationEntry): object {

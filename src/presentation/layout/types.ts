@@ -49,6 +49,7 @@ export interface LayoutBudgets {
   readonly maxBreakOpportunities: number;
   readonly maxVisualRuns: number;
   readonly maxFlexSizingWork: number;
+  /** Shared sizing records: intrinsic contributions plus natural flex plan headers, lines, and item allocations. */
   readonly maxIntrinsicContributionCacheEntries: number;
   readonly maxGridItems: number;
   readonly maxExplicitGridTracks: number;
@@ -332,6 +333,8 @@ export interface LayoutScrollOwner {
 }
 
 export interface LayoutFragmentTree {
+  /** Whether natural metadata for this resource can change consumed sizing contributions or used geometry. */
+  imageDimensionsAffectLayout(resourceId: string): boolean;
   readonly textAnalysisWork: Readonly<{ intrinsicCalls: number; intrinsicReuses: number; intrinsicAnalyzedUnits: number; inlineBuilds: number; inlineReuses: number }>;
   readonly viewportDirection: "ltr" | "rtl";
   readonly scrollExtent: CssRect;

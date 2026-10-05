@@ -1,3 +1,4 @@
+import type { LayoutContainingBlock } from "../containing-block.js";
 import type {
   DocumentNodeRef,
   HtmlTableCellMetadata,
@@ -283,6 +284,7 @@ export interface TableSizingHost extends TableSlotGridHost, TableColumnMeasureHo
 }
 
 export interface TableLayoutHost extends TableSizingHost {
+  containingBlock(owner: FormattingNodeId, rect: CssRect, width: CssPixelLength | null, height: CssPixelLength | null): LayoutContainingBlock;
   layoutChild(
     id: FormattingNodeId,
     x: CssCoordinate,
@@ -290,9 +292,10 @@ export interface TableLayoutHost extends TableSizingHost {
     width: CssPixelLength,
     clip: CssRect,
     depth: number,
-    containingHeight: CssPixelLength | null,
+    containingBlock: LayoutContainingBlock,
     forcedContentWidth: CssPixelLength | null,
     forcedContentHeight: CssPixelLength | null,
+    forcedContentHeightIsDefinite: boolean,
   ): TableLayoutOperationResult | null;
   layoutOutOfFlow(
     node: FormattingNode,
@@ -322,6 +325,7 @@ export interface TableLayoutHost extends TableSizingHost {
     clip: CssRect,
     children: readonly LayoutFragmentId[],
     lines: readonly LineBox[],
+    containingBlock: LayoutContainingBlock,
   ): TableLayoutOperationResult;
   withContainerReservation<T>(operation: () => T): T;
   tryContainerReservation<T>(operation: () => T): T | null;

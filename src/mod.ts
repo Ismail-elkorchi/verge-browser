@@ -50,6 +50,8 @@ export type {
   PageRequestOptions,
   PageDiagnostics,
   FetchStylesheetResult,
+  FetchImageResult,
+  ImageRequestOptions,
   PageSnapshot
 } from "./app/types.js";
 export type {

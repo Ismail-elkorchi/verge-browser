@@ -1,4 +1,4 @@
-import type { DocumentState, IndexedWebDocumentSnapshot } from "../../document/index.js";
+import type { DocumentImageMetadata, DocumentState, IndexedWebDocumentSnapshot } from "../../document/index.js";
 import type { LayoutContext } from "../layout/index.js";
 import type { MediaEnvironment, StyleDiagnostic, StylesheetResource } from "../style/index.js";
 import type { TerminalRenderContext, ViewportWindow } from "../terminal/index.js";
@@ -10,6 +10,7 @@ import type {
 } from "./types.js";
 
 export interface RenderDocumentViewportInput {
+  readonly images?: readonly DocumentImageMetadata[];
   readonly document: IndexedWebDocumentSnapshot;
   readonly state: DocumentState;
   readonly resources: readonly StylesheetResource[];
@@ -48,6 +49,7 @@ export function renderDocumentViewport(input: RenderDocumentViewportInput): InPr
       document: input.document,
       state: input.state,
       resources: input.resources,
+      ...(input.images === undefined ? {} : { images: input.images }),
       ...(input.styleDiagnostics === undefined ? {} : { styleDiagnostics: input.styleDiagnostics }),
       ...(input.budgets === undefined ? {} : { budgets: input.budgets }),
       ...(input.signal === undefined ? {} : { signal: input.signal }),

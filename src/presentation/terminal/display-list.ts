@@ -11,6 +11,7 @@ import type {
 
 const DEFAULT_PAINT_BUDGETS: TerminalPaintBudgets = Object.freeze({
   maxDisplayListCommands: 200_000,
+  maxRetainedImagePlacements: 4_096,
   maxGeneratedPaintUnits: 2_000_000,
   maxRetainedPaintCells: 2_000_000,
   maxRetainedCellBufferRows: 10_000,
@@ -33,6 +34,7 @@ export function terminalPaintBudgets(value: Partial<TerminalPaintBudgets> | unde
   };
   const result = {
     maxDisplayListCommands: read("maxDisplayListCommands"),
+    maxRetainedImagePlacements: read("maxRetainedImagePlacements"),
     maxGeneratedPaintUnits: read("maxGeneratedPaintUnits"),
     maxRetainedPaintCells: read("maxRetainedPaintCells"),
     maxRetainedCellBufferRows: read("maxRetainedCellBufferRows"),
@@ -105,7 +107,7 @@ export function buildDocumentDisplayList(input: BuildDocumentDisplayListInput): 
       context,
       fragmentPaintOrder: Object.freeze(fragmentPaintOrder),
       canvasBackground: null,
-      commands: commands.finish(input.layout, fragmentPaintOrder, 0),
+      commands: commands.finish(input.layout, fragmentPaintOrder, 0, input.images),
       outcome: Object.freeze({ status: "rejected", reason: rejection ?? "invalid-budget" })
     });
   }
@@ -118,7 +120,8 @@ export function buildDocumentDisplayList(input: BuildDocumentDisplayListInput): 
     const current = paintStyle(fragment);
     const style = fragment.documentNode === canvas?.source && fragment.pseudoElement === null
       ? Object.freeze({ ...current, background: null }) : current;
-    if (!commands.append(fragment, fragmentPaintOrder.length, style, budgets.maxDisplayListCommands - reservedCommands, input.signal)) return false;
+    const node = input.layout.formatting.node(fragment.formattingNode);
+    if (!commands.append(fragment, fragmentPaintOrder.length, style, budgets.maxDisplayListCommands - reservedCommands, input.signal, node.kind === "image" && node.imageResourceId !== null)) return false;
     checkPackedMetadata(8);
     fragmentPaintOrder.push(fragment.id);
     return true;
@@ -192,7 +195,7 @@ export function buildDocumentDisplayList(input: BuildDocumentDisplayListInput): 
     context,
     fragmentPaintOrder: Object.freeze(fragmentPaintOrder),
     canvasBackground: canvas,
-    commands: commands.finish(input.layout, fragmentPaintOrder, reservedCommands),
+    commands: commands.finish(input.layout, fragmentPaintOrder, reservedCommands, input.images),
     outcome: Object.freeze(outcome)
   });
 }

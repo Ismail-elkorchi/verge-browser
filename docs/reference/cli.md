@@ -24,6 +24,13 @@ and restores its original known mode on exit. `--once` does not acquire terminal
 modes. See [Unicode text layout](../architecture/unicode-text.md) for the host
 contract.
 
+Graphics protocol support alone does not satisfy this text-presentation contract.
+For example, Kitty 0.48.2 does not establish the required state through the default
+mode probe. A custom host can declare explicit cell presentation only after its
+terminal configuration has been qualified; the image qualification uses Kitty's
+`force_ltr=yes` with the existing host `initialState.cellPresentation` contract.
+This does not make an unconfigured Kitty session a supported CLI startup target.
+
 ## Browser keys
 
 | Key | Action |

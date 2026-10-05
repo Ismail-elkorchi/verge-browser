@@ -153,9 +153,15 @@ function receive(message: RenderWorkerRequest): void {
         state: hydrateDocumentState(message.attachment.state),
         resources: measured(workerMetrics, "stylesheet-hydration", () => hydrateRenderStylesheets(message.attachment, documentSignal, workerMetrics)),
         styleDiagnostics: message.attachment.styleDiagnostics,
+        images: message.attachment.images ?? [],
         signal: documentSignal,
       });
       post({ kind: "acknowledged", requestId: message.requestId });
+      return;
+    }
+    if (message.kind === "update-document-images") {
+      const change = store.updateImages(message);
+      post({ kind: "images-updated", requestId: message.requestId, change });
       return;
     }
     if (message.kind === "update-document-state") {

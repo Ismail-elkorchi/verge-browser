@@ -1,4 +1,5 @@
 import { TabRestorationScheduler } from "./tab-restoration.js";
+import { documentImageMetadata, type DocumentImageMetadata, type DocumentImageResource } from "../document/image-resources.js";
 import { dirname } from "node:path";
 
 import {
@@ -81,6 +82,11 @@ function diagnosticsLines(document: BrowserDocumentState): readonly string[] {
   const issues = summary?.styleDiagnostics ?? snapshot.styleDiagnostics;
   const shown = issues.slice(0, 24);
   const omitted = issues.length - shown.length + (summary?.omittedStyleDiagnosticCount ?? 0);
+  const images = snapshot.images ?? [];
+  const imageFailures = new Map<string, number>();
+  for (const image of images) if (image.status === "failed") {
+    imageFailures.set(image.failure, (imageFailures.get(image.failure) ?? 0) + 1);
+  }
   return [
     `URL: ${snapshot.finalUrl}`,
     `Status: ${String(snapshot.status)} ${snapshot.statusText}`,
@@ -93,6 +99,10 @@ function diagnosticsLines(document: BrowserDocumentState): readonly string[] {
     `Parse errors: ${String(snapshot.diagnostics.parseErrorCount)}`,
     `Stylesheets: ${String(snapshot.diagnostics.stylesheetCount)}`,
     `Stylesheet load issues: ${String(snapshot.diagnostics.stylesheetLoadIssueCount)}`,
+    `Images: ${String(images.filter((image) => image.status === "ready").length)} ready, ${String(images.filter((image) => image.status === "pending").length)} pending, ${String(images.filter((image) => image.status === "failed").length)} failed`,
+    ...((snapshot.imageOmittedReferenceCount ?? 0) > 0
+      ? [`Image references outside the resource limit: ${String(snapshot.imageOmittedReferenceCount)}`] : []),
+    ...[...imageFailures].map(([failure, count]) => `Image ${failure}: ${String(count)}`),
     `Navigation ms (fetch, parse, stylesheets): ${String(snapshot.diagnostics.totalDurationMs)}`,
     `Rendering: ${document.rendering.status}`,
     ...(summary?.styleOutcome.status === "truncated" && summary.styleOutcome.fallback !== null
@@ -217,7 +227,8 @@ export class BrowserController {
   readonly #documentAttachments = new Map<string, {
     readonly epoch: number;
     desired: { readonly documentRevision: number; readonly stateRevision: number };
-    attached: { readonly sourceId: string; readonly documentRevision: number; readonly stateRevision: number; readonly state: DocumentState } | null;
+    attached: { readonly sourceId: string; readonly documentRevision: number; readonly stateRevision: number;
+      readonly state: DocumentState; readonly images: readonly DocumentImageMetadata[] } | null;
     preparation: Promise<RenderWorkerClient> | null;
     tail: Promise<unknown>;
   }>();
@@ -226,6 +237,7 @@ export class BrowserController {
   readonly #provisionalAcquisitionIds = new Set<string>();
   #nextDocumentNumber = 1;
   #workspaceSaveRevision = 0;
+  #imageOperation: Promise<unknown> | null = null;
 
   public constructor(options: BrowserControllerOptions) {
     this.#renderWorkerFactory = options.renderWorkerFactory ?? (() => new RenderWorkerClient());
@@ -368,6 +380,23 @@ export class BrowserController {
 
   public cancelViewport(documentId: string): void { this.#renderer.cancelViewport(documentId); }
 
+  public async acquireImages(
+    document: BrowserDocumentState,
+    signal: AbortSignal,
+    onResource: (resource: DocumentImageResource) => Promise<void>,
+  ): Promise<void> {
+    signal.throwIfAborted();
+    while (this.#imageOperation !== null) {
+      await waitForPreparation(this.#imageOperation.catch(() => undefined), signal);
+      signal.throwIfAborted();
+    }
+    if (this.#closed) throw new Error("Browser controller is closed.");
+    const operation = this.#acquisition(document.id).acquireImages(document.snapshot, { signal, onResource });
+    this.#imageOperation = operation;
+    try { await operation; }
+    finally { if (this.#imageOperation === operation) this.#imageOperation = null; }
+  }
+
   /** Internal interaction metrics used by deterministic browser qualification. */
   public renderingMetrics(): ReturnType<RenderWorkerClient["metrics"]> {
     return this.#renderer.metrics();
@@ -450,9 +479,16 @@ export class BrowserController {
         await renderer.updateState(document, changed, attached.documentRevision === document.documentRevision
           ? undefined : attached.documentRevision);
       }
+      const images = (document.snapshot.images ?? []).map(documentImageMetadata);
+      if (attached !== null && attached.sourceId === sourceId
+        && (attached.images.length !== images.length || images.some((image, index) => {
+          const previous = attached.images[index];
+          return previous?.id !== image.id || previous.width !== image.width || previous.height !== image.height;
+        }))) await renderer.updateDocumentImages(document);
       // Record an acknowledged producer even when its consumer was superseded.
       // The serialized successor must advance from the worker's actual revision.
-      lifecycle.attached = { sourceId, documentRevision: document.documentRevision, stateRevision: document.stateRevision, state: document.documentState };
+      lifecycle.attached = { sourceId, documentRevision: document.documentRevision, stateRevision: document.stateRevision,
+        state: document.documentState, images };
       validate();
       return renderer;
     });

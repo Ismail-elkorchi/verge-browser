@@ -1,4 +1,5 @@
 import { scrollDocument } from "./document-scroll.js";
+import { acceptImageResource, imageSources } from "./image-loading.js";
 import { assertPageInitiatedNavigation } from "../app/security.js";
 import { currentEntry, traverseHistory, isSameDocumentNavigation, fragmentSnapshot, type NavigationProvenance } from "../app/navigation-history.js";
 import { acceptNavigation, activateHistory, resumeDocument } from "./navigation-state.js";
@@ -831,6 +832,9 @@ function reduceBrowser(
   message: BrowserTuiMessage,
   context: Pick<TuiContext, "terminalSize"> = { terminalSize: { columns: 100, rows: 24 } }
 ): TuiUpdateResult<BrowserTuiState, BrowserTuiMessage> {
+  if (message.kind === "imageResource" || message.kind === "imageResourcesFailed") {
+    return result(acceptImageResource(state, message));
+  }
   if (message.kind === "pickerQuery") {
     const settled = pickerQuery.update(state.pickerQuery, message.message).state;
     if (settled === state.pickerQuery || state.overlay?.kind !== "picker") return result(state);
@@ -2063,6 +2067,7 @@ export function createBrowserApp(
       };
     },
     update: (state, message, context) => updateBrowser(controller, state, message, context),
+    subscriptions: (state) => imageSources(controller, state),
     view: (state, context) => measured(
       instrumentation,
       "terminal-ui-element-tree-construction",

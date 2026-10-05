@@ -105,6 +105,7 @@ class FormattingBuilder {
   readonly #budgets: FormattingBudgets;
   readonly #nodes = new Map<FormattingNodeId, FormattingNode>();
   readonly #suppressed: SuppressedFormattingSubtree[] = [];
+  readonly #images: ReadonlyMap<string, NonNullable<BuildFormattingTreeInput["images"]>[number]>;
   readonly #sourceIndex = new Map<DocumentNodeRef, FormattingNodeId[]>();
   readonly #ordinalBySource = new Map<string, number>();
   readonly #counters: FormattingCounters;
@@ -134,6 +135,7 @@ class FormattingBuilder {
 
   public constructor(input: BuildFormattingTreeInput) {
     this.#input = input;
+    this.#images = new Map(input.images?.map((image) => [image.id, image]));
     this.#document = input.document;
     this.#state = snapshotDocumentState(input.state);
     this.#styles = input.styles;
@@ -409,9 +411,11 @@ class FormattingBuilder {
 
   #replaced(source: DocumentNodeRef, style: ComputedStyle): FormattingReplacedNode {
     const metadata = this.#document.replaced(source);
+    const imageResourceId = metadata?.kind === "image" ? metadata.source : null;
+    const image = imageResourceId === null ? undefined : this.#images.get(imageResourceId);
     return this.#store({
-      id: this.#id(source, metadata?.kind === "image" ? "image-fallback" : "replaced-element"),
-      kind: metadata?.kind === "image" ? "image-fallback" : "replaced-element",
+      id: this.#id(source, metadata?.kind === "image" ? "image" : "replaced-element"),
+      kind: metadata?.kind === "image" ? "image" : "replaced-element",
       source,
       styleNode: source,
       pseudo: null,
@@ -420,8 +424,11 @@ class FormattingBuilder {
       semantic: this.#document.semantic(source),
       outer: style.display.box === "principal" ? style.display.outer : "inline",
       fallbackText: metadata?.fallbackText ?? this.#document.semantic(source)?.accessibleName ?? "Embedded content",
-      intrinsicWidth: metadata?.width ?? null,
-      intrinsicHeight: metadata?.height ?? null,
+      imageResourceId,
+      naturalWidth: image?.width ?? null,
+      naturalHeight: image?.height ?? null,
+      intrinsicWidth: metadata?.kind === "image" ? null : metadata?.width ?? null,
+      intrinsicHeight: metadata?.kind === "image" ? null : metadata?.height ?? null,
       appliesBoxStyle: true
     });
   }

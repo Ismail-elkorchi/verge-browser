@@ -1,4 +1,5 @@
 import type { ViewportRevealRequest } from "../presentation/terminal/index.js";
+import type { ImageResourceMessage } from "./image-loading.js";
 import type { NavigationHistory, NavigationProvenance } from "../app/navigation-history.js";
 import type {
   CheckboxGroupTransition,
@@ -258,6 +259,7 @@ export interface BrowserTuiState {
 }
 
 export type BrowserTuiMessage =
+  | ImageResourceMessage
   | { readonly kind: "implicitSubmit"; readonly controlId: string }
   | { readonly kind: "quit" }
   | { readonly kind: "terminalResized" }
