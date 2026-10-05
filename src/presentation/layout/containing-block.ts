@@ -11,5 +11,6 @@ export interface LayoutContainingBlock {
   readonly owner: FormattingNodeId | null;
   rect: CssRect;
   readonly percentageWidth: CssPixelLength | null;
-  readonly percentageHeight: CssPixelLength | null;
+  /** A flex owner may finalize an unchanged stretch allocation without rebuilding its contents. */
+  percentageHeight: CssPixelLength | null;
 }

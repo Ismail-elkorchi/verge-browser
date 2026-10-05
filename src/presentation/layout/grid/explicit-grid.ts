@@ -64,6 +64,7 @@ export function expandExplicitGridAxis(input: {
   readonly gap: CssNonNegativeLength;
   readonly limits: GridWorkLimits;
   readonly resolveLength: (value: CssLength, basis: CssPixelLength | null) => CssPixelLength | null;
+  readonly onIndefiniteSize?: () => void;
   readonly signal: AbortSignal | undefined;
 }): ExpandedGridAxis {
   const tracks: CssGridTrackSizingFunction[] = [];
@@ -125,6 +126,7 @@ export function expandExplicitGridAxis(input: {
       if (entry.kind === "line-names") appendNames(entry.names);
       else if (entry.kind === "track") appendTrack(entry.sizing, false);
       else {
+        if (entry.repetition.kind !== "fixed" && input.availableSize === null) input.onIndefiniteSize?.();
         const count = entry.repetition.kind === "fixed" ? entry.repetition.count : repeatCount(
           entry.entries,
           autoRepeatAvailable,

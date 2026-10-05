@@ -242,6 +242,100 @@ for (const [height, expected] of [["16px", 16], ["100px", 100], ["auto", 16]]) {
   });
 }
 
+test("nested ordinary flex stretch retains unchanged subtrees instead of doubling layout work", () => {
+  for (const wrap of ["nowrap", "wrap", "wrap-reverse"]) for (const depth of [4, 8, 16]) {
+    const result = render(`${`<div style="display:flex;flex-wrap:${wrap}">`.repeat(depth)}<span>hello</span>${"</div>".repeat(depth)}`);
+    const work = result.layout.textAnalysisWork;
+    assert.equal(work.inlineBuilds + work.inlineReuses, 1, `depth ${depth} needs only its one text layout`);
+  }
+});
+
+for (const dependency of ["height:50%", "min-height:50%", "max-height:50%", "position:relative;top:50%"])
+  test(`nested flex owners propagate ${dependency} without exponential layout work`, () => {
+    for (const depth of [4, 8, 12]) {
+      let html = "<span>hello</span>";
+      for (let index = 0; index < depth; index += 1)
+        html = `<div id="owner${index}" style="display:flex"><div id="dependent${index}"
+          style="${dependency}">x</div>${html}</div>`;
+      const result = render(html);
+      const work = result.layout.textAnalysisWork;
+      // Each natural measurement can need one final pass through its descendants;
+      // a known definite allocation must never start that measurement again.
+      assert.ok(work.inlineBuilds + work.inlineReuses <= depth * (depth + 3) / 2,
+        `depth ${depth}: ${JSON.stringify(work)}`);
+      if (dependency.startsWith("position")) assert.equal(offset(result, "dependent0", "owner0"), 8);
+      else assert.equal(contentHeight(result, "dependent0"), dependency.startsWith("min-") ? 16 : 8);
+    }
+  });
+
+test("flex stretch percentage dependencies stop at an independent block owner", () => {
+  const depth = 16;
+  for (const wrap of ["nowrap", "wrap", "wrap-reverse"]) {
+    const result = render(`${`<div style="display:flex;flex-wrap:${wrap}">`.repeat(depth)}<div><div id="independent"><div
+      id="percentage" style="height:50%">x</div></div></div>${"</div>".repeat(depth)}`);
+    assert.equal(contentHeight(result, "percentage"), 16, "the independent auto block remains indefinite");
+    const work = result.layout.textAnalysisWork;
+    assert.equal(work.inlineBuilds + work.inlineReuses, 1);
+  }
+});
+
+for (const wrap of ["wrap", "wrap-reverse"]) for (const multipleLines of [false, true])
+  test(`nested ${wrap} percentage consumers reuse exact natural plans (${multipleLines ? "multiple" : "single"} lines)`, () => {
+    for (const depth of [4, 8, 12]) {
+      let html = "<span>hello</span>";
+      for (let index = 0; index < depth; index += 1)
+        html = `<div style="display:flex;flex-wrap:${wrap};${multipleLines ? "width:32px;flex:none" : ""}"><div
+          id="dependent${index}" style="height:50%;${multipleLines ? "width:8px;flex:none" : ""}">x</div>${html}</div>`;
+      const result = render(html);
+      const work = result.layout.textAnalysisWork;
+      assert.ok(work.inlineBuilds + work.inlineReuses <= 2 * depth * depth, JSON.stringify(work));
+      assert.equal(contentHeight(result, "dependent0"), multipleLines ? 16 : 8);
+    }
+  });
+
+test("flex stretch carries block definiteness through allocated column-flex items", () => {
+  for (const depth of [4, 8, 12]) {
+    const result = render(`<div style="display:flex">${'<div style="display:flex;flex-direction:column">'.repeat(depth)}<div
+      id="percentage" style="height:50%;min-height:0">x</div>${"</div>".repeat(depth)}</div>`);
+    assert.equal(contentHeight(result, "percentage"), 8);
+    const work = result.layout.textAnalysisWork;
+    assert.equal(work.inlineBuilds + work.inlineReuses, 2, "one natural pass and one final definite pass");
+  }
+});
+
+test("equal-size flex stretch resolves a column owner's percentage flex bases", () => {
+  const result = render(`<div style="display:flex"><div style="display:flex;flex-direction:column"><div
+    id="first" style="flex:0 0 25%;min-height:0">x</div><div
+    id="second" style="flex:0 0 75%;min-height:0">y</div></div></div>`);
+  assert.equal(contentHeight(result, "first"), 8);
+  assert.equal(contentHeight(result, "second"), 24);
+});
+
+for (const dependency of ["height:50%", "max-height:50%", "position:relative;top:50%"])
+  for (const column of [false, true])
+  test(`equal-size flex stretch transfers table cell definiteness for ${dependency}${column ? " through column flex" : ""}`, () => {
+    const table = `<div style="display:table"><div id="percentage" style="${dependency}">x</div><span>y</span></div>`;
+    const result = render(`<div style="display:flex;width:160px">${column
+      ? `<div style="display:flex;flex-direction:column">${table}</div>` : table}</div>`);
+    if (dependency.startsWith("position")) assert.equal(cssPixels(fragment(result, "percentage").borderRect.y), 10);
+    else assert.equal(contentHeight(result, "percentage"), 8);
+  });
+
+for (const [rows, first, second] of [
+  ["grid-template-rows:25% 1fr", 8, 24],
+  ["grid-auto-rows:25%", 8, 8],
+  ["grid-template-rows:minmax(25%,1fr) 1fr", 16, 16],
+  ["grid-template-rows:repeat(auto-fill,10px)", 10, 10],
+  ["grid-template-rows:repeat(auto-fit,10px)", 10, 10]
+]) for (const column of [false, true])
+  test(`equal-size flex stretch preserves grid block-size dependencies for ${rows}${column ? " through column flex" : ""}`, () => {
+    const grid = `<div style="display:grid;${rows}"><div id="first">x</div><div id="second">y</div></div>`;
+    const result = render(`<div style="display:flex;width:160px">${column
+      ? `<div style="display:flex;flex-direction:column">${grid}</div>` : grid}</div>`);
+    assert.equal(contentHeight(result, "first"), first);
+    assert.equal(contentHeight(result, "second"), second);
+  });
+
 test("sticky percentage insets use the nearest scrollport dimensions", () => {
   const result = render(`<div style="height:200px;overflow:auto"><div id="scrollport"
     style="width:160px;height:100px;overflow:auto"><div style="height:400px"><div id="sticky"

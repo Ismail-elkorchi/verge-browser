@@ -75,6 +75,8 @@ export interface GridUsedEdges {
 
 export interface GridContainerLayoutHost {
   containingBlock(owner: FormattingNodeId, rect: CssRect, width: CssPixelLength | null, height: CssPixelLength | null): LayoutContainingBlock;
+  transferBlockDefiniteness(parent: LayoutContainingBlock, child: LayoutContainingBlock): void;
+  dependOnBlockSize(owner: LayoutContainingBlock): void;
   readonly budgets: LayoutBudgets;
   readonly signal: AbortSignal | undefined;
   formattingNode(id: FormattingNodeId): FormattingNode;
@@ -86,8 +88,8 @@ export interface GridContainerLayoutHost {
     containingHeight: CssPixelLength | null,
     forcedContentWidth: CssPixelLength | null
   ): GridUsedDimensions;
-  usedGap(value: CssGap, percentageBasis: CssPixelLength | null, style: ComputedStyle): CssPixelLength | null;
-  usedLength(value: CssLength, percentageBasis: CssPixelLength | null, style: ComputedStyle | null): CssPixelLength | null;
+  usedGap(value: CssGap, percentageBasis: CssPixelLength | null, style: ComputedStyle, owner?: LayoutContainingBlock): CssPixelLength | null;
+  usedLength(value: CssLength, percentageBasis: CssPixelLength | null, style: ComputedStyle | null, owner?: LayoutContainingBlock): CssPixelLength | null;
   isOutOfFlow(node: FormattingNode): boolean;
   intrinsicContributions(id: FormattingNodeId, availableInlineSize: CssPixelLength | null): IntrinsicSizeContributions;
   gridItemMinimumInlineContribution(
@@ -239,11 +241,17 @@ export function layoutGridContainer(
   const contentWidth = dimensions.contentWidth;
   const specifiedHeight = input.forcedContentHeight !== null && !input.forcedContentHeightIsDefinite
     ? null : input.forcedContentHeight ?? dimensions.specifiedHeight;
+  const blockSizeOwner = host.containingBlock(node.id,
+    cssRect(contentX, contentY, contentWidth, specifiedHeight ?? ZERO), contentWidth, specifiedHeight);
+  if (input.forcedContentHeight !== null && !input.forcedContentHeightIsDefinite)
+    host.transferBlockDefiniteness(input.containingBlock, blockSizeOwner);
   return host.withGridBudget(() => {
     const columnGap = nonNegative(host.usedGap(style.box.columnGap, contentWidth, style) ?? ZERO);
-    let rowGap = nonNegative(host.usedGap(style.box.rowGap, specifiedHeight, style) ?? ZERO);
+    let rowGap = nonNegative(host.usedGap(style.box.rowGap, specifiedHeight, style, blockSizeOwner) ?? ZERO);
     const resolveLength = (value: CssLength, basis: CssPixelLength | null): CssPixelLength | null =>
       host.usedLength(value, basis, style);
+    const resolveBlockLength = (value: CssLength, basis: CssPixelLength | null): CssPixelLength | null =>
+      host.usedLength(value, basis, style, blockSizeOwner);
     const explicitColumns = expandExplicitGridAxis({
       list: style.box.gridTemplateColumns,
       areas: style.box.gridTemplateAreas,
@@ -263,7 +271,8 @@ export function layoutGridContainer(
       availableSize: specifiedHeight,
       gap: rowGap,
       limits: host.budgets,
-      resolveLength,
+      resolveLength: resolveBlockLength,
+      onIndefiniteSize: () => { host.dependOnBlockSize(blockSizeOwner); },
       signal: host.signal
     });
     const gridItems: FormattingNodeId[] = [];
@@ -359,7 +368,7 @@ export function layoutGridContainer(
       contributions: rowContributions,
       availableSize: specifiedHeight,
       gap: rowGap,
-      resolveLength,
+      resolveLength: resolveBlockLength,
       alignment: usedContentAlignment(style.box.alignContent),
       maxWork: host.budgets.maxGridTrackSizingWork,
       signal: host.signal
@@ -386,6 +395,7 @@ export function layoutGridContainer(
       });
     }
     const contentRect = cssRect(contentX, contentY, contentWidth, contentHeight);
+    blockSizeOwner.rect = contentRect;
     const paddingRect = cssRect(
       point(contentX, negate(dimensions.padding.left)),
       point(contentY, negate(dimensions.padding.top)),

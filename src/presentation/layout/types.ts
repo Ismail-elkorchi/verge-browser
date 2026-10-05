@@ -49,6 +49,7 @@ export interface LayoutBudgets {
   readonly maxBreakOpportunities: number;
   readonly maxVisualRuns: number;
   readonly maxFlexSizingWork: number;
+  /** Shared sizing records: intrinsic contributions plus natural flex plan headers, lines, and item allocations. */
   readonly maxIntrinsicContributionCacheEntries: number;
   readonly maxGridItems: number;
   readonly maxExplicitGridTracks: number;

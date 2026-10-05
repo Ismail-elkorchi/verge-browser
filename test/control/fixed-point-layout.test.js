@@ -76,6 +76,19 @@ test("intrinsic contribution caching reports cycles and capacity without substit
   ), { status: "truncated", limit: 1 });
 });
 
+test("intrinsic contributions and natural planning share one sizing-record budget", () => {
+  const cache = new IntrinsicContributionCache(3);
+  const request = { formattingNode: "intrinsic-node", availableInlineSize: null, inlineSizing: "contribution" };
+  assert.equal(cache.reservePlanningEntries(2), true);
+  cache.resolve(request, () => ({ status: "cycle" }));
+  assert.equal(cache.reservePlanningEntries(1), false, "intrinsic entries occupy shared capacity");
+  cache.clear();
+  cache.resolve(request, () => ({ status: "cycle" }));
+  assert.equal(cache.reservePlanningEntries(1), false, "clearing contributions preserves live planning reservations");
+  cache.releasePlanningEntries(2);
+  assert.equal(cache.reservePlanningEntries(2), true);
+});
+
 function media(columns, rows) {
   return {
     viewportWidthCssPx: columns * 8,
@@ -1555,6 +1568,24 @@ function assertLiveLineIndexes(layout) {
     assert.ok(line.visualOrder.every((id) => reached.has(id)));
   }
 }
+
+test("exhausted natural planning capacity truncates before rendering uncached flex subtrees", () => {
+  for (const [depth, prefixCount, limit] of [[6, 150, 500], [8, 150, 500], [10, 150, 500], [12, 150, 500],
+    [12, 0, 100], [12, 0, 200]]) {
+    let chain = "<span>hello</span>";
+    for (let index = 0; index < depth; index += 1)
+      chain = `<div style="display:flex;flex-wrap:wrap"><div style="height:50%">x</div>${chain}</div>`;
+    const prefix = '<div style="display:flex;flex-wrap:wrap">p</div>'.repeat(prefixCount);
+    const result = render(`<style>html,body{margin:0}</style>${prefix}${chain}`, 80, 24,
+      { layout: { maxIntrinsicContributionCacheEntries: limit } });
+    assert.equal(result.layout.outcome.status, "truncated");
+    assert.equal(result.layout.outcome.budget, "maxIntrinsicContributionCacheEntries");
+    const work = result.layout.textAnalysisWork;
+    assert.ok(work.inlineBuilds + work.inlineReuses <= prefixCount + 2 * depth * depth, JSON.stringify(work));
+    assertLiveLineIndexes(result.layout);
+    assert.equal(reachableFragments(result.layout).size, result.layout.outcome.fragments, "all retained fragments are owned");
+  }
+});
 
 test("batched flex stretch replaces every item's lines within the live-line budget", () => {
   const count = 256;
