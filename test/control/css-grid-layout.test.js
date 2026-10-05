@@ -889,6 +889,11 @@ test("non-spanning and spanning automatic Grid minima agree under intrinsic cons
   }
 });
 
+// These expectations follow CSS Grid 11.5, including its single-span/spanning equivalence:
+// https://drafts.csswg.org/css-grid-1/#algo-single-span-items
+// Chromium's differing min-content behavior is documented in CSSWG #2303;
+// the compatibility fixture compares only the verified max-content geometry.
+// https://github.com/w3c/csswg-drafts/issues/2303
 test("nested Grid intrinsic columns retain non-spanning content with an explicit zero minimum", () => {
   for (const mode of ["min-content", "max-content"]) {
     for (const [template, expected] of [["auto", 160], ["minmax(auto,100px)", 100], ["fit-content(100px)", 100]]) {

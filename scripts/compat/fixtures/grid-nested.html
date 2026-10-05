@@ -9,7 +9,11 @@
 <article id="profile"><h2>Engineering</h2><div id="nested-grid"><strong id="role">Maintainer</strong><a id="person" href="/ada">Ada</a></div></article>
 <article id="support"><h2>Support</h2><p>Weekday coverage</p></article>
 </section>
-<!-- Fixed-size descendants isolate nested intrinsic track sizing from font metrics. -->
+<!-- Fixed-size descendants isolate nested intrinsic track sizing from font metrics.
+     Min-content cases assert the native CSS Grid 11.5 behavior; only max-content
+     cases assert Chromium geometry equivalence because Blink's explicit-minimum
+     behavior differs here: https://github.com/w3c/csswg-drafts/issues/2303
+     Normative rule: https://drafts.csswg.org/css-grid-1/#algo-single-span-items -->
 <div id="min-auto" class="intrinsic-outer"><div id="min-auto-inner" class="intrinsic-inner"><div class="intrinsic-item"><div class="intrinsic-content"></div></div></div><div id="min-auto-sibling"></div></div>
 <div id="max-auto" class="intrinsic-outer intrinsic-max"><div id="max-auto-inner" class="intrinsic-inner"><div class="intrinsic-item"><div class="intrinsic-content"></div></div></div><div id="max-auto-sibling"></div></div>
 <div id="min-fixed" class="intrinsic-outer"><div id="min-fixed-inner" class="intrinsic-inner intrinsic-fixed"><div class="intrinsic-item"><div class="intrinsic-content"></div></div></div><div id="min-fixed-sibling"></div></div>
