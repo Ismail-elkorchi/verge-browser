@@ -1,3 +1,4 @@
+import { documentImageMetadata } from "../../document/index.js";
 import { estimatedRetainedCost, RenderBudgetExceededError } from "../../memory/retained-cost.js";
 import { setTimeout, clearTimeout } from "node:timers";
 import { Worker } from "node:worker_threads";
@@ -191,6 +192,19 @@ export class RenderWorkerClient {
     });
   }
 
+  public async updateDocumentImages(document: BrowserDocumentState): Promise<"none" | "paint" | "layout"> {
+    this.cancelViewport(document.id);
+    const response = await this.#send({
+      kind: "update-document-images",
+      requestId: this.#nextRequestId(),
+      documentId: document.id,
+      documentRevision: document.documentRevision,
+      images: Object.freeze((document.snapshot.images ?? []).map(documentImageMetadata)),
+    });
+    if (response.kind !== "images-updated") throw new Error("Unexpected image metadata update response.");
+    return response.change;
+  }
+
   public async updateState(
     document: BrowserDocumentState,
     changed: readonly string[],
@@ -301,7 +315,7 @@ export class RenderWorkerClient {
       const request = pending.request;
       const owner = request.kind === "attach-document" ? request.attachment.documentId
         : "documentId" in request ? request.documentId : null;
-      if ((preserveStatePreparation && request.kind === "update-document-state")
+      if ((preserveStatePreparation && (request.kind === "update-document-state" || request.kind === "update-document-images"))
         || request.kind === "release-document" || owner !== documentId || (kind !== undefined && request.kind !== kind)) continue;
       this.#pending.delete(id);
       const queued = this.#queue.indexOf(id);

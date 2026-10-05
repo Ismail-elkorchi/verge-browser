@@ -1,0 +1,22 @@
+{
+  "wptRepository": "https://github.com/web-platform-tests/wpt",
+  "source": "css/css-position/position-relative-015.html",
+  "retrievedFrom": "https://raw.githubusercontent.com/web-platform-tests/wpt/master/css/css-position/position-relative-015.html",
+  "retrieved": "2026-10-05",
+  "sourceSha256": "e9a9d5d442b0559228c470bee412769eb9003c12e81c6db183988807edb1a168",
+  "sourceByteLength": 7356,
+  "license": "WPT 3-clause BSD; Verge tests are independently written behavioral adaptations and copy no upstream source.",
+  "test": "test/control/layout-percentage-ownership.test.js",
+  "adaptedCases": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 15, 16, 17, 18, 20],
+  "terminalAdjustment": "Each case is isolated in a document with zero root margins. Fixed-point fragment offsets replace getBoundingClientRect; graphical backgrounds and the browser test harness are unnecessary.",
+  "excludedCases": [
+    {
+      "cases": [12, 13, 14],
+      "reason": "Intrinsic block-size keywords fit-content, max-content, and min-content are outside the supported height policy. They must not be counted as conformance merely because an unsupported declaration falls back to auto."
+    },
+    {
+      "cases": [19],
+      "reason": "The stretch height keyword is not supported; grid/flex stretching is separately covered and does not imply support for height:stretch."
+    }
+  ]
+}

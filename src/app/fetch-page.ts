@@ -30,6 +30,8 @@ import type {
   FetchPageResult,
   FetchPageStreamResult,
   FetchStylesheetResult,
+  FetchImageResult,
+  ImageRequestOptions,
   NetworkOutcome,
   NetworkOutcomeKind,
   PageRequestOptions
@@ -437,6 +439,15 @@ const CSS_RESOURCE_PROFILE: NetworkResourceProfile = {
   label: "CSS",
   acceptsContentType(contentType) {
     return contentType === null || contentType.toLowerCase().split(";", 1)[0]?.trim() === "text/css";
+  }
+};
+
+const IMAGE_RESOURCE_PROFILE: NetworkResourceProfile = {
+  accept: "image/png,image/jpeg",
+  label: "PNG/JPEG image",
+  acceptsContentType(contentType) {
+    const type = contentType?.toLowerCase().split(";", 1)[0]?.trim();
+    return type === "image/png" || type === "image/jpeg";
   }
 };
 
@@ -1153,6 +1164,35 @@ export class PageNetworkClient {
       requestOptions,
       readLocalFileText
     );
+  }
+
+  /** Page-owned image resource: ordinary public transport, same-origin credentials only. */
+  public async fetchImage(
+    requestUrl: string,
+    documentUrl: string,
+    options: ImageRequestOptions
+  ): Promise<FetchImageResult> {
+    const target = new URL(requestUrl);
+    if (target.protocol !== "http:" && target.protocol !== "https:") {
+      throw new Error("Image transport only accepts HTTP(S) resources.");
+    }
+    const timeout = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    assertTimeout(timeout);
+    const result = await fetchNetworkResponse(
+      (url, request) => this.#publicClient.fetch(url, request),
+      this.#session === undefined ? undefined : new SameOriginHttpSession(this.#session, documentUrl),
+      requestUrl, timeout,
+      resolveSecurityPolicy({ maxContentBytes: options.maxContentBytes,
+        maxRedirects: options.maxRedirects ?? 5, maxRequestRetries: 0 }),
+      options.signal === undefined ? {} : { signal: options.signal }, IMAGE_RESOURCE_PROFILE
+    );
+    if (result.status < 200 || result.status >= 300) {
+      const error = new NetworkFetchError(outcomeFromHttpStatus(result.finalUrl, result.status, result.statusText));
+      await result.body.cancel(error);
+      throw error;
+    }
+    return { requestUrl, finalUrl: result.finalUrl, contentType: result.contentType,
+      bytes: await readByteStream(result.body) };
   }
 
   public fetchPageStream(

@@ -332,6 +332,8 @@ export interface LayoutScrollOwner {
 }
 
 export interface LayoutFragmentTree {
+  /** Whether natural metadata for this resource can change consumed sizing contributions or used geometry. */
+  imageDimensionsAffectLayout(resourceId: string): boolean;
   readonly textAnalysisWork: Readonly<{ intrinsicCalls: number; intrinsicReuses: number; intrinsicAnalyzedUnits: number; inlineBuilds: number; inlineReuses: number }>;
   readonly viewportDirection: "ltr" | "rtl";
   readonly scrollExtent: CssRect;

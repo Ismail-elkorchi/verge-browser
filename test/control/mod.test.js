@@ -6,6 +6,7 @@ import { isHtmlLikeContentType } from "../../dist/mod.js";
 
 test("root API keeps document construction and mutable state orchestration internal", () => {
   assert.equal(typeof publicApi.PageNetworkClient, "function");
+  assert.equal(typeof publicApi.PageNetworkClient.prototype.fetchImage, "function");
   for (const name of [
     "parseWebDocument",
     "parseWebDocumentBytes",
@@ -22,7 +23,11 @@ test("root API keeps document construction and mutable state orchestration inter
     "createPager",
     "createSearchState",
     "formatRenderedPage",
-    "WebDocumentSnapshot"
+    "WebDocumentSnapshot",
+    "StaticImageDecoder",
+    "acquireDocumentImages",
+    "discoverDocumentImages",
+    "documentImageMetadata"
   ]) assert.equal(publicApi[name], undefined, `${name} must not remain exported`);
 });
 

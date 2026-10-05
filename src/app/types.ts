@@ -1,6 +1,7 @@
 import type { HttpFields } from "@ismail-elkorchi/http-client";
 
 import type { IndexedWebDocumentSnapshot, WebDocumentSnapshot } from "../document/index.js";
+import type { DocumentImageResource } from "../document/image-resources.js";
 import type { StyleDiagnostic, StylesheetResource } from "../presentation/style/index.js";
 
 /** Classified network outcome kinds surfaced by fetch helpers and page snapshots. */
@@ -72,6 +73,22 @@ export interface FetchStylesheetResult {
   readonly transportEncodingLabel?: string;
 }
 
+/** Bounded PNG/JPEG transport bytes. Image navigation protocols are not widened. */
+export interface FetchImageResult {
+  readonly requestUrl: string;
+  readonly finalUrl: string;
+  readonly contentType: string | null;
+  readonly bytes: Uint8Array;
+}
+
+/** Limits for one public-address PNG/JPEG transport request; credentials are same-origin only. */
+export interface ImageRequestOptions {
+  readonly signal?: AbortSignal;
+  readonly maxContentBytes: number;
+  readonly maxRedirects?: number;
+  readonly timeoutMs?: number;
+}
+
 /** Options accepted by page navigation and fetch helpers. */
 export interface PageRequestOptions {
   readonly method?: "GET" | "POST";
@@ -115,6 +132,9 @@ export interface PageSnapshot {
 /** @internal Browser-owned snapshot with indexes required by rendering and UI subsystems. */
 export interface IndexedPageSnapshot extends Omit<PageSnapshot, "document"> {
   readonly document: IndexedWebDocumentSnapshot;
+  readonly images?: readonly DocumentImageResource[];
+  /** Source-bearing img references omitted by the acquisition resource-count limit. */
+  readonly imageOmittedReferenceCount?: number;
 }
 
 /** @internal Narrows a browser-produced public snapshot at Verge's internal ownership boundary. */

@@ -48,6 +48,8 @@ function verifyPackedFiles(packEntry) {
     "dist/ui/render-worker/worker-entry.js",
     "dist/ui/render-worker/client.js",
     "dist/ui/render-worker/protocol.js",
+    "dist/runtime/image-decoder-entry.js",
+    "dist/runtime/image-decoder.js",
     "dist/mod.d.ts",
     "dist/mod.js",
     "package.json"
@@ -126,7 +128,10 @@ try {
     join(consumerRoot, "smoke.ts"),
     `import {
   BrowserSession,
+  PageNetworkClient,
   fetchPage,
+  type FetchImageResult,
+  type ImageRequestOptions,
   type PageSnapshot,
   type WebDocumentSnapshot
 } from "@ismail-elkorchi/verge-browser";
@@ -140,6 +145,17 @@ const session = new BrowserSession({
 });
 const snapshot: PageSnapshot = await session.open("https://example.test/");
 const document: WebDocumentSnapshot = snapshot.document;
+const imageOptions: ImageRequestOptions = { maxContentBytes: 1024, maxRedirects: 2, timeoutMs: 1000 };
+const imageFetch: (url: string, documentUrl: string, options: ImageRequestOptions) => Promise<FetchImageResult>
+  = PageNetworkClient.prototype.fetchImage;
+void imageOptions;
+void imageFetch;
+// @ts-expect-error Progressive pixels are private to the interactive snapshot.
+snapshot.images;
+// @ts-expect-error BrowserSession does not own progressive image configuration.
+new BrowserSession({ imagePolicy: { maxPixels: 1 } });
+// @ts-expect-error Decoder ownership is not part of the public package API.
+type PrivatePixels = import("@ismail-elkorchi/verge-browser").DocumentImageResource;
 if (document.root.length === 0) throw new Error("invalid document");
 await session.close();
 `,

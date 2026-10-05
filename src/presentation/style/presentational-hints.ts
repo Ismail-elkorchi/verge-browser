@@ -29,13 +29,30 @@ export function parseLegacyColor(source: string): CssColor | null {
 
 /** Element-specific HTML rendering hints enter the author-presentational-hint origin. */
 export function presentationalHints(node: WebElementNode): readonly CssDeclaration[] {
-  if (node.namespace !== "http://www.w3.org/1999/xhtml" || !BACKGROUND_ELEMENTS.has(node.name)) return [];
-  const attribute = node.attributes.find((entry) => entry.namespace === null && entry.name === "bgcolor");
-  if (attribute === undefined) return [];
-  const color = parseLegacyColor(attribute.value);
-  if (color === null) return [];
-  const hex = [color.r, color.g, color.b].map((channel) => channel.toString(16).padStart(2, "0")).join("");
-  const declaration = parseDeclaration(`background-color:#${hex}`);
-  if (!declaration.ok) throw new Error("Invalid generated HTML color hint.");
-  return Object.freeze([declaration.value]);
+  if (node.namespace !== "http://www.w3.org/1999/xhtml") return [];
+  const declarations: CssDeclaration[] = [];
+  const append = (source: string): void => {
+    const declaration = parseDeclaration(source);
+    if (!declaration.ok) throw new Error("Invalid generated HTML presentational hint.");
+    declarations.push(declaration.value);
+  };
+  // Image attributes are presentation hints, not intrinsic dimensions. Author
+  // declarations (including auto) must replace them through the normal cascade.
+  if (node.name === "img") {
+    for (const property of ["width", "height"] as const) {
+      const attribute = node.attributes.find((entry) => entry.namespace === null && entry.name === property);
+      if (attribute === undefined || !/^[\t\n\f\r ]*\d+(?:\.\d+)?[\t\n\f\r ]*$/u.test(attribute.value)) continue;
+      const value = Number(attribute.value);
+      if (Number.isFinite(value) && value >= 0) append(`${property}:${String(value)}px`);
+    }
+  }
+  if (BACKGROUND_ELEMENTS.has(node.name)) {
+    const attribute = node.attributes.find((entry) => entry.namespace === null && entry.name === "bgcolor");
+    const color = attribute === undefined ? null : parseLegacyColor(attribute.value);
+    if (color !== null) {
+      const hex = [color.r, color.g, color.b].map((channel) => channel.toString(16).padStart(2, "0")).join("");
+      append(`background-color:#${hex}`);
+    }
+  }
+  return Object.freeze(declarations);
 }

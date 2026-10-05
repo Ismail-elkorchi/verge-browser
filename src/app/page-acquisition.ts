@@ -26,6 +26,9 @@ import {
 } from "./fetch-page.js";
 import { withNavigationSource } from "./http-session-context.js";
 import { assertPageInitiatedNavigation } from "./security.js";
+import { acquireDocumentImages, discoverDocumentImages, type ImageAcquisitionOptions,
+  type ImageAcquisitionMetrics, type ImageLoader } from "./image-acquisition.js";
+import { imagePolicy, type ImagePolicyOptions } from "./image-policy.js";
 import type {
   FetchPagePayload,
   FetchPageResult,
@@ -108,6 +111,12 @@ export interface BrowserSessionOptions {
   readonly defaultParseMode?: ParseMode;
   readonly localFileReader?: LocalFileReader;
   readonly instrumentation?: StylesheetSyntaxInstrumentation;
+}
+
+/** @internal Progressive image controls belong to interactive document acquisition. */
+export interface PageAcquisitionOptions extends BrowserSessionOptions {
+  readonly imageLoader?: ImageLoader;
+  readonly imagePolicy?: ImagePolicyOptions;
 }
 
 function stylesheetLimit(value: number | undefined, fallback: number, name: string): number {
@@ -201,11 +210,15 @@ export class PageAcquisition {
   readonly #parseOptions: Omit<WebDocumentParseOptions, "signal">;
   readonly #defaultParseMode: ParseMode;
   readonly #instrumentation: StylesheetSyntaxInstrumentation | undefined;
+  readonly #imageLoader: ImageLoader;
+  readonly #imagePolicy: Required<ImagePolicyOptions>;
+  readonly #imageOperations = new Set<Promise<ImageAcquisitionMetrics>>();
+  #activeImages: AbortController | null = null;
   #activeNavigation: AbortController | null = null;
   #navigationSequence = 0;
   #closed = false;
 
-  public constructor(options: BrowserSessionOptions = {}) {
+  public constructor(options: PageAcquisitionOptions = {}) {
     if (options.networkClient !== undefined && options.httpSession !== undefined) {
       throw new TypeError("BrowserSession accepts either networkClient or httpSession, not both.");
     }
@@ -237,6 +250,9 @@ export class PageAcquisition {
         requestUrl, undefined, undefined, requestOptions, this.#localFileReader
       ));
     this.#stylesheetLoader = options.stylesheetLoader ?? null;
+    this.#imageLoader = options.imageLoader ?? ((url, documentUrl, imageOptions) =>
+      this.#requiredNetworkClient().fetchImage(url, documentUrl, imageOptions));
+    this.#imagePolicy = imagePolicy(options.imagePolicy);
     this.#stylesheetPolicy = Object.freeze({
       maxStylesheets: stylesheetLimit(
         options.stylesheetPolicy?.maxStylesheets,
@@ -276,6 +292,9 @@ export class PageAcquisition {
     this.#closed = true;
     this.#activeNavigation?.abort(new Error("Browser session closed."));
     this.#activeNavigation = null;
+    this.#activeImages?.abort(new Error("Browser session closed."));
+    await Promise.allSettled(this.#imageOperations);
+    this.#activeImages = null;
     if (this.#ownsNetworkClient) await this.#networkClient?.close();
   }
 
@@ -284,6 +303,9 @@ export class PageAcquisition {
     this.#closed = true;
     this.#activeNavigation?.abort(reason);
     this.#activeNavigation = null;
+    this.#activeImages?.abort(reason);
+    await Promise.allSettled(this.#imageOperations);
+    this.#activeImages = null;
     if (this.#ownsNetworkClient) await this.#networkClient?.destroy(reason);
   }
 
@@ -298,6 +320,7 @@ export class PageAcquisition {
   } {
     if (this.#closed) throw new Error("Browser session is closed.");
     this.#activeNavigation?.abort(new Error("Navigation superseded."));
+    this.#activeImages?.abort(new Error("Image activation superseded by navigation."));
     const controller = new AbortController();
     this.#activeNavigation = controller;
     const sequence = ++this.#navigationSequence;
@@ -305,6 +328,24 @@ export class PageAcquisition {
       sequence,
       options: { ...options, signal: combineSignals(controller.signal, options.signal) }
     };
+  }
+
+  /** Progressive image work begins only after the caller accepts this document. */
+  public acquireImages(snapshot: IndexedPageSnapshot, options: ImageAcquisitionOptions): Promise<ImageAcquisitionMetrics> {
+    if (this.#closed) return Promise.reject(new Error("Browser session is closed."));
+    this.#activeImages?.abort(new Error("Image activation superseded."));
+    const controller = new AbortController();
+    this.#activeImages = controller;
+    // A replacement activation cannot overlap the previous decoder's termination.
+    const pending = Promise.allSettled([...this.#imageOperations]).then(() => acquireDocumentImages(snapshot, { ...options,
+      signal: AbortSignal.any([controller.signal, options.signal]) }, this.#imageLoader, this.#imagePolicy));
+    this.#imageOperations.add(pending);
+    const finish = (): void => {
+      this.#imageOperations.delete(pending);
+      if (this.#activeImages === controller) this.#activeImages = null;
+    };
+    void pending.then(finish, finish);
+    return pending;
   }
 
   #finishNavigation(sequence: number): void {
@@ -743,6 +784,7 @@ export class PageAcquisition {
       const stylesheetDurationMs = Date.now() - stylesheetStartedAtMs;
       signal.throwIfAborted();
       this.#finishNavigation(navigation.sequence);
+      const images = discoverDocumentImages(document, this.#imagePolicy);
       const snapshot: IndexedPageSnapshot = Object.freeze({
         requestUrl: fetchedPage.requestUrl,
         finalUrl: fetchedPage.finalUrl,
@@ -752,6 +794,8 @@ export class PageAcquisition {
         responseFields: fetchedPage.responseFields,
         fetchedAtIso: fetchedPage.fetchedAtIso,
         document,
+        images: images.resources,
+        imageOmittedReferenceCount: images.omittedReferences,
         stylesheets: stylesheets.resources,
         styleDiagnostics: stylesheets.diagnostics,
         diagnostics: diagnosticsFromDocument(

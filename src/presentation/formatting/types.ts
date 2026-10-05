@@ -1,5 +1,6 @@
 import type {
   DocumentFormControl,
+  DocumentImageMetadata,
   DocumentNodeRef,
   DocumentSemanticEntry,
   DocumentSourceRange,
@@ -47,7 +48,7 @@ export type FormattingNodeKind =
   | "grid-container"
   | "grid-item"
   | "replaced-element"
-  | "image-fallback"
+  | "image"
   | "form-control";
 
 interface FormattingNodeBase {
@@ -110,8 +111,11 @@ export interface FormattingBreakNode extends FormattingNodeBase {
 }
 
 export interface FormattingReplacedNode extends FormattingNodeBase {
-  readonly kind: "replaced-element" | "image-fallback";
+  readonly kind: "replaced-element" | "image";
   readonly fallbackText: string;
+  readonly imageResourceId: string | null;
+  readonly naturalWidth: number | null;
+  readonly naturalHeight: number | null;
   readonly intrinsicWidth: number | null;
   readonly intrinsicHeight: number | null;
 }
@@ -159,6 +163,7 @@ export type FormattingOutcome =
   | { readonly status: "rejected"; readonly reason: "document-style-mismatch" };
 
 export interface BuildFormattingTreeInput {
+  readonly images?: readonly DocumentImageMetadata[];
   readonly document: IndexedWebDocumentSnapshot;
   readonly state: DocumentState;
   readonly styles: StyleSnapshot;

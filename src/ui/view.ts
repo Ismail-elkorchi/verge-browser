@@ -1,3 +1,4 @@
+import { browserRasterImage } from "./image-presentation.js";
 import { nativeFormControl } from "./native-control.js";
 import {
   commandInputView,
@@ -45,6 +46,7 @@ import type {
   TerminalControlGeometry,
   TerminalFocusTarget,
   TerminalHitRegion,
+  TerminalImagePlacement,
   TerminalSearchResult,
   TerminalStyle as ActualTerminalStyle
 } from "../presentation/terminal/index.js";
@@ -396,8 +398,66 @@ function browserDocumentChildBounds(
   });
 }
 
+// Image clips share the document's canonical paint projection. They are mounted
+// after native editors so paint and pointer order agree without duplicate controls.
+const browserImageComponent = defineComponent<{
+  readonly document: BrowserDocumentComponentModel;
+  readonly placement: TerminalImagePlacement;
+}, BrowserDocumentAction>()({
+  name: "verge-browser/components/image",
+  identity: "required",
+  structure: "leaf",
+  semantics: "semantic",
+  accessibleRole: "text",
+  measure({ model }) {
+    return { minWidth: 0, minHeight: 0, preferredWidth: model.placement.clip.width,
+      preferredHeight: model.placement.clip.height };
+  },
+  render({ model, bounds, target }) {
+    const { document, placement } = model;
+    // Keep the ordinary cells beneath the graphic for unsupported terminals and
+    // rejected graphics commits, including where an earlier editor was mounted.
+    for (const row of document.terminalRender.cellBuffer.rows) {
+      if (row.row < placement.clip.row || row.row >= placement.clip.row + placement.clip.height) continue;
+      // The child target clips the shared styled row to this image allocation.
+      // Reusing the document projection preserves search and link decoration in
+      // fallback cells instead of replacing them with authored styles alone.
+      target.write(bounds.row + row.row - placement.clip.row, bounds.column - placement.clip.column,
+        rowSegments(document, row, row.row));
+    }
+    const resource = document.source.snapshot.images?.find((entry) => entry.id === placement.resourceId);
+    if (resource === undefined || resource.width !== placement.naturalWidth || resource.height !== placement.naturalHeight) return;
+    const image = browserRasterImage(resource);
+    if (image === null) return;
+    target.placeGraphic({ id: `${document.source.id}:${placement.id}`, image, fit: "fill", clip: bounds,
+      bounds: { ...placement.bounds, row: bounds.row + placement.bounds.row - placement.clip.row,
+        column: bounds.column + placement.bounds.column - placement.clip.column } });
+  },
+  accessibility({ id }) {
+    // The document owns the single semantic image/alt identity.
+    return { id, role: "text", label: "" };
+  },
+  hitTargets({ model, bounds }) {
+    const action = model.placement.action;
+    return [{ id: "image", bounds, focus: { kind: "preserve" as const },
+      accepts: ["click" as const, "contextMenu" as const, "pointerDown" as const, "hover" as const],
+      cursor: action?.kind === "link" ? "pointer" as const : "default" as const,
+      message(event) {
+        if (action === null || action.kind === "form-control" || event.kind === "hover"
+          || event.kind === "pointerDown" && event.button !== "middle") return ignoreMessage();
+        const actionId = documentActionId(action);
+        return event.kind === "contextMenu" && action.kind === "link"
+          ? { kind: "openLinkMenu" as const, actionId, row: event.row, column: event.column }
+          : { kind: "activateActionAt" as const, actionId, disposition: event.button === "middle"
+            ? "newBackground" as const : event.modifiers.ctrl ? "newForeground" as const : "current" as const };
+      },
+    }];
+  },
+});
+
 const browserDocumentSlots = {
-  controls: { cardinality: "many", owner: "caller", messages: "bubble" }
+  controls: { cardinality: "many", owner: "caller", messages: "bubble" },
+  images: { cardinality: "many", owner: "caller", messages: "bubble" }
 } as const;
 
 const browserDocumentComponent = defineComponent<BrowserDocumentComponentOptions, BrowserDocumentAction>()({
@@ -442,7 +502,9 @@ const browserDocumentComponent = defineComponent<BrowserDocumentComponentOptions
         model.document,
         bounds,
         slots.count("controls")
-      )
+      ),
+      images: model.document.terminalRender.cellBuffer.images.map((image) => ({ ...image.clip,
+        row: bounds.row + image.clip.row, column: bounds.column + image.clip.column }))
     };
   },
   renderBeforeChildren({ model, bounds, viewport: visibleBounds, target }) {
@@ -561,7 +623,7 @@ const browserDocumentComponent = defineComponent<BrowserDocumentComponentOptions
         : ignoreMessage()
     };
     return [rootScrollTarget, ...scrollTargets, ...terminalRender.hitTestIndex.regions
-      .filter((placement) => placement.action.kind !== "form-control")
+      .filter((placement) => placement.action.kind !== "form-control" && !placement.id.startsWith("viewport-image-hit:"))
       .flatMap((placement) => {
         const clipped = documentCellBounds(placement.rect, contentBounds, visibleBounds);
         if (clipped === null) return [];
@@ -611,7 +673,9 @@ function browserDocument(
   const content = browserDocumentComponent({
     id: `browser-${document.id}`,
     document: model,
-    slots: { controls: children },
+    slots: { controls: children, images: terminalRender.cellBuffer.images.map((placement) => browserImageComponent({
+      id: `${document.id}:${placement.id}`, document: model, placement, onAction: (action): BrowserTuiMessage => action,
+    })) },
     onAction: (action): BrowserTuiMessage => action
   });
   return surface(viewport(content, {
@@ -641,6 +705,7 @@ function committedBrowserViewport(document: BrowserDocumentState): BrowserViewpo
     cellBuffer: column === 0 ? payload.cellBuffer : {
       ...payload.cellBuffer,
       windowStartColumn: 0,
+      images: payload.cellBuffer.images.map((entry) => ({ ...entry, bounds: rect(entry.bounds), clip: rect(entry.clip) })),
       rows: payload.cellBuffer.rows.map((row) => ({ ...row,
         cells: row.cells.map((cell) => ({ ...cell, column: cell.column - column })),
         spans: row.spans.map((span) => ({ ...span, column: span.column - column }))

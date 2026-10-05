@@ -9,6 +9,8 @@ export type {
 } from "./parse.js";
 export { applyDocumentAction, createDocumentState, snapshotDocumentState, controlState, controlValues, controlChecked, controlSelections } from "./state.js";
 export type * from "./types.js";
+export { documentImageMetadata } from "./image-resources.js";
+export type { DocumentImageMetadata, DocumentImageResource, ImageFailureCode } from "./image-resources.js";
 export type {
   HtmlTableCellMetadata,
   HtmlTableColumnMetadata,

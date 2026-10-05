@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Relative percentage containing blocks</title>
+<style>
+html,body{margin:0;padding:0;font:16px/16px monospace}
+.case{width:160px;margin:0 0 16px}
+.label,.offset,.after{height:16px}
+.offset{position:relative;top:100%}
+#fixed{height:48px;margin-bottom:48px}
+#minimum{min-height:64px}
+#grid{display:grid;grid-template-rows:40px;width:160px}
+#grid-offset{position:relative;top:50%;height:16px}
+</style>
+<div class="case" id="automatic"><div class="label">AUTO LABEL</div><div class="offset" id="automatic-offset">AUTO MENU</div></div>
+<div class="after" id="automatic-after">AUTO ARTICLE</div>
+<div class="case" id="fixed"><div class="label">FIXED LABEL</div><div class="offset" id="fixed-offset">FIXED MENU</div></div>
+<div class="after" id="fixed-after">FIXED ARTICLE</div>
+<div class="case" id="minimum"><div class="label">MIN LABEL</div><div class="offset" id="minimum-offset">MIN MENU</div></div>
+<div class="after" id="minimum-after">MIN ARTICLE</div>
+<div class="case" id="grid"><div id="grid-offset">GRID ITEM</div></div>

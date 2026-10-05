@@ -1,3 +1,4 @@
+import type { DocumentImageMetadata } from "../../document/index.js";
 import { withPackedAllocationCheck, finishPackedConstructionPhase } from "../../memory/packed.js";
 import { retainedSideCacheRevision, retainedSideCaches, estimatedRetainedCost, RetainedCostAccounting, RenderBudgetExceededError, type RetainedCostOwner } from "../../memory/retained-cost.js";
 import { buildFormattingTree } from "../formatting/index.js";
@@ -67,6 +68,10 @@ interface AttachedDocument {
   readonly budgets: AttachDocumentArtifactsInput["budgets"];
   readonly attachmentOwner: RetainedCostOwner;
   stateOwner: RetainedCostOwner;
+  imagesOwner: RetainedCostOwner;
+  images: readonly DocumentImageMetadata[];
+  imageDimensionsRevision: number;
+  imageMetadataRevision: number;
   cacheOwners: readonly RetainedCostOwner[];
   readonly sideCacheSources: Map<object, number>;
   readonly mutableOwners: Map<object, { readonly owner: RetainedCostOwner; readonly revision: number }>;
@@ -140,7 +145,7 @@ function dependencyKey(document: AttachedDocument, request: DocumentAnalysisRequ
   const layoutViewport = layoutKey(styles, request);
   const textMetrics = textMetricsKey(request);
   const computedStyleMap = evaluation.identity;
-  const boxTree = `${evaluation.formattingIdentity}:content:${String(document.textStateRevision)}`;
+  const boxTree = `${evaluation.formattingIdentity}:content:${String(document.textStateRevision)}:images:${String(document.imageDimensionsRevision)}`;
   const logicalTextIndex = document.logicalText?.stateRevision === document.textStateRevision
     && document.logicalText.dependency === styles.logicalTextDependency
     ? document.logicalText.key : `${computedStyleMap}:text:${String(document.textStateRevision)}`;
@@ -151,7 +156,7 @@ function dependencyKey(document: AttachedDocument, request: DocumentAnalysisRequ
     stateRevision: document.stateRevision,
     media: evaluation.media, layoutViewport, textMetrics, computedStyleMap, boxTree,
     inlineItemStreams: boxTree, logicalTextIndex, documentLayout,
-    documentDisplayList: `${documentLayout}:paint:${computedStyleMap}`, documentGeometry: documentLayout,
+    documentDisplayList: `${documentLayout}:paint:${computedStyleMap}:images:${String(document.imageMetadataRevision)}`, documentGeometry: documentLayout,
     reporting: evaluation.reporting,
   });
 }
@@ -221,8 +226,13 @@ export class RenderArtifactStore {
     // External revisions may restart or already be large after reattachment.
     // Seed semantic freshness from the same monotonic source used by updates.
     const semanticRevision = ++this.#clock;
+    const images = input.images ?? Object.freeze([]);
     const attachment: AttachedDocument = {
       attachmentOwner,
+      images,
+      imagesOwner: this.#accounting.immutable(images, new Set(), input.signal),
+      imageDimensionsRevision: 0,
+      imageMetadataRevision: 0,
       stateOwner: this.#accounting.immutable(input.state, new Set(), input.signal),
       cacheOwners: cacheRoots.map((root) => this.#accounting.mutable(root, input.signal)),
       queryOwners: new Map(),
@@ -250,6 +260,42 @@ export class RenderArtifactStore {
       this.#measureRetainedCost();
       throw error;
     }
+  }
+
+  /** Pixel readiness is a UI concern. Only consumed natural geometry retires layout. */
+  public updateImages(input: { readonly documentId: string; readonly documentRevision: number;
+    readonly images: readonly DocumentImageMetadata[] }): "none" | "paint" | "layout" {
+    const document = this.#document(input.documentId, input.documentRevision);
+    if (document.images.length === input.images.length && document.images.every((image, index) => {
+      const next = input.images[index];
+      return next !== undefined && image.id === next.id && image.width === next.width && image.height === next.height;
+    })) return "none";
+    const oldById = new Map(document.images.map((image) => [image.id, image]));
+    const nextById = new Map(input.images.map((image) => [image.id, image]));
+    const changed = [...new Set([...oldById.keys(), ...nextById.keys()])].filter((id) => {
+      const old = oldById.get(id), next = nextById.get(id);
+      return (old?.width ?? null) !== (next?.width ?? null) || (old?.height ?? null) !== (next?.height ?? null);
+    });
+    const layouts = [...document.resources.documentLayout.values()];
+    const changesLayout = changed.length > 0 && (layouts.length === 0
+      || layouts.some(({ value }) => changed.some((id) => value.imageDimensionsAffectLayout(id))));
+    const previous = { images: document.images, imagesOwner: document.imagesOwner,
+      imageDimensionsRevision: document.imageDimensionsRevision, imageMetadataRevision: document.imageMetadataRevision };
+    document.images = input.images;
+    document.imagesOwner = this.#accounting.immutable(input.images);
+    if (changesLayout) document.imageDimensionsRevision = ++this.#clock;
+    document.imageMetadataRevision = ++this.#clock;
+    try { this.#admit(); }
+    catch (error) { Object.assign(document, previous); this.#measureRetainedCost(); throw error; }
+    if (changesLayout) {
+      for (const phase of PHASES) if (phase !== "computedStyles" && phase !== "textSearchIndex") this.#retirePhase(document, phase);
+      document.searches.clear();
+    } else {
+      this.#retirePhase(document, "documentDisplayList");
+      this.#retirePhase(document, "displayListSpatialIndex");
+    }
+    this.#measureRetainedCost();
+    return changesLayout ? "layout" : "paint";
   }
 
   public updateState(input: UpdateDocumentArtifactsStateInput): void {
@@ -430,7 +476,7 @@ export class RenderArtifactStore {
         this.#admit(request.signal);
       }
       const boxTree = this.#resource(document, "boxTree", key.boxTree) ?? retain("boxTree", measured(instrumentation, "box-tree-construction", () => buildFormattingTree({
-        document: document.program.document, state: document.state, styles: computedStyles,
+        document: document.program.document, state: document.state, styles: computedStyles, images: document.images,
         ...(document.budgets?.formatting === undefined ? {} : { budgets: document.budgets.formatting }),
         ...(request.signal === undefined ? {} : { signal: request.signal }),
       })));
@@ -446,7 +492,7 @@ export class RenderArtifactStore {
           ...(request.signal === undefined ? {} : { signal: request.signal }),
         })));
       const documentDisplayList = this.#resource(document, "documentDisplayList", key.documentDisplayList) ?? retain("documentDisplayList",
-        measured(instrumentation, "document-display-list-construction", () => buildDocumentDisplayList({ layout: documentLayout, styles: computedStyles,
+        measured(instrumentation, "document-display-list-construction", () => buildDocumentDisplayList({ layout: documentLayout, styles: computedStyles, images: document.images,
           context: { ...request.terminalContext, colorDepth: 24, ...(document.budgets?.terminal === undefined ? {} : { budgets: document.budgets.terminal }) },
           ...(request.signal === undefined ? {} : { signal: request.signal }),
         })));
@@ -776,7 +822,7 @@ export class RenderArtifactStore {
       const indexes = new Set([...document.resources.textSearchIndex.values()].map(({ value }) => value));
       if (document.logicalText !== null) indexes.add(document.logicalText.index);
       for (const index of indexes) this.#refreshQueryCosts(document, index, signal);
-      owners.push(document.attachmentOwner, document.stateOwner, ...document.cacheOwners,
+      owners.push(document.attachmentOwner, document.stateOwner, document.imagesOwner, ...document.cacheOwners,
         ...[...document.queryOwners.values()].map((entry) => entry.owner));
       if (document.logicalText !== null) owners.push(this.#accounting.immutable(document.logicalText.index));
       for (const phase of PHASES) for (const entry of document.resources[phase].values()) owners.push(entry.owner);
@@ -795,7 +841,7 @@ export class RenderArtifactStore {
   /** Expensive diagnostic oracle for tests and explicit qualification, never used for admission. */
   public recountRetainedCost(): number {
     return estimatedRetainedCost([...this.#documents.values()].map((document) => ({
-      program: document.program, state: document.state, budgets: document.budgets,
+      program: document.program, state: document.state, images: document.images, budgets: document.budgets,
       logicalText: document.logicalText,
       queryIndexes: [...document.queryOwners.keys()],
       styles: [...document.styles.values()],

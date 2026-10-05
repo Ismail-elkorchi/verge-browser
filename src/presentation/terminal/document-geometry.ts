@@ -298,6 +298,13 @@ export function buildDocumentGeometryIndex(
   const document = list.layout.formatting.document;
   const geometry = new Map<DocumentNodeRef, MutableGeometry>();
   const controls: DocumentControlGeometry[] = [];
+  // Derive native paint membership once from the canonical ordering. Empty
+  // editors need no pretend text command, and viewport projection stays bounded.
+  const controlPaintGroups = new Map<LayoutFragmentId, number>();
+  for (const [paintGroup, id] of list.fragmentPaintOrder.entries()) {
+    if ((paintGroup & 255) === 0) signal?.throwIfAborted();
+    if (list.layout.fragment(id).kind === "control") controlPaintGroups.set(id, paintGroup);
+  }
   const focus = new Map<DocumentNodeRef, {
     action: NonNullable<LayoutFragment["action"]>;
     fragments: LayoutFragmentId[];
@@ -351,7 +358,8 @@ export function buildDocumentGeometryIndex(
     if (fragment.kind === "control" && fragment.documentNode !== null && fragment.style.visible
       && fragment.borderRect.width > 0 && fragment.borderRect.height > 0) {
       if (controls.length < budgets.maxRetainedDocumentRectangles) {
-        controls.push(Object.freeze({ node: fragment.documentNode, fragment: fragment.id, rect: fragment.borderRect }));
+        controls.push(Object.freeze({ node: fragment.documentNode, fragment: fragment.id, rect: fragment.borderRect,
+          paintGroup: controlPaintGroups.get(fragment.id) ?? -1 }));
       } else truncated("maxRetainedDocumentRectangles", budgets.maxRetainedDocumentRectangles);
     }
     if (fragment.action === null) continue;

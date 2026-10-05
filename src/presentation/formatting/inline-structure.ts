@@ -12,7 +12,7 @@ export function isInlineFormattingNode(node: FormattingNode): boolean {
 
 /** Atomic content owns its text stream even when blockified or positioned. */
 export function isAtomicFormattingNode(node: FormattingNode): boolean {
-  return node.kind === "form-control" || node.kind === "replaced-element" || node.kind === "image-fallback";
+  return node.kind === "form-control" || node.kind === "replaced-element" || node.kind === "image";
 }
 
 /** CSS display-structure classification for an indivisible inline-level box. */

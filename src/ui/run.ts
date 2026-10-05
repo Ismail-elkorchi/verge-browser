@@ -66,6 +66,7 @@ export async function runBrowserTui(initialTarget: string, options: BrowserTuiOp
     await runTui(prepared.app, {
       ...(options.host === undefined ? {} : { host: options.host }),
       textPresentation: prepared.textPresentation,
+      graphics: "auto",
       sessionPolicy: { ...defaultSessionProtocolPolicy, cellPresentation: "required" },
       initialFocus: activeTab !== undefined
         && (activeTab.kind === "ready" ? activeTab.snapshot.finalUrl : activeTab.requestedUrl) === "about:newtab"

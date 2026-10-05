@@ -1535,6 +1535,63 @@ test("flex line cross sizes apply stretch, align-content, and column wrapping", 
   );
 });
 
+function assertLiveLineIndexes(layout) {
+  const reached = reachableFragments(layout);
+  const lines = new Map(layout.lineBoxes.map((line) => [line.id, line]));
+  assert.equal(lines.size, layout.lineBoxes.length, "live line IDs are unique after relayout");
+  assert.equal(layout.outcome.lineBoxes, lines.size);
+  const owned = new Set();
+  for (const id of reached) {
+    const fragment = layout.fragment(id);
+    for (const line of fragment.lineBoxes) {
+      owned.add(line.id);
+      assert.deepEqual(lines.get(line.id), line, "translated owner lines match the compacted index");
+    }
+  }
+  assert.equal(owned.size, lines.size, "no discarded or unowned lines survive");
+  for (const line of lines.values()) {
+    assert.ok(reached.has(line.containingFragment));
+    assert.ok(line.fragments.every((id) => reached.has(id)));
+    assert.ok(line.visualOrder.every((id) => reached.has(id)));
+  }
+}
+
+test("batched flex stretch replaces every item's lines within the live-line budget", () => {
+  const count = 256;
+  const html = `<style>html,body,p{margin:0}</style><p>before</p>
+    <div style="display:flex;flex-wrap:wrap;width:800px">${"<span>item</span>".repeat(count)}</div><p>after</p>`;
+  const result = render(html, 100, 80, { layout: { maxLineBoxes: count + 2 } });
+  assert.equal(result.layout.outcome.status, "complete");
+  assert.equal(result.layout.lineBoxes.length, count + 2);
+  assertLiveLineIndexes(result.layout);
+  const text = (line) => line.fragments.map((id) => result.layout.fragment(id).text ?? "").join("");
+  assert.deepEqual(result.layout.lineBoxes.map(text), ["before", ...Array(count).fill("item"), "after"]);
+
+  const truncated = render(html, 100, 80, { layout: { maxLineBoxes: count + 1 } });
+  assert.equal(truncated.layout.outcome.status, "truncated");
+  assert.equal(truncated.layout.outcome.budget, "maxLineBoxes");
+  assert.ok(truncated.layout.lineBoxes.length <= count + 1);
+  assertLiveLineIndexes(truncated.layout);
+});
+
+test("nested stretch batches preserve unaffected lines, percentage bases, and translated indexes", () => {
+  const count = 24;
+  const result = render(`<style>html,body,p{margin:0}</style><p>before</p>
+    <div style="display:flex;flex-wrap:wrap;width:320px;align-content:stretch">${Array.from({ length: count }, (_, index) =>
+      `<section style="display:flex;width:80px"><div style="width:40px"><p id="percentage-${String(index)}" style="height:50%">a</p></div>
+      <div style="width:40px;height:32px;align-self:start;position:relative;top:3px">b</div></section>`).join("")}</div><p>after</p>`,
+  50, 80, { layout: { maxLineBoxes: count * 2 + 2 } });
+  assert.equal(result.layout.outcome.status, "complete");
+  assert.equal(result.layout.lineBoxes.length, count * 2 + 2);
+  assertLiveLineIndexes(result.layout);
+  for (let index = 0; index < count; index += 1) {
+    const percentage = principalFragment(result, elementById(result, `percentage-${String(index)}`));
+    assert.equal(cssPixels(percentage.contentRect.height), 16);
+  }
+  assert.equal(result.layout.lineBoxes[0].fragments.map((id) => result.layout.fragment(id).text ?? "").join(""), "before");
+  assert.equal(result.layout.lineBoxes.at(-1).fragments.map((id) => result.layout.fragment(id).text ?? "").join(""), "after");
+});
+
 test("flexible-length resolution has deterministic work and cancellation boundaries", () => {
   const items = Array.from({ length: 2_000 }, (_, sourceIndex) => ({
     identity: sourceIndex,

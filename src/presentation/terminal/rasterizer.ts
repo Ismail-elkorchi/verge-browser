@@ -14,6 +14,7 @@ import type {
   TerminalCellRow,
   TerminalCellSpan,
   TerminalCellStyleSpan,
+  TerminalImagePlacement,
   DocumentDisplayList,
   TerminalPaintBudgets,
   TerminalPaintCommand,
@@ -139,7 +140,7 @@ function snapUnclippedCssRect(rect: CssRect, list: RasterizationDisplayList): Te
   return cellRect(row, column, safeSubtract(edge, column), safeSubtract(bottom, row));
 }
 
-function textClip(command: Extract<TerminalPaintCommand, { readonly kind: "text" }>, list: RasterizationDisplayList, budgets: TerminalPaintBudgets): TerminalCellRect {
+function textClip(command: Extract<TerminalPaintCommand, { readonly kind: "text" | "image" }>, list: RasterizationDisplayList, budgets: TerminalPaintBudgets): TerminalCellRect {
   const fragment = list.layout.fragment(command.layoutFragment);
   const clip = fragment.kind === "control" || fragment.kind === "replaced"
     ? cssIntersection(command.clipRect, command.rect) : command.clipRect;
@@ -169,7 +170,7 @@ function reservePaintUnit(state: PaintUnitGenerationState): boolean {
 }
 
 function* textUnits(
-  command: Extract<TerminalPaintCommand, { readonly kind: "text" }>,
+  command: Extract<TerminalPaintCommand, { readonly kind: "text" | "image" }>,
   list: RasterizationDisplayList,
   budgets: TerminalPaintBudgets,
   generation: PaintUnitGenerationState,
@@ -229,7 +230,7 @@ function* textUnits(
 }
 
 function* backgroundUnits(
-  command: Extract<TerminalPaintCommand, { readonly kind: "background" }>,
+  command: Extract<TerminalPaintCommand, { readonly kind: "background" | "image" }>,
   list: RasterizationDisplayList,
   budgets: TerminalPaintBudgets,
   generation: PaintUnitGenerationState,
@@ -338,6 +339,19 @@ function* borderUnits(
   }
 }
 
+function* imageUnits(
+  command: Extract<TerminalPaintCommand, { readonly kind: "image" }>,
+  list: RasterizationDisplayList,
+  budgets: TerminalPaintBudgets,
+  generation: PaintUnitGenerationState,
+  signal: AbortSignal | undefined,
+): Generator<PaintUnit> {
+  // Reserve every covered cell in the same owner grid as ordinary paint. The
+  // fallback is replaced only by terminal graphics after admission, never lost.
+  yield* backgroundUnits(command, list, budgets, generation, signal);
+  if (!generation.truncated) yield* textUnits(command, list, budgets, generation, signal);
+}
+
 function unitsFor(
   command: TerminalPaintCommand,
   list: RasterizationDisplayList,
@@ -345,6 +359,7 @@ function unitsFor(
   generation: PaintUnitGenerationState,
   signal: AbortSignal | undefined
 ): Generator<PaintUnit> {
+  if (command.kind === "image") return imageUnits(command, list, budgets, generation, signal);
   if (command.kind === "text") return textUnits(command, list, budgets, generation, signal);
   if (command.kind === "background") return backgroundUnits(command, list, budgets, generation, signal);
   return borderUnits(command, list, budgets, generation, signal);
@@ -396,14 +411,14 @@ function terminalColor(color: TerminalColor | null, depth: RasterizationDisplayL
 function actualStyle(command: TerminalPaintCommand, under: PaintedUnit | undefined, depth: RasterizationDisplayList["context"]["colorDepth"]): TerminalStyle {
   const background = composite(command.style.background, under?.actualStyle.background ?? null);
   const foregroundSource = command.kind === "border-side" ? command.style.borderColors[command.side]
-    : command.kind === "text" ? command.style.foreground : null;
+    : (command.kind === "text" || command.kind === "image") ? command.style.foreground : null;
   return Object.freeze({
     foreground: terminalColor(composite(foregroundSource, background), depth),
     background: terminalColor(background, depth),
-    bold: command.kind === "text" && command.style.bold,
-    italic: command.kind === "text" && command.style.italic,
-    underline: command.kind === "text" && command.style.underline,
-    strikethrough: command.kind === "text" && command.style.strikethrough
+    bold: (command.kind === "text" || command.kind === "image") && command.style.bold,
+    italic: (command.kind === "text" || command.kind === "image") && command.style.italic,
+    underline: (command.kind === "text" || command.kind === "image") && command.style.underline,
+    strikethrough: (command.kind === "text" || command.kind === "image") && command.style.strikethrough
   });
 }
 
@@ -447,6 +462,7 @@ function rejectedViewportBuffer(
   const start = Math.max(0, list.window.scrollRow - list.window.overscanBefore);
   return Object.freeze({
     cellBuffer: Object.freeze({
+      images: Object.freeze([]),
       columns: Math.max(0, safeInteger(list.context.columns)),
       documentRowCount: 0,
       windowStartRow: start,
@@ -521,8 +537,16 @@ export function rasterizeViewportDisplayList(
           const previous = row[column];
           if (previous !== undefined && !collided.includes(previous)) collided.push(previous);
         }
+        const coveredEdge = safeAdd(unit.column, unit.width);
         let removed = 0;
-        for (const previous of collided) removed += previous.width;
+        for (const previous of collided) {
+          // Wide fallback glyphs clear atomically, but their opaque image still
+          // owns cells outside the later paint unit's actual coverage.
+          const retainedImageCells = previous.command.kind === "image"
+            ? Math.max(0, unit.column - previous.column)
+              + Math.max(0, safeAdd(previous.column, previous.width) - coveredEdge) : 0;
+          removed += previous.width - retainedImageCells;
+        }
         const projectedCells = retainedCells - removed + unit.width;
         if (projectedCells > budgets.maxRetainedPaintCells) {
           addTruncation(truncations, "maxRetainedPaintCells", budgets.maxRetainedPaintCells);
@@ -531,7 +555,10 @@ export function rasterizeViewportDisplayList(
         }
         for (const previous of collided) {
           for (let column = previous.column; column < safeAdd(previous.column, previous.width); column += 1) {
-            row[column] = undefined;
+            row[column] = previous.command.kind === "image" && (column < unit.column || column >= coveredEdge)
+              ? { ...previous, column, width: 1, text: " ", startCodeUnit: 0, endCodeUnit: 0,
+                contentStartCodeUnit: null, contentEndCodeUnit: null, sourceRange: null }
+              : undefined;
           }
         }
         const under = collided[0];
@@ -553,12 +580,37 @@ export function rasterizeViewportDisplayList(
     if (error instanceof InvalidTerminalCellMeasurement) return rejectedViewportBuffer(input, "invalid-cell-measurement");
     throw error;
   }
+  const images: TerminalImagePlacement[] = [];
+  const openImageRuns = new Map<string, number>();
   const rows: TerminalCellRow[] = [];
   let retainedTextSpans = 0;
   for (let localRow = 0; localRow < rowCount; localRow += 1) {
     input.signal?.throwIfAborted();
     const visibleUnits = [...new Set((owners[localRow] ?? []).filter((unit): unit is PaintedUnit => unit !== undefined))]
       .sort((left, right) => left.column - right.column || left.command.paintOrder - right.command.paintOrder);
+    // Coalesce adjacent image-owned cells into bounded rectangular clips. These
+    // clips exclude later text/background ink before the flattened row is sent.
+    const ownerRow = owners[localRow] ?? [];
+    for (let column = 0; column < ownerRow.length;) {
+      const command = ownerRow[column]?.command;
+      if (command?.kind !== "image") { column += 1; continue; }
+      const start = column++;
+      while (column < ownerRow.length && ownerRow[column]?.command === command) column += 1;
+      const width = column - start;
+      const key = `${command.id}:${String(start)}:${String(width)}`;
+      const previousIndex = openImageRuns.get(key);
+      const previous = previousIndex === undefined ? undefined : images[previousIndex];
+      if (previousIndex !== undefined && previous !== undefined && previous.clip.row + previous.clip.height === windowStartRow + localRow) {
+        images[previousIndex] = Object.freeze({ ...previous,
+          clip: cellRect(previous.clip.row, previous.clip.column, previous.clip.width, previous.clip.height + 1) });
+      } else if (images.length < budgets.maxRetainedImagePlacements) {
+        const whole = snapUnclippedCssRect(command.rect, localList);
+        openImageRuns.set(key, images.length);
+        images.push(Object.freeze({ layoutFragment: command.layoutFragment, id: `${command.id}:${String(images.length)}`, resourceId: command.resourceId, naturalWidth: command.naturalWidth, naturalHeight: command.naturalHeight, paintGroup: command.paintGroup, action: command.action,
+          bounds: cellRect(whole.row + windowStartRow, whole.column + windowStartColumn, whole.width, whole.height),
+          clip: cellRect(windowStartRow + localRow, start + windowStartColumn, width, 1) }));
+      } else addTruncation(truncations, "maxRetainedImagePlacements", budgets.maxRetainedImagePlacements);
+    }
     let text = "";
     let column = 0;
     const cells: TerminalCell[] = [];
@@ -585,7 +637,7 @@ export function rasterizeViewportDisplayList(
         documentNode: command.documentNode,
         paintOrder: command.paintOrder
       }));
-      if (command.kind === "text") {
+      if ((command.kind === "text" || command.kind === "image") && unit.endCodeUnit > unit.startCodeUnit) {
         const span: TerminalCellSpan = Object.freeze({
           command: command.id,
           layoutFragment: command.layoutFragment,
@@ -650,6 +702,7 @@ export function rasterizeViewportDisplayList(
         truncations: Object.freeze([...truncations])
       };
   const cellBuffer: ViewportCellBuffer = Object.freeze({
+    images: Object.freeze(images),
     columns: Math.min(localList.context.columns, budgets.maxRetainedCellBufferColumns),
     documentRowCount,
     windowStartRow,

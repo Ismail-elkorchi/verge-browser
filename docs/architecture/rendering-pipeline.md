@@ -253,6 +253,26 @@ style, box, text, layout, display-list, geometry, and raster artifacts stay in
 the worker. Only compact document extent, focus, and anchor summaries plus the
 requested viewport rows and visible indexes cross back to the UI.
 
+Static image resources use the same accepted-document boundary. Acquisition
+discovers metadata without delaying document publication for downloads. One
+active-document subscription awaits reliable resource completions; switching
+tabs aborts its work and waits for decoder termination before the next tab can
+allocate decoder workspace. Decoded pixels remain in accepted UI snapshots;
+the render worker receives resource identities and natural dimensions only.
+The existing retained-history budget includes image ownership, and a separate
+64 MiB UI bound reserves both decoded storage and terminal-ui's raster copy.
+
+Natural dimensions participate in shared replaced-element sizing. Layout
+records whether it consumed them, so fixed-size image metadata updates retain
+layout, computed styles and logical search. Canonical image paint operations
+produce bounded visible cell clips in normal paint order. UI image slots retain
+native-control ordering and pointer ownership. Ready pixels are substituted
+only into placements with matching accepted natural dimensions. Raster handles
+are prepared once at the asynchronous completion boundary; rendering only
+looks them up. Failed uploads or unsupported terminals retain alternative text.
+This opaque-image path does not implement CSS subtree masks or alpha-over-text
+compositing.
+
 Every viewport names its required summary identity and layout revision. A
 summary contains document extent, scroll anchors, and logical focus order. The
 client caches a summary on receipt, even when the UI subsequently rejects that

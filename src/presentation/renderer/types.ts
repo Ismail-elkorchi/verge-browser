@@ -1,4 +1,4 @@
-import type { DocumentState, IndexedWebDocumentSnapshot } from "../../document/index.js";
+import type { DocumentImageMetadata, DocumentState, IndexedWebDocumentSnapshot } from "../../document/index.js";
 import type { FormattingBudgets, FormattingTree } from "../formatting/index.js";
 import type { LayoutBudgets, LayoutContext, LayoutFragmentTree } from "../layout/index.js";
 import type { TextSearchIndex } from "../search/index.js";
@@ -34,6 +34,7 @@ export interface RenderArtifactBudgets {
 }
 
 export interface AttachDocumentArtifactsInput {
+  readonly images?: readonly DocumentImageMetadata[];
   readonly documentId: string;
   readonly documentRevision: number;
   readonly stateRevision: number;

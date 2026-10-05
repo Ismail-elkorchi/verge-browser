@@ -1,3 +1,4 @@
+import type { LayoutContainingBlock } from "../containing-block.js";
 import type {
   FormattingContainerNode,
   FormattingNodeId,
@@ -44,6 +45,10 @@ export interface TableContainerLayoutInput {
   readonly width: CssPixelLength;
   readonly clip: CssRect;
   readonly depth: number;
+  readonly containingBlock: LayoutContainingBlock;
+  readonly forcedContentWidth: CssPixelLength | null;
+  readonly forcedContentHeight: CssPixelLength | null;
+  readonly forcedContentHeightIsDefinite: boolean;
 }
 
 function point(value: CssCoordinate, offset: CssPixelLength): CssCoordinate {
@@ -134,12 +139,13 @@ function captionSequence(
   width: CssPixelLength,
   clip: CssRect,
   depth: number,
+  containingBlock: LayoutContainingBlock,
 ): { readonly fragments: readonly TableLayoutOperationResult[]; readonly nextY: CssCoordinate } {
   const fragments: TableLayoutOperationResult[] = [];
   let currentY = y;
   for (const id of ids) {
     const dimensions = host.dimensions(host.formattingNode(id), width, null);
-    const laidOut = host.layoutChild(id, x, point(currentY, dimensions.margin.top), width, clip, depth + 1, null, null, null);
+    const laidOut = host.layoutChild(id, x, point(currentY, dimensions.margin.top), width, clip, depth + 1, containingBlock, null, null, false);
     if (laidOut === null) break;
     const free = cssMax(ZERO, sum(width, cssNegate(laidOut.marginRect.width)));
     const result = free > 0
@@ -377,22 +383,27 @@ export function layoutTableContainer(
       .find((node) => node.kind === "table");
     if (table === undefined) {
       const empty = cssRect(input.x, input.y, ZERO, ZERO);
-      return host.container(input.wrapper, empty, empty, empty, empty, input.clip, [], []);
+      return host.container(input.wrapper, empty, empty, empty, empty, input.clip, [], [], input.containingBlock);
     }
     const style = host.computed(table);
     if (style === null) {
       const empty = cssRect(input.x, input.y, ZERO, ZERO);
-      return host.container(input.wrapper, empty, empty, empty, empty, input.clip, [], []);
+      return host.container(input.wrapper, empty, empty, empty, empty, input.clip, [], [], input.containingBlock);
     }
     const { grid, collapsedWinners, spacing, captions, widthResult, dimensions, rows, contentHeight } =
-      resolveTableSizing(host, table, style, input.width);
+      resolveTableSizing(host, table, style, input.width, input.containingBlock.percentageHeight, input.forcedContentWidth, input.forcedContentHeight);
     const hasActiveColumns = widthResult.columns.some((column) => !column.collapsed);
     const hasActiveRows = rows.rows.some((row) => !row.collapsed);
     const outerX = point(input.x, dimensions.marginLeft);
     // Like other layout contexts, input.y is the wrapper's border-box start;
     // its caller places the wrapper margins in flow, float, or positioned space.
     const outerY = input.y;
-    const top = captionSequence(host, captions.top, outerX, outerY, sum(widthResult.usedGridWidth, dimensions.padding.left, dimensions.padding.right, dimensions.border.left, dimensions.border.right), input.clip, input.depth);
+    const captionWidth = sum(widthResult.usedGridWidth, dimensions.padding.left,
+      dimensions.padding.right, dimensions.border.left, dimensions.border.right);
+    const captionContainingBlock = host.containingBlock(input.wrapper.id,
+      cssRect(outerX, outerY, captionWidth, ZERO), captionWidth, null);
+    const top = captionSequence(host, captions.top, outerX, outerY, captionWidth,
+      input.clip, input.depth, captionContainingBlock);
     const borderX = outerX;
     const borderY = top.nextY;
     const paddingX = point(borderX, dimensions.border.left);
@@ -400,6 +411,13 @@ export function layoutTableContainer(
     const contentX = point(paddingX, dimensions.padding.left);
     const contentY = point(paddingY, dimensions.padding.top);
     const contentRect = cssRect(contentX, contentY, widthResult.usedGridWidth, contentHeight);
+    // Final row allocation is definite for cell contents only when the table or
+    // the cell has a definite authored height. Auto table row growth alone does
+    // not establish a percentage-height basis.
+    const definiteTableHeight = dimensions.specifiedHeight !== null ||
+      (input.forcedContentHeight !== null && input.forcedContentHeightIsDefinite);
+    const tableContainingBlock = host.containingBlock(table.id, contentRect,
+      contentRect.width, definiteTableHeight ? contentRect.height : null);
     const paddingRect = cssRect(
       paddingX,
       paddingY,
@@ -488,10 +506,11 @@ export function layoutTableContainer(
             empty,
             [],
             [],
+            tableContainingBlock,
           );
         });
       }
-      const cellDimensions = host.dimensions(cellNode, areaWidth, areaHeight, null);
+      const cellDimensions = host.dimensions(cellNode, areaWidth, definiteTableHeight ? areaHeight : null, null);
       const forcedWidth = cssNonNegativeLength(
         cssMax(
           ZERO,
@@ -516,7 +535,10 @@ export function layoutTableContainer(
           ),
         ),
       );
-      const result = host.layoutChild(cell.formattingNode, areaX, areaY, areaWidth, tableClip, input.depth + 3, areaHeight, forcedWidth, forcedHeight);
+      const result = host.layoutChild(cell.formattingNode, areaX, areaY, areaWidth, tableClip, input.depth + 3,
+        host.containingBlock(table.id, cssRect(areaX, areaY, areaWidth, areaHeight), areaWidth,
+          definiteTableHeight ? areaHeight : null), forcedWidth, forcedHeight,
+        definiteTableHeight || cellDimensions.specifiedHeight !== null);
       if (result === null) return null;
       const fragment = host.fragment(result.fragment);
       const verticalAlign = host.computed(cellNode)?.text.verticalAlign;
@@ -603,6 +625,7 @@ export function layoutTableContainer(
             (entry) => entry.fragment,
           ),
           [],
+          tableContainingBlock,
         );
       });
     const buildRoot = (): TableLayoutOperationResult => {
@@ -630,7 +653,7 @@ export function layoutTableContainer(
             if (host.computed(columnNode)?.box.position !== "static") {
               host.registerPositionedContainingBlock(track.formattingNode, rect);
             }
-            const column = host.tryContainerReservation(() => host.container(host.formattingNode(track.formattingNode as FormattingNodeId), rect, rect, rect, rect, tableClip, [], []));
+            const column = host.tryContainerReservation(() => host.container(host.formattingNode(track.formattingNode as FormattingNodeId), rect, rect, rect, rect, tableClip, [], [], tableContainingBlock));
             if (column === null) break;
             columnChildren.push(column);
           }
@@ -656,7 +679,7 @@ export function layoutTableContainer(
             groupRect,
             input.depth + 3,
           );
-          return host.container(host.formattingNode(columnGroupId), groupRect, groupRect, groupRect, groupRect, tableClip, [...columnChildren, ...positioned].map((entry) => entry.fragment), []);
+          return host.container(host.formattingNode(columnGroupId), groupRect, groupRect, groupRect, groupRect, tableClip, [...columnChildren, ...positioned].map((entry) => entry.fragment), [], tableContainingBlock);
         });
         if (group === null) break;
         structuralChildren.push(group);
@@ -678,7 +701,7 @@ export function layoutTableContainer(
         if (host.computed(columnNode)?.box.position !== "static") {
           host.registerPositionedContainingBlock(column.formattingNode, rect);
         }
-        const fragment = host.tryContainerReservation(() => host.container(host.formattingNode(column.formattingNode as FormattingNodeId), rect, rect, rect, rect, tableClip, [], []));
+        const fragment = host.tryContainerReservation(() => host.container(host.formattingNode(column.formattingNode as FormattingNodeId), rect, rect, rect, rect, tableClip, [], [], tableContainingBlock));
         if (fragment === null) break;
         structuralChildren.push(fragment);
       }
@@ -740,7 +763,7 @@ export function layoutTableContainer(
             rect,
             input.depth + 3,
           );
-          return host.container(host.formattingNode(groupId), rect, rect, rect, rect, tableClip, [...children, ...positioned].map((entry) => entry.fragment), []);
+          return host.container(host.formattingNode(groupId), rect, rect, rect, rect, tableClip, [...children, ...positioned].map((entry) => entry.fragment), [], tableContainingBlock);
         });
         if (group === null) break;
         structuralChildren.push(group);
@@ -748,13 +771,13 @@ export function layoutTableContainer(
       structuralChildren.push(
         ...layoutOwnedOutOfFlow(table.id, paddingRect, input.depth + 2),
       );
-      return host.container(table, contentRect, paddingRect, borderRect, borderRect, tableClip, structuralChildren.map((entry) => entry.fragment), []);
+      return host.container(table, contentRect, paddingRect, borderRect, borderRect, tableClip, structuralChildren.map((entry) => entry.fragment), [], tableContainingBlock);
     };
     const root = host.tryContainerReservation(buildRoot);
     const bottomStart = point(borderRect.y, borderRect.height);
     const bottom = root === null
       ? Object.freeze({ fragments: Object.freeze([]), nextY: bottomStart })
-      : captionSequence(host, captions.bottom, outerX, bottomStart, borderRect.width, input.clip, input.depth);
+      : captionSequence(host, captions.bottom, outerX, bottomStart, borderRect.width, input.clip, input.depth, captionContainingBlock);
     const all = root === null ? [...top.fragments] : [...top.fragments, root, ...bottom.fragments];
     const empty = cssRect(outerX, outerY, ZERO, ZERO);
     // Table margins belong outside the wrapper, around both grid and captions.
@@ -770,6 +793,7 @@ export function layoutTableContainer(
       sum(wrapperRect.width, dimensions.marginLeft, dimensions.marginRight),
       sum(wrapperRect.height, dimensions.margin.top, dimensions.margin.bottom),
     );
-    return host.container(input.wrapper, wrapperRect, wrapperRect, wrapperRect, wrapperMarginRect, cssIntersection(input.clip, wrapperRect), all.map((entry) => entry.fragment), []);
+    captionContainingBlock.rect = wrapperRect;
+    return host.container(input.wrapper, wrapperRect, wrapperRect, wrapperRect, wrapperMarginRect, cssIntersection(input.clip, wrapperRect), all.map((entry) => entry.fragment), [], input.containingBlock);
   });
 }

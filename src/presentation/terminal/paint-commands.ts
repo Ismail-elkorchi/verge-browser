@@ -1,3 +1,4 @@
+import type { DocumentImageMetadata } from "../../document/index.js";
 import { PackedRows, ValueSequence, checkPackedMetadata } from "../../memory/packed.js";
 import { registerRetainedOwner } from "../../memory/retained-cost.js";
 import {
@@ -9,7 +10,7 @@ import type { DocumentPaintCommands, TerminalPaintCommand } from "./types.js";
 
 // Rows retain only canonical fragment/continuation IDs and paint-specific selections.
 // The ordinary box/text geometry and semantic/source identities remain in layout.
-const BACKGROUND = 0, TOP = 1, LEFT = 4, COLLAPSED = 5, CONTROL_LINE = 6, TEXT = 7;
+const BACKGROUND = 0, TOP = 1, LEFT = 4, COLLAPSED = 5, CONTROL_LINE = 6, TEXT = 7, IMAGE = 8;
 const SIDES = ["top", "right", "bottom", "left"] as const;
 
 function box(fragment: LayoutFragment, continuation: number) {
@@ -33,18 +34,26 @@ function fragmentText(fragment: LayoutFragment): string {
     : fragment.kind === "replaced" ? fragment.replacedText ?? "" : "";
 }
 
-function *operations(fragment: LayoutFragment, style: LayoutPaintStyle): IterableIterator<readonly [number, number]> {
+function paintsBorderColor(color: LayoutPaintStyle["foreground"]): boolean {
+  // Null selects the terminal/default currentColor; only explicit transparency suppresses ink.
+  return color === null || color.a > 0;
+}
+
+function *operations(fragment: LayoutFragment, style: LayoutPaintStyle, image: boolean): IterableIterator<readonly [number, number]> {
   if (style.visible && fragment.kind !== "text") {
     const count = fragment.inlineContinuations?.length ?? 1;
     for (let continuation = 0; continuation < count; continuation += 1) {
       if (style.background !== null && style.background.a > 0) yield [BACKGROUND, continuation];
       const widths = borderWidths(fragment, continuation);
       for (const [index, side] of SIDES.entries()) {
-        if (style.borderStyles[side] === "solid" && widths[side] > 0) yield [TOP + index, continuation];
+        if (style.borderStyles[side] === "solid" && widths[side] > 0
+          && paintsBorderColor(style.borderColors[side])) yield [TOP + index, continuation];
       }
     }
     if (fragment.kind === "box") {
-      for (let index = 0; index < (fragment.tableCollapsedBorderSegments?.length ?? 0); index += 1) yield [COLLAPSED, index];
+      for (const [index, segment] of (fragment.tableCollapsedBorderSegments ?? []).entries()) {
+        if (paintsBorderColor(segment.style.borderColors[segment.side])) yield [COLLAPSED, index];
+      }
     }
   }
   if (fragment.kind === "control") {
@@ -53,7 +62,8 @@ function *operations(fragment: LayoutFragment, style: LayoutPaintStyle): Iterabl
       if (line.text.length > 0) yield [CONTROL_LINE, index];
     }
   }
-  if (style.visible && fragmentText(fragment).length > 0) yield [TEXT, 0];
+  if (style.visible && image) yield [IMAGE, 0];
+  else if (style.visible && fragmentText(fragment).length > 0) yield [TEXT, 0];
 }
 
 /** Construction-only interning is discarded when ownership transfers to the immutable sequence. */
@@ -64,12 +74,12 @@ export class PaintCommandBuilder {
   readonly #foregroundStyles = new Map<LayoutPaintStyle, LayoutPaintStyle>();
   public constructor() {
     // Immutable sequence wrapper/private slots and its style-reference owner.
-    checkPackedMetadata(64 + 5 * 8 + 64);
+    checkPackedMetadata(64 + 6 * 8 + 64);
   }
   public get length(): number { return this.#rows.length; }
-  public append(fragment: LayoutFragment, fragmentIndex: number, style: LayoutPaintStyle, limit: number, signal?: AbortSignal): boolean {
+  public append(fragment: LayoutFragment, fragmentIndex: number, style: LayoutPaintStyle, limit: number, signal?: AbortSignal, image = false): boolean {
     let count = 0;
-    const pending = operations(fragment, style);
+    const pending = operations(fragment, style, image);
     while (!pending.next().done) {
       if ((count++ & 255) === 0) signal?.throwIfAborted();
       if (this.length + count > limit) return false;
@@ -83,7 +93,7 @@ export class PaintCommandBuilder {
       return index;
     };
     let foreground: LayoutPaintStyle | undefined;
-    for (const [kind, detail] of operations(fragment, style)) {
+    for (const [kind, detail] of operations(fragment, style, image)) {
       signal?.throwIfAborted();
       let selected = style;
       if (kind === COLLAPSED) {
@@ -102,8 +112,8 @@ export class PaintCommandBuilder {
     }
     return true;
   }
-  public finish(layout: LayoutFragmentTree, fragments: readonly LayoutFragmentId[], reserved: number): DocumentPaintCommands {
-    return new PackedPaintCommands(layout, fragments, this.#rows.seal(), Object.freeze(this.#styles), reserved);
+  public finish(layout: LayoutFragmentTree, fragments: readonly LayoutFragmentId[], reserved: number, images?: readonly DocumentImageMetadata[]): DocumentPaintCommands {
+    return new PackedPaintCommands(layout, fragments, this.#rows.seal(), Object.freeze(this.#styles), reserved, images);
   }
 }
 
@@ -113,10 +123,11 @@ class PackedPaintCommands extends ValueSequence<TerminalPaintCommand> implements
   readonly #rows: PackedRows;
   readonly #styles: readonly LayoutPaintStyle[];
   readonly #reserved: number;
+  readonly #images: readonly DocumentImageMetadata[] | undefined;
   public constructor(layout: LayoutFragmentTree, fragments: readonly LayoutFragmentId[], rows: PackedRows,
-    styles: readonly LayoutPaintStyle[], reserved: number) {
-    super(); this.#layout = layout; this.#fragments = fragments; this.#rows = rows; this.#styles = styles; this.#reserved = reserved;
-    registerRetainedOwner(this, [layout, fragments, rows, styles], () => 5 * 8); Object.freeze(this);
+    styles: readonly LayoutPaintStyle[], reserved: number, images?: readonly DocumentImageMetadata[]) {
+    super(); this.#layout = layout; this.#fragments = fragments; this.#rows = rows; this.#styles = styles; this.#reserved = reserved; this.#images = images;
+    registerRetainedOwner(this, [layout, fragments, rows, styles, images], () => 6 * 8); Object.freeze(this);
   }
   public get length(): number { return this.#rows.length; }
   public layoutFragment(index: number): LayoutFragmentId {
@@ -139,7 +150,7 @@ class PackedPaintCommands extends ValueSequence<TerminalPaintCommand> implements
         fragment.contentRect.width, cssMin(line.height, cssCoordinateDifference(
           cssCoordinateAdd(fragment.contentRect.y, fragment.contentRect.height), cssCoordinateAdd(fragment.contentRect.y, line.blockOffset))));
     }
-    if (kind === TEXT) return fragment.contentRect;
+    if (kind === TEXT || kind === IMAGE) return fragment.contentRect;
     throw new RangeError("Missing canonical paint geometry.");
   }
   public at(index: number): TerminalPaintCommand | undefined {
@@ -172,6 +183,15 @@ class PackedPaintCommands extends ValueSequence<TerminalPaintCommand> implements
       const line = fragment.controlLines?.[detail];
       if (line === undefined) throw new RangeError("Missing control paint line.");
       return Object.freeze({ ...common, id: `terminal-paint:control-line:${fragment.id}:${String(detail)}`, kind: "text", text: line.text, clusters: line.clusters });
+    }
+    if (kind === IMAGE) {
+      const node = this.#layout.formatting.node(fragment.formattingNode);
+      if (node.kind !== "image" || node.imageResourceId === null) throw new RangeError("Missing canonical image resource.");
+      const metadata = this.#images?.find((image) => image.id === node.imageResourceId);
+      return Object.freeze({ ...common, id: `terminal-paint:image:${fragment.id}`, kind: "image", resourceId: node.imageResourceId, paintGroup: this.#rows.get(index, 0),
+        naturalWidth: metadata === undefined ? node.naturalWidth : metadata.width,
+        naturalHeight: metadata === undefined ? node.naturalHeight : metadata.height,
+        text: fragmentText(fragment), clusters: fragment.visualClusters ?? EMPTY_TEXT_CLUSTERS });
     }
     return Object.freeze({ ...common, id: `terminal-paint:text:${fragment.id}`, kind: "text", text: fragmentText(fragment),
       clusters: fragment.visualClusters ?? EMPTY_TEXT_CLUSTERS });

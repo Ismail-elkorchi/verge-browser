@@ -112,12 +112,20 @@ create authored overlap.
 
 The `grid` shorthand, subgrid, masonry, vertical writing modes, table
 fragmentation, multi-column layout, rotated/scaled/3D transforms, web fonts,
-raster image decoding, and page
+CSS background images and masks, SVG rasterization, and page
 JavaScript remain explicit gaps. The implemented `grid-template` shorthand
 does not imply support for the separate `grid` shorthand. Supported positioned clipping retains document
 semantics while its actual paint and pointer geometry stays clipped. Sticky
 positioning uses the relevant scroll owner, including supported nested scrolling
 boxes.
+
+Static opaque PNG/JPEG `img` resources have bounded progressive decoding and
+terminal graphics output where supported. Natural dimensions and aspect ratio
+participate in the same replaced-element sizing used by inline, block, flex,
+grid and table layout. HTML dimensions enter the cascade as presentational
+hints; an author `auto` value can override them. Missing or unsupported image
+resources retain their alternative text and semantic/link identity. This does
+not enable CSS image functions or arbitrary web-font rendering.
 
 HTML meaning remains available when a rule cannot be represented. Unsupported
 selectors, properties, and values are ignored and aggregated in the browser's
