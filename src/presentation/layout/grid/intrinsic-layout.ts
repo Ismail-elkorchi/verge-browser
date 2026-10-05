@@ -21,7 +21,7 @@ import {
   offsetGridPlacements,
   placeGridItems
 } from "./placement.js";
-import { sizeGridTracks } from "./track-sizing.js";
+import { gridItemHasAutomaticMinimum, sizeGridTracks } from "./track-sizing.js";
 import type { GridItemContribution, ResolvedGridTrack } from "./types.js";
 
 const ZERO = cssNonNegativeLength(cssPx(0));
@@ -43,7 +43,8 @@ export interface GridIntrinsicSizingHost {
   ): IntrinsicSizeContributions;
   gridItemMinimumInlineContribution(
     id: FormattingNodeId,
-    contributions: IntrinsicSizeContributions
+    contributions: IntrinsicSizeContributions,
+    automaticMinimum: boolean
   ): CssNonNegativeLength;
   intrinsicOuterBlockSize(
     id: FormattingNodeId,
@@ -98,6 +99,7 @@ function contribution(
   start: number,
   end: number,
   percentageBasis: CssPixelLength,
+  automaticMinimum: boolean,
   mode: "min-content" | "max-content" = "max-content"
 ): GridItemContribution {
   const intrinsic = host.intrinsicContributions(formattingNode, null);
@@ -108,7 +110,7 @@ function contribution(
     start,
     end,
     minimumContribution: nonNegative(sum(
-      host.gridItemMinimumInlineContribution(formattingNode, intrinsic),
+      host.gridItemMinimumInlineContribution(formattingNode, intrinsic, automaticMinimum),
       edges.margin.left,
       edges.margin.right
     )),
@@ -197,6 +199,8 @@ export function intrinsicGridInlineSize(
       item.columnStart,
       item.columnEnd,
       ZERO,
+      gridItemHasAutomaticMinimum(sequence.tracks, item.columnStart, item.columnEnd,
+        { availableSize: null, resolveLength }),
       mode
     ));
     const sized = sizeGridTracks({
@@ -287,7 +291,9 @@ export function intrinsicGridBlockSize(
         item.formattingNode,
         item.columnStart,
         item.columnEnd,
-        availableInlineSize
+        availableInlineSize,
+        gridItemHasAutomaticMinimum(columnSequence.tracks, item.columnStart, item.columnEnd,
+          { availableSize: availableInlineSize, resolveLength })
       )),
       availableSize: availableInlineSize,
       gap: columnGap,

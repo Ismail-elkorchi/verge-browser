@@ -1,10 +1,6 @@
-import type { Rect } from "@ismail-elkorchi/terminal-ui/renderer";
-
 import type { DocumentForm, DocumentFormControl, DocumentLink, DocumentNodeRef } from "../document/index.js";
 import type { BrowserDocumentState, BrowserTuiState } from "./model.js";
 import type { ViewportRenderPayload } from "./render-worker/index.js";
-
-const MAX_DOCUMENT_COLUMNS = 120;
 
 export const BROWSER_SIDE_PANEL_COLUMNS = 40;
 export const BROWSER_SIDE_PANEL_MIN_COLUMNS = 100;
@@ -17,7 +13,7 @@ export function browserPageSize(
   const panelColumns = state.sidePanel !== null && terminalSize.columns >= BROWSER_SIDE_PANEL_MIN_COLUMNS
     ? BROWSER_SIDE_PANEL_COLUMNS + 1 : 0;
   return {
-    columns: documentContentColumns(terminalSize.columns - panelColumns - 1),
+    columns: Math.max(1, Math.floor(terminalSize.columns - panelColumns - 1)),
     rows: Math.max(1, terminalSize.rows - (state.findBar === null ? 3 : 4))
   };
 }
@@ -93,20 +89,6 @@ export type BrowserDocumentAction = {
   readonly node: DocumentNodeRef;
   readonly open: boolean;
 };
-
-export function documentContentColumns(columns: number): number {
-  return Math.max(1, Math.min(MAX_DOCUMENT_COLUMNS, Math.floor(columns)));
-}
-
-export function documentContentBounds(bounds: Rect): Rect {
-  const width = documentContentColumns(bounds.width);
-  return {
-    row: bounds.row,
-    column: bounds.column + Math.floor((bounds.width - width) / 2),
-    width,
-    height: bounds.height
-  };
-}
 
 export function documentScrollRow(document: BrowserDocumentState): number {
   const extent = document.rendering.summary?.documentRowCount ?? 1;

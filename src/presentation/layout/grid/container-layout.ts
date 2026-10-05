@@ -1,3 +1,4 @@
+import { isScrollableOverflow } from "../../style/overflow.js";
 import type { LayoutContainingBlock } from "../containing-block.js";
 import type { FormattingNode, FormattingNodeId } from "../../formatting/index.js";
 import type {
@@ -41,7 +42,7 @@ import {
   offsetGridPlacements,
   placeGridItems
 } from "./placement.js";
-import { sizeGridTracks } from "./track-sizing.js";
+import { gridItemHasAutomaticMinimum, sizeGridTracks } from "./track-sizing.js";
 import type {
   GridAreaPlacement,
   GridItemContribution
@@ -94,7 +95,8 @@ export interface GridContainerLayoutHost {
   intrinsicContributions(id: FormattingNodeId, availableInlineSize: CssPixelLength | null): IntrinsicSizeContributions;
   gridItemMinimumInlineContribution(
     id: FormattingNodeId,
-    contributions: IntrinsicSizeContributions
+    contributions: IntrinsicSizeContributions,
+    automaticMinimum: boolean
   ): CssNonNegativeLength;
   edges(style: ComputedStyle | null, containingWidth: CssPixelLength): GridUsedEdges;
   clip(node: FormattingNode, paddingRect: CssRect, borderRect: CssRect, inheritedClip: CssRect): CssRect;
@@ -315,7 +317,9 @@ export function layoutGridContainer(
         start: item.columnStart,
         end: item.columnEnd,
         minimumContribution: nonNegative(sum(
-          host.gridItemMinimumInlineContribution(item.formattingNode, intrinsic),
+          host.gridItemMinimumInlineContribution(item.formattingNode, intrinsic,
+            gridItemHasAutomaticMinimum(columnSequence.tracks, item.columnStart, item.columnEnd,
+              { availableSize: contentWidth, resolveLength })),
           edges.margin.left,
           edges.margin.right
         )),
@@ -481,20 +485,9 @@ export function layoutGridContainer(
       const autoMarginBottom = childStyle?.box.margin.bottom.kind === "auto";
       const intrinsic = host.intrinsicContributions(item.formattingNode, area.width);
       const availableContentWidth = nonNegative(sum(area.width, negate(horizontalChrome)));
-      let spansFlexibleColumn = false;
-      let spansAutomaticMinimumColumn = false;
-      for (let index = item.columnStart; index < item.columnEnd; index += 1) {
-        const track = columnSequence.tracks[index];
-        if (track === undefined) continue;
-        if (item.columnEnd - item.columnStart > 1
-          && ((track.kind === "breadth" && track.breadth.kind === "flex")
-            || (track.kind === "minmax" && track.maximum.kind === "flex"))) spansFlexibleColumn = true;
-        if (track.kind === "fit-content"
-          || (track.kind === "breadth" && (track.breadth.kind === "auto" || track.breadth.kind === "flex"))
-          || (track.kind === "minmax" && track.minimum.kind === "auto")) spansAutomaticMinimumColumn = true;
-      }
-      const automaticMinimumInline = childStyle?.box.overflowX !== "hidden"
-        && !spansFlexibleColumn && spansAutomaticMinimumColumn
+      const automaticMinimumInline = !isScrollableOverflow(childStyle?.box.overflowX ?? "visible")
+        && gridItemHasAutomaticMinimum(columnSequence.tracks, item.columnStart, item.columnEnd,
+          { availableSize: contentWidth, resolveLength })
         ? intrinsic.automaticMinimumSize.inline
         : ZERO;
       const specifiedWidth = childStyle === null

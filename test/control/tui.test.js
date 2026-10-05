@@ -100,6 +100,7 @@ async function preparedFixture(options = {}) {
     },
     createAcquisition: () => new PageAcquisition({
       loader: options.loader ?? loader,
+      ...(options.imageLoader === undefined ? {} : { imageLoader: options.imageLoader }),
       stylesheetLoader: async () => { throw new Error("unexpected stylesheet"); },
       defaultParseMode: "text"
     })
@@ -1595,5 +1596,76 @@ test("Arabic document and native form use one visual-cell contract while edits a
     await waitUntil(runtime, () => runtime.state().documents[0].snapshot.document.title === "Arabic result");
     assert.equal(requests.length, 1);
     assert.equal(new URL(requests[0]).searchParams.get("q"), "مرحبا X123");
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});
+
+test('wide viewport respects author centering, responsive media and actual panel width', async () => {
+  const { runtime, prepared } = await preparedFixture({ terminalSize: { columns: 240, rows: 24 }, loader: async (url) => response(url,
+    '<style>body{margin:0}main{width:160px;margin-inline:auto}#responsive{display:none}'
+    + '@media(min-width:1700px){#responsive{display:block}}</style><main>CENTERED_BY_AUTHOR</main><p id=responsive>WIDE_MEDIA</p>') });
+  try {
+    const current = () => runtime.state().documents[0];
+    assert.equal(current().rendering.viewport.cellBuffer.columns, 239);
+    assert.match(renderFramePlain(runtime.frame()), /WIDE_MEDIA/u);
+    const position = () => renderFramePlain(runtime.frame()).split('\n').find((line) => line.includes('CENTERED_BY_AUTHOR')).indexOf('CENTERED_BY_AUTHOR');
+    assert.equal(position(), Math.floor((239 - 20) / 2));
+    await runtime.dispatch({ kind: 'toggleSidePanel', panel: 'history' });
+    await waitUntil(runtime, () => current().rendering.status === 'ready');
+    assert.equal(current().rendering.viewport.cellBuffer.columns, 198);
+    assert.doesNotMatch(renderFramePlain(runtime.frame()), /WIDE_MEDIA/u);
+    assert.equal(position(), (198 - 20) / 2);
+    await runtime.resize({ columns: 180, rows: 24 });
+    await waitUntil(runtime, () => current().rendering.status === 'ready');
+    assert.equal(current().rendering.viewport.cellBuffer.columns, 138);
+    assert.equal(position(), (138 - 20) / 2);
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});
+
+test('wide tab switches retain only the selected image fallback and its hit location', async () => {
+  const names = ['ALPHA', 'BETA', 'GAMMA'];
+  const { runtime, prepared } = await preparedFixture({ terminalSize: { columns: 240, rows: 24 },
+    imageLoader: async () => { throw new Error('Fixture image download unavailable'); },
+    loader: async (url) => {
+      const index = url.endsWith('/beta') ? 1 : url.endsWith('/gamma') ? 2 : 0;
+      return response(url, `<title>${names[index]}</title><style>body{margin:0}p{margin:0}img{position:absolute;left:${index === 0 ? 640 : 32}px;top:32px;width:160px;height:64px}</style>`
+        + (index === 2 ? '' : `<a href=/target><img src=/${index}.png alt=${names[index]}_IMG></a>`)
+        + `<p>${names[index]} body</p>`);
+    } });
+  const current = () => runtime.state().documents[runtime.state().activeDocumentIndex];
+  const ready = () => current().kind === 'ready' && current().rendering.status === 'ready' && !current().loading
+    && current().rendering.viewport?.stateRevision === current().stateRevision
+    && (current().snapshot.images ?? []).every((image) => image.status === 'failed');
+  const assertSelected = (index) => {
+    const frame = runtime.frame();
+    const body = renderFramePlain(frame).split('\n').slice(2, -1).join('\n');
+    assert.ok(body.includes(`${names[index]} body`));
+    for (const [other, name] of names.entries()) {
+      assert.equal(body.includes(`${name}_IMG`), other === index && index !== 2);
+      if (other !== index) assert.equal(body.includes(`${name} body`), false);
+    }
+    const targets = frame.hitTargets.filter((entry) => entry.id === 'image');
+    assert.equal(targets.length, index === 2 ? 0 : 1);
+    if (index !== 2) {
+      const target = targets[0];
+      assert.equal(target.bounds.column, index === 0 ? 81 : 5);
+      const lines = renderFramePlain(frame).split('\n');
+      assert.equal(lines[target.bounds.row - 1].indexOf(`${names[index]}_IMG`) + 1, target.bounds.column);
+      assert.equal(body.split(`${names[index]}_IMG`).length - 1, 1);
+    }
+  };
+  try {
+    await waitUntil(runtime, ready);
+    assertSelected(0);
+    for (const target of ['https://example.test/beta', 'https://example.test/gamma']) {
+      await runtime.dispatch({ kind: 'newDocument', target });
+      await waitUntil(runtime, ready);
+      assertSelected(runtime.state().activeDocumentIndex);
+    }
+    for (const index of [0, 1, 2, 0, 2, 1, 0]) {
+      await runtime.dispatch({ kind: 'selectDocument', index });
+      assertSelected(index);
+      await waitUntil(runtime, ready);
+      assertSelected(index);
+    }
   } finally { await runtime.dispose(); await prepared.controller.close(); }
 });

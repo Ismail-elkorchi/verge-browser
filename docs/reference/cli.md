@@ -3,7 +3,7 @@
 ## Usage
 
 ```text
-verge [initial-target] [--once]
+verge [initial-target] [--once] [--terminal-cell-presentation=explicit]
 ```
 
 - An explicit target opens in a fresh browser workspace.
@@ -25,11 +25,41 @@ modes. See [Unicode text layout](../architecture/unicode-text.md) for the host
 contract.
 
 Graphics protocol support alone does not satisfy this text-presentation contract.
-For example, Kitty 0.48.2 does not establish the required state through the default
-mode probe. A custom host can declare explicit cell presentation only after its
-terminal configuration has been qualified; the image qualification uses Kitty's
-`force_ltr=yes` with the existing host `initialState.cellPresentation` contract.
-This does not make an unconfigured Kitty session a supported CLI startup target.
+When the terminal is independently configured to preserve application-ordered
+cells but cannot report standard mode 8, pass
+`--terminal-cell-presentation=explicit`. This declares the current state through
+the host's existing initial-state contract; it does not change terminal settings
+or suppress contradictory observed state. Never use it for an unqualified
+terminal or transport.
+
+Kitty 0.45.0 needs `force_ltr=yes` for this configuration:
+
+```sh
+kitty -o force_ltr=yes verge --terminal-cell-presentation=explicit https://example.com
+```
+
+The upstream 0.45.0 Linux binary was checked directly on Debian 13. Its stock
+`force_ltr=no` configuration reorders RTL words and is not qualified. Both
+configurations report standard mode 8 as unrecognized. This is not a claim
+about every Ubuntu package, font, multiplexer, or remote transport. Terminal
+startup errors retain the failed operation's reason and restoration diagnostics.
+
+Ghostty 1.3.1 was also built from its signed source and checked on Debian 13.
+Its standard mode 8 query is ignored, while the checked default configuration
+preserves cell order. That configuration can use the same declaration:
+
+```sh
+ghostty -e verge --terminal-cell-presentation=explicit https://example.com
+```
+
+WezTerm `20260912-133823-2afb8364`, built from its unmodified source on Debian 13,
+starts without the declaration: standard mode 8 reports explicit presentation.
+Its unrecognized alternate-screen query does not negate working set/reset
+support. Native startup, mixed-direction editing, interruption and terminal
+restoration were checked. Ubuntu 26.04 Ptyxis could not be launched in the test
+runtime because of GTK incompatibility and a terminal-helper permission failure.
+These checks do not establish support for every Ubuntu package, multiplexer or
+remote-session configuration.
 
 ## Browser keys
 
