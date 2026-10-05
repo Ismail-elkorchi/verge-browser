@@ -21,7 +21,7 @@ import {
   resolveStyles
 } from "../../dist/presentation/style/index.js";
 import { buildInlineItemStreamSet } from "../../dist/presentation/text/index.js";
-import { terminalCellMeasurer, terminalCssTextMeasurer } from "../../dist/ui/terminal-measure.js";
+import { terminalCellMeasurer, terminalCssTextMeasurer, terminalCssControlMeasurer } from "../../dist/ui/terminal-measure.js";
 
 const CELL_WIDTH = cssPx(8);
 const ROW_HEIGHT = cssPx(16);
@@ -71,6 +71,7 @@ function render(html, columns = 60, rows = 40, layoutBudgets) {
     mediaEnvironment: environment(columns, rows),
     layoutContext: {
       viewport: { width, height },
+      controlMeasurer: terminalCssControlMeasurer(),
       textMeasurer: terminalCssTextMeasurer(CELL_WIDTH, ROW_HEIGHT),
       initialContainingBlock: cssRect(cssCoordinate(ZERO), cssCoordinate(ZERO), width, height),
       scrollport: cssRect(cssCoordinate(ZERO), cssCoordinate(ZERO), width, height),
@@ -441,7 +442,7 @@ test("CSS header and footer groups define one display row sequence used by fixed
     const node = result.document.elementById(id);
     const fragment = result.artifacts.documentLayout.forDocumentNode(node).find((candidate) => candidate.kind === "box");
     assert.ok(fragment);
-    const index = result.artifacts.documentDisplayList.commands.findIndex((command) =>
+    const index = [...result.artifacts.documentDisplayList.commands].findIndex((command) =>
       command.kind === "background" && command.layoutFragment === fragment.id);
     assert.ok(index >= 0);
     return index;
@@ -645,7 +646,7 @@ test("separated and collapsed borders retain one layout-owned geometry path", ()
   const right = fragmentFor(collapsed, "right", "table-cell");
   assert.equal(left.borderRect.width - left.paddingRect.width, cssPx(2));
   assert.equal(right.borderRect.width - right.paddingRect.width, cssPx(2));
-  const shared = collapsed.artifacts.documentDisplayList.commands.filter((command) => command.kind === "border-side"
+  const shared = [...collapsed.artifacts.documentDisplayList.commands].filter((command) => command.kind === "border-side"
     && (command.layoutFragment === left.id || command.layoutFragment === right.id)
     && (command.side === "left" || command.side === "right"));
   assert.equal(shared.length, 1);
@@ -656,7 +657,7 @@ test("separated and collapsed borders retain one layout-owned geometry path", ()
     <td id="lower-right" style="border-top:2px solid blue">right</td></tr></table>`, 50);
   const spanEdgeFragments = ["wide", "lower-left", "lower-right"]
     .map((id) => fragmentFor(mismatchedSpans, id, "table-cell").id);
-  const spanEdgeCommands = mismatchedSpans.artifacts.documentDisplayList.commands.filter((command) =>
+  const spanEdgeCommands = [...mismatchedSpans.artifacts.documentDisplayList.commands].filter((command) =>
     command.kind === "border-side" && spanEdgeFragments.includes(command.layoutFragment)
       && (command.side === "top" || command.side === "bottom"));
   assert.equal(spanEdgeCommands.length, 2);
@@ -683,13 +684,13 @@ test("collapsed tables suppress padding and retain perimeter edges across empty 
     candidate.kind === "box" && result.artifacts.boxTree.node(candidate.formattingNode).kind === "table");
   assert.ok(empty);
   assert.deepEqual(empty.paddingRect, empty.contentRect);
-  const emptySegments = result.artifacts.documentDisplayList.commands.filter((command) =>
+  const emptySegments = [...result.artifacts.documentDisplayList.commands].filter((command) =>
     command.kind === "border-side" && command.documentNode === emptyNode);
   assert.equal(emptySegments.length, 4);
   assert.ok(emptySegments.every((command) => command.borderRect.width > 0 && command.borderRect.height > 0));
 
   const missing = fragmentFor(result, "missing-table", "table");
-  const perimeter = result.artifacts.documentDisplayList.commands.filter((command) =>
+  const perimeter = [...result.artifacts.documentDisplayList.commands].filter((command) =>
     command.kind === "border-side" && command.documentNode === result.document.elementById("missing-table"));
   assert.ok(perimeter.length >= 2);
   assert.ok(missing.borderRect.width >= fragmentFor(result, "only-cell", "table-cell").borderRect.width);
@@ -702,7 +703,7 @@ test("collapsed-border conflict precedence is deterministic in LTR and RTL and h
       <td id="logical-second" style="border-left:4px solid blue">second</td></tr></table>`, 50);
     const first = fragmentFor(result, "logical-first", "table-cell");
     const second = fragmentFor(result, "logical-second", "table-cell");
-    const shared = result.artifacts.documentDisplayList.commands.find((command) => command.kind === "border-side"
+    const shared = [...result.artifacts.documentDisplayList.commands].find((command) => command.kind === "border-side"
       && (command.layoutFragment === first.id || command.layoutFragment === second.id)
       && (command.side === "left" || command.side === "right"));
     assert.ok(shared);
@@ -721,7 +722,7 @@ test("collapsed-border conflict precedence is deterministic in LTR and RTL and h
     <td id="left-span" rowspan="2" style="border-top:2px solid blue;border-right:3px solid blue">left</td>
     <td style="border-top:2px solid blue">right</td></tr><tr><td style="border-left:3px solid green">bottom</td></tr></table>`, 50);
   const top = fragmentFor(connected, "top-span", "table-cell");
-  const harmonized = connected.artifacts.documentDisplayList.commands.filter((command) => command.kind === "border-side"
+  const harmonized = [...connected.artifacts.documentDisplayList.commands].filter((command) => command.kind === "border-side"
     && command.borderRect.y >= top.borderRect.y + top.borderRect.height - cssPx(3));
   assert.ok(harmonized.length >= 2);
   assert.ok(harmonized.some((command) => command.style.borderColors[command.side]?.r === 255));
@@ -788,7 +789,7 @@ test("table paint metadata preserves structural background phases and positioned
     ["cell", "table-cell"]
   ].map(([id, kind]) => {
     const fragment = fragmentFor(painted, id, kind);
-    const index = painted.artifacts.documentDisplayList.commands.findIndex((command) =>
+    const index = [...painted.artifacts.documentDisplayList.commands].findIndex((command) =>
       command.kind === "background" && command.layoutFragment === fragment.id);
     assert.ok(index >= 0, `Missing background for ${id}`);
     return index;
@@ -919,6 +920,7 @@ test("table slot construction, intrinsic sizing, distribution, and collapsed edg
     inlineItemStreams: buildInlineItemStreamSet(formatting),
     context: {
       viewport: { width, height },
+      controlMeasurer: terminalCssControlMeasurer(),
       textMeasurer: terminalCssTextMeasurer(CELL_WIDTH, ROW_HEIGHT),
       initialContainingBlock: cssRect(cssCoordinate(ZERO), cssCoordinate(ZERO), width, height),
       scrollport: cssRect(cssCoordinate(ZERO), cssCoordinate(ZERO), width, height)
@@ -957,4 +959,78 @@ test("CSS table fixup keeps HTML spans source-owned and CSS-created cells at spa
   });
   const cssFormattingCell = formatting.forSource(cssCell).find((node) => node.kind === "table-cell");
   assert.ok(cssFormattingCell);
+});
+
+test("nested table intrinsic rows use resolved inner column widths before parent-cell height", () => {
+  const source = readFileSync(new URL("../../scripts/compat/fixtures/table-nested.html", import.meta.url), "utf8");
+  for (const columns of [40, 80, 120]) {
+    const result = render(source, columns, 120);
+    assert.equal(result.artifacts.documentLayout.outcome.status, "complete");
+    const cell = fragmentFor(result, "nested-cell", "table-cell");
+    const inner = fragmentFor(result, "inner-table", "table-wrapper");
+    assert.ok(inner.borderRect.y >= cell.contentRect.y);
+    assert.ok(inner.borderRect.y + inner.borderRect.height <= cell.contentRect.y + cell.contentRect.height,
+      `inner table is contained by its cell at ${columns} columns`);
+    if (columns === 40) {
+      assert.equal(cssPixels(inner.borderRect.height), 46);
+      assert.equal(cssPixels(cell.borderRect.height), 54);
+      const innerCell = fragmentFor(result, "inner-cell", "table-cell");
+      assert.equal(cssPixels(innerCell.contentRect.height), 32, "inner content wraps within its own column");
+    }
+  }
+});
+
+test("nested table intrinsic sizing shares fixed tracks, captions and collapsed row planning", () => {
+  for (const collapse of ["separate", "collapse"]) {
+    const result = render(`<style>body{margin:0}table{border-spacing:3px;border-collapse:${collapse}}td{padding:3px;border:1px solid}</style>
+      <table style="width:240px"><tr><td>Outer</td><td id="nested-cell">
+        <table id="inner-table" style="table-layout:fixed;width:140px"><caption>Inner caption</caption>
+          <col style="width:45px"><col><tr><td id="inner-cell" rowspan="2">one two three four five</td><td>six seven eight</td></tr>
+          <tr><td>nine ten eleven</td></tr></table>
+      </td></tr></table>`, 40);
+    assert.equal(result.artifacts.documentLayout.outcome.status, "complete");
+    const cell = fragmentFor(result, "nested-cell", "table-cell");
+    const inner = fragmentFor(result, "inner-table", "table-wrapper");
+    assert.ok(inner.borderRect.y + inner.borderRect.height <= cell.contentRect.y + cell.contentRect.height,
+      `${collapse} nested table rows and caption are contained: ${JSON.stringify({cell:cell.contentRect,inner:inner.borderRect})}`);
+  }
+});
+
+test("intrinsic atomic line extents reserve shared ascent and descent before table row placement", () => {
+  const cases = [
+    { name: "textarea bottom baseline", content: '<textarea rows="2">x</textarea>', height: 36, baseline: 32 },
+    { name: "opposite native margins", content: '<input value="a" style="margin-top:20px"><input value="b" style="margin-bottom:20px">', height: 56, baseline: 32 },
+    { name: "opposite inline-block margins", content: '<span style="display:inline-block;margin-top:20px">a</span><span style="display:inline-block;margin-bottom:20px">b</span>', height: 56, baseline: 32 },
+    { name: "multiline inline-block last baseline", content: '<span style="display:inline-block">a<br>b</span>', height: 32, baseline: 28 },
+    { name: "short inline-block clipped baseline", content: '<span style="display:inline-block;height:4px;margin-top:20px">a</span>', height: 28, baseline: 24 },
+    { name: "inline-block with block control synthesizes bottom", content: '<span style="display:inline-block"><input value="a" style="display:block;margin-bottom:20px"></span>', height: 40, baseline: 36 },
+    { name: "replaced bottom baseline", content: '<img width="16" height="32" alt="x">', height: 36, baseline: 32 },
+  ];
+  for (const { name, content, height, baseline } of cases) {
+    const result = render(`<style>body{margin:0}table{border-spacing:0}td{padding:0;vertical-align:baseline}input{width:24px}</style>
+      <table><tr><td id="atomic-cell">${content}</td><td id="sibling">same-row</td></tr><tr><td id="next">next-row</td></tr></table>`);
+    const cell = fragmentFor(result, "atomic-cell", "table-cell");
+    const next = fragmentFor(result, "next", "table-cell");
+    assert.equal(cssPixels(cell.contentRect.height), height, name);
+    assert.equal(cssPixels(cell.lineBoxes[0].baseline - cell.contentRect.y), baseline, name);
+    assert.ok(cell.contentRect.y + cell.contentRect.height <= next.borderRect.y, `${name}: rows do not overlap`);
+    const sibling = fragmentFor(result, "sibling", "table-cell");
+    const texts = [...reachableFragments(result.artifacts.documentLayout)].map((id) => result.artifacts.documentLayout.fragment(id)).filter((entry) => entry.kind === "text" && entry.text === "same-row");
+    assert.equal(texts.length, 1);
+    assert.ok(texts[0].borderRect.y + texts[0].borderRect.height <= sibling.contentRect.y + sibling.contentRect.height, `${name}: sibling descent fits`);
+  }
+});
+
+
+test("intrinsic atomic vertical percentages use the final cell inline-size basis", () => {
+  const result = render(`<style>body{margin:0}table{border-spacing:0;table-layout:fixed;width:300px}td{padding:0;vertical-align:baseline}
+    input{width:24px}</style><table><col style="width:200px"><col style="width:100px">
+    <tr><td id="atomic-cell"><input value="a" style="margin-top:20%"><input value="b" style="margin-bottom:20%"></td><td>same-row</td></tr>
+    <tr><td id="next">next-row</td></tr></table>`);
+  const cell = fragmentFor(result, "atomic-cell", "table-cell");
+  const next = fragmentFor(result, "next", "table-cell");
+  assert.equal(cssPixels(cell.contentRect.width), 200);
+  assert.equal(cssPixels(cell.contentRect.height), 96);
+  assert.equal(cssPixels(cell.lineBoxes[0].rect.height), 96);
+  assert.equal(next.borderRect.y, cell.borderRect.y + cell.borderRect.height);
 });

@@ -1,9 +1,11 @@
+import type { ValueSequence } from "../../memory/packed.js";
+import type { StyleSnapshot } from "../style/types.js";
 import type { DocumentScrollOffset, ViewportGeometryProjection } from "./viewport-geometry.js";
 import type { DocumentNodeRef, DocumentSemanticEntry, DocumentSourceRange } from "../../document/index.js";
 import type { DocumentActionIdentity, FormattingNodeId } from "../formatting/index.js";
 import type {
   CssEdges, CssPixelLength, CssRect, LayoutFragmentId,
-  LayoutFragmentTree, LayoutFragment, LayoutPaintStyle, LayoutTextCluster
+  LayoutFragmentTree, LayoutPaintStyle, LayoutTextCluster, LayoutTextClusters
 } from "../layout/index.js";
 import type { TextSearchMatchId } from "../search/index.js";
 
@@ -73,7 +75,7 @@ interface TerminalPaintCommandBase {
 export interface TerminalTextPaintCommand extends TerminalPaintCommandBase {
   readonly kind: "text";
   readonly text: string;
-  readonly clusters: readonly TerminalPaintTextCluster[];
+  readonly clusters: LayoutTextClusters;
 }
 
 export type TerminalPaintTextCluster = LayoutTextCluster;
@@ -101,13 +103,23 @@ export type DocumentDisplayListOutcome =
     }
   | { readonly status: "rejected"; readonly reason: "invalid-context" | "invalid-budget" };
 
+/** Canonical command references; decoded paint records are never retained by this owner. */
+export interface DocumentPaintCommands extends ValueSequence<TerminalPaintCommand> {
+  layoutFragment(index: number): LayoutFragmentId;
+  rect(index: number): CssRect;
+  isText(index: number): boolean;
+}
+
 /** Retained CSS-pixel paint commands for one scroll-independent document layout. */
 export interface DocumentDisplayList {
+  readonly styles: StyleSnapshot;
   readonly layout: LayoutFragmentTree;
   readonly context: TerminalRenderContext;
   /** Layout fragments in the CSS paint order used to build this display list. */
   readonly fragmentPaintOrder: readonly LayoutFragmentId[];
-  readonly commands: readonly TerminalPaintCommand[];
+  /** Canvas paint is independent of element geometry, scroll ownership and hit testing. */
+  readonly canvasBackground: { readonly source: DocumentNodeRef; readonly style: LayoutPaintStyle } | null;
+  readonly commands: DocumentPaintCommands;
   readonly outcome: DocumentDisplayListOutcome;
 }
 
@@ -330,7 +342,12 @@ export interface TerminalControlGeometry {
   readonly layoutFragment: LayoutFragmentId;
   /** Full allocation, kept independent of clipping so editors retain their geometry. */
   readonly allocation: TerminalCellRect;
+  /** Exact writable cell rectangle, clipped independently of native allocation. */
   readonly visible: TerminalCellRect;
+  readonly outer: CssRect;
+  readonly content: CssRect;
+  /** Current paint colors resolved together with this geometry in the accepted viewport. */
+  readonly style: TerminalStyle;
 }
 
 export interface DocumentFocusGeometry {
@@ -393,7 +410,7 @@ export interface ViewportTerminalResult {
 export interface BuildDocumentDisplayListInput {
   readonly layout: LayoutFragmentTree;
   /** Current paint inputs after a verified background-only style transition. */
-  readonly paintStyle?: (fragment: LayoutFragment) => LayoutPaintStyle;
+  readonly styles: StyleSnapshot;
   readonly context: TerminalRenderContext;
   readonly signal?: AbortSignal;
 }

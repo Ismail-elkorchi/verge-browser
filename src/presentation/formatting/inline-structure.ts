@@ -2,10 +2,10 @@ import type { FormattingNode, FormattingTree } from "./types.js";
 
 /** Whether a formatting node participates in its parent's inline formatting context. */
 export function isInlineFormattingNode(node: FormattingNode): boolean {
+  if (node.kind === "marker") return node.markerPlacement === "inside";
   return node.outer === "inline"
     || node.kind === "text-sequence"
     || node.kind === "generated-text"
-    || node.kind === "marker"
     || node.kind === "forced-line-break"
     || node.kind === "line-break-opportunity";
 }

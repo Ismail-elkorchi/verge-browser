@@ -28,7 +28,7 @@ function sourceUnits(artifacts, formatting) {
     ? tree.styles.style(node.styleNode)
     : tree.styles.pseudo(node.styleNode, node.pseudo) ?? tree.styles.style(node.styleNode);
   if (style === null || style.visibility !== "visible") return [];
-  return (artifacts.inlineItemStreams.textForFormattingNode(formatting)?.units ?? []).filter(meaningful).map((unit) => ({
+  return [...(artifacts.inlineItemStreams.textForFormattingNode(formatting)?.units ?? [])].filter(meaningful).map((unit) => ({
     formattingNode: formatting,
     documentNode: node.source,
     contentStartCodeUnit: unit.contentStartCodeUnit,
@@ -44,7 +44,7 @@ function sourceUnits(artifacts, formatting) {
 // A merged span is accepted only if its actual row text equals its retained
 // clusters. Logical offsets retain source ownership across RTL visual order.
 export function paintedSourceUnits(rows, commands, layout = null) {
-  const byCommand = new Map(commands.filter((command) => command.kind === "text").map((command) => [command.id, command]));
+  const byCommand = new Map([...commands].filter((command) => command.kind === "text").map((command) => [command.id, command]));
   const units = [];
   const malformedSpans = [];
   for (const row of rows) {
@@ -55,7 +55,7 @@ export function paintedSourceUnits(rows, commands, layout = null) {
         malformedSpans.push({ row: row.row, command: span.command, reason: "span-source-ownership-mismatch" });
         continue;
       }
-      const clusters = command.clusters.filter((cluster) => intervalContains(
+      const clusters = [...command.clusters].filter((cluster) => intervalContains(
         span.contentStartCodeUnit, span.contentEndCodeUnit, cluster.contentStartCodeUnit, cluster.contentEndCodeUnit
       ));
       const actualText = row.text.slice(span.startCodeUnit, span.endCodeUnit);

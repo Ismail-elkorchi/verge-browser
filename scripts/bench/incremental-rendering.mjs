@@ -18,13 +18,15 @@ import { updateBrowser } from "../../dist/ui/app.js";
 import { browserView } from "../../dist/ui/view.js";
 
 const SAMPLE_COUNT = 21;
-// The full fixture retains ~569 MB after GC. Its former 93 MB estimate omitted owners.
-// Default 512 MiB admission rejection is covered by the resource controls; timings use explicit bounds.
-const QUALIFICATION_RENDER_BUDGETS = Object.freeze({
-  maxRetainedArtifactBytes: 1024 * 1024 * 1024,
-  maxWorkingSetBytes: 2 * 1024 * 1024 * 1024,
+// Qualification uses the same budgets as interactive browsing, with no worker overrides.
+const DEFAULT_RENDER_LIMITS = Object.freeze({
+  maxRetainedArtifactBytes: 512 * 1024 * 1024,
+  maxWorkingSetBytes: 1024 * 1024 * 1024,
 });
 const LIMITS_MS = Object.freeze({
+  // Liveness ceilings match the existing qualification timeout, not an interactive-speed claim.
+  firstViewport: 30_000,
+  resizeP95: 30_000,
   warmScrollP95: 100,
   noChangeViewportP95: 100,
   colorDepthOnlyP95: 100,
@@ -138,7 +140,7 @@ async function workerMeasurements(html) {
   });
   const navigation = await elapsed(() => session.open("https://incremental.test/article"));
   const document = browserDocument(navigation.value);
-  const client = new RenderWorkerClient(QUALIFICATION_RENDER_BUDGETS);
+  const client = new RenderWorkerClient();
   let maximumDelay = 0;
   const eventLoopDelays = [];
   let eventLoopPhase = "idle";
@@ -157,6 +159,7 @@ async function workerMeasurements(html) {
     const attachment = await elapsed(() => client.attach(document));
     eventLoopPhase = "first-viewport";
     const firstFrame = await elapsed(() => client.renderViewport(document, 1, parameters()));
+    const firstViewportMetrics = await client.metrics();
     eventLoopPhase = "viewport-warmup";
     for (let index = 0; index < 3; index += 1) {
       await client.renderViewport(document, index + 2, parameters((index + 1) * 3));
@@ -187,7 +190,16 @@ async function workerMeasurements(html) {
     eventLoopPhase = "search";
     const search = await elapsed(() => client.search(document, "reference paragraph", parameters(0), 2_000));
     eventLoopPhase = "resize";
-    const resize = await elapsed(() => client.renderViewport(document, 300, parameters(0, { columns: 80 })));
+    const resizeSamples = [];
+    const resizeStages = [];
+    for (const [index, columns] of [80, 160, 120, 80, 160, 120].entries()) {
+      const resized = await elapsed(() => client.renderViewport(document, 300 + index, parameters(0, { columns })));
+      resizeSamples.push(resized.milliseconds);
+      const metrics = await client.metrics();
+      resizeStages.push({ columns, stages: resized.value.stageMetrics, textAnalysisWork: metrics.textAnalysisWork,
+        retainedCost: metrics.retainedCost, accountedAllocations: metrics.accountedAllocations,
+        allocatedPackedBytes: metrics.allocatedPackedBytes, peakWorkingSetBytes: metrics.peakWorkingSetBytes });
+    }
     eventLoopPhase = "replacement-burst";
     const burst = Array.from({ length: 100 }, (_, index) =>
       client.renderViewport(document, 400 + index, parameters(index * 3))
@@ -204,6 +216,7 @@ async function workerMeasurements(html) {
       attachmentMs: attachment.milliseconds,
       firstViewportMs: firstFrame.milliseconds,
       firstViewportStages: firstFrame.value.stageMetrics,
+      firstViewportMetrics,
       warmScrollP50: percentile(scroll, 0.5),
       warmScrollP95: percentile(scroll, 0.95),
       noChangeViewportP50: percentile(noChange, 0.5),
@@ -211,7 +224,10 @@ async function workerMeasurements(html) {
       colorDepthOnlyP50: percentile(color, 0.5),
       colorDepthOnlyP95: percentile(color, 0.95),
       searchMs: search.milliseconds,
-      resizeMs: resize.milliseconds,
+      resizeP50: percentile(resizeSamples, 0.5),
+      resizeP95: percentile(resizeSamples, 0.95),
+      resizeSamples,
+      resizeStages,
       maximumMainEventLoopDelay: maximumDelay,
       mainEventLoopDelayP95: percentile(eventLoopDelays, 0.95),
       eventLoopDelayByPhase: Object.fromEntries(eventLoopDelayByPhase),
@@ -236,7 +252,7 @@ async function tuiMeasurements(html) {
   const uiMetrics = new RenderStageMetrics();
   const preparedAt = performance.now();
   const prepared = await prepareBrowserTui("https://incremental.test/article", {
-    renderWorkerFactory: () => new RenderWorkerClient(QUALIFICATION_RENDER_BUDGETS),
+    renderWorkerFactory: () => new RenderWorkerClient(),
     store,
     instrumentation: uiMetrics,
     services: {
@@ -252,7 +268,7 @@ async function tuiMeasurements(html) {
   });
   const preparedMs = performance.now() - preparedAt;
   const host = createMemoryTerminalHost({ terminalSize: { columns: 120, rows: 40 } });
-  const runtime = createTuiRuntime({ app: prepared.app, host });
+  const runtime = createTuiRuntime({ app: prepared.app, host, textPresentation: prepared.textPresentation });
   const context = {
     terminalSize: { columns: 120, rows: 40 },
     capabilities: await host.getCapabilities(),
@@ -428,7 +444,7 @@ async function restoredWorkspaceShell(tabCount) {
     },
   });
   const host = createMemoryTerminalHost({ terminalSize: { columns: 120, rows: 40 } });
-  const runtime = createTuiRuntime({ app: prepared.app, host });
+  const runtime = createTuiRuntime({ app: prepared.app, host, textPresentation: prepared.textPresentation });
   try {
     const shell = await elapsed(() => runtime.start());
     await waitUntil(() => starts.length === 1, `${String(tabCount)}-tab active restoration start`, 1_000);
@@ -453,6 +469,8 @@ const worker = await workerMeasurements(html);
 const tui = await tuiMeasurements(html);
 const restoration = [await restoredWorkspaceShell(4), await restoredWorkspaceShell(50)];
 const metricsMs = {
+  firstViewport: worker.firstViewportMs,
+  resizeP95: worker.resizeP95,
   warmScrollP95: worker.warmScrollP95,
   noChangeViewportP95: worker.noChangeViewportP95,
   colorDepthOnlyP95: worker.colorDepthOnlyP95,
@@ -465,11 +483,26 @@ const failures = Object.entries(LIMITS_MS)
   .filter(([name, limit]) => metricsMs[name] > limit)
   .map(([name, limit]) => `${name}=${metricsMs[name].toFixed(2)}ms exceeds ${String(limit)}ms`);
 if (tui.quitToCompleteDisposal > 1000) failures.push("quit-to-complete-disposal exceeded 1000ms");
-if (worker.workerMetrics.retainedCost > QUALIFICATION_RENDER_BUDGETS.maxRetainedArtifactBytes) failures.push("retained-cost admission exceeded its budget");
+if (worker.workerMetrics.retainedCost > DEFAULT_RENDER_LIMITS.maxRetainedArtifactBytes) failures.push("retained-cost admission exceeded its budget");
 if (worker.workerMetrics.peakWorkingSetBytes > worker.workerMetrics.workingSetBudget) failures.push("worker exceeded its working-set budget");
 if (worker.maximumRetainedRows > worker.viewportRowBound) failures.push("viewport cell rows exceeded viewport plus overscan");
 if (worker.burstFulfilled !== 1) failures.push("100 replaceable viewport requests committed more than the latest generation");
-if (worker.releasedWorkerMetrics.attachedDocuments !== 0) failures.push("released worker document remained attached");
+if (worker.releasedWorkerMetrics.attachedDocuments !== 0 || worker.releasedWorkerMetrics.retainedCost !== 0
+  || worker.releasedWorkerMetrics.pinnedResources !== 0 || worker.releasedWorkerMetrics.reservedCost !== 0) {
+  failures.push("released worker retained document resources, pins, or reservations");
+}
+// This fixture has no media/state-dependent styles: width-independent analysis must survive resize.
+for (const resize of worker.resizeStages) {
+  const work = resize.textAnalysisWork;
+  const cold = worker.firstViewportMetrics.textAnalysisWork;
+  if (work === undefined || cold === undefined || work.inlineBuilds !== 0
+    || (cold.intrinsicAnalyzedUnits > 0 && work.intrinsicAnalyzedUnits >= cold.intrinsicAnalyzedUnits)) {
+    failures.push(`resize ${String(resize.columns)} rebuilt width-independent text analysis`);
+  }
+}
+if (worker.workerMetrics.workingSetBudget !== DEFAULT_RENDER_LIMITS.maxWorkingSetBytes) {
+  failures.push("qualification did not use the interactive working-set budget");
+}
 for (const result of restoration) {
   if (result.firstShellMs > LIMITS_MS.firstShell) {
     failures.push(`${String(result.tabs)}-tab first shell exceeded ${String(LIMITS_MS.firstShell)}ms`);
@@ -491,7 +524,7 @@ const report = {
   tui,
   restoration,
   limitsMs: LIMITS_MS,
-  renderingBudgets: QUALIFICATION_RENDER_BUDGETS,
+  renderingBudgets: DEFAULT_RENDER_LIMITS,
   ok: failures.length === 0,
   failures,
 };

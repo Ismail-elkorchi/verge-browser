@@ -1,3 +1,4 @@
+import { ValueSequence, checkPackedMetadata } from "../../memory/packed.js";
 import { registerRetainedOwner } from "../../memory/retained-cost.js";
 import type {
   DocumentNodeRef,
@@ -72,11 +73,70 @@ export type InlineItem = InlineTextItem
   | InlineStructuralBidiControlItem
   | InlineBlockBoundaryItem;
 
+interface InlineTextRun {
+  readonly action: DocumentActionIdentity | null;
+  readonly semantic: DocumentSemanticEntry | null;
+  readonly node: FormattingNode;
+  readonly processed: ProcessedCssText;
+  readonly start: number;
+  readonly end: number;
+}
+
+/** Inline provenance lives at node/run boundaries, never on every retained grapheme. */
+export class InlineItems extends ValueSequence<InlineItem> {
+  readonly #tree: FormattingTree;
+  readonly #runs: readonly (InlineTextRun | { readonly item: InlineItem; readonly start: number; readonly end: number })[];
+  public readonly length: number;
+  public constructor(tree: FormattingTree, runs: readonly (InlineTextRun | { readonly item: InlineItem; readonly start: number; readonly end: number })[]) {
+    super(); checkPackedMetadata(148, this); this.#tree = tree; this.#runs = Object.freeze(runs); this.length = runs.at(-1)?.end ?? 0;
+    registerRetainedOwner(this, () => [this.#tree, this.#runs], () => 32); Object.freeze(this);
+  }
+  #run(index: number): InlineTextRun | { readonly item: InlineItem; readonly start: number; readonly end: number } | undefined {
+    if (index < 0 || index >= this.length) return undefined;
+    let low = 0, high = this.#runs.length;
+    while (low < high) { const middle = (low + high) >>> 1;
+      if ((this.#runs[middle]?.end ?? 0) <= index) low = middle + 1; else high = middle; }
+    return this.#runs[low];
+  }
+  public formattingNodeAt(index: number): FormattingNodeId | null {
+    const run = this.#run(index); return run === undefined ? null : "item" in run ? run.item.formattingNode : run.node.id;
+  }
+  public at(index: number): InlineItem | undefined {
+    if (index < 0) index += this.length;
+    if (index < 0 || index >= this.length) return undefined;
+    const run = this.#run(index);
+    if (run === undefined) return undefined;
+    if ("item" in run) return run.item;
+    const unit = run.processed.units.at(index - run.start);
+    if (unit === undefined) return undefined;
+    const identity = { formattingNode: run.node.id, documentNode: run.node.source, pseudoElement: run.node.pseudo, action: run.action, semantic: run.semantic, sourceRange: unitSourceRange(this.#tree, run.node, unit),
+      contentStartCodeUnit: unit.contentStartCodeUnit, contentEndCodeUnit: unit.contentEndCodeUnit };
+    return unit.kind === "forced-break" ? { ...identity, kind: "forced-line-break", text: "" }
+      : { ...identity, kind: unit.kind, text: unit.text, collapsibleSpace: unit.collapsibleSpace,
+        whiteSpace: (run.node as FormattingNode & { whiteSpace: ComputedWhiteSpace }).whiteSpace };
+  }
+}
+
+class InlineItemsBuilder {
+  readonly #runs: (InlineTextRun | { readonly item: InlineItem; readonly start: number; readonly end: number })[] = [];
+  #length = 0;
+  public push(item: InlineItem): void {
+    this.#runs.push(Object.freeze({ item, start: this.#length, end: ++this.#length }));
+  }
+  public text(tree: FormattingTree, node: FormattingNode, processed: ProcessedCssText): void {
+    if (processed.units.length === 0) return;
+    const start = this.#length; this.#length += processed.units.length;
+    const identity = baseIdentity(tree, node);
+    this.#runs.push(Object.freeze({ action: identity.action, semantic: identity.semantic, node, processed, start, end: this.#length }));
+  }
+  public finish(tree: FormattingTree): InlineItems { return new InlineItems(tree, this.#runs); }
+}
+
 export interface InlineItemStream {
   readonly id: InlineItemStreamId;
   readonly containingFormattingBox: FormattingNodeId;
   readonly roots: readonly FormattingNodeId[];
-  readonly items: readonly InlineItem[];
+  readonly items: InlineItems;
   readonly graphemeClusters: number;
   readonly collapsibleSpacePending: boolean;
 }
@@ -198,7 +258,7 @@ export function buildInlineItemStreamSet(tree: FormattingTree, signal?: AbortSig
     if (roots.length === 0) return;
     const key = streamKey(containing, roots);
     if (byKey.has(key)) return;
-    const items: InlineItem[] = [];
+    const items = new InlineItemsBuilder();
     let graphemeClusters = 0;
     let collapsibleSpacePending = false;
     const appendControl = (node: FormattingNode, bidiClass: BidiClass): void => {
@@ -215,6 +275,7 @@ export function buildInlineItemStreamSet(tree: FormattingTree, signal?: AbortSig
     const visit = (id: FormattingNodeId): void => {
       signal?.throwIfAborted();
       const node = tree.node(id);
+      if (node.kind === "marker" && node.markerPlacement === "outside" && containing !== node.id) return;
       const identity = baseIdentity(tree, node);
       if (isAtomicFormattingNode(node) || isAtomicInlineBox(tree, node)) {
         items.push(Object.freeze({
@@ -242,34 +303,12 @@ export function buildInlineItemStreamSet(tree: FormattingTree, signal?: AbortSig
           throw new RangeError("Inline item stream exceeded its grapheme-cluster budget.");
         }
         graphemeClusters += processed.outcome.graphemeClusters;
-        const retainedUnits: LogicalTextUnit[] = [];
+        const markerControls = node.kind === "marker" ? structuralControls(node, tree) : null;
+        for (const control of markerControls?.before ?? []) appendControl(node, control);
+        items.text(tree, node, processed);
         collapsibleSpacePending = processed.collapsibleSpacePending;
-        for (const unit of processed.units) {
-          if (unit.kind === "forced-break") {
-            retainedUnits.push(unit);
-            items.push(Object.freeze({
-              ...identity,
-              kind: "forced-line-break",
-              text: "",
-              sourceRange: unitSourceRange(tree, node, unit),
-              contentStartCodeUnit: unit.contentStartCodeUnit,
-              contentEndCodeUnit: unit.contentEndCodeUnit
-            }));
-            collapsibleSpacePending = false;
-            continue;
-          }
-          // One canonical object owns both CSS text offsets and inline provenance.
-          const item: InlineTextItem & LogicalTextUnit = Object.freeze({
-            ...identity,
-            ...unit,
-            kind: unit.kind,
-            whiteSpace: node.whiteSpace,
-            sourceRange: unitSourceRange(tree, node, unit),
-          });
-          items.push(item);
-          retainedUnits.push(item);
-        }
-        textByFormatting.set(node.id, Object.freeze({ ...processed, units: Object.freeze(retainedUnits) }));
+        textByFormatting.set(node.id, processed);
+        for (const control of markerControls?.after ?? []) appendControl(node, control);
         return;
       }
       if (node.kind === "forced-line-break") {
@@ -317,7 +356,7 @@ export function buildInlineItemStreamSet(tree: FormattingTree, signal?: AbortSig
       id: `inline-item-stream:${key}` as InlineItemStreamId,
       containingFormattingBox: containing,
       roots: Object.freeze([...roots]),
-      items: Object.freeze(items),
+      items: items.finish(tree),
       graphemeClusters,
       collapsibleSpacePending
     });
@@ -331,7 +370,7 @@ export function buildInlineItemStreamSet(tree: FormattingTree, signal?: AbortSig
     const id = pending.pop();
     if (id === undefined) continue;
     const node = tree.node(id);
-    if (isAtomicFormattingNode(node)) buildStream(node.id, [node.id]);
+    if (isAtomicFormattingNode(node) || (node.kind === "marker" && node.markerPlacement === "outside")) buildStream(node.id, [node.id]);
     const ownsInlineFormattingContext = node.kind === "root" || node.outer === "block" || isAtomicInlineBox(tree, node);
     if (ownsInlineFormattingContext) {
       let run: FormattingNodeId[] = [];

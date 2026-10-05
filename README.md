@@ -52,6 +52,11 @@ reader output, page diagnostics, cookie inspection, and tab/workspace
 persistence. Non-HTML navigation offers to download the resource instead of
 replacing the current page.
 
+Interactive mode requires a terminal host with explicit visual-cell presentation
+so page and editor text is not reordered twice. Unknown host state fails startup;
+see the [CLI terminal contract](./docs/reference/cli.md). `--once` needs no terminal
+mode acquisition.
+
 Author CSS contributes page colors, emphasis, visibility, spacing, borders,
 block/inline flow, flexible sizing and alignment, positioned layout, floats,
 horizontal-writing-mode Grid placement, track sizing, and alignment, and

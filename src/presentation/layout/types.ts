@@ -1,6 +1,8 @@
+import type { LayoutTextClusters } from "./text-clusters.js";
 import type { CssOverflow } from "../style/types.js";
 import type {
   DocumentNodeRef,
+  DocumentFormControl, DocumentState, IndexedWebDocumentSnapshot,
   DocumentSemanticEntry,
   DocumentSourceRange
 } from "../../document/index.js";
@@ -11,7 +13,6 @@ import type {
 } from "../formatting/index.js";
 import type { CssBorderColors, CssBorderStyles, CssColor, PseudoElementIdentity } from "../style/index.js";
 import type { InlineItemStreamSet } from "../text/index.js";
-import type { BidiLevel } from "../../unicode/index.js";
 import type { CssEdges, CssPixelLength, CssRect, CssSize } from "./fixed.js";
 
 export type LayoutFragmentId = string & { readonly __layoutFragmentId: unique symbol };
@@ -76,9 +77,21 @@ export interface LayoutBudgets {
   readonly maxDepth: number;
 }
 
+/** A native single-line baseline is relative to the content origin; null requests synthesis. */
+export interface CssControlMetrics extends CssSize {
+  readonly baseline: CssPixelLength | null;
+}
+
+/** Native control metrics are supplied by the output adapter in CSS units. */
+export interface CssControlMeasurer {
+  readonly identity: string;
+  measure(control: DocumentFormControl, document: IndexedWebDocumentSnapshot, state: DocumentState): CssControlMetrics;
+}
+
 export interface LayoutContext {
   readonly viewport: CssSize;
   readonly textMeasurer: CssTextMeasurer;
+  readonly controlMeasurer: CssControlMeasurer;
   readonly initialContainingBlock: CssRect;
   /** The visible CSS-pixel scrollport in document coordinates. */
   readonly scrollport: CssRect;
@@ -116,7 +129,7 @@ export interface LayoutTextCluster {
 
 export interface LayoutControlTextLine {
   readonly text: string;
-  readonly clusters: readonly LayoutTextCluster[];
+  readonly clusters: LayoutTextClusters;
   readonly blockOffset: CssPixelLength;
   readonly height: CssPixelLength;
 }
@@ -132,7 +145,7 @@ export interface LayoutTextFragment {
   readonly contentEndCodeUnit: number;
   readonly text: string;
   readonly visualText: string;
-  readonly visualClusters: readonly LayoutTextCluster[];
+  readonly visualClusters: LayoutTextClusters;
   readonly bidiParagraph: number;
   readonly embeddingLevel: number;
   readonly contentRect: CssRect;
@@ -150,8 +163,6 @@ export interface LayoutTextFragment {
   readonly action: DocumentActionIdentity | null;
   readonly semantic: DocumentSemanticEntry | null;
   readonly style: LayoutPaintStyle;
-  readonly minContentContribution: CssPixelLength;
-  readonly maxContentContribution: CssPixelLength;
 }
 
 export interface LayoutTableCollapsedBorderSegment {
@@ -191,21 +202,22 @@ export interface LayoutBoxFragment {
   readonly children: readonly LayoutFragmentId[];
   readonly lineBoxes: readonly LineBox[];
   readonly usedFontMetrics: UsedFontMetrics | null;
+  /** Exported baseline relative to this fragment's border-box block start. */
   readonly baseline: CssPixelLength | null;
   readonly visualOrder: number;
   readonly paintOrder: number;
   readonly action: DocumentActionIdentity | null;
   readonly semantic: DocumentSemanticEntry | null;
   readonly style: LayoutPaintStyle;
-  readonly minContentContribution: CssPixelLength;
-  readonly maxContentContribution: CssPixelLength;
   readonly inlineContinuations?: readonly InlineContinuationGeometry[];
+  /** Natural native block footprint, independent of the CSS outer box and line strut. */
+  readonly nativeControlMetrics?: CssControlMetrics;
   readonly controlLabel?: string;
   readonly controlValue?: string;
   readonly controlText?: string;
   readonly controlLines?: readonly LayoutControlTextLine[];
   readonly replacedText?: string;
-  readonly visualClusters?: readonly LayoutTextCluster[];
+  readonly visualClusters?: LayoutTextClusters;
   readonly tableCollapsedBorderSegments?: readonly LayoutTableCollapsedBorderSegment[];
 }
 
@@ -255,14 +267,9 @@ export interface LineBox {
   readonly descent: CssPixelLength;
   readonly usedInlineAdvance: CssPixelLength;
   readonly fragments: readonly LayoutFragmentId[];
-  readonly textFragments: readonly LayoutFragmentId[];
   readonly visualOrder: readonly LayoutFragmentId[];
   readonly logicalItemStart: number;
   readonly logicalItemEnd: number;
-  readonly embeddingLevels: readonly (BidiLevel | null)[];
-  readonly sourceRanges: readonly DocumentSourceRange[];
-  readonly actions: readonly DocumentActionIdentity[];
-  readonly semantics: readonly DocumentSemanticEntry[];
   readonly breakCause: "end-of-paragraph" | "forced" | "wrap";
   readonly visualRuns: readonly LayoutVisualRun[];
 }
@@ -325,6 +332,7 @@ export interface LayoutScrollOwner {
 }
 
 export interface LayoutFragmentTree {
+  readonly textAnalysisWork: Readonly<{ intrinsicCalls: number; intrinsicReuses: number; intrinsicAnalyzedUnits: number; inlineBuilds: number; inlineReuses: number }>;
   readonly viewportDirection: "ltr" | "rtl";
   readonly scrollExtent: CssRect;
   readonly viewportOverflow: { readonly x: CssOverflow; readonly y: CssOverflow };

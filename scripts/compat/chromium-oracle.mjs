@@ -51,11 +51,13 @@ function nativeStyle(style) {
     : style.display.internal ?? (style.display.inner === "flow" ? style.display.outer : style.display.inner);
   return { display, overflowX: style.box.overflowX, overflowY: style.box.overflowY, contain: style.box.contain, visibility: style.visibility, fontSize: `${fontSize}px`, lineHeight,
     color: cssColor(style.text.color), backgroundColor: cssColor(style.text.background),
-    direction: style.text.direction, whiteSpace: style.text.whiteSpace, fontWeight: String(style.text.fontWeight) };
+    direction: style.text.direction, whiteSpace: style.text.whiteSpace, fontWeight: String(style.text.fontWeight),
+    listStyleType: style.listStyleType, listStylePosition: style.listStylePosition };
 }
 
 function nativeInspection(fixture, variant, snapshot, pipeline) {
-  const ids = new Set([...(fixture.oracle?.styles ?? []), ...(fixture.oracle?.geometry ?? [])].map((entry) => entry.id));
+  const ids = new Set([...(fixture.oracle?.styles ?? []), ...(fixture.oracle?.geometry ?? [])]
+    .flatMap((entry) => entry.referenceId === undefined ? [entry.id] : [entry.id, entry.referenceId]));
   return {
     paintExpectations: paintExpectations(fixture, variant).map((entry) => typeof entry === "string" ? entry : entry.text),
     paintedPhrases: pipeline.evidence.paintedPhrases,
@@ -126,7 +128,7 @@ const inspect = async (javaScriptEnabled) => {
               const style = computedStyle(element);
               return { tag: element.tagName.toLowerCase(), id: element.id,
                 rectangle: { x: rect.x + globalThis.scrollX, y: rect.y + globalThis.scrollY, width: rect.width, height: rect.height },
-                style: Object.fromEntries(["display", "visibility", "fontSize", "lineHeight", "color", "backgroundColor", "direction", "whiteSpace", "fontWeight", "overflowX", "overflowY", "contain"].map((property) => [property, style[property]])) };
+                style: Object.fromEntries(["display", "visibility", "fontSize", "lineHeight", "color", "backgroundColor", "direction", "whiteSpace", "fontWeight", "overflowX", "overflowY", "contain", "listStyleType", "listStylePosition"].map((property) => [property, style[property]])) };
             };
             return {
               url: document.URL, compatibilityMode: document.compatMode,

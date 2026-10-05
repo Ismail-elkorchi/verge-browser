@@ -302,7 +302,7 @@ export function readerDocumentLines(document: ReaderDocument): readonly string[]
   const lines: string[] = [document.title, ""];
   for (const block of document.blocks) {
     if (block.kind === "heading") lines.push(`${"#".repeat(block.level)} ${block.text}`, "");
-    else if (block.kind === "list-item") lines.push(`${"  ".repeat(block.depth)}${block.marker} ${block.text}`);
+    else if (block.kind === "list-item") lines.push(`${"  ".repeat(block.depth)}${block.marker}${block.text}`);
     else if (block.kind === "quotation") lines.push(`> ${block.text}`, "");
     else if (block.kind === "term") lines.push(block.text);
     else if (block.kind === "definition") lines.push(`  ${block.text}`, "");

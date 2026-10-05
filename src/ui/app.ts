@@ -41,6 +41,7 @@ import {
 
 import { formatHelpText, parseCommand, type BrowserCommand } from "../app/commands.js";
 import { NetworkFetchError } from "../app/fetch-page.js";
+import { resolveImplicitSubmission } from "../app/forms.js";
 import type { DownloadRecord } from "../app/storage.js";
 import type { PageRequestOptions, IndexedPageSnapshot } from "../app/types.js";
 import { measured, type RenderInstrumentation } from "../presentation/renderer/index.js";
@@ -296,6 +297,7 @@ function effect(
               documentRevision: navigation.documentRevision, navigationGeneration: navigation.navigationGeneration + 1,
             }),
             message: error instanceof Error ? error.message : String(error),
+            ...(error instanceof NetworkFetchError ? { networkOutcome: error.networkOutcome } : {}),
             ...(downloadTarget === undefined ? {} : { downloadTarget })
           }
         };
@@ -1382,7 +1384,8 @@ function reduceBrowser(
         overlay: message.downloadTarget === undefined
           ? failedState.overlay
           : { kind: "downloadPrompt", target: message.downloadTarget },
-        status: status(message.message, "error")
+        status: { ...status(message.message, "error"),
+          ...(message.networkOutcome === undefined ? {} : { networkOutcome: message.networkOutcome }) }
       });
     }
     default: break;
@@ -1641,13 +1644,16 @@ function reduceBrowser(
       if (!control || control.kind !== "text" || control.inputType !== "number") return result(state);
       const editor = numberEditor(document, control);
       const next = numberInputReducer(editor, message.transition);
-      return result(updateFormControl(
+      const updated = updateFormControl(
         state,
         document,
         control,
         [next.input.text],
         { kind: "number", state: next }
-      ));
+      );
+      return message.transition.kind === "commit"
+        ? updateBrowser(controller, updated, { kind: "implicitSubmit", controlId: control.node }, context)
+        : result(updated);
     }
     case "formArea": {
       const control = controlById(document, message.controlId);
@@ -1784,6 +1790,15 @@ function reduceBrowser(
         }),
         formEditors: Object.fromEntries(Object.entries(current.formEditors).filter(([id]) => !nodes.has(id as DocumentNodeRef)))
       })));
+    }
+    case "implicitSubmit": {
+      const submission = resolveImplicitSubmission(document.snapshot.document, message.controlId as DocumentNodeRef);
+      if (submission.kind === "none") return result(state);
+      if (submission.kind === "unsupported") return result({ ...state, status: status(submission.reason, "error") });
+      return updateBrowser(controller, state, {
+        kind: "submitForm", formId: submission.formId,
+        ...(submission.submitterId === undefined ? {} : { submitterId: submission.submitterId }),
+      }, context);
     }
     case "submitForm": {
       const form = controller.form(document, message.formId);

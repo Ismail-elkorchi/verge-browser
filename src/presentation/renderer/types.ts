@@ -143,11 +143,19 @@ export interface DocumentSearchGeometryResult {
 }
 
 export interface RenderArtifactStoreMetrics {
+  readonly textAnalysisWork: DocumentRenderArtifacts["documentLayout"]["textAnalysisWork"];
+  /** Direct immutable allocation owners only; dependencies and mutable caches are reported in retainedCost. */
+  readonly phaseOwnedBytes: Readonly<{
+    computedStyles: number; boxTree: number; inlineItemStreams: number; textSearchIndex: number;
+    documentLayout: number; documentDisplayList: number; displayListSpatialIndex: number; documentGeometry: number;
+  }>;
   readonly attachedDocuments: number;
   readonly retainedAnalyses: number;
   readonly retainedResources: number;
   readonly pinnedResources: number;
   readonly reservedCost: number;
+  readonly allocatedPackedBytes: number;
+  readonly allocatedPackedPages: number;
   readonly sideCacheScans: number;
   readonly retainedCost: number;
   readonly evictions: number;

@@ -1,3 +1,4 @@
+import { URL } from "node:url";
 import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -104,7 +105,7 @@ async function preparedFixture(options = {}) {
     })
   });
   const host = createMemoryTerminalHost({ terminalSize: options.terminalSize ?? { columns: 100, rows: 28 } });
-  const runtime = createTuiRuntime({ app: prepared.app, host });
+  const runtime = createTuiRuntime({ app: prepared.app, host, textPresentation: prepared.textPresentation });
   await runtime.start();
   if (options.waitForRender !== false) {
     await waitUntil(runtime, () => {
@@ -185,7 +186,7 @@ test("workspace restoration paints placeholders first, loads the active tab firs
   assert.equal(sessions, 0);
   assert.ok(prepared.state.documents.every((tab) => tab.kind === "restoring"));
   const host = createMemoryTerminalHost({ terminalSize: { columns: 80, rows: 24 } });
-  const runtime = createTuiRuntime({ app: prepared.app, host });
+  const runtime = createTuiRuntime({ app: prepared.app, host, textPresentation: prepared.textPresentation });
   try {
     await runtime.start();
     assert.ok(runtime.frame());
@@ -1470,5 +1471,129 @@ test("indented citation fragment, Back, Forward, and search retain the unpanned 
     assert.equal(documentScrollRow(current()), 0);
     assertUnpanned();
     assert.match(renderFramePlain(runtime.frame()), /layout/);
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});
+
+for (const [type, readOnly, hasButton] of [
+  ["text", false, true], ["search", false, false], ["password", false, true],
+  ["number", false, true], ["text", true, true], ["number", true, false]
+]) {
+  test(`Enter submits current ${readOnly ? "readonly " : ""}${type} through the shared form path`, async () => {
+    const requests = [];
+    const html = `<form action=/implicit><input id=q type=${type} name=q value=${type === "number" ? "1" : "alpha"} ${readOnly ? "readonly" : ""}>
+      ${hasButton ? '<button name=intent value=enter formaction=/override>Search</button>' : ""}</form>`;
+    const { runtime, prepared } = await preparedFixture({ loader: async (url) => {
+      if (url === "https://example.test/") return response(url, html);
+      requests.push(url);
+      return response(url, "<title>Implicit result</title><p>Submitted</p>");
+    } });
+    try {
+      const control = runtime.state().documents[0].snapshot.document.control(
+        runtime.state().documents[0].snapshot.document.elementById("q"));
+      await runtime.dispatch({ kind: "movePageFocus", direction: "next", currentActionId: "" });
+      await waitUntil(runtime, () => runtime.frame().focusPath?.includes(control.node));
+      if (!readOnly) {
+        await runtime.handleInput(key("end"));
+        await runtime.handleInput({ kind: "text", text: type === "number" ? "2" : "Z", paste: false });
+      }
+      await runtime.handleInput(key("enter"));
+      await waitUntil(runtime, () => runtime.state().documents[0].snapshot.document.title === "Implicit result");
+      const value = type === "number" ? (readOnly ? "1" : "12") : (readOnly ? "alpha" : "alphaZ");
+      assert.deepEqual(requests, [`https://example.test/${hasButton ? "override" : "implicit"}?q=${value}${hasButton ? "&intent=enter" : ""}`]);
+    } finally { await runtime.dispose(); await prepared.controller.close(); }
+  });
+}
+
+test("implicit submission uses the same required validation and submitter exemption", async () => {
+  for (const exemption of ["", "novalidate", "formnovalidate"]) {
+    const requests = [];
+    const { runtime, prepared } = await preparedFixture({ loader: async (url) => {
+      if (url === "https://example.test/") return response(url,
+        `<form action=/implicit ${exemption === "novalidate" ? exemption : ""}><input id=q name=q required>
+          <button ${exemption === "formnovalidate" ? exemption : ""}>Search</button></form>`);
+      requests.push(url);
+      return response(url, "<title>Implicit result</title>");
+    } });
+    try {
+      const control = runtime.state().documents[0].snapshot.document.controls[0];
+      await runtime.dispatch({ kind: "movePageFocus", direction: "next", currentActionId: "" });
+      await waitUntil(runtime, () => runtime.frame().focusPath?.includes(control.node));
+      await runtime.handleInput(key("enter"));
+      if (exemption === "") {
+        assert.match(runtime.state().status.text, /required/u);
+        assert.deepEqual(requests, []);
+      } else {
+        await waitUntil(runtime, () => runtime.state().documents[0].snapshot.document.title === "Implicit result");
+        assert.deepEqual(requests, ["https://example.test/implicit?q="]);
+      }
+    } finally { await runtime.dispose(); await prepared.controller.close(); }
+  }
+});
+
+test("implicit Enter does not skip disabled defaults or multiple blocking fields", async () => {
+  for (const tail of ["<button disabled>First</button><button>Second</button>", "<input disabled>", "<input readonly>", "<input type=date>"]) {
+    const requests = [];
+    const { runtime, prepared } = await preparedFixture({ loader: async (url) => {
+      requests.push(url);
+      return response(url, `<form action=/implicit><input id=q name=q value=alpha>${tail}</form>`);
+    } });
+    try {
+      const document = runtime.state().documents[0];
+      const control = document.snapshot.document.control(document.snapshot.document.elementById("q"));
+      await runtime.dispatch({ kind: "movePageFocus", direction: "next", currentActionId: "" });
+      await waitUntil(runtime, () => runtime.frame().focusPath?.includes(control.node));
+      await runtime.handleInput(key("enter"));
+      assert.deepEqual(requests, ["https://example.test/"]);
+      assert.equal(runtime.state().documents[0].loading, false);
+      assert.notEqual(runtime.state().status?.tone, "error");
+    } finally { await runtime.dispose(); await prepared.controller.close(); }
+  }
+});
+
+test("implicit Enter reports an unsupported default image submitter without choosing a later button", async () => {
+  const requests = [];
+  const { runtime, prepared } = await preparedFixture({ loader: async (url) => {
+    requests.push(url);
+    return response(url, '<form><input id=q name=q><input type=image><button>Later</button></form>');
+  } });
+  try {
+    const control = runtime.state().documents[0].snapshot.document.controls[0];
+    await runtime.dispatch({ kind: "movePageFocus", direction: "next", currentActionId: "" });
+    await waitUntil(runtime, () => runtime.frame().focusPath?.includes(control.node));
+    await runtime.handleInput(key("enter"));
+    assert.match(runtime.state().status.text, /default image submitter/u);
+    assert.deepEqual(requests, ["https://example.test/"]);
+  } finally { await runtime.dispose(); await prepared.controller.close(); }
+});
+
+test("Arabic document and native form use one visual-cell contract while edits and submission stay logical", async () => {
+  const requests = [];
+  const { runtime, prepared } = await preparedFixture({ loader: async (url) => {
+    if (url === "https://example.test/") return response(url,
+      '<style>body{margin:0;background:white;color:black}</style><p dir=rtl>مرحبا</p><form action=/arabic><input id=q name=q value="مرحبا 123"><button>Send</button></form>');
+    requests.push(url);
+    return response(url, '<title>Arabic result</title>');
+  } });
+  try {
+    const initial = runtime.state().documents[0];
+    const control = initial.snapshot.document.control(initial.snapshot.document.elementById("q"));
+    assert.ok(renderFramePlain(runtime.frame()).includes("123 ابحرم"));
+    assert.equal(initial.documentState.controls.get(control.node).value, "مرحبا 123");
+    const target = runtime.frame().hitTargets.find((entry) => entry.id === `${control.node}:text`);
+    assert.ok(target);
+    const digit = runtime.frame().cells.find((cell) => cell.row === target.bounds.row
+      && cell.column >= target.bounds.column && cell.column < target.bounds.column + target.bounds.width && cell.text === "1");
+    assert.ok(digit);
+    for (const action of ["press", "release"]) await runtime.handleInput({ kind: "mouse", sequence: "", encoding: "sgr",
+      action, button: "left", row: digit.row, column: digit.column, rawCode: 0, modifiers: { shift: false, alt: false, ctrl: false } });
+    await runtime.handleInput({ kind: "text", text: "X", paste: false });
+    assert.equal(runtime.state().documents[0].documentState.controls.get(control.node).value, "مرحبا X123");
+    await runtime.resize({ columns: 70, rows: 28 });
+    await waitUntil(runtime, () => runtime.state().documents[0].rendering.status === "ready");
+    assert.equal(runtime.state().documents[0].documentState.controls.get(control.node).value, "مرحبا X123");
+    await runtime.handleInput(key("enter"));
+    await waitUntil(runtime, () => runtime.state().documents[0].snapshot.document.title === "Arabic result");
+    assert.equal(requests.length, 1);
+    assert.equal(new URL(requests[0]).searchParams.get("q"), "مرحبا X123");
   } finally { await runtime.dispose(); await prepared.controller.close(); }
 });

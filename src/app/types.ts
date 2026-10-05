@@ -10,6 +10,7 @@ export type NetworkOutcomeKind =
   | "timeout"
   | "dns"
   | "tls"
+  | "transport"
   | "redirect_limit"
   | "content_type_block"
   | "size_limit"

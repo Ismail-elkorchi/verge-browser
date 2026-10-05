@@ -1,8 +1,9 @@
-import { createLayoutPaintResolver } from "../layout/paint-style.js";
+import { withPackedAllocationCheck, finishPackedConstructionPhase } from "../../memory/packed.js";
 import { retainedSideCacheRevision, retainedSideCaches, estimatedRetainedCost, RetainedCostAccounting, RenderBudgetExceededError, type RetainedCostOwner } from "../../memory/retained-cost.js";
 import { buildFormattingTree } from "../formatting/index.js";
 import {
   buildLayoutFragmentTree,
+  textMeasurementDependencyKey,
   cssCoordinate,
   cssPx,
   cssRect,
@@ -121,11 +122,13 @@ function layoutKey(styles: DocumentRenderArtifacts["computedStyles"], request: D
 function textMetricsKey(request: DocumentAnalysisRequest): string {
   const metrics = request.layoutContext.textMeasurer.defaultFontMetrics();
   return [
+    textMeasurementDependencyKey(request.layoutContext.textMeasurer, metrics),
     metrics.fontSize,
     metrics.ascent,
     metrics.descent,
     metrics.lineGap,
     metrics.chAdvance,
+    request.layoutContext.controlMeasurer.identity,
     request.terminalContext.cellWidthCssPx,
     request.terminalContext.rowHeightCssPx,
     request.terminalContext.ambiguousWidth,
@@ -166,6 +169,9 @@ export class RenderArtifactStore {
   readonly #accounting = new RetainedCostAccounting();
   readonly #maximumCost: number;
   #reservedCost = 0;
+  #allocatedPackedBytes = 0;
+  #allocatedPackedPages = 0;
+  #constructionDepth = 0;
   readonly #instrumentation: RenderArtifactStoreOptions["instrumentation"];
   #clock = 0;
   #evictions = 0;
@@ -315,7 +321,15 @@ export class RenderArtifactStore {
     instrumentation: RenderArtifactStoreOptions["instrumentation"],
   ): DocumentRenderArtifacts {
     const document = this.#document(request.documentId, request.documentRevision);
-    try { return this.#analyze(request, instrumentation); }
+    this.#constructionDepth += 1;
+    try { return withPackedAllocationCheck((bytes, page) => {
+      if (bytes < 0) { this.#reservedCost += bytes; return; }
+      request.signal?.throwIfAborted();
+      this.#reservedCost += bytes;
+      if (this.#retainedCost + this.#reservedCost > this.#maximumCost) this.#admit(request.signal);
+      if (bytes > 0) this.#allocatedPackedBytes += bytes;
+      if (page) this.#allocatedPackedPages += 1;
+    }, () => this.#analyze(request, instrumentation)); }
     catch (error) {
       this.#clearProgramCaches(document);
       // Failed construction does not restore displaced phase residency.
@@ -323,7 +337,7 @@ export class RenderArtifactStore {
       this.#retirePhase(document, "computedStyles");
       this.#measureRetainedCost();
       throw error;
-    } finally { this.#accounting.endBatch(); }
+    } finally { this.#constructionDepth -= 1; this.#accounting.endBatch(); }
   }
 
   #clearProgramCaches(document: AttachedDocument): void {
@@ -397,6 +411,11 @@ export class RenderArtifactStore {
         if (entry === undefined) throw new Error("Missing newly retained phase resource.");
         entry.pins += 1; pinned.push(entry);
         created.push({ phase, identity });
+        // The phase now owns its packed capacities and metadata; reservation is
+        // exchanged for the measured owner while the new phase remains pinned.
+        finishPackedConstructionPhase();
+        this.#reservedCost = 0;
+        this.#admit(request.signal);
       }
       return value;
     };
@@ -405,15 +424,9 @@ export class RenderArtifactStore {
       const replacesLayout = !document.resources.documentLayout.has(key.documentLayout);
       const replacesPaint = !document.resources.documentDisplayList.has(key.documentDisplayList);
       if (replacesLayout || replacesPaint) {
-        // Capture only a numeric estimate; no displaced artifacts survive retirement in a token or rollback list.
         const phases = replacesLayout ? GEOMETRY_PHASES : ["documentDisplayList", "displayListSpatialIndex"] as const;
-        let estimate = 0;
-        for (const phase of phases) for (const [identity, entry] of document.resources[phase]) {
-          if (identity !== identities[phase] && entry.pins === 0) estimate += entry.owner.bytes;
-        }
         for (const phase of phases) this.#retirePhase(document, phase, identities[phase]);
         if (replacesLayout) for (const phase of ["boxTree", "inlineItemStreams", "textSearchIndex"] as const) this.#retirePhase(document, phase, identities[phase]);
-        this.#reservedCost = estimate;
         this.#admit(request.signal);
       }
       const boxTree = this.#resource(document, "boxTree", key.boxTree) ?? retain("boxTree", measured(instrumentation, "box-tree-construction", () => buildFormattingTree({
@@ -433,12 +446,12 @@ export class RenderArtifactStore {
           ...(request.signal === undefined ? {} : { signal: request.signal }),
         })));
       const documentDisplayList = this.#resource(document, "documentDisplayList", key.documentDisplayList) ?? retain("documentDisplayList",
-        measured(instrumentation, "document-display-list-construction", () => buildDocumentDisplayList({ layout: documentLayout, paintStyle: createLayoutPaintResolver(documentLayout, computedStyles),
+        measured(instrumentation, "document-display-list-construction", () => buildDocumentDisplayList({ layout: documentLayout, styles: computedStyles,
           context: { ...request.terminalContext, colorDepth: 24, ...(document.budgets?.terminal === undefined ? {} : { budgets: document.budgets.terminal }) },
           ...(request.signal === undefined ? {} : { signal: request.signal }),
         })));
       const displayListSpatialIndex = this.#resource(document, "displayListSpatialIndex", key.documentDisplayList) ?? retain("displayListSpatialIndex",
-        measured(instrumentation, "display-list-spatial-index-construction", () => buildDisplayListSpatialIndex(documentDisplayList)));
+        measured(instrumentation, "display-list-spatial-index-construction", () => buildDisplayListSpatialIndex(documentDisplayList, request.signal)));
       const documentGeometry = this.#resource(document, "documentGeometry", key.documentGeometry) ?? retain("documentGeometry",
         measured(instrumentation, "document-geometry-index-construction", () => buildDocumentGeometryIndex(documentDisplayList, request.signal)));
       this.#reservedCost = 0;
@@ -623,22 +636,32 @@ export class RenderArtifactStore {
 
   public metrics(): RenderArtifactStoreMetrics {
     this.#measureRetainedCost();
+    const phaseOwnedBytes = Object.fromEntries(PHASES.map((phase) => [phase, 0])) as Record<PhaseName, number>;
     let retainedAnalyses = 0;
     let retainedResources = 0;
     let pinnedResources = 0;
+    const textAnalysisWork = { intrinsicCalls: 0, intrinsicReuses: 0, intrinsicAnalyzedUnits: 0, inlineBuilds: 0, inlineReuses: 0 };
     for (const document of this.#documents.values()) {
       retainedAnalyses += document.resources.documentLayout.size;
+      for (const { value } of document.resources.documentLayout.values()) {
+        for (const key of Object.keys(textAnalysisWork) as (keyof typeof textAnalysisWork)[]) textAnalysisWork[key] += value.textAnalysisWork[key];
+      }
       for (const phase of PHASES) for (const resource of document.resources[phase].values()) {
+        phaseOwnedBytes[phase] += resource.owner.bytes;
         retainedResources += 1;
         if (resource.pins > 0) pinnedResources += 1;
       }
     }
     return Object.freeze({
       attachedDocuments: this.#documents.size,
+      textAnalysisWork: Object.freeze(textAnalysisWork),
+      phaseOwnedBytes: Object.freeze(phaseOwnedBytes),
       retainedAnalyses,
       retainedResources,
       pinnedResources,
       reservedCost: this.#reservedCost,
+      allocatedPackedBytes: this.#allocatedPackedBytes,
+      allocatedPackedPages: this.#allocatedPackedPages,
       sideCacheScans: this.#sideCacheScans,
       retainedCost: this.#retainedCost,
       evictions: this.#evictions,
@@ -766,7 +789,7 @@ export class RenderArtifactStore {
       for (const identity of document.searches.keys()) bookkeeping += 1024 + identity.length * 2;
     }
     this.#retainedCost = bookkeeping + this.#accounting.total(owners);
-    this.#accounting.endBatch();
+    if (this.#constructionDepth === 0) this.#accounting.endBatch();
   }
 
   /** Expensive diagnostic oracle for tests and explicit qualification, never used for admission. */

@@ -20,6 +20,50 @@ export interface FormEntry {
   readonly value: string;
 }
 
+type ImplicitSubmission =
+  | { readonly kind: "none" }
+  | { readonly kind: "submit"; readonly formId: DocumentNodeRef; readonly submitterId?: DocumentNodeRef }
+  | { readonly kind: "unsupported"; readonly reason: string };
+
+const IMPLICIT_SUBMISSION_BLOCKERS: ReadonlySet<string> = new Set([
+  "text", "search", "url", "tel", "email", "password", "date", "month", "week",
+  "time", "datetime-local", "number",
+]);
+
+/** Resolve HTML implicit submission without changing state or choosing a different default button. */
+export function resolveImplicitSubmission(
+  document: IndexedWebDocumentSnapshot,
+  controlId: DocumentNodeRef,
+): ImplicitSubmission {
+  const control = document.control(controlId);
+  if (control?.kind !== "text" || control.disabled || control.form === null || inDatalist(document, control)) {
+    return { kind: "none" };
+  }
+  if (document.indexOutcome.status !== "complete") {
+    return { kind: "unsupported", reason: "Cannot submit an incompletely indexed document" };
+  }
+  const form = document.form(control.form);
+  if (form === null) return { kind: "none" };
+  // The indexed control sequence is document order, including external form owners.
+  const submitter = form.controls.find((candidate) => candidate.kind === "submit"
+    || (candidate.kind === "unsupported" && candidate.inputType === "image"));
+  if (submitter !== undefined) {
+    if (submitter.disabled) return { kind: "none" };
+    if (submitter.kind === "unsupported") {
+      return { kind: "unsupported", reason: "The form's default image submitter is unsupported" };
+    }
+    return { kind: "submit", formId: form.node, submitterId: submitter.node };
+  }
+  let blockers = 0;
+  for (const candidate of form.controls) {
+    if ((candidate.kind === "text" || candidate.kind === "unsupported")
+      && IMPLICIT_SUBMISSION_BLOCKERS.has(candidate.inputType) && ++blockers > 1) {
+      return { kind: "none" };
+    }
+  }
+  return { kind: "submit", formId: form.node };
+}
+
 function inDatalist(document: IndexedWebDocumentSnapshot, control: DocumentFormControl): boolean {
   let parent = document.parent(control.node);
   while (parent !== null) {

@@ -1,3 +1,4 @@
+import { PackedRows, ValueSequence, checkPackedMetadata } from "../../memory/packed.js";
 import { registerRetainedOwner } from "../../memory/retained-cost.js";
 import type { DocumentNodeRef, DocumentSourceRange } from "../../document/index.js";
 import type {
@@ -63,6 +64,52 @@ interface TextSearchSegment {
   readonly sourceRange: DocumentSourceRange | null;
 }
 
+interface SearchSegmentIdentity {
+  readonly formatting: FormattingNodeId | null;
+  readonly source: DocumentNodeRef | null;
+}
+class TextSearchSegments extends ValueSequence<TextSearchSegment> {
+  readonly #rows: PackedRows;
+  readonly #identities: readonly SearchSegmentIdentity[];
+  public readonly length: number;
+  public constructor(rows: PackedRows, identities: readonly SearchSegmentIdentity[]) {
+    super(); checkPackedMetadata(148, this); this.#rows = rows.seal(); this.#identities = Object.freeze(identities); this.length = rows.length;
+    registerRetainedOwner(this, [rows, identities], () => 32); Object.freeze(this);
+  }
+  public at(index: number): TextSearchSegment | undefined {
+    if (index < 0) index += this.length;
+    if (index < 0 || index >= this.length) return undefined;
+    const rows = this.#rows, identity = this.#identities[rows.get(index, 6) >>> 1];
+    if (identity === undefined) throw new RangeError("Missing search segment identity.");
+    const sourceStart = rows.get(index, 4);
+    return { ...identity, start: rows.get(index, 0), end: rows.get(index, 1), contentStart: rows.get(index, 2), contentEnd: rows.get(index, 3),
+      sourceRange: sourceStart === 0 ? null : { start: sourceStart - 1, end: rows.get(index, 5) - 1,
+        provenance: (rows.get(index, 6) & 1) === 1 ? "inferred" : "input" } };
+  }
+}
+class TextSearchSegmentBuilder {
+  readonly #rows = new PackedRows(7);
+  readonly #identities: SearchSegmentIdentity[] = [];
+  readonly #identityIndex = new Map<FormattingNodeId | null, number>();
+  #last: TextSearchSegment | undefined;
+  public get last(): TextSearchSegment | undefined { return this.#last; }
+  public replaceLast(segment: TextSearchSegment): void { this.#last = segment; }
+  #flush(): void {
+    const segment = this.#last;
+    if (segment === undefined) return;
+    let identity = this.#identityIndex.get(segment.formatting);
+    if (identity === undefined) { identity = this.#identities.length;
+      this.#identities.push(Object.freeze({ formatting: segment.formatting, source: segment.source }));
+      this.#identityIndex.set(segment.formatting, identity); }
+    this.#rows.push(segment.start, segment.end, segment.contentStart, segment.contentEnd,
+      segment.sourceRange === null ? 0 : segment.sourceRange.start + 1,
+      segment.sourceRange === null ? 0 : segment.sourceRange.end + 1,
+      identity * 2 + (segment.sourceRange?.provenance === "inferred" ? 1 : 0));
+  }
+  public push(segment: TextSearchSegment): void { this.#flush(); this.#last = segment; }
+  public finish(): TextSearchSegments { this.#flush(); this.#last = undefined; return new TextSearchSegments(this.#rows, this.#identities); }
+}
+
 function foldText(value: string): {
   readonly text: string;
   readonly originalBoundaryByFoldedOffset: Uint32Array;
@@ -106,17 +153,17 @@ export function clearTextSearchQueryCache(index: TextSearchIndex): void {
 class ImmutableTextSearchIndex implements TextSearchIndex {
   readonly #queries = new Map<string, TextSearchResult>();
   readonly text: string;
-  readonly #segments: readonly TextSearchSegment[];
+  readonly #segments: TextSearchSegments;
   readonly #foldedText: string;
   readonly #originalBoundaryByFoldedOffset: Uint32Array;
 
   public constructor(
     text: string,
-    segments: readonly TextSearchSegment[]
+    segments: TextSearchSegments
   ) {
     this.text = text;
     queryCaches.set(this, { values: this.#queries, revision: 0 });
-    this.#segments = Object.freeze(segments.map((segment) => Object.freeze(segment)));
+    this.#segments = segments;
     const folded = foldText(text);
     this.#foldedText = folded.text;
     this.#originalBoundaryByFoldedOffset = folded.originalBoundaryByFoldedOffset;
@@ -158,11 +205,11 @@ class ImmutableTextSearchIndex implements TextSearchIndex {
       let upper = this.#segments.length;
       while (lower < upper) {
         const middle = lower + Math.floor((upper - lower) / 2);
-        if ((this.#segments[middle]?.end ?? Number.POSITIVE_INFINITY) <= start) lower = middle + 1;
+        if ((this.#segments.at(middle)?.end ?? Number.POSITIVE_INFINITY) <= start) lower = middle + 1;
         else upper = middle;
       }
       for (let segmentIndex = lower; segmentIndex < this.#segments.length; segmentIndex += 1) {
-        const segment = this.#segments[segmentIndex];
+        const segment = this.#segments.at(segmentIndex);
         if (segment === undefined || segment.start >= end) break;
         if (segment.formatting === null || end <= segment.start) continue;
         const overlapStart = Math.max(start, segment.start);
@@ -222,7 +269,7 @@ export function buildTextSearchIndex(
     throw new RangeError("Inline item streams and text search must use the same box tree.");
   }
   const parts: string[] = [];
-  const segments: TextSearchSegment[] = [];
+  const segments = new TextSearchSegmentBuilder();
   let length = 0;
   let previousExact = false;
   let pendingSeparator: Omit<TextSearchSegment, "start" | "end"> | null = null;
@@ -240,7 +287,7 @@ export function buildTextSearchIndex(
       previousExact = false;
     }
     parts.push(value);
-    const previous = segments.at(-1);
+    const previous = segments.last;
     const range = segment.sourceRange;
     const exact = exactSourceText && range !== null
       && value.length === segment.contentEnd - segment.contentStart
@@ -250,7 +297,7 @@ export function buildTextSearchIndex(
       && previous.source === segment.source && previous.contentEnd === segment.contentStart
       && previous.sourceRange.end === range.start
       && previous.sourceRange.provenance === range.provenance) {
-      segments[segments.length - 1] = {
+      segments.replaceLast({
         ...previous,
         end: length + value.length,
         contentEnd: segment.contentEnd,
@@ -259,7 +306,7 @@ export function buildTextSearchIndex(
           end: range.end,
           provenance: range.provenance,
         }),
-      };
+      });
     } else {
       segments.push({ ...segment, start: length, end: length + value.length });
     }
@@ -336,7 +383,7 @@ export function buildTextSearchIndex(
       if (child !== undefined) pending.push({ phase: "enter", id: child });
     }
   }
-  return new ImmutableTextSearchIndex(parts.join(""), segments);
+  return new ImmutableTextSearchIndex(parts.join(""), segments.finish());
 }
 
 /** Retains one logical query and its fragment mapping for viewport projection. */

@@ -22,7 +22,8 @@ export function formatCounterNumber(value: number, style: CounterStyle): string 
 }
 
 export function formatListMarker(value: number, style: CounterStyle): string {
+  if (style === "none") return "";
   const representation = formatCounterNumber(value, style);
   return style === "decimal" || style === "decimal-leading-zero" || style === "lower-alpha" || style === "upper-alpha"
-    ? `${representation}.` : representation;
+    ? `${representation}. ` : `${representation} `;
 }

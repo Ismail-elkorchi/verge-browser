@@ -13,7 +13,7 @@ import {
   cssPx,
   cssRect
 } from "../../dist/presentation/layout/index.js";
-import { terminalCellMeasurer, terminalCssTextMeasurer } from "../../dist/ui/terminal-measure.js";
+import { terminalCellMeasurer, terminalCssTextMeasurer, terminalCssControlMeasurer } from "../../dist/ui/terminal-measure.js";
 
 const CELL_WIDTH = cssPx(8);
 const ROW_HEIGHT = cssPx(16);
@@ -110,6 +110,7 @@ async function runSmoke(expectedRuntime) {
     },
     layoutContext: {
       viewport: { width: viewportWidth, height: viewportHeight },
+      controlMeasurer: terminalCssControlMeasurer(),
       textMeasurer: CSS_TEXT_MEASURER,
       initialContainingBlock: cssRect(
         cssCoordinate(cssPx(0)), cssCoordinate(cssPx(0)), viewportWidth, viewportHeight

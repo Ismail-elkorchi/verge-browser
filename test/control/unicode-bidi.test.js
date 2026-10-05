@@ -33,8 +33,8 @@ test("Unicode 17.0.0 BidiCharacterTest conformance through UAX #9 rule L2", asyn
     const requested = fields[1] === "0" ? "ltr" : fields[1] === "1" ? "rtl" : "auto";
     const paragraph = resolveBidiParagraph(bidiItemsFromText(value, () => null), requested);
     assert.equal(paragraph.baseLevel, Number.parseInt(fields[2] ?? "0", 10), rawLine);
-    assert.deepEqual(paragraph.embeddingLevels, expectedLevels(fields[3] ?? ""), rawLine);
-    assert.deepEqual(paragraph.visualOrder.itemIndices, expectedOrder(fields[4] ?? ""), rawLine);
+    assert.deepEqual([...paragraph.embeddingLevels], expectedLevels(fields[3] ?? ""), rawLine);
+    assert.deepEqual([...paragraph.visualOrder.itemIndices], expectedOrder(fields[4] ?? ""), rawLine);
     cases += 1;
   }
   assert.ok(cases > 90_000, `expected the complete BidiCharacterTest suite, received ${String(cases)} cases`);
@@ -72,8 +72,8 @@ test("Unicode 17.0.0 BidiTest property-sequence conformance", async () => {
     for (const [mask, requested] of [[1, "auto"], [2, "ltr"], [4, "rtl"]]) {
       if ((bitset & mask) === 0) continue;
       const paragraph = resolveBidiParagraph(items, requested);
-      assert.deepEqual(paragraph.embeddingLevels, levels, `${rawLine}; direction=${requested}`);
-      assert.deepEqual(paragraph.visualOrder.itemIndices, order, `${rawLine}; direction=${requested}`);
+      assert.deepEqual([...paragraph.embeddingLevels], levels, `${rawLine}; direction=${requested}`);
+      assert.deepEqual([...paragraph.visualOrder.itemIndices], order, `${rawLine}; direction=${requested}`);
       cases += 1;
     }
   }
@@ -117,18 +117,18 @@ test("bidi budgets and cancellation return deterministic complete-state prefixes
 });
 
 
-test("paragraph collections share immutable items at global paragraph boundaries", () => {
+test("packed paragraph slices preserve global item values without retained object records", () => {
   const items = bidiItemsFromText("A😀\nאב\u2067ع\u2069", () => null);
   const collection = resolveBidiParagraphs(items);
-  const unique = new Set(collection.items);
+  assert.ok(Object.isFrozen(collection.items));
   for (const slice of collection.paragraphs) {
     for (const [local, item] of slice.paragraph.items.entries()) {
-      assert.equal(item, collection.items[slice.itemStart + local]);
-      assert.ok(Object.isFrozen(item));
+      assert.deepEqual(item, collection.items.at(slice.itemStart + local));
       assert.equal("logicalIndex" in item, false);
-      unique.add(item);
+      item.text = "changed decoded record";
+      assert.notEqual(collection.items.at(slice.itemStart + local).text, item.text);
     }
   }
-  assert.equal(unique.size, items.length);
+  assert.equal(collection.items.length, items.length);
   assert.equal(collection.paragraphs.length, 2);
 });

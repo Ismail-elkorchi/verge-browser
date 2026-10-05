@@ -43,7 +43,7 @@ import type {
   HistoryEntry,
   StoredBrowserDocument,
 } from "../app/storage.js";
-import type { IndexedPageSnapshot } from "../app/types.js";
+import type { IndexedPageSnapshot, NetworkOutcome } from "../app/types.js";
 import type { DocumentNodeRef, DocumentSelectOption, DocumentState } from "../document/index.js";
 import type { RenderDocumentSummary, ViewportRenderPayload } from "./render-worker/index.js";
 
@@ -76,6 +76,13 @@ export const linkMenuItems = [
 export interface StatusMessage {
   readonly text: string;
   readonly tone: "info" | "error" | "success";
+  readonly networkOutcome?: NetworkOutcome;
+}
+
+interface OperationFailure {
+  readonly message: string;
+  readonly networkOutcome?: NetworkOutcome;
+  readonly downloadTarget?: string;
 }
 
 export interface DocumentSearchMatch {
@@ -251,6 +258,7 @@ export interface BrowserTuiState {
 }
 
 export type BrowserTuiMessage =
+  | { readonly kind: "implicitSubmit"; readonly controlId: string }
   | { readonly kind: "quit" }
   | { readonly kind: "terminalResized" }
   | { readonly kind: "requestActiveViewport" }
@@ -376,16 +384,10 @@ export type BrowserTuiMessage =
   | { readonly kind: "downloadsChanged"; readonly downloads: readonly DownloadRecord[]; readonly status: string }
   | { readonly kind: "libraryChanged" }
   | { readonly kind: "operationComplete"; readonly status: string }
-  | {
-      readonly kind: "operationFailed";
-      readonly message: string;
-      readonly downloadTarget?: string;
-    }
-  | {
+  | ({ readonly kind: "operationFailed" } & OperationFailure)
+  | ({
       readonly kind: "navigationFailed";
-      readonly message: string;
       readonly documentId: string;
       readonly documentRevision: number;
       readonly navigationGeneration: number;
-      readonly downloadTarget?: string;
-    };
+    } & OperationFailure);

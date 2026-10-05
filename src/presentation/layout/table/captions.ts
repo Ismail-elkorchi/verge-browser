@@ -8,7 +8,7 @@ import {
   type CssNonNegativeLength,
   type CssPixelLength,
 } from "../fixed.js";
-import type { TableLayoutHost, TableSlotGrid } from "./types.js";
+import type { TableSizingHost, TableSlotGrid } from "./types.js";
 import type { IntrinsicSizeContributions } from "../intrinsic/index.js";
 
 const ZERO = cssNonNegativeLength(cssPx(0));
@@ -18,7 +18,7 @@ export interface TableCaptionGroups {
   readonly bottom: readonly FormattingNodeId[];
 }
 
-export function groupTableCaptions(host: TableLayoutHost, grid: TableSlotGrid): TableCaptionGroups {
+export function groupTableCaptions(host: TableSizingHost, grid: TableSlotGrid): TableCaptionGroups {
   const top: FormattingNodeId[] = [];
   const bottom: FormattingNodeId[] = [];
   for (const id of grid.captions) {

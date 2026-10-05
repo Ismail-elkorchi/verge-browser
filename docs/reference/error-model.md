@@ -5,7 +5,8 @@
 Represents deterministic failures that happen before a usable HTML response is available, or while enforcing fetch safety limits.
 
 Common kinds include:
-- DNS/network resolution failures,
+- DNS resolution failures,
+- transport failures such as refused or reset connections,
 - timeout failures,
 - TLS failures,
 - redirect-limit failures,
@@ -14,6 +15,15 @@ Common kinds include:
 - policy-denied URL failures.
 
 `fetchPage()` and `fetchPageStream()` throw `NetworkFetchError` for those cases.
+
+Branch on `networkOutcome.kind` and `detailCode`, not the error's display text.
+The HTTP client's `NETWORK_FAILURE` maps to `kind: "transport"`; recognized DNS,
+TLS, and timeout failures keep their separate classifications. A transport
+summary may include a bounded, allowlisted underlying code such as
+`ECONNREFUSED`, without exposing arbitrary cause messages. The original error
+remains available as `cause` for controlled diagnostics and can contain private
+request details. Display messages are sanitized and bounded; the structured
+outcome is retained unchanged by that display formatting and by the browser UI.
 
 ## HTTP error responses are returned, not thrown
 

@@ -16,7 +16,7 @@ import {
 } from "../../dist/presentation/layout/index.js";
 import { RenderArtifactStore, RenderStageMetrics } from "../../dist/presentation/renderer/index.js";
 import { embeddedStylesheetSources } from "../../dist/presentation/style/index.js";
-import { terminalCellMeasurer, terminalCssTextMeasurer } from "../../dist/ui/terminal-measure.js";
+import { terminalCellMeasurer, terminalCssTextMeasurer, terminalCssControlMeasurer } from "../../dist/ui/terminal-measure.js";
 import { RenderWorkerClient } from "../../dist/ui/render-worker/index.js";
 
 const CELL_WIDTH = cssPx(8);
@@ -40,6 +40,7 @@ function contexts(columns, rows, colorDepth = 24, ambiguousWidth = 1) {
       viewport: { width: cssNonNegativeLength(width), height: cssNonNegativeLength(height) },
       initialContainingBlock: viewport,
       scrollport: viewport,
+      controlMeasurer: terminalCssControlMeasurer(),
       textMeasurer: terminalCssTextMeasurer(CELL_WIDTH, ROW_HEIGHT, ambiguousWidth),
     },
     terminalContext: {
@@ -424,7 +425,7 @@ function comparableRendering(store, result, columns, rows) {
       return { node, ...style, customProperties: [...style.customProperties] };
     }),
     geometry: layoutFragments(artifacts.documentLayout),
-    commands: artifacts.documentDisplayList.commands,
+    commands: [...artifacts.documentDisplayList.commands],
     cells: result.terminal.cellBuffer,
     actions: result.terminal.hitTestIndex.regions,
     focus: result.terminal.focusMap.targets,
@@ -978,7 +979,7 @@ for (const [name, content, selector] of [
       assert.equal(after.textSearchIndex, before.textSearchIndex);
       for (const stage of ["box-tree-construction", "inline-item-stream-construction", "logical-search-index-construction", "normal-flow-layout", "document-geometry-index-construction"]) assert.equal(invocation(changed, stage), 0, stage);
       assert.equal(invocation(changed, "document-display-list-construction"), 1);
-      assert.deepEqual(after.documentDisplayList.commands, full.documentDisplayList.commands);
+      assert.deepEqual([...after.documentDisplayList.commands], [...full.documentDisplayList.commands]);
       assert.ok(after.documentDisplayList.commands.some((command) => command.kind === "background" && command.style.background?.r === 255));
       assert.deepEqual(changed.terminal.cellBuffer, expected.terminal.cellBuffer);
       assert.deepEqual(changed.terminal.focusMap, expected.terminal.focusMap);
@@ -1004,7 +1005,7 @@ test("background participation in hidden empty table cells uses canonical recomp
     const expected = render(fresh.store, 2);
     assert.equal(invocation(changed, "normal-flow-layout"), 1);
     assert.deepEqual(changed.terminal.cellBuffer, expected.terminal.cellBuffer);
-    assert.deepEqual(analysis(retained.store,80,24).documentDisplayList.commands, analysis(fresh.store,80,24).documentDisplayList.commands);
+    assert.deepEqual([...analysis(retained.store,80,24).documentDisplayList.commands], [...analysis(fresh.store,80,24).documentDisplayList.commands]);
   } finally { retained.store.dispose(); fresh.store.dispose(); }
 });
 

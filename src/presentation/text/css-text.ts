@@ -1,3 +1,5 @@
+import { PackedRows, ValueSequence, checkPackedMetadata } from "../../memory/packed.js";
+import { registerRetainedOwner } from "../../memory/retained-cost.js";
 import { segmentGraphemeClusters } from "../../unicode/index.js";
 import { transformTextWithSourceRanges, transformedSourceRange, type TransformedText } from "./text-transform.js";
 
@@ -12,6 +14,27 @@ export interface LogicalTextUnit {
   readonly transformedStartCodeUnit: number;
   readonly transformedEndCodeUnit: number;
   readonly collapsibleSpace: boolean;
+}
+
+/** Canonical CSS logical text. Identity offsets are implicit; only transformed exceptions need mapping. */
+export class LogicalTextUnits extends ValueSequence<LogicalTextUnit> {
+  readonly #rows: PackedRows;
+  readonly #transformed: TransformedText;
+  public readonly length: number;
+  public constructor(transformed: TransformedText, rows: PackedRows) {
+    super(); checkPackedMetadata(148, this); this.#transformed = transformed; this.#rows = rows.seal(); this.length = rows.length;
+    registerRetainedOwner(this, () => [this.#transformed, this.#rows], () => 32); Object.freeze(this);
+  }
+  public at(index: number): LogicalTextUnit | undefined {
+    if (index < 0) index += this.length;
+    if (index < 0 || index >= this.length) return undefined;
+    const start = this.#rows.get(index, 0), end = this.#rows.get(index, 1), flags = this.#rows.get(index, 2);
+    const [contentStartCodeUnit, contentEndCodeUnit] = transformedSourceRange(this.#transformed, start, end);
+    const kind = flags === 2 ? "tab" : flags === 3 ? "forced-break" : flags === 4 ? "soft-hyphen" : "text";
+    return { kind, text: kind === "forced-break" ? "" : flags === 1 ? " " : this.#transformed.value.slice(start, end),
+      contentStartCodeUnit, contentEndCodeUnit, transformedStartCodeUnit: start, transformedEndCodeUnit: end,
+      collapsibleSpace: flags === 1 };
+  }
 }
 
 export interface CssTextProcessingBudgets {
@@ -30,7 +53,7 @@ export type CssTextProcessingOutcome =
 
 export interface ProcessedCssText {
   readonly transformed: TransformedText;
-  readonly units: readonly LogicalTextUnit[];
+  readonly units: LogicalTextUnits;
   readonly collapsibleSpacePending: boolean;
   readonly outcome: CssTextProcessingOutcome;
 }
@@ -66,7 +89,7 @@ export function processCssText(
   if (!Number.isSafeInteger(limit) || limit < 0) {
     return Object.freeze({
       transformed,
-      units: Object.freeze([]),
+      units: new LogicalTextUnits(transformed, new PackedRows(3)),
       collapsibleSpacePending,
       outcome: Object.freeze({ status: "rejected", reason: "invalid-budget" })
     });
@@ -75,7 +98,7 @@ export function processCssText(
   if (stream.outcome.status !== "complete") {
     return Object.freeze({
       transformed,
-      units: Object.freeze([]),
+      units: new LogicalTextUnits(transformed, new PackedRows(3)),
       collapsibleSpacePending,
       outcome: stream.outcome.status === "rejected"
         ? Object.freeze({ status: "rejected", reason: "invalid-budget" })
@@ -90,70 +113,33 @@ export function processCssText(
   const collapses = whiteSpace === "normal" || whiteSpace === "nowrap" || whiteSpace === "pre-line";
   const preservesSegmentBreaks = whiteSpace === "pre" || whiteSpace === "pre-wrap"
     || whiteSpace === "pre-line" || whiteSpace === "break-spaces";
-  const units: LogicalTextUnit[] = [];
+  const units = new PackedRows(3, false, Math.max(1, Math.min(128, stream.clusters.length)));
   let pending = collapsibleSpacePending;
   for (const cluster of stream.clusters) {
     signal?.throwIfAborted();
-    const [contentStartCodeUnit, contentEndCodeUnit] = transformedSourceRange(
-      transformed,
-      cluster.startCodeUnit,
-      cluster.endCodeUnit
-    );
     if (cssSegmentBreak(cluster.text) && preservesSegmentBreaks) {
-      units.push(Object.freeze({
-        kind: "forced-break",
-        text: "",
-        contentStartCodeUnit,
-        contentEndCodeUnit,
-        transformedStartCodeUnit: cluster.startCodeUnit,
-        transformedEndCodeUnit: cluster.endCodeUnit,
-        collapsibleSpace: false
-      }));
+      units.push(cluster.startCodeUnit, cluster.endCodeUnit, 3);
       pending = false;
       continue;
     }
     if (cluster.text === "\u00ad") {
-      units.push(Object.freeze({
-        kind: "soft-hyphen",
-        text: cluster.text,
-        contentStartCodeUnit,
-        contentEndCodeUnit,
-        transformedStartCodeUnit: cluster.startCodeUnit,
-        transformedEndCodeUnit: cluster.endCodeUnit,
-        collapsibleSpace: false
-      }));
+      units.push(cluster.startCodeUnit, cluster.endCodeUnit, 4);
       pending = false;
       continue;
     }
     if (cluster.text === "\t" && !collapses) {
-      units.push(Object.freeze({
-        kind: "tab",
-        text: cluster.text,
-        contentStartCodeUnit,
-        contentEndCodeUnit,
-        transformedStartCodeUnit: cluster.startCodeUnit,
-        transformedEndCodeUnit: cluster.endCodeUnit,
-        collapsibleSpace: false
-      }));
+      units.push(cluster.startCodeUnit, cluster.endCodeUnit, 2);
       pending = false;
       continue;
     }
     const collapsible = collapses && cssWhiteSpaceCluster(cluster.text);
     if (collapsible && pending) continue;
-    units.push(Object.freeze({
-      kind: "text",
-      text: collapsible ? " " : cluster.text,
-      contentStartCodeUnit,
-      contentEndCodeUnit,
-      transformedStartCodeUnit: cluster.startCodeUnit,
-      transformedEndCodeUnit: cluster.endCodeUnit,
-      collapsibleSpace: collapsible
-    }));
+    units.push(cluster.startCodeUnit, cluster.endCodeUnit, collapsible ? 1 : 0);
     pending = collapsible;
   }
   return Object.freeze({
     transformed,
-    units: Object.freeze(units),
+    units: new LogicalTextUnits(transformed, units),
     collapsibleSpacePending: pending,
     outcome: Object.freeze({ status: "complete", graphemeClusters: stream.clusters.length })
   });

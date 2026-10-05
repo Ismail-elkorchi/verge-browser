@@ -276,9 +276,13 @@ export interface TableCollapsedBorderHost {
   registerCollapsedBorderOverride(node: FormattingNodeId, value: TableBorderOverride): void;
 }
 
-export interface TableLayoutHost extends TableSlotGridHost, TableColumnMeasureHost, TableCollapsedBorderHost {
+/** Box, column and row sizing dependencies shared by intrinsic and used table layout. */
+export interface TableSizingHost extends TableSlotGridHost, TableColumnMeasureHost, TableCollapsedBorderHost {
   tableSlotGrid(table: FormattingNode): TableSlotGrid;
   dimensions(node: FormattingNode, width: CssPixelLength, height: CssPixelLength | null, forcedWidth?: CssPixelLength | null): TableUsedDimensions;
+}
+
+export interface TableLayoutHost extends TableSizingHost {
   layoutChild(
     id: FormattingNodeId,
     x: CssCoordinate,

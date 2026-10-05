@@ -46,7 +46,7 @@ export interface CssColor {
   readonly a: number;
 }
 
-export type CssLengthUnit = "px" | "em" | "rem" | "ch" | "%" | "vw" | "vh";
+export type CssLengthUnit = "px" | "em" | "rem" | "ex" | "ch" | "%" | "vw" | "vh";
 
 export type CssLengthPercentageExpression =
   | { readonly kind: "value"; readonly value: number; readonly unit: CssLengthUnit }
@@ -213,6 +213,7 @@ export interface ComputedBoxStyle {
 export interface ComputedStyle {
   readonly display: ComputedDisplay;
   readonly visibility: "visible" | "hidden" | "collapse";
+  readonly listStylePosition: "inside" | "outside";
   readonly listStyleType:
     | "none"
     | "disc"

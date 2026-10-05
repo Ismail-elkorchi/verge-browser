@@ -24,10 +24,11 @@ test("reader lists preserve nested item depth without duplicating descendant lis
   const reader = readerDocument("<ol><li>Parent<ul><li>Child</li></ul></li><li>Sibling</li></ol>");
   const items = reader.blocks.filter((block) => block.kind === "list-item");
   assert.deepEqual(items.map((item) => [item.depth, item.marker, item.text]), [
-    [1, "1.", "Parent"],
-    [2, "•", "Child"],
-    [1, "2.", "Sibling"]
+    [1, "1. ", "Parent"],
+    [2, "• ", "Child"],
+    [1, "2. ", "Sibling"]
   ]);
+  assert.deepEqual(readerDocumentLines(reader).slice(2), ["  1. Parent", "    • Child", "  2. Sibling"]);
 });
 
 test("reader document retains generic and custom-element prose around semantic blocks", () => {

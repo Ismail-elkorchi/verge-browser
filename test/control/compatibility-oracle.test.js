@@ -42,6 +42,39 @@ test("oracle comparisons fail computed style and controlled geometry drift", () 
   assert.deepEqual(compareOracleCase(fixture, DEFAULT_VARIANTS[0], native, chromium).failures.map((failure) => failure.kind), ["computed-style", "controlled-geometry"]);
 });
 
+test("relative oracle geometry compares owned edges without equating text or ex metrics", () => {
+  const { fixture, native, chromium } = observations();
+  fixture.oracle.geometry[0].referenceId = "reference";
+  native.byId.reference = { rectangle: { width: 68 } };
+  chromium.byId.box.rectangle.width = 104;
+  chromium.byId.reference = { rectangle: { width: 76 } };
+  assert.deepEqual(compareOracleCase(fixture, DEFAULT_VARIANTS[0], native, chromium).failures, []);
+  native.byId.box.rectangle.width += 8;
+  assert.deepEqual(compareOracleCase(fixture, DEFAULT_VARIANTS[0], native, chromium).failures, [
+    { kind: "controlled-geometry", target: "box.width - reference.width", expected: 28, actual: 36 },
+  ]);
+  // Equivalent expressions can agree within each engine even when the
+  // terminal fallback and browser x-height produce different absolute sizes.
+  native.byId.box.rectangle.width = native.byId.reference.rectangle.width;
+  chromium.byId.box.rectangle.width = chromium.byId.reference.rectangle.width;
+  assert.deepEqual(compareOracleCase(fixture, DEFAULT_VARIANTS[0], native, chromium).failures, []);
+});
+
+test("relative oracle geometry rejects missing and nonfinite reference measurements", () => {
+  const { fixture, native, chromium } = observations();
+  fixture.oracle.geometry[0].referenceId = "reference";
+  for (const width of [undefined, Number.NaN, Number.POSITIVE_INFINITY]) {
+    native.byId.reference = { rectangle: { width } };
+    chromium.byId.reference = { rectangle: { width } };
+    assert.deepEqual(compareOracleCase(fixture, DEFAULT_VARIANTS[0], native, chromium).failures, [
+      { kind: "controlled-geometry", target: "box.width - reference.width", expected: null, actual: null },
+    ]);
+  }
+  delete native.byId.reference;
+  delete chromium.byId.reference;
+  assert.equal(compareOracleCase(fixture, DEFAULT_VARIANTS[0], native, chromium).failures[0].kind, "controlled-geometry");
+});
+
 test("oracle comparisons distinguish intentional zero font suppression", () => {
   const { fixture, native, chromium } = observations();
   native.zeroFontPainted = 1;

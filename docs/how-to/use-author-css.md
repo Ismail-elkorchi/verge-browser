@@ -53,9 +53,13 @@ rasterization. The currently supported CSS slice includes:
   `attr(name)`, `counter()` and `counters()`, plus optional `/` alternative text;
   `counter-reset`, `counter-increment`, and `counter-set` share HTML list
   `start`, `reversed`, and item `value` numbering;
+- `list-style-type`, `list-style-position: inside|outside`, and the supported
+  `list-style` shorthand; inside markers join inline flow, while outside markers
+  align with the first content baseline without widening the item's content;
 - margins (including negative and automatic values), padding, side-specific
   border widths, horizontal LTR/RTL logical block/inline borders and their
-  width/style/color longhands, percentages, viewport units, font-relative units,
+  width/style/color longhands, percentages, viewport units, `em`, `rem`, `ex`,
+  and `ch`,
   `box-sizing`, and min/max constraints resolved to used CSS-pixel values;
 - block flow with adjoining-margin collapse, inline formatting with explicit
   line boxes, flexible-length resolution, automatic flex minimum sizes,
@@ -79,7 +83,12 @@ rasterization. The currently supported CSS slice includes:
   shared paint/interaction geometry, and transformed containing blocks;
 - bounded widths, heights, gaps, solid borders, CSS named colors and functional
   RGB/HSL colors, HTML `bgcolor` presentational hints, alpha composition, and
-  overflow clipping.
+  overflow clipping and nested scrolling geometry.
+
+The current root background, or an eligible body background under a transparent
+HTML root, paints the canvas beyond the element's box. Body propagation is
+suppressed by `display:none` or paint containment on the root or body. Canvas
+painting does not enlarge the body or create a pointer target.
 
 Generated counters support decimal, decimal-leading-zero, lower/upper-alpha
 (and lower/upper-latin aliases), disc, circle, square, and none. Generated
@@ -94,7 +103,10 @@ physical sides before cascade winner selection; they do not add vertical writing
 
 The terminal text measurer uses its actual fixed-size glyph advances and normal
 line metrics. Computed CSS font sizes and font-relative lengths remain distinct;
-the rasterizer does not simulate smaller glyphs by overwriting adjacent text or
+used `ex` resolves against x-height and `ch` against the character advance.
+Computed font-size/line-height values and media queries use a `0.5em` fallback
+for these units where selected-font metrics are unavailable. The rasterizer
+does not simulate smaller glyphs by overwriting adjacent text or
 larger glyphs by inserting spaces. Explicit compact line heights can still
 create authored overlap.
 
@@ -104,8 +116,8 @@ raster image decoding, and page
 JavaScript remain explicit gaps. The implemented `grid-template` shorthand
 does not imply support for the separate `grid` shorthand. Supported positioned clipping retains document
 semantics while its actual paint and pointer geometry stays clipped. Sticky
-positioning uses the root terminal scrollport; nested scrolling boxes remain
-typed unsupported.
+positioning uses the relevant scroll owner, including supported nested scrolling
+boxes.
 
 HTML meaning remains available when a rule cannot be represented. Unsupported
 selectors, properties, and values are ignored and aggregated in the browser's

@@ -62,3 +62,15 @@ test("emergency line selection retains tab-stop advances after an ordinary wrap"
   assert.deepEqual(result.lines, ["a", "abc\t", "defg"]);
   assert.equal(result.selection.usedAdvances.get(5), cssPx(1));
 });
+
+
+test("line selection preserves signed inline edge advances and tab stops before the origin", () => {
+  const items = [-4, 0, 4].map((advance, logicalIndex) => ({ logicalIndex, advance: cssPx(advance),
+    tabInterval: logicalIndex === 1 ? cssPx(8) : null, breakBefore: "prohibited", forcedBreak: false,
+    collapsibleSpace: false, wrappingAllowed: true }));
+  const selection = selectLogicalLines(items, cssPx(4), cssPx(4));
+  assert.equal(selection.outcome.status, "complete");
+  assert.equal(selection.outcome.lines, 1);
+  assert.equal(selection.usedAdvances.get(0), cssPx(-4));
+  assert.equal(selection.usedAdvances.get(1), cssPx(4));
+});

@@ -21,7 +21,7 @@ import {
   buildViewportTerminalResult,
   rasterizeViewportDisplayList
 } from "../../dist/presentation/terminal/index.js";
-import { terminalCellMeasurer, terminalCssTextMeasurer } from "../../dist/ui/terminal-measure.js";
+import { terminalCellMeasurer, terminalCssTextMeasurer, terminalCssControlMeasurer } from "../../dist/ui/terminal-measure.js";
 
 const CELL_WIDTH = cssPx(8);
 const ROW_HEIGHT = cssPx(16);
@@ -78,6 +78,7 @@ function render(html, columns = 80, rows = 24, options = {}) {
       viewport: { width: viewportWidth, height: viewportHeight },
       initialContainingBlock: viewportRect,
       scrollport: viewportRect,
+      controlMeasurer: terminalCssControlMeasurer(),
       textMeasurer: terminalCssTextMeasurer(CELL_WIDTH, ROW_HEIGHT),
       ...(options.budgets === undefined ? {} : { budgets: options.budgets })
     },
@@ -85,8 +86,7 @@ function render(html, columns = 80, rows = 24, options = {}) {
   });
   assert.ok(layout.outcome.status === "complete" || (options.budgets !== undefined && layout.outcome.status === "truncated"),
     JSON.stringify(layout.outcome));
-  const displayList = buildDocumentDisplayList({
-    layout,
+  const displayList = buildDocumentDisplayList({ styles: layout.formatting.styles, layout,
     context: {
       columns,
       rows,
@@ -266,7 +266,7 @@ test("an atomic child's transform does not move its inline ancestor decoration o
   assert.deepEqual(shifted.layout.lineBoxes[shifted.layout.lineBoxes.length - 1].rect,
     baseline.layout.lineBoxes[baseline.layout.lineBoxes.length - 1].rect);
   assert.ok(parent.overflowRect.x + parent.overflowRect.width >= fragment(shifted, "child").borderRect.x + cssPx(40));
-  const backgrounds = (result) => result.displayList.commands.filter((command) => command.kind === "background"
+  const backgrounds = (result) => [...result.displayList.commands].filter((command) => command.kind === "background"
     && command.documentNode === node(result, "parent"));
   assert.ok(backgrounds(shifted).length > 0, "the inline ancestor's own background is painted");
   assert.deepEqual(backgrounds(shifted).map((command) => command.rect), backgrounds(baseline).map((command) => command.rect));
@@ -395,7 +395,7 @@ for (const captionSide of ["top", "bottom"]) {
       assertTranslation(formattingFragment(baseline, "table", kind), formattingFragment(shifted, "table", kind), 24, 48);
     }
     assert.deepEqual(fragment(shifted, "after").borderRect, fragment(baseline, "after").borderRect);
-    const paints = shifted.displayList.commands.filter((command) => command.kind === "background" && command.documentNode === node(shifted, "table"));
+    const paints = [...shifted.displayList.commands].filter((command) => command.kind === "background" && command.documentNode === node(shifted, "table"));
     assert.equal(paints.length, 1, "only the grid paints the table background");
     assert.deepEqual(paints[0].rect, formattingFragment(shifted, "table", "table").borderRect);
   });

@@ -1,20 +1,22 @@
 import { renderElementFrame, renderFramePlain } from "@ismail-elkorchi/terminal-ui/renderer";
-import { runTui, TuiRunError } from "@ismail-elkorchi/terminal-ui/tui";
+import { defaultSessionProtocolPolicy, runTui, TuiRunError } from "@ismail-elkorchi/terminal-ui/tui";
 import type { DiagnosticOccurrence, TerminalDiagnosticValue } from "@ismail-elkorchi/terminal-ui";
 import type { HttpSessionAdapter } from "@ismail-elkorchi/http-client";
 
 import type { PageAcquisition } from "../app/page-acquisition.js";
 import type { BrowserStore } from "../app/storage.js";
 import type { RenderInstrumentation } from "../presentation/renderer/index.js";
-import type { TerminalSize } from "@ismail-elkorchi/terminal-ui/host";
+import type { TerminalHost, TerminalSize } from "@ismail-elkorchi/terminal-ui/host";
 import type { RenderWorkerClient } from "./render-worker/client.js";
 import type { BrowserServices } from "./services.js";
 import { createBrowserApp, createBrowserInitialState } from "./app.js";
 import { BrowserController } from "./browser-controller.js";
 import { browserRenderPreferences, browserPageSize, documentScrollRow } from "./document-layout.js";
 import { browserView } from "./view.js";
+import { createBrowserTextPresentation } from "./text-presentation.js";
 
 export interface BrowserTuiOptions {
+  readonly host?: TerminalHost;
   readonly store: BrowserStore;
   readonly services: BrowserServices;
   readonly createAcquisition: (httpSession: HttpSessionAdapter) => PageAcquisition;
@@ -48,6 +50,7 @@ export async function prepareBrowserTui(initialTarget: string, options: BrowserT
     return {
       controller,
       state,
+      textPresentation: createBrowserTextPresentation(),
       app: createBrowserApp(state, controller, options.instrumentation)
     };
   } catch (error) {
@@ -61,6 +64,9 @@ export async function runBrowserTui(initialTarget: string, options: BrowserTuiOp
   try {
     const activeTab = prepared.state.documents[prepared.state.activeDocumentIndex];
     await runTui(prepared.app, {
+      ...(options.host === undefined ? {} : { host: options.host }),
+      textPresentation: prepared.textPresentation,
+      sessionPolicy: { ...defaultSessionProtocolPolicy, cellPresentation: "required" },
       initialFocus: activeTab !== undefined
         && (activeTab.kind === "ready" ? activeTab.snapshot.finalUrl : activeTab.requestedUrl) === "about:newtab"
         ? { kind: "element", elementId: "browser-omnibox" }
@@ -169,7 +175,8 @@ export async function renderBrowserOnce(
     };
     return renderFramePlain(renderElementFrame(
       browserView(renderedState, { terminalSize }),
-      terminalSize
+      terminalSize,
+      { textPresentation: prepared.textPresentation }
     ));
   } finally {
     await prepared.controller.close();

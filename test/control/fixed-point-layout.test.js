@@ -50,7 +50,8 @@ import {
 } from "../../dist/presentation/terminal/index.js";
 import {
   terminalCellMeasurer,
-  terminalCssTextMeasurer
+  terminalCssTextMeasurer,
+  terminalCssControlMeasurer
 } from "../../dist/ui/terminal-measure.js";
 
 import { paintedSourceUnits, sourceUnitPainted } from "../../scripts/compat/paint-coverage.mjs";
@@ -61,7 +62,7 @@ const ZERO = cssPx(0);
 
 test("intrinsic contribution caching reports cycles and capacity without substituting geometry", () => {
   const cache = new IntrinsicContributionCache(1);
-  const request = { formattingNode: "intrinsic-node", availableInlineSize: null };
+  const request = { formattingNode: "intrinsic-node", availableInlineSize: null, inlineSizing: "contribution" };
   let recursive;
   const first = cache.resolve(request, () => {
     recursive = cache.resolve(request, () => assert.fail("recursive intrinsic calculation ran"));
@@ -70,7 +71,7 @@ test("intrinsic contribution caching reports cycles and capacity without substit
   assert.deepEqual(recursive, { status: "cycle" });
   assert.deepEqual(first, { status: "truncated", limit: 7 });
   assert.deepEqual(cache.resolve(
-    { formattingNode: "other-node", availableInlineSize: null },
+    { formattingNode: "other-node", availableInlineSize: null, inlineSizing: "contribution" },
     () => assert.fail("capacity-exhausted intrinsic calculation ran")
   ), { status: "truncated", limit: 1 });
 });
@@ -150,6 +151,7 @@ function renderFormatting(formattingTree, columns, rows = 24, budgets = {}, capa
         width: cssLengthFromFixed(columns * CELL_WIDTH),
         height: cssLengthFromFixed(rows * ROW_HEIGHT)
       },
+      controlMeasurer: terminalCssControlMeasurer(),
       textMeasurer,
       initialContainingBlock: cssRect(
         cssCoordinate(ZERO),
@@ -177,7 +179,7 @@ function renderFormatting(formattingTree, columns, rows = 24, budgets = {}, capa
     cellMeasurer: terminalCellMeasurer(capabilities.ambiguousWidth ?? 1),
     ...(budgets.terminal === undefined ? {} : { budgets: budgets.terminal })
   };
-  const displayList = buildDocumentDisplayList({ layout, context });
+  const displayList = buildDocumentDisplayList({ styles: layout.formatting.styles, layout, context });
   const documentGeometry = buildDocumentGeometryIndex(displayList);
   const terminal = terminalViewport(displayList, { scrollRow: capabilities.scrollRow ?? 0, viewportRows: rows });
   return { formatting: formattingTree, inlineItemStreams, searchIndex, layout, displayList, documentGeometry, terminal };
@@ -266,6 +268,7 @@ test("fixed-point arithmetic saturates and invalid layout inputs are rejected by
   const inlineItemStreams = buildInlineItemStreamSet(tree);
   const context = {
     viewport: { width: cssPx(160), height: cssPx(160) },
+    controlMeasurer: terminalCssControlMeasurer(),
     textMeasurer,
     initialContainingBlock: cssRect(cssCoordinate(ZERO), cssCoordinate(ZERO), cssPx(160), cssPx(160)),
     scrollport: cssRect(cssCoordinate(ZERO), cssCoordinate(ZERO), cssPx(160), cssPx(160))
@@ -281,6 +284,7 @@ test("fixed-point arithmetic saturates and invalid layout inputs are rejected by
     inlineItemStreams,
     context: {
       ...context,
+      controlMeasurer: terminalCssControlMeasurer(),
       textMeasurer: { ...textMeasurer, measure() { return Number.NaN; } }
     }
   });
@@ -290,6 +294,7 @@ test("fixed-point arithmetic saturates and invalid layout inputs are rejected by
     inlineItemStreams,
     context: {
       ...context,
+      controlMeasurer: terminalCssControlMeasurer(),
       textMeasurer: {
         ...textMeasurer,
         fontMetrics(fontSize) {
@@ -493,15 +498,15 @@ test("inline formatting creates explicit line boxes with source-linked text frag
   assert.ok(paragraph.lineBoxes.every((line) => line.rect.height > 0 && line.baseline >= line.rect.y));
   assert.ok(paragraph.lineBoxes.every((line) => line.usedInlineAdvance > 0));
   assert.ok(paragraph.lineBoxes.every((line) =>
-    line.embeddingLevels.length === line.logicalItemEnd - line.logicalItemStart
-    && line.sourceRanges.length > 0
+    line.logicalItemEnd > line.logicalItemStart
+    && line.fragments.some((id) => result.layout.fragment(id).sourceRange !== null)
   ));
-  assert.ok(paragraph.lineBoxes.flatMap((line) => line.textFragments)
+  assert.ok(paragraph.lineBoxes.flatMap((line) => line.fragments.filter((id) => result.layout.fragment(id).kind === "text"))
     .every((id) => result.layout.fragment(id).sourceRange !== null));
   const identityResult = render(`<p id="p"><a href="/next">linked text</a></p>`, 20);
   const identityLine = principalFragment(identityResult, elementById(identityResult, "p")).lineBoxes[0];
-  assert.equal(identityLine?.actions.some((action) => action.kind === "link"), true);
-  assert.equal(identityLine?.semantics.some((semantic) => semantic.role === "link"), true);
+  assert.equal(identityLine?.fragments.some((id) => identityResult.layout.fragment(id).action?.kind === "link"), true);
+  assert.equal(identityLine?.fragments.some((id) => { const action = identityResult.layout.fragment(id).action; return action !== null && identityResult.formatting.document.semantic(action.node)?.role === "link"; }), true);
 });
 
 test("line boxes calculate ascent, descent, height, baseline, and vertical alignment", () => {
@@ -524,7 +529,7 @@ test("text alignment is resolved independently for each line box", () => {
   const result = render(`<p id="p" style="width:6ch;text-align:right">aa bb cc</p>`, 20);
   const paragraph = principalFragment(result, elementById(result, "p"));
   assert.equal(paragraph.lineBoxes.length, 2);
-  const inlineOffset = (line) => line.textFragments.reduce(
+  const inlineOffset = (line) => line.fragments.filter((id) => result.layout.fragment(id).kind === "text").reduce(
     (minimum, fragment) => Math.min(
       minimum,
       result.layout.fragment(fragment).contentRect.x - paragraph.contentRect.x
@@ -539,8 +544,8 @@ test("text indentation affects the first line but not continuation line boxes", 
   const result = render(`<p id="p" style="width:6ch;text-indent:1ch">aa bb cc</p>`, 20);
   const paragraph = principalFragment(result, elementById(result, "p"));
   assert.equal(paragraph.lineBoxes.length, 2);
-  const first = result.layout.fragment(paragraph.lineBoxes[0].textFragments[0]);
-  const second = result.layout.fragment(paragraph.lineBoxes[1].textFragments[0]);
+  const first = result.layout.fragment(paragraph.lineBoxes[0].fragments.filter((id) => result.layout.fragment(id).kind === "text")[0]);
+  const second = result.layout.fragment(paragraph.lineBoxes[1].fragments.filter((id) => result.layout.fragment(id).kind === "text")[0]);
   assert.equal(cssPixels(first.contentRect.x - paragraph.contentRect.x), 8);
   assert.equal(second.contentRect.x, paragraph.contentRect.x);
 });
@@ -571,9 +576,9 @@ test("inline item streams scope collapsible white space to their inline formatti
     (item) => item.kind === "atomic-inline" && item.formattingNode === atomicFormatting.id
   ));
   assert.ok(outerStream);
-  const atomicIndex = outerStream.items.findIndex((item) => item.kind === "atomic-inline");
-  assert.equal(outerStream.items[atomicIndex + 1]?.kind, "text");
-  assert.equal(outerStream.items[atomicIndex + 1]?.text, " ");
+  const atomicIndex = [...outerStream.items].findIndex((item) => item.kind === "atomic-inline");
+  assert.equal(outerStream.items.at(atomicIndex + 1)?.kind, "text");
+  assert.equal(outerStream.items.at(atomicIndex + 1)?.text, " ");
   const innerStream = atomic.inlineItemStreams.streams.find(
     (stream) => stream.containingFormattingBox === atomicFormatting.id
   );
@@ -590,8 +595,8 @@ test("long unbreakable text remains one source-linked overflowing text fragment"
   const result = render(`<p id="p" style="width:4ch">${text}</p>`, 20);
   const paragraph = principalFragment(result, elementById(result, "p"));
   assert.equal(paragraph.lineBoxes.length, 1);
-  assert.equal(paragraph.lineBoxes[0].textFragments.length, 1);
-  const fragment = result.layout.fragment(paragraph.lineBoxes[0].textFragments[0]);
+  assert.equal(paragraph.lineBoxes[0].fragments.filter((id) => result.layout.fragment(id).kind === "text").length, 1);
+  const fragment = result.layout.fragment(paragraph.lineBoxes[0].fragments.filter((id) => result.layout.fragment(id).kind === "text")[0]);
   assert.equal(fragment.text, text);
   assert.equal(fragment.contentEndCodeUnit - fragment.contentStartCodeUnit, text.length);
   assert.ok(fragment.sourceRange);
@@ -634,7 +639,7 @@ test("atomic controls resolve box sizing and min/max constraints in CSS pixels",
   assert.equal(cssPixels(control.borderRect.height), 48);
   assert.equal(cssPixels(control.contentRect.height), 16);
   assert.deepEqual(
-    result.displayList.commands.filter((command) => command.layoutFragment === control.id).map((command) => command.kind),
+    [...result.displayList.commands].filter((command) => command.layoutFragment === control.id).map((command) => command.kind),
     ["border-side", "border-side", "border-side", "border-side", "text"]
   );
 });
@@ -1267,7 +1272,7 @@ test("positioned layout resolves containing blocks, out-of-flow geometry, sticky
     <div id="low" style="position:absolute;inset:0;background:blue;z-index:-1">low</div>
     <div id="auto" style="position:absolute;inset:0;background:green">auto</div>
   </div>`, 20, 10);
-  const backgroundOrder = stacked.displayList.commands
+  const backgroundOrder = [...stacked.displayList.commands]
     .filter((command) => command.kind === "background")
     .map((command) => stacked.layout.fragment(command.layoutFragment).documentNode);
   assert.ok(backgroundOrder.indexOf(elementById(stacked, "low")) < backgroundOrder.indexOf(elementById(stacked, "auto")));
@@ -1277,9 +1282,9 @@ test("positioned layout resolves containing blocks, out-of-flow geometry, sticky
     <div id="normal-stack" style="position:static;width:40px;height:16px;background:blue">
       <span id="negative-stack" style="position:absolute;inset:0;background:red;z-index:-1">negative</span>
     </div></div>`, 20, 6);
-  const normalPaint = nestedStack.displayList.commands.find((command) => command.kind === "background"
+  const normalPaint = [...nestedStack.displayList.commands].find((command) => command.kind === "background"
     && command.documentNode === elementById(nestedStack, "normal-stack"));
-  const negativePaint = nestedStack.displayList.commands.find((command) => command.kind === "background"
+  const negativePaint = [...nestedStack.displayList.commands].find((command) => command.kind === "background"
     && command.documentNode === elementById(nestedStack, "negative-stack"));
   assert.ok(normalPaint && negativePaint && negativePaint.paintOrder < normalPaint.paintOrder);
 
@@ -1293,7 +1298,7 @@ test("positioned layout resolves containing blocks, out-of-flow geometry, sticky
   assert.ok(boundedSticky.borderRect.y < scrollportY);
   assert.equal(principalFragment(scrolled, elementById(scrolled, "scrolled-fixed")).borderRect.y, 0);
   const scrolledViewport = viewportDisplayList(scrolled.displayList, { scrollRow: 5, viewportRows: 4 });
-  const fixedViewportCommand = scrolledViewport.commands.find((command) =>
+  const fixedViewportCommand = [...scrolledViewport.commands].find((command) =>
     command.kind === "text" && command.text === "fixed");
   assert.ok(fixedViewportCommand);
   assert.equal(fixedViewportCommand.rect.y, scrollportY);
@@ -1333,17 +1338,17 @@ test("positioned descendants use final auto-height containing blocks and layout-
   const positive = principalFragment(stacking, elementById(stacking, "positive"));
   assert.equal(stacking.layout.stacking(relativeAuto.id).establishesStackingContext, false);
   assert.equal(stacking.layout.stacking(positive.id).containingStackingContext, stacking.layout.root);
-  const positivePaint = stacking.displayList.commands.find((command) => command.documentNode === elementById(stacking, "positive"));
-  const siblingPaint = stacking.displayList.commands.find((command) => command.documentNode === elementById(stacking, "sibling"));
+  const positivePaint = [...stacking.displayList.commands].find((command) => command.documentNode === elementById(stacking, "positive"));
+  const siblingPaint = [...stacking.displayList.commands].find((command) => command.documentNode === elementById(stacking, "sibling"));
   assert.ok(positivePaint && siblingPaint && positivePaint.paintOrder > siblingPaint.paintOrder);
 
   const flexStacking = render(`<div style="display:flex;position:relative;width:60px;height:20px">
     <span id="flex-high" style="z-index:2;background:red;width:30px">high</span>
     <span id="flex-low" style="z-index:-1;background:blue;width:30px;margin-left:-30px">low</span>
   </div>`, 20, 8);
-  const flexHighPaint = flexStacking.displayList.commands.find((command) => command.kind === "background"
+  const flexHighPaint = [...flexStacking.displayList.commands].find((command) => command.kind === "background"
     && command.documentNode === elementById(flexStacking, "flex-high"));
-  const flexLowPaint = flexStacking.displayList.commands.find((command) => command.kind === "background"
+  const flexLowPaint = [...flexStacking.displayList.commands].find((command) => command.kind === "background"
     && command.documentNode === elementById(flexStacking, "flex-low"));
   assert.ok(flexHighPaint && flexLowPaint && flexHighPaint.paintOrder > flexLowPaint.paintOrder);
 
@@ -1395,9 +1400,9 @@ test("relative positioning moves complete inline visual and interaction geometry
     const shiftedNested = principalFragment(shifted, elementById(shifted, "nested"));
     const unshiftedNested = principalFragment(unshifted, elementById(unshifted, "nested"));
     assert.equal(shiftedNested.borderRect.x - unshiftedNested.borderRect.x, cssPx(8));
-    const unshiftedBackgrounds = unshifted.displayList.commands.filter((command) =>
+    const unshiftedBackgrounds = [...unshifted.displayList.commands].filter((command) =>
       command.kind === "background" && command.documentNode === unshiftedLink);
-    const shiftedBackgrounds = shifted.displayList.commands.filter((command) =>
+    const shiftedBackgrounds = [...shifted.displayList.commands].filter((command) =>
       command.kind === "background" && command.documentNode === shiftedLink);
     assert.deepEqual(
       shiftedBackgrounds.map((command) => command.rect.x),
@@ -1613,6 +1618,7 @@ test("cell differences arise only during terminal snapping", () => {
   const tree = formatting(`<div id="box" style="width:17px">x</div>`, 20);
   const normal = renderFormatting(tree, 20);
   const narrowCells = buildDocumentDisplayList({
+    styles: normal.layout.formatting.styles,
     layout: normal.layout,
     context: {
       columns: 40,
@@ -1825,6 +1831,7 @@ test("layout, display-list construction, and cell rasterization honor cancellati
     inlineItemStreams: buildInlineItemStreamSet(tree),
     context: {
       viewport: { width: cssPx(160), height: cssPx(160) },
+      controlMeasurer: terminalCssControlMeasurer(),
       textMeasurer,
       initialContainingBlock: cssRect(cssCoordinate(ZERO), cssCoordinate(ZERO), cssPx(160), cssPx(160)),
       scrollport: cssRect(cssCoordinate(ZERO), cssCoordinate(ZERO), cssPx(160), cssPx(160))
@@ -1835,12 +1842,14 @@ test("layout, display-list construction, and cell rasterization honor cancellati
   const displayController = new globalThis.AbortController();
   displayController.abort();
   assert.throws(() => buildDocumentDisplayList({
+    styles: complete.layout.formatting.styles,
     layout: complete.layout,
     context: complete.displayList.context,
     signal: displayController.signal
   }), { name: "AbortError" });
   const paintController = new globalThis.AbortController();
   const displayList = buildDocumentDisplayList({
+    styles: complete.layout.formatting.styles,
     layout: complete.layout,
     context: complete.displayList.context
   });
@@ -1862,7 +1871,7 @@ test("display-list budgets retain an ordered paint-command prefix", () => {
   assert.equal(result.displayList.outcome.status, "truncated");
   assert.equal(result.displayList.outcome.budget, "maxDisplayListCommands");
   assert.equal(result.displayList.commands.length, 3);
-  assert.ok(result.displayList.commands.every((command, index, commands) =>
+  assert.ok([...result.displayList.commands].every((command, index, commands) =>
     index === 0 || command.paintOrder >= commands[index - 1].paintOrder
   ));
   const grouped = render(`<div style="border:solid 8px;background:#123456">x</div>`, 20, 10, {
@@ -2011,6 +2020,7 @@ test("terminal budget validation keeps zero as no-work and rejects malformed lim
   assert.deepEqual(invalid.displayList.outcome, { status: "rejected", reason: "invalid-budget" });
   assert.deepEqual(invalid.terminal.cellBuffer.outcome, { status: "rejected", reason: "invalid-budget" });
   const malformedList = buildDocumentDisplayList({
+    styles: zero.layout.formatting.styles,
     layout: zero.layout,
     context: {
       ...zero.displayList.context,
@@ -2032,7 +2042,7 @@ test("terminal actual values preserve every grapheme at all supported CSS font s
   for (const size of sizes) {
     const result = render(`<span style="font-size:${String(size)}px">abcdef</span>`, 80, 10);
     const text = result.terminal.cellBuffer.rows.flatMap((row) => row.cells)
-      .filter((cell) => result.displayList.commands.find((command) => command.id === cell.command)?.kind === "text")
+      .filter((cell) => [...result.displayList.commands].find((command) => command.id === cell.command)?.kind === "text")
       .map((cell) => cell.text)
       .join("");
     assert.equal(text, "abcdef", `font-size ${String(size)}px`);
@@ -2049,7 +2059,7 @@ test("terminal actual values preserve every grapheme at all supported CSS font s
   ]) {
     const result = render(`<span>${sample}</span>`, 80, 10);
     const text = result.terminal.cellBuffer.rows.flatMap((row) => row.cells)
-      .filter((cell) => result.displayList.commands.find((command) => command.id === cell.command)?.kind === "text")
+      .filter((cell) => [...result.displayList.commands].find((command) => command.id === cell.command)?.kind === "text")
       .map((cell) => cell.text)
       .join("");
     assert.equal(text, actual);
@@ -2075,7 +2085,7 @@ test("bidi paragraphs span inline boxes while tree paint order retains fragment 
   );
   assert.equal(renderedText(result), "abc 123 גבא");
   assert.equal(
-    result.displayList.commands.filter((command) => command.kind === "text").map((command) => command.text).join(""),
+    [...result.displayList.commands].filter((command) => command.kind === "text").map((command) => command.text).join(""),
     "abc גבא 123"
   );
   const narrowResult = render(`<p>abc <span>אבג</span> 123</p>`, 8);
@@ -2108,7 +2118,7 @@ test("atomic inline visual geometry does not replace CSS tree paint order", () =
     style="display:inline-block;padding:8px;border:solid 8px;background:#662244">B</a></p>`, 20, 10);
   const first = principalFragment(result, elementById(result, "a"));
   const second = principalFragment(result, elementById(result, "b"));
-  const paintSequence = result.displayList.commands.flatMap((command) => {
+  const paintSequence = [...result.displayList.commands].flatMap((command) => {
     if (command.kind === "background" && command.layoutFragment === first.id) return ["background:A"];
     if (command.kind === "background" && command.layoutFragment === second.id) return ["background:B"];
     if (command.kind === "text" && (command.text === "A" || command.text === "B")) return [`text:${command.text}`];
@@ -2141,24 +2151,24 @@ test("bidi inline backgrounds keep their own fragments and CSS paint phases", ()
   assert.ok(red.borderRect.width > 0);
   assert.ok(blue.borderRect.width > 0);
   assert.notEqual(red.borderRect.x, blue.borderRect.x);
-  const redCommands = result.displayList.commands.filter((command) => command.documentNode === redNode);
-  const blueCommands = result.displayList.commands.filter((command) => command.documentNode === blueNode);
+  const redCommands = [...result.displayList.commands].filter((command) => command.documentNode === redNode);
+  const blueCommands = [...result.displayList.commands].filter((command) => command.documentNode === blueNode);
   assert.ok(redCommands.length > 0);
   assert.ok(blueCommands.length > 0);
   assert.ok(redCommands.every((command) => command.layoutFragment === red.id
     || result.layout.parent(command.layoutFragment)?.id === red.id));
   assert.ok(blueCommands.every((command) => command.layoutFragment === blue.id
     || result.layout.parent(command.layoutFragment)?.id === blue.id));
-  const redBackground = result.displayList.commands.findIndex(
+  const redBackground = [...result.displayList.commands].findIndex(
     (command) => command.kind === "background" && command.layoutFragment === red.id
   );
-  const redText = result.displayList.commands.findIndex(
+  const redText = [...result.displayList.commands].findIndex(
     (command) => command.kind === "text" && descendsFrom(command.layoutFragment, red.id)
   );
-  const blueBackground = result.displayList.commands.findIndex(
+  const blueBackground = [...result.displayList.commands].findIndex(
     (command) => command.kind === "background" && command.layoutFragment === blue.id
   );
-  const blueText = result.displayList.commands.findIndex(
+  const blueText = [...result.displayList.commands].findIndex(
     (command) => command.kind === "text" && descendsFrom(command.layoutFragment, blue.id)
   );
   assert.ok(redBackground >= 0 && redBackground < redText);
@@ -2274,7 +2284,7 @@ test("splittable inline boxes retain per-line decoration geometry without empty 
   assert.ok(fragment.inlineContinuations.every((entry) => entry.borderRect.width > 0 && entry.borderRect.height > 0));
   assert.equal(new Set(fragment.inlineContinuations.map((entry) => entry.borderRect.y)).size, fragment.inlineContinuations.length);
   assert.equal(
-    result.displayList.commands.filter((command) => command.layoutFragment === fragment.id && command.kind === "background").length,
+    [...result.displayList.commands].filter((command) => command.layoutFragment === fragment.id && command.kind === "background").length,
     fragment.inlineContinuations.length
   );
   for (const continuation of fragment.inlineContinuations) {
@@ -2316,7 +2326,7 @@ test("paint commands cover empty backgrounds, side borders, phases, and alpha co
   const result = render(`<div id="parent" style="height:2em;padding:8px;background:rgba(255,0,0,.5);
     border-style:solid;border-width:8px 0 0 8px"><span id="child" style="background:rgba(0,0,255,.5)">x</span></div>`, 20);
   const parent = principalFragment(result, elementById(result, "parent"));
-  const parentCommands = result.displayList.commands.filter((command) => command.layoutFragment === parent.id);
+  const parentCommands = [...result.displayList.commands].filter((command) => command.layoutFragment === parent.id);
   assert.deepEqual(parentCommands.map((command) => command.kind), ["background", "border-side", "border-side"]);
   assert.ok(parentCommands.every((command, index) => index === 0 || command.paintOrder > parentCommands[index - 1].paintOrder));
   assert.ok(result.terminal.cellBuffer.rows.flatMap((row) => row.cells).some((cell) => cell.text === " " && cell.style.background !== null));
@@ -2332,9 +2342,9 @@ test("paint order covers empty and overlapping boxes plus the supported table ba
     <div id="second" style="height:16px;margin-top:-16px;background:#00f"></div>`, 20, 10);
   const first = principalFragment(overlap, elementById(overlap, "first"));
   const second = principalFragment(overlap, elementById(overlap, "second"));
-  const firstPaint = overlap.displayList.commands.find((command) => command.layoutFragment === first.id
+  const firstPaint = [...overlap.displayList.commands].find((command) => command.layoutFragment === first.id
     && command.kind === "background");
-  const secondPaint = overlap.displayList.commands.find((command) => command.layoutFragment === second.id
+  const secondPaint = [...overlap.displayList.commands].find((command) => command.layoutFragment === second.id
     && command.kind === "background");
   assert.ok(firstPaint && secondPaint && firstPaint.paintOrder < secondPaint.paintOrder);
   assert.ok(overlap.terminal.cellBuffer.rows.flatMap((row) => row.cells)
@@ -2344,12 +2354,12 @@ test("paint order covers empty and overlapping boxes plus the supported table ba
     table{background:#100}tbody{background:#200}tr{background:#300}td{background:#400}
     </style><table id="table"><tbody id="group"><tr id="row"><td id="cell">cell</td></tr></tbody></table>`, 20, 10);
   const tableNodes = ["table", "group", "row", "cell"].map((id) => elementById(table, id));
-  const backgroundOrders = tableNodes.map((node) => table.displayList.commands.find((command) =>
+  const backgroundOrders = tableNodes.map((node) => [...table.displayList.commands].find((command) =>
     command.documentNode === node && command.kind === "background"
   )?.paintOrder);
   assert.ok(backgroundOrders.every((order) => order !== undefined));
   assert.deepEqual(backgroundOrders, [...backgroundOrders].sort((left, right) => left - right));
-  const cellText = table.displayList.commands.find((command) => command.kind === "text" && command.text === "cell");
+  const cellText = [...table.displayList.commands].find((command) => command.kind === "text" && command.text === "cell");
   assert.ok(cellText && cellText.paintOrder > (backgroundOrders.at(-1) ?? -1));
 });
 
@@ -2473,7 +2483,7 @@ for (const display of ["block", "flex", "grid"]) {
         assert.equal(fragment.contentRect.width, cssPx(40));
         assert.equal(fragment.contentRect.height, cssPx(32));
         const stream = result.inlineItemStreams.stream(fragment.formattingNode, [fragment.formattingNode]);
-        assert.equal(stream.items.filter((item) => item.kind === "atomic-inline").length, 1);
+        assert.equal([...stream.items].filter((item) => item.kind === "atomic-inline").length, 1);
       });
     }
   }
@@ -2541,7 +2551,7 @@ test("zero font size suppresses glyphs while logical search text remains availab
 
 test("authored compact line heights and positioned overlap are not expanded to avoid collisions", () => {
   const compact = render("<style>body{margin:0}p{margin:0;line-height:8px}</style><p>first</p><p>second</p>");
-  const text = compact.displayList.commands.filter((command) => command.kind === "text");
+  const text = [...compact.displayList.commands].filter((command) => command.kind === "text");
   assert.equal(text[1].rect.y - text[0].rect.y, cssPx(8));
   const overlapping = render("<style>body{margin:0}span{position:absolute;left:0;top:0}</style><span>first</span><span>later</span>");
   assert.equal(normalizedPaintRows(overlapping)[0], "later");
@@ -2554,7 +2564,7 @@ test("split inline styles and destinations preserve painted cell signatures", ()
   assertCompleteTextPaint(original);
   assertCompleteTextPaint(split);
   const signature = (result) => result.terminal.cellBuffer.rows.map((row) => row.cells.map((cell) => {
-    const command = result.displayList.commands.find((entry) => entry.id === cell.command);
+    const command = [...result.displayList.commands].find((entry) => entry.id === cell.command);
     return { column: cell.column, text: cell.text, style: command.style, action: command.action?.kind, destination: command.action?.destination };
   }));
   assert.deepEqual(signature(split), signature(original));
@@ -2564,7 +2574,7 @@ test("ambiguous glyph width policy is shared by measurement and rasterization", 
   for (const ambiguousWidth of [1, 2]) {
     const result = render("<style>body{margin:0;font-size:14px}</style><p>·α界👍🏽</p>", 30, 10, {}, { ambiguousWidth });
     assertCompleteTextPaint(result);
-    const text = result.displayList.commands.filter((command) => command.kind === "text");
+    const text = [...result.displayList.commands].filter((command) => command.kind === "text");
     for (const command of text) {
       for (const cluster of command.clusters) {
         assert.equal(cluster.advance, cssPx(8 * terminalCellMeasurer(ambiguousWidth).width(cluster.text)));
@@ -2675,11 +2685,11 @@ test("logical search coalesces only exact contiguous source runs and preserves s
   assert.equal(foldedMatch.end - foldedMatch.start, 1);
 });
 
-test("text layout clusters reuse the canonical immutable inline source ranges", () => {
+test("text layout clusters resolve canonical inline source ranges", () => {
   const result = render("<p>Latin אבג 😀é</p>", 80);
   const ranges = new Set();
   for (const stream of result.inlineItemStreams.streams) {
-    for (const item of stream.items) if (item.sourceRange !== null) ranges.add(item.sourceRange);
+    for (const item of stream.items) if (item.sourceRange !== null) ranges.add(JSON.stringify(item.sourceRange));
   }
   assert.ok(ranges.size > 0);
   const pending = [result.layout.fragment(result.layout.root)];
@@ -2687,26 +2697,27 @@ test("text layout clusters reuse the canonical immutable inline source ranges", 
     const fragment = pending.pop();
     pending.push(...result.layout.children(fragment.id));
     for (const cluster of fragment.visualClusters ?? []) {
-      if (cluster.sourceRange !== null) assert.ok(ranges.has(cluster.sourceRange));
+      if (cluster.sourceRange !== null) assert.ok(ranges.has(JSON.stringify(cluster.sourceRange)));
     }
   }
 });
 
 
-test("CSS text and inline streams retain one canonical text unit", () => {
+test("CSS text and inline streams retain compact canonical text with shared empty fragment metadata", () => {
   const result = render("<p>Latin אבג 😀é</p>", 80);
   let checked = 0;
   for (const stream of result.inlineItemStreams.streams) {
     for (const item of stream.items) {
       if (item.kind !== "text" || item.formattingNode === null) continue;
       const units = result.inlineItemStreams.textForFormattingNode(item.formattingNode).units;
-      assert.ok(units.includes(item));
-      assert.ok(Object.isFrozen(item));
+      assert.ok([...units].some((unit) => unit.text === item.text
+        && unit.contentStartCodeUnit === item.contentStartCodeUnit && unit.contentEndCodeUnit === item.contentEndCodeUnit));
+      assert.ok(Object.isFrozen(units));
       checked += 1;
     }
   }
   assert.ok(checked > 5);
-  const textFragments = result.displayList.commands
+  const textFragments = [...result.displayList.commands]
     .filter((command) => command.kind === "text")
     .map((command) => result.layout.fragment(command.layoutFragment));
   for (const fragment of textFragments) {
@@ -2716,7 +2727,7 @@ test("CSS text and inline streams retain one canonical text unit", () => {
     assert.equal(fragment.lineBoxes, textFragments[0].lineBoxes);
   }
   const other = render("<p>another document</p>", 80);
-  const otherText = other.displayList.commands.find((command) => command.kind === "text");
+  const otherText = [...other.displayList.commands].find((command) => command.kind === "text");
   assert.equal(other.layout.fragment(otherText.layoutFragment).children, textFragments[0].children);
 });
 

@@ -1,18 +1,12 @@
-import {
-  cssCoordinateAdd,
-  cssRect,
-  cssMin,
-  cssCoordinateDifference,
-  cssMax,
-  cssPx,
-  type LayoutFragment
-} from "../layout/index.js";
+import { checkPackedMetadata } from "../../memory/packed.js";
+import { PaintCommandBuilder } from "./paint-commands.js";
+import { createLayoutPaintResolver } from "../layout/paint-style.js";
+import type { LayoutFragment } from "../layout/index.js";
 import type {
   BuildDocumentDisplayListInput,
   DocumentDisplayList,
   DocumentDisplayListOutcome,
-  TerminalPaintBudgets,
-  TerminalPaintCommand
+  TerminalPaintBudgets
 } from "./types.js";
 
 const DEFAULT_PAINT_BUDGETS: TerminalPaintBudgets = Object.freeze({
@@ -68,112 +62,32 @@ export function validTerminalRenderContext(input: BuildDocumentDisplayListInput[
     && typeof input.cellMeasurer.width === "function";
 }
 
-function commandGroup(fragment: LayoutFragment, style = fragment.style): readonly Omit<TerminalPaintCommand, "paintOrder">[] {
-  const common = {
-    layoutFragment: fragment.id,
-    formattingNode: fragment.formattingNode,
-    documentNode: fragment.documentNode,
-    sourceRange: fragment.sourceRange,
-    contentStartCodeUnit: fragment.contentStartCodeUnit,
-    contentEndCodeUnit: fragment.contentEndCodeUnit,
-    clipRect: fragment.clipRect,
-    action: fragment.action,
-    semantic: fragment.semantic,
-    style
-  } as const;
-  const commands: Omit<TerminalPaintCommand, "paintOrder">[] = [];
-  if (style.visible && fragment.kind !== "text") {
-    const boxes = fragment.inlineContinuations ?? [{
-      contentRect: fragment.contentRect,
-      paddingRect: fragment.paddingRect,
-      borderRect: fragment.borderRect,
-      marginRect: fragment.marginRect
-    }];
-    for (const [continuation, box] of boxes.entries()) {
-      if (style.background !== null && style.background.a > 0) {
-        commands.push(Object.freeze({
-          ...common,
-          id: `terminal-paint:background:${fragment.id}:${String(continuation)}`,
-          kind: "background",
-          rect: box.borderRect
-        }));
-      }
-      const borderEdge = cssCoordinateAdd(box.borderRect.x, box.borderRect.width);
-      const borderBottom = cssCoordinateAdd(box.borderRect.y, box.borderRect.height);
-      const paddingEdge = cssCoordinateAdd(box.paddingRect.x, box.paddingRect.width);
-      const paddingBottom = cssCoordinateAdd(box.paddingRect.y, box.paddingRect.height);
-      const borderWidths = Object.freeze({
-        top: cssMax(cssPx(0), cssCoordinateDifference(box.paddingRect.y, box.borderRect.y)),
-        right: cssMax(cssPx(0), cssCoordinateDifference(borderEdge, paddingEdge)),
-        bottom: cssMax(cssPx(0), cssCoordinateDifference(borderBottom, paddingBottom)),
-        left: cssMax(cssPx(0), cssCoordinateDifference(box.paddingRect.x, box.borderRect.x))
-      });
-      for (const side of ["top", "right", "bottom", "left"] as const) {
-        if (style.borderStyles[side] !== "solid") continue;
-        if (borderWidths[side] <= 0) continue;
-        commands.push(Object.freeze({
-          ...common,
-          id: `terminal-paint:border-${side}:${fragment.id}:${String(continuation)}`,
-          kind: "border-side",
-          side,
-          rect: box.borderRect,
-          borderRect: box.borderRect,
-          borderWidths
-        }));
-      }
-    }
-    if (
-      fragment.kind === "box" &&
-      fragment.tableCollapsedBorderSegments !== undefined
-    ) {
-      for (const segment of fragment.tableCollapsedBorderSegments) {
-        commands.push(
-          Object.freeze({
-            id: segment.id,
-            kind: "border-side",
-            layoutFragment: fragment.id,
-            formattingNode: segment.formattingNode,
-            documentNode: segment.documentNode,
-            sourceRange: segment.sourceRange,
-            contentStartCodeUnit: null,
-            contentEndCodeUnit: null,
-            rect: segment.borderRect,
-            borderRect: segment.borderRect,
-            borderWidths: segment.borderWidths,
-            clipRect: segment.clipRect,
-            side: segment.side,
-            action: null,
-            semantic: null,
-            style: segment.style,
-          }),
-        );
-      }
+/** CSS canvas propagation never alters the selected element's used box. */
+function canvasBackground(input: BuildDocumentDisplayListInput): DocumentDisplayList["canvasBackground"] {
+  const document = input.styles.document;
+  const root = document.documentElement;
+  if (root === null) return null;
+  const rootStyle = input.styles.style(root);
+  if (rootStyle.display.box === "none") return null;
+  let source = root;
+  let selected = rootStyle;
+  const rootNode = document.node(root);
+  if ((rootStyle.text.background === null || rootStyle.text.background.a === 0)
+    && rootNode.kind === "element" && rootNode.name === "html"
+    && rootNode.namespace === "http://www.w3.org/1999/xhtml"
+    && rootStyle.box.contain === "none" && document.body !== null) {
+    const body = document.node(document.body);
+    const bodyStyle = input.styles.style(document.body);
+    if (body.kind === "element" && body.name === "body" && body.parent === root
+      && bodyStyle.display.box !== "none" && bodyStyle.box.contain === "none") {
+      source = document.body;
+      selected = bodyStyle;
     }
   }
-  if (fragment.kind === "control" && fragment.controlLines !== undefined) {
-    for (const [index, line] of fragment.controlLines.entries()) {
-      if (line.blockOffset >= fragment.contentRect.height) break;
-      if (line.text.length === 0) continue;
-      commands.push(Object.freeze({ ...common, id: `terminal-paint:control-line:${fragment.id}:${String(index)}`,
-        kind: "text", rect: cssRect(fragment.contentRect.x, cssCoordinateAdd(fragment.contentRect.y, line.blockOffset),
-          fragment.contentRect.width, cssMin(line.height, cssCoordinateDifference(cssCoordinateAdd(fragment.contentRect.y, fragment.contentRect.height), cssCoordinateAdd(fragment.contentRect.y, line.blockOffset)))),
-        text: line.text, clusters: line.clusters }));
-    }
-  }
-  const text = fragment.kind === "text" ? fragment.visualText
-    : fragment.kind === "control" ? fragment.controlText ?? ""
-      : fragment.kind === "replaced" ? fragment.replacedText ?? "" : "";
-  if (style.visible && text.length > 0) {
-    commands.push(Object.freeze({
-      ...common,
-      id: `terminal-paint:text:${fragment.id}`,
-      kind: "text",
-      rect: fragment.contentRect,
-      text,
-      clusters: fragment.visualClusters ?? Object.freeze([])
-    }));
-  }
-  return commands;
+  if (selected.text.background === null || selected.text.background.a <= 0) return null;
+  const base = input.layout.fragment(input.layout.root).style;
+  return Object.freeze({ source, style: Object.freeze({ ...base, visible: true,
+    foreground: null, background: selected.text.background }) });
 }
 
 export function buildDocumentDisplayList(input: BuildDocumentDisplayListInput): DocumentDisplayList {
@@ -181,26 +95,31 @@ export function buildDocumentDisplayList(input: BuildDocumentDisplayListInput): 
   const budgets = terminalPaintBudgets(context.budgets);
   const rejection = !validTerminalRenderContext(context) ? "invalid-context" as const
     : budgets === null ? "invalid-budget" as const : null;
+  const commands = new PaintCommandBuilder();
+  checkPackedMetadata(64);
+  const fragmentPaintOrder: LayoutFragment["id"][] = [];
   if (rejection !== null || budgets === null) {
     return Object.freeze({
       layout: input.layout,
+      styles: input.styles,
       context,
-      fragmentPaintOrder: Object.freeze([]),
-      commands: Object.freeze([]),
+      fragmentPaintOrder: Object.freeze(fragmentPaintOrder),
+      canvasBackground: null,
+      commands: commands.finish(input.layout, fragmentPaintOrder, 0),
       outcome: Object.freeze({ status: "rejected", reason: rejection ?? "invalid-budget" })
     });
   }
-  const commands: TerminalPaintCommand[] = [];
-  const fragmentPaintOrder = [] as LayoutFragment["id"][];
+  const selectedCanvas = canvasBackground(input);
+  const canvas = budgets.maxDisplayListCommands > 0 ? selectedCanvas : null;
+  const reservedCommands = canvas === null ? 0 : 1;
+  const paintStyle = createLayoutPaintResolver(input.layout, input.styles);
   const append = (fragment: LayoutFragment): boolean => {
     input.signal?.throwIfAborted();
-    const group = commandGroup(fragment, input.paintStyle?.(fragment) ?? fragment.style);
-    if (commands.length + group.length > budgets.maxDisplayListCommands) {
-      return false;
-    }
-    for (const command of group) {
-      commands.push(Object.freeze({ ...command, paintOrder: commands.length }) as TerminalPaintCommand);
-    }
+    const current = paintStyle(fragment);
+    const style = fragment.documentNode === canvas?.source && fragment.pseudoElement === null
+      ? Object.freeze({ ...current, background: null }) : current;
+    if (!commands.append(fragment, fragmentPaintOrder.length, style, budgets.maxDisplayListCommands - reservedCommands, input.signal)) return false;
+    checkPackedMetadata(8);
     fragmentPaintOrder.push(fragment.id);
     return true;
   };
@@ -257,20 +176,23 @@ export function buildDocumentDisplayList(input: BuildDocumentDisplayListInput): 
     }
     return true;
   };
-  const complete = paintStackingContext(input.layout.fragment(input.layout.root));
+  const complete = (selectedCanvas === null || canvas !== null)
+    && paintStackingContext(input.layout.fragment(input.layout.root));
   const outcome: DocumentDisplayListOutcome = !complete
     ? {
         status: "truncated",
-        commands: commands.length,
+        commands: reservedCommands + commands.length,
         budget: "maxDisplayListCommands",
         limit: budgets.maxDisplayListCommands
       }
-    : { status: "complete", commands: commands.length };
+    : { status: "complete", commands: reservedCommands + commands.length };
   return Object.freeze({
     layout: input.layout,
+    styles: input.styles,
     context,
     fragmentPaintOrder: Object.freeze(fragmentPaintOrder),
-    commands: Object.freeze(commands),
+    canvasBackground: canvas,
+    commands: commands.finish(input.layout, fragmentPaintOrder, reservedCommands),
     outcome: Object.freeze(outcome)
   });
 }
