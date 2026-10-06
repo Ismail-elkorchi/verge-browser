@@ -69,7 +69,10 @@ session. Graphics selection remains independent.
 A user may explicitly remember a narrow unqueryable terminal setting in Verge's
 existing bounded, private BrowserStore. These assertions are scoped to the exact
 host-generated terminal/transport context; invalid or mismatched records do not
-affect admission. They are not session-success caches and cannot override observed
+affect admission. The context shares recorded terminal identity and version fields
+across direct windows and profiles; it does not identify a configuration file or
+prove that a setting is enabled. The user must maintain the asserted setting across
+that entire scope. They are not session-success caches and cannot override observed
 contradictions. The CLI provides [one-time setting commands](../reference/cli.md#remembering-an-unqueryable-setting)
 instead of repeated invocation declarations. Ordinary startup has no presentation
 flag; former declarations are removed without compatibility aliases.

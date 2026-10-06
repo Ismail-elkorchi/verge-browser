@@ -98,6 +98,9 @@ for (const failures of [[], ["services"], ["flush"], ["services", "flush"], ["se
     assert.equal(await readFile(events, "utf8"), "frames=0\n");
     assert.equal(result.stderr.split(primaryMessage).length - 1, 1);
     assert.ok(result.stderr.includes("--remember-terminal-setting=kitty-force-ltr"), result.stderr);
+    assert.ok(result.stderr.includes("Only after configuring all direct sessions"), result.stderr);
+    assert.ok(result.stderr.includes("including other windows and profiles"), result.stderr);
+    assert.ok(result.stderr.includes("temporary launch override is not sufficient"), result.stderr);
     let previous = result.stderr.indexOf(primaryMessage);
     for (const [name, message] of Object.entries(cleanupMessages)) {
       assert.equal(result.stderr.split(message).length - 1, failures.includes(name) ? 1 : 0, result.stderr);

@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { Buffer } from "node:buffer";
 import { pathToFileURL } from "node:url";
+import { BrowserStore } from "../../dist/app/storage.js";
 
 async function writeCliHook(path, sources) {
   const cliUrl = pathToFileURL(resolve("dist/cli.js")).href;
@@ -190,8 +191,11 @@ export function createNodeTerminalHost(options) {
         }
         const event = JSON.parse(await readFile(events, "utf8"));
         if (accepted) {
-          const state = JSON.parse(await readFile(join(directory, "state", "verge-browser", "state.json"), "utf8"));
-          if (state.terminalSettings.length !== 0) throw new Error("Successful startup must not persist terminal assertions.");
+          const statePath = join(directory, "state", "verge-browser", "state.json");
+          const state = JSON.parse(await readFile(statePath, "utf8"));
+          if (Object.hasOwn(state, "terminalSettings") || (await BrowserStore.open({ statePath })).terminalSettings().length !== 0) {
+            throw new Error("Successful startup must not persist terminal assertions.");
+          }
         }
         if ((event.frames > 0) !== accepted || event.raw !== false
           || scenario === "reset" && (!event.reset || !event.restored)

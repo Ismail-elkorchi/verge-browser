@@ -5,7 +5,7 @@
 ```text
 verge [initial-target] [--once]
 verge --remember-terminal-setting=kitty-force-ltr|konsole-bidi-disabled
-verge --forget-terminal-settings
+verge --forget-terminal-setting=kitty-force-ltr|konsole-bidi-disabled
 ```
 
 - An explicit target opens in a fresh browser workspace.
@@ -50,9 +50,9 @@ that a terminal's default matches its inherited state.
 Two narrow, optional commands record settings the terminal cannot report. First
 configure the terminal itself, then run the matching command there once:
 
-- Kitty: set `force_ltr=yes`, then run
+- Kitty: consistently set `force_ltr=yes` across the scope below, then run
   `verge --remember-terminal-setting=kitty-force-ltr`
-- Konsole: disable bidirectional rendering in the active profile, then run
+- Konsole: disable bidirectional rendering in every profile within that scope, then run
   `verge --remember-terminal-setting=konsole-bidi-disabled`
 
 These commands assert an existing setting; they do not change terminal
@@ -60,20 +60,37 @@ configuration. Each command exits without opening a page. Later launches use
 ordinary `verge`, without flags. A setting can only be remembered when the TUI
 recognizes the matching condition and an unambiguous terminal/transport context.
 SSH and shared multiplexer contexts cannot safely reuse these exceptions.
-A setting for another terminal or transport is ignored. If the terminal setting
-changes, remove the assertion from that same context:
+A setting for another recorded terminal identity or transport is ignored.
+
+The scope is all direct sessions sharing the host-recorded `TERM`, terminal-program
+and reported-version fields. It includes other windows and pre-existing profiles
+with those same fields; it does not identify an individual window, profile or
+configuration file. Remember a setting only when it is consistently enabled across
+that entire scope. A temporary `kitty -o force_ltr=yes` launch is not sufficient.
+The assertion is a user-maintained assumption, not a measured or verified setting.
+If profiles within that scope need different settings, do not remember an assertion.
+If the terminal setting changes, revoke its saved assertion. This works from any
+terminal or non-TTY context and removes that condition's record regardless of its
+recorded terminal context. Revocation does not need to read the assertion or
+ordinary browser state, so malformed records do not prevent their removal:
 
 ```sh
-verge --forget-terminal-settings
+verge --forget-terminal-setting=kitty-force-ltr
+verge --forget-terminal-setting=konsole-bidi-disabled
 ```
 
-Assertions use Verge's existing private browser state and bounded parsing and
-atomic writes. At most 32 assertions are retained; remembering another evicts the
-oldest assertion. They are never saved automatically after a successful run. They
+BrowserStore owns one bounded private atomic file per condition, separate from
+ordinary browsing-state writes. At most two assertions are retained, one current
+context per condition; remembering a different context replaces that condition's
+previous record. Only explicit setting commands change these files, so a stale
+running browser cannot recreate a revoked assertion. Concurrent explicit commands
+take effect in their atomic replace or unlink order for that condition. They are
+never saved automatically after a successful run. They
 cannot override an observed contradiction, unknown restoration baseline or a
 failed verification. No general trust override or terminal-profile framework is
 provided. The former `--terminal-cell-presentation` options, including `existing`,
-`mode-8-reset` and `explicit`, are rejected without aliases.
+`mode-8-reset` and `explicit`, and the former plural `--forget-terminal-settings`
+option are rejected without aliases.
 
 `--once` deliberately produces plain output and does not acquire terminal state.
 Setting-management commands cannot be combined with a target or `--once`.
