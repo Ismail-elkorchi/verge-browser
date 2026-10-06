@@ -344,3 +344,62 @@ test("state loading reads the same file handle that passed validation", async ()
     await rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test("terminal setting assertions are explicit, exact-context, private and removable", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "verge-terminal-settings-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const statePath = join(directory, "state.json");
+  const store = await BrowserStore.open({ statePath });
+  assert.deepEqual(store.terminalSettings(), []);
+  assert.throws(() => { store.terminalSettings().push({ context: "invalid", condition: "kitty-force-ltr" }); }, TypeError);
+  const kitty = { context: "context:kitty:direct:v1", condition: "kitty-force-ltr" };
+  const remote = { context: "context:kitty:ssh:v1", condition: "kitty-force-ltr" };
+  await store.rememberTerminalSetting(kitty);
+  await store.rememberTerminalSetting(remote);
+  await store.rememberTerminalSetting(kitty);
+  await store.recordHistory("about:newtab", "New tab");
+  await store.flush();
+  const reopened = await BrowserStore.open({ statePath });
+  assert.deepEqual(reopened.terminalSettings(), [kitty, remote]);
+  assert.throws(() => { reopened.terminalSettings()[0].context = "other"; }, TypeError);
+  assert.throws(() => { reopened.terminalSettings().push(kitty); }, TypeError);
+  if (process.platform !== "win32") assert.equal((await stat(statePath)).mode & 0o777, 0o600);
+  await reopened.forgetTerminalSettings(kitty.context);
+  assert.throws(() => { reopened.terminalSettings().push(kitty); }, TypeError);
+  assert.deepEqual((await BrowserStore.open({ statePath })).terminalSettings(), [remote]);
+  await reopened.forgetTerminalSettings("unrelated");
+  assert.deepEqual(reopened.terminalSettings(), [remote]);
+});
+
+test("terminal setting storage rejects malformed and oversized records without broadening context", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "verge-terminal-settings-invalid-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const statePath = join(directory, "state.json");
+  const valid = { context: "exact-context", condition: "konsole-bidi-disabled" };
+  const invalid = [null, {}, { context: "", condition: "kitty-force-ltr" },
+    { context: "x".repeat(4097), condition: "kitty-force-ltr" },
+    { context: "exact-context", condition: "trust-all" },
+    { context: 7, condition: "kitty-force-ltr" }];
+  await writeFile(statePath, JSON.stringify({ terminalSettings: [...invalid, valid, valid] }));
+  const store = await BrowserStore.open({ statePath });
+  assert.deepEqual(store.terminalSettings(), [valid]);
+  for (const entry of invalid) await assert.rejects(store.rememberTerminalSetting(entry), /Invalid terminal setting assertion/u);
+  await assert.rejects(store.forgetTerminalSettings(""), /Invalid terminal setting context/u);
+  assert.deepEqual(store.terminalSettings(), [valid]);
+});
+
+test("terminal setting parsing and retention have a fixed record budget", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "verge-terminal-settings-bounded-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const statePath = join(directory, "state.json");
+  const records = Array.from({ length: 40 }, (_, index) => ({ context: `context-${index}`, condition: "kitty-force-ltr" }));
+  await writeFile(statePath, JSON.stringify({ terminalSettings: records }));
+  const store = await BrowserStore.open({ statePath });
+  assert.deepEqual(store.terminalSettings(), records.slice(0, 32));
+  const latest = { context: "latest", condition: "konsole-bidi-disabled" };
+  await store.rememberTerminalSetting(latest);
+  assert.deepEqual(store.terminalSettings(), [latest, ...records.slice(0, 31)]);
+  assert.deepEqual((await BrowserStore.open({ statePath })).terminalSettings(), store.terminalSettings());
+  await writeFile(statePath, JSON.stringify({ terminalSettings: [...Array(32).fill(null), latest] }));
+  assert.deepEqual((await BrowserStore.open({ statePath })).terminalSettings(), []);
+});

@@ -4,6 +4,7 @@ import { chmod, lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promis
 import { basename, dirname, join } from "node:path";
 import { homedir } from "node:os";
 
+import type { TerminalCellPresentationException } from "@ismail-elkorchi/terminal-ui/host";
 import type { HttpSessionAdapter } from "@ismail-elkorchi/http-client";
 import type { SerializedCookieJar } from "tough-cookie";
 
@@ -78,6 +79,9 @@ export interface BrowserWorkspace {
   readonly sidePanel: StoredSidePanel;
 }
 
+/** An explicit assertion about an unqueryable terminal setting, never a session result. */
+export type StoredTerminalSetting = TerminalCellPresentationException;
+
 interface BrowserState {
   readonly bookmarks: readonly BookmarkEntry[];
   readonly history: readonly HistoryEntry[];
@@ -85,8 +89,11 @@ interface BrowserState {
   readonly indexDocuments: readonly IndexDocument[];
   readonly downloads: readonly DownloadRecord[];
   readonly workspace: BrowserWorkspace | null;
+  readonly terminalSettings: readonly StoredTerminalSetting[];
 }
 
+const MAX_TERMINAL_SETTINGS = 32;
+const MAX_TERMINAL_CONTEXT_CODE_UNITS = 4096;
 const DEFAULT_HISTORY_LIMIT = 500;
 const DEFAULT_INDEX_LIMIT = 250;
 const MAX_HISTORY_LIMIT = 2000;
@@ -141,7 +148,8 @@ function createEmptyState(): BrowserState {
     cookieJar: null,
     indexDocuments: [],
     downloads: [],
-    workspace: null
+    workspace: null,
+    terminalSettings: Object.freeze([])
   };
 }
 
@@ -274,6 +282,29 @@ function normalizeWorkspace(value: unknown): BrowserWorkspace | null {
   };
 }
 
+function normalizeTerminalSetting(value: unknown): StoredTerminalSetting | null {
+  if (value === null || typeof value !== "object") return null;
+  const candidate = value as Record<string, unknown>;
+  const context = candidate["context"];
+  const condition = candidate["condition"];
+  if (typeof context !== "string" || context.length === 0 || context.length > MAX_TERMINAL_CONTEXT_CODE_UNITS
+    || (condition !== "kitty-force-ltr" && condition !== "konsole-bidi-disabled")) return null;
+  return Object.freeze({ context, condition });
+}
+
+function normalizeTerminalSettings(value: unknown): readonly StoredTerminalSetting[] {
+  if (!Array.isArray(value)) return Object.freeze([]);
+  const records: StoredTerminalSetting[] = [];
+  // Admission is bounded before inspection. Invalid or duplicate records cannot grow this work.
+  for (const item of value.slice(0, MAX_TERMINAL_SETTINGS)) {
+    const record = normalizeTerminalSetting(item);
+    if (record !== null && !records.some((entry) => entry.context === record.context && entry.condition === record.condition)) {
+      records.push(record);
+    }
+  }
+  return Object.freeze(records);
+}
+
 function normalizeState(value: unknown): BrowserState {
   if (value === null || typeof value !== "object") {
     return createEmptyState();
@@ -325,7 +356,8 @@ function normalizeState(value: unknown): BrowserState {
     cookieJar: serializedCookieJar(candidate["cookieJar"]),
     indexDocuments,
     downloads,
-    workspace: normalizeWorkspace(candidate["workspace"])
+    workspace: normalizeWorkspace(candidate["workspace"]),
+    terminalSettings: normalizeTerminalSettings(candidate["terminalSettings"])
   };
 }
 
@@ -484,6 +516,28 @@ export class BrowserStore {
     await prepareStateDirectory(statePath);
     const state = await loadStateFromPath(statePath);
     return new BrowserStore(statePath, historyLimit, indexLimit, state);
+  }
+
+  public terminalSettings(): readonly StoredTerminalSetting[] {
+    return this.state.terminalSettings;
+  }
+
+  public async rememberTerminalSetting(setting: StoredTerminalSetting): Promise<void> {
+    const normalized = normalizeTerminalSetting(setting);
+    if (normalized === null) throw new Error("Invalid terminal setting assertion.");
+    this.state = { ...this.state, terminalSettings: normalizeTerminalSettings([
+      normalized,
+      ...this.state.terminalSettings.filter((entry) => entry.context !== normalized.context || entry.condition !== normalized.condition)
+    ]) };
+    await this.save();
+  }
+
+  public async forgetTerminalSettings(context: string): Promise<void> {
+    if (typeof context !== "string" || context.length === 0 || context.length > MAX_TERMINAL_CONTEXT_CODE_UNITS) {
+      throw new Error("Invalid terminal setting context.");
+    }
+    this.state = { ...this.state, terminalSettings: normalizeTerminalSettings(this.state.terminalSettings.filter((entry) => entry.context !== context)) };
+    await this.save();
   }
 
   public listBookmarks(): readonly BookmarkEntry[] {

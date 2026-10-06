@@ -48,7 +48,8 @@ async function runSmokeCheck() {
   try {
     const once = spawnSync(process.execPath, ["dist/cli.js", "--once", target], {
       encoding: "utf8",
-      timeout: 8_000
+      timeout: 8_000,
+      env: { ...process.env, XDG_STATE_HOME: join(fixtureDirectory, "state") }
     });
     if (once.status !== 0) {
       throw new Error(`CLI --once failed with exit code ${String(once.status)}\n${once.stderr}`);
@@ -65,12 +66,7 @@ async function runSmokeCheck() {
     if (once.stdout.includes("\u001b")) {
       throw new Error("CLI --once emitted terminal control sequences.");
     }
-    const declared = spawnSync(process.execPath, [
-      "dist/cli.js", "--terminal-cell-presentation=existing", "--once", target
-    ], { encoding: "utf8", timeout: 8_000 });
-    if (declared.status !== 0 || declared.stdout !== once.stdout) {
-      throw new Error("Explicit terminal state must not change plain one-shot output.");
-    }
+
   } finally {
     await rm(fixtureDirectory, { recursive: true, force: true });
   }
@@ -83,7 +79,7 @@ async function verifyCliHostOwnership() {
   const hostModule = `import { appendFileSync } from "node:fs";
 import { createNodeTerminalHost as createHost } from ${JSON.stringify(import.meta.resolve("@ismail-elkorchi/terminal-ui/host"))};
 export function createNodeTerminalHost(options) {
-  if (options.cellPresentation.qualification !== process.env.CLI_PRESENTATION) throw new Error("invalid presentation qualification");
+  if (options.capabilities.cellPresentation.policy !== "auto") throw new Error("missing automatic policy");
   appendFileSync(process.env.CLI_EVENTS, "create\\n");
   const host = createHost(options);
   const dispose = host.dispose.bind(host);
@@ -106,22 +102,20 @@ export async function renderBrowserOnce() { throw new Error("unexpected one-shot
     "./ui/run.js": runModule
   });
   try {
-    for (const qualification of ["existing", "mode-8-reset"]) {
-      for (const [fail, disposeFail] of [[false, false], [true, false], [false, true], [true, true]]) {
-        await writeFile(events, "", "utf8");
-        const result = spawnSync(process.execPath, [
-          "--import", pathToFileURL(hook).href, "dist/cli.js", `--terminal-cell-presentation=${qualification}`, "about:newtab"
-        ], { encoding: "utf8", timeout: 8_000, env: {
-          ...process.env, CLI_PRESENTATION: qualification, CLI_EVENTS: events, CLI_FAIL: fail ? "1" : "0",
-          CLI_DISPOSE_FAIL: disposeFail ? "1" : "0",
-          XDG_STATE_HOME: join(directory, "state")
-        } });
-        if (result.status !== (fail || disposeFail ? 1 : 0)
-          || await readFile(events, "utf8") !== "create\nrun\ndispose\n"
-          || fail && !result.stderr.includes("injected startup failure")
-          || disposeFail && !result.stderr.includes("injected disposal failure")) {
-          throw new Error(`CLI host lifecycle failed (run=${fail}, dispose=${disposeFail}): ${result.stderr}`);
-        }
+    for (const [fail, disposeFail] of [[false, false], [true, false], [false, true], [true, true]]) {
+      await writeFile(events, "", "utf8");
+      const result = spawnSync(process.execPath, [
+        "--import", pathToFileURL(hook).href, "dist/cli.js", "about:newtab"
+      ], { encoding: "utf8", timeout: 8_000, env: {
+        ...process.env, CLI_EVENTS: events, CLI_FAIL: fail ? "1" : "0",
+        CLI_DISPOSE_FAIL: disposeFail ? "1" : "0",
+        XDG_STATE_HOME: join(directory, "state")
+      } });
+      if (result.status !== (fail || disposeFail ? 1 : 0)
+        || await readFile(events, "utf8") !== "create\nrun\ndispose\n"
+        || fail && !result.stderr.includes("injected startup failure")
+        || disposeFail && !result.stderr.includes("injected disposal failure")) {
+        throw new Error(`CLI host lifecycle failed (run=${fail}, dispose=${disposeFail}): ${result.stderr}`);
       }
     }
   } finally {
@@ -129,7 +123,7 @@ export async function renderBrowserOnce() { throw new Error("unexpected one-shot
   }
 }
 
-async function verifyCliPresentationFailures() {
+async function verifyCliAutomaticPresentation() {
   const directory = await mkdtemp(join(tmpdir(), "verge-cli-presentation-"));
   const hook = join(directory, "host-hook.mjs");
   const realHostUrl = import.meta.resolve("@ismail-elkorchi/terminal-ui/host");
@@ -137,24 +131,27 @@ async function verifyCliPresentationFailures() {
 import { appendFileSync } from "node:fs";
 export function createNodeTerminalHost(options) {
   const scenario = process.env.CLI_SCENARIO;
-  const host = createMemoryTerminalHost(options);
+  const host = createMemoryTerminalHost({ ...options, env: scenario === "kitty" ? { TERM: "xterm-kitty", KITTY_WINDOW_ID: "1" } : { TERM: "xterm-256color" } });
   let reset = false;
   let restored = false;
   for (const method of ["write", "writeRecovery"]) {
-  const originalWrite = host.stdout[method].bind(host.stdout);
-  host.stdout[method] = async (chunk, context) => {
-    const result = await originalWrite(chunk, context);
-    const text = typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
-    if (text.includes("\\u001b[8l")) reset = true;
-    if (text.includes("\\u001b[8h")) restored = true;
-    if (text.includes("\\u001b[8$p")) {
-      if (!(scenario === "verification-missing" && reset && !restored)) {
-        const state = scenario === "unqualified" ? 2 : scenario === "fixed" ? 3 : 1;
-        host.input("\\u001b[8;" + state + "$y\\u001b[?1;2c");
+    const originalWrite = host.stdout[method].bind(host.stdout);
+    host.stdout[method] = async (chunk, context) => {
+      const result = await originalWrite(chunk, context);
+      const text = typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+      if (text.includes("\\u001b[8l")) reset = true;
+      if (text.includes("\\u001b[8h")) restored = true;
+      const queries = [...text.matchAll(/\\[(\\??)(\\d+)\\$p/gu)];
+      for (const [, prefix, mode] of queries) {
+        if (prefix === "" && mode === "8" && scenario === "verification-missing" && reset && !restored) continue;
+        const state = prefix !== "" || mode !== "8" ? 2 : scenario === "fixed" ? 3
+          : scenario === "normal" || scenario === "kitty" || scenario === "raw-input" ? 2
+          : reset && !restored && scenario !== "verification-mismatch" ? 2 : 1;
+        host.input("\\u001b[" + prefix + mode + ";" + state + "$y");
       }
-    }
-    return result;
-  };
+      if (queries.length > 0) host.input("\\u001b[?1;2c");
+      return result;
+    };
   }
   if (scenario === "raw-input") {
     const setRawMode = host.stdin.setRawMode.bind(host.stdin);
@@ -163,10 +160,13 @@ export function createNodeTerminalHost(options) {
       return setRawMode(enabled);
     };
   }
-  const timer = setInterval(() => host.clock.advance(100), 5);
-  const originalDispose = host.dispose;
+  const timer = setInterval(() => {
+    host.clock.advance(100);
+    if (host.frames().length > 0) host.input("\\u0003");
+  }, 5);
+  const originalDispose = host.dispose.bind(host);
   host.dispose = async () => {
-    appendFileSync(process.env.CLI_EVENTS, "dispose\\n");
+    appendFileSync(process.env.CLI_EVENTS, JSON.stringify({ frames: host.frames().length, raw: host.stdin.isRawModeEnabled(), reset, restored }) + "\\n");
     try { await originalDispose(); } finally { clearInterval(timer); }
     if (process.env.CLI_DISPOSE_FAIL === "1") throw new Error("injected host cleanup failure");
   };
@@ -174,24 +174,30 @@ export function createNodeTerminalHost(options) {
 }`;
   await writeCliHook(hook, { "@ismail-elkorchi/terminal-ui/host": hostModule });
   try {
-    for (const [scenario, qualification] of [
-      ["unqualified", null], ["contradicted", "existing"], ["fixed", "mode-8-reset"],
-      ["raw-input", "existing"], ["verification-missing", "mode-8-reset"],
-      ["verification-mismatch", "mode-8-reset"]
-    ]) {
+    for (const scenario of ["normal", "reset", "kitty", "fixed", "raw-input", "verification-missing", "verification-mismatch"]) {
       for (const cleanupFailure of [false, true]) {
         const events = join(directory, `${scenario}-${cleanupFailure}.txt`);
         const result = spawnSync(process.execPath, ["--import", pathToFileURL(hook).href, "dist/cli.js",
-          ...(qualification === null ? [] : [`--terminal-cell-presentation=${qualification}`]), "about:newtab"
-        ], { encoding: "utf8", timeout: 15_000, env: {
-          ...process.env, CLI_SCENARIO: scenario, CLI_EVENTS: events,
-          CLI_DISPOSE_FAIL: cleanupFailure ? "1" : "0", XDG_STATE_HOME: join(directory, "state")
-        } });
-        const guided = result.stderr.includes("After verifying your terminal configuration and transport");
-        if (result.status !== 1 || guided !== (scenario === "unqualified")
-          || await readFile(events, "utf8") !== "dispose\n"
-          || cleanupFailure && !result.stderr.includes("injected host cleanup failure")) {
-          throw new Error(`Actual CLI presentation failure (${scenario}, cleanup=${cleanupFailure}, status=${result.status}, signal=${result.signal}): ${result.error ?? ""} ${result.stderr}`);
+          ...(scenario === "normal" ? [] : ["about:newtab"])], {
+          encoding: "utf8", timeout: 15_000, env: {
+            ...process.env, CLI_SCENARIO: scenario, CLI_EVENTS: events,
+            CLI_DISPOSE_FAIL: cleanupFailure ? "1" : "0", XDG_STATE_HOME: join(directory, "state")
+          }
+        });
+        const accepted = scenario === "normal" || scenario === "reset";
+        if (result.error || result.status !== (accepted && !cleanupFailure ? 0 : 1)) {
+          throw new Error(`Actual CLI automatic startup (${scenario}, cleanup=${cleanupFailure}): ${result.error ?? ""} ${result.stderr}`);
+        }
+        const event = JSON.parse(await readFile(events, "utf8"));
+        if (accepted) {
+          const state = JSON.parse(await readFile(join(directory, "state", "verge-browser", "state.json"), "utf8"));
+          if (state.terminalSettings.length !== 0) throw new Error("Successful startup must not persist terminal assertions.");
+        }
+        if ((event.frames > 0) !== accepted || event.raw !== false
+          || scenario === "reset" && (!event.reset || !event.restored)
+          || cleanupFailure && !result.stderr.includes("injected host cleanup failure")
+          || scenario === "kitty" && !result.stderr.includes("--remember-terminal-setting=kitty-force-ltr")) {
+          throw new Error(`Actual CLI automatic startup ownership failed (${scenario}): ${JSON.stringify(event)} ${result.stderr}`);
         }
       }
     }
@@ -204,14 +210,14 @@ export function createNodeTerminalHost(options) {
 try {
   await runSmokeCheck();
   await verifyCliHostOwnership();
-  await verifyCliPresentationFailures();
+  await verifyCliAutomaticPresentation();
   const invalidOption = spawnSync(process.execPath, ["dist/cli.js", "--unknown-option"], {
     encoding: "utf8"
   });
   if (invalidOption.status !== 1 || !invalidOption.stderr.includes("Unknown option: --unknown-option")) {
     throw new Error("CLI did not reject an unknown option");
   }
-  for (const value of ["implicit", "explicit", "unknown"]) {
+  for (const value of ["implicit", "explicit", "existing", "mode-8-reset", "unknown"]) {
     const invalidPresentation = spawnSync(process.execPath, [
       "dist/cli.js", `--terminal-cell-presentation=${value}`
     ], { encoding: "utf8" });

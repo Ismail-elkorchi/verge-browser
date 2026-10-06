@@ -55,27 +55,35 @@ editors implement those overrides.
 
 Interactive startup and resume require application-ordered physical LTR cells
 and matching input coordinates, paired with that text adapter. Raw ECMA-48 mode 8
-and the full presentation guarantee are separate: explicit bidirectional mode
+and the full presentation contract are separate: explicit bidirectional mode
 can still have an RTL character path. Mode observations and restoration baselines
-do not supply full presentation qualification.
+do not prove character direction or coordinate alignment.
 
-The host accepts a caller declaration of a qualified existing presentation, or
-one established after an observed and verified mode-8 reset. This is declared
-assurance, not an observed proof of character direction. The caller must preserve
-the qualified configuration and transport throughout the host lifetime, including
-external use during suspension. Contradictory observations invalidate the
-qualification; inconclusive refreshes cannot resurrect it. `TERM` names do not
-establish this capability. The CLI exposes the same contract through its
-[terminal presentation option](../reference/cli.md#terminal-presentation).
+The terminal-ui host owns automatic support decisions, terminal context, probes,
+input demultiplexing, evidence and restoration. Verge requests required session
+admission and retains its native text adapter; it does not duplicate terminal
+classification or probe stdin. Conventional VT presentation is honestly reported
+as assumed. Known configuration hazards and observed contradictions block the
+session. Graphics selection remains independent.
 
-After successful acquisition, the full-screen TUI clears its owned surface once
-at startup or resume so old paragraph attributes do not survive. Clearing does
-not independently establish LTR character direction. Ordinary partial updates
-remain incremental. Session release restores the known raw modes it actually
-changed, including failure, cancellation and suspension; it never substitutes a
-guessed default for an unknown original character path. One-shot plain output
-uses the same text adapter without acquiring terminal modes. These contracts do
-not imply native qualification across all terminals, fonts or transports.
+A user may explicitly remember a narrow unqueryable terminal setting in Verge's
+existing bounded, private BrowserStore. These assertions are scoped to the exact
+host-generated terminal/transport context; invalid or mismatched records do not
+affect admission. They are not session-success caches and cannot override observed
+contradictions. The CLI provides [one-time setting commands](../reference/cli.md#remembering-an-unqueryable-setting)
+instead of repeated invocation declarations. Ordinary startup has no presentation
+flag; former declarations are removed without compatibility aliases.
+
+After admission, the full-screen TUI clears its owned surface once at startup or
+resume so old paragraph attributes do not survive. Clearing does not independently
+establish LTR character direction. Ordinary partial updates remain incremental.
+Session release restores the known raw modes it actually changed, including
+failure, cancellation and suspension, without substituting a guessed default for
+an unknown original character path. One-shot output deliberately uses the same
+text adapter without terminal mode acquisition. Rejected interactive startup never
+silently switches to one-shot, ASCII-only or rasterized-text rendering. These
+contracts do not imply native qualification across all terminals, fonts or
+transports.
 
 The Unicode generator is `scripts/unicode/generate-unicode-data.mjs`.
 `npm run unicode:generate` downloads only the versioned official sources,

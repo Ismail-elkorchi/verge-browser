@@ -5,11 +5,11 @@ navigation, transport, and immutable web-document APIs.
 
 ## Install
 
-The interactive CLI requires Node.js 24 or newer. Before interactive use, choose
-the qualification matching your terminal configuration in the
+The interactive CLI requires Node.js 24 or newer. Ordinary startup automatically
+checks the terminal using the TUI's support policy. Conventional VT cell ordering
+is an explicit assumption, not a measured guarantee. Known incompatible settings
+and contradictory observations stop startup with a specific remedy; see the
 [terminal presentation guide](./docs/reference/cli.md#terminal-presentation).
-Unqualified startup stops with guidance; the commands below do not assume that
-mode 8 or the terminal name establishes the required ordering:
 
 ```sh
 npm install --global @ismail-elkorchi/verge-browser
@@ -56,10 +56,10 @@ reader output, page diagnostics, cookie inspection, and tab/workspace
 persistence. Non-HTML navigation offers to download the resource instead of
 replacing the current page.
 
-Interactive mode requires qualified application-ordered LTR cells and matching
-input coordinates. A mode-8 reset alone is insufficient. Unknown presentation fails startup;
-see the [CLI terminal contract](./docs/reference/cli.md). `--once` needs no terminal
-mode acquisition.
+Interactive mode preserves native text and requires application-ordered LTR cells
+with matching input coordinates. Terminal settings are inspected independently of
+graphics support. `--once` is a deliberate plain-output mode; rejected interactive
+startup never silently switches rendering modes.
 
 Author CSS contributes page colors, emphasis, visibility, spacing, borders,
 block/inline flow, flexible sizing and alignment, positioned layout, floats,

@@ -1,34 +1,37 @@
 #!/usr/bin/env node
 import { PageAcquisition } from "./app/page-acquisition.js";
-import { BrowserStore } from "./app/storage.js";
+import { BrowserStore, type StoredTerminalSetting } from "./app/storage.js";
 import { createNodeBrowserServices } from "./runtime/node-browser-services.js";
 import { renderBrowserOnce, runBrowserTui } from "./ui/run.js";
 import type { HttpSessionAdapter } from "@ismail-elkorchi/http-client";
-import { createNodeTerminalHost, type TerminalCellPresentationQualification } from "@ismail-elkorchi/terminal-ui/host";
+import { createNodeTerminalHost, type TerminalHost } from "@ismail-elkorchi/terminal-ui/host";
 import { defaultTuiLifecyclePolicy, TuiRunError } from "@ismail-elkorchi/terminal-ui/tui";
 
 interface CliFlags {
   readonly initialTarget: string | null;
   readonly runOnce: boolean;
-  readonly terminalPresentation: TerminalCellPresentationQualification["qualification"] | null;
+  readonly rememberTerminalSetting: StoredTerminalSetting["condition"] | null;
+  readonly forgetTerminalSettings: boolean;
 }
 
 function parseCliFlags(argv: readonly string[]): CliFlags {
   let initialTarget: string | null = null;
   let runOnce = false;
-  let terminalPresentation: CliFlags["terminalPresentation"] = null;
+  let rememberTerminalSetting: CliFlags["rememberTerminalSetting"] = null;
+  let forgetTerminalSettings = false;
 
   for (const token of argv) {
     if (token === "--once") {
       runOnce = true;
       continue;
     }
-    if (token === "--terminal-cell-presentation=existing") {
-      terminalPresentation = "existing";
+    if (token === "--remember-terminal-setting=kitty-force-ltr" || token === "--remember-terminal-setting=konsole-bidi-disabled") {
+      if (rememberTerminalSetting !== null) throw new Error("Remember one terminal setting at a time.");
+      rememberTerminalSetting = token === "--remember-terminal-setting=kitty-force-ltr" ? "kitty-force-ltr" : "konsole-bidi-disabled";
       continue;
     }
-    if (token === "--terminal-cell-presentation=mode-8-reset") {
-      terminalPresentation = "mode-8-reset";
+    if (token === "--forget-terminal-settings") {
+      forgetTerminalSettings = true;
       continue;
     }
     if (token.startsWith("--")) {
@@ -39,52 +42,37 @@ function parseCliFlags(argv: readonly string[]): CliFlags {
     }
   }
 
-  return {
-    initialTarget,
-    runOnce,
-    terminalPresentation
-  };
+  if (rememberTerminalSetting !== null && forgetTerminalSettings) {
+    throw new Error("Remember and forget terminal settings are separate commands.");
+  }
+  if ((rememberTerminalSetting !== null || forgetTerminalSettings) && (initialTarget !== null || runOnce)) {
+    throw new Error("Terminal setting commands exit without browsing; do not combine them with a target or --once.");
+  }
+  return { initialTarget, runOnce, rememberTerminalSetting, forgetTerminalSettings };
 }
 
-async function main(): Promise<void> {
-  const cliFlags = parseCliFlags(process.argv.slice(2));
-  const services = createNodeBrowserServices();
-  const store = await BrowserStore.open();
-  const searchUrlTemplate = process.env["VERGE_SEARCH_URL_TEMPLATE"];
-  const downloadDirectory = process.env["VERGE_DOWNLOAD_DIR"];
-  const browserOptions = {
-    store,
-    services,
-    createAcquisition: (httpSession: HttpSessionAdapter) => new PageAcquisition({ httpSession }),
-    ...(searchUrlTemplate === undefined ? {} : { searchUrlTemplate }),
-    ...(downloadDirectory === undefined ? {} : { downloadDirectory }),
-    restoreWorkspace: cliFlags.initialTarget === null && !cliFlags.runOnce
-  };
-
-  const initialTarget = cliFlags.initialTarget ?? "about:newtab";
-
-  if (cliFlags.runOnce) {
-    const output = await renderBrowserOnce(initialTarget, browserOptions, {
-      columns: process.stdout.columns || 100,
-      rows: process.stdout.rows || 24
-    });
-    process.stdout.write(`${output}\n`);
-    return;
+async function changeTerminalSettings(host: TerminalHost, store: BrowserStore, flags: CliFlags): Promise<string> {
+  // The same host owns classification, context and normal startup admission. No CLI probing.
+  const capabilities = await host.getCapabilities();
+  const facts = capabilities.cellPresentation.facts;
+  const context = facts.find((fact) => fact.name === "cellPresentation.context")?.value;
+  if (!capabilities.isTty || typeof context !== "string" || context.length === 0) {
+    throw new Error("This terminal and transport cannot be identified safely. Use a directly attached supported terminal before remembering a setting.");
   }
-
-  const host = createNodeTerminalHost({
-    ...(cliFlags.terminalPresentation === null ? {}
-      : { cellPresentation: { qualification: cliFlags.terminalPresentation } })
-  });
-  const failures: unknown[] = [];
-  try {
-    await runBrowserTui(initialTarget, {
-      ...browserOptions,
-      host
-    });
-  } catch (error) {
-    failures.push(error);
+  if (flags.forgetTerminalSettings) {
+    await store.forgetTerminalSettings(context);
+    return "Forgot remembered terminal settings for this terminal and transport.";
   }
+  const condition = flags.rememberTerminalSetting;
+  const conditions = facts.find((fact) => fact.name === "cellPresentation.conditions")?.value;
+  if (condition === null || !Array.isArray(conditions) || !conditions.includes(condition)) {
+    throw new Error("That setting does not apply to the current terminal and transport. Run the command in the terminal you configured.");
+  }
+  await store.rememberTerminalSetting({ context, condition });
+  return `Remembered ${condition} for this terminal and transport. The terminal must already be configured; observed contradictions still block startup.`;
+}
+
+async function disposeTerminalHost(host: TerminalHost, failures: unknown[]): Promise<void> {
   const disposalController = new AbortController();
   const timerController = new AbortController();
   try {
@@ -104,10 +92,50 @@ async function main(): Promise<void> {
   } finally {
     timerController.abort();
   }
+}
+
+async function main(): Promise<void> {
+  const cliFlags = parseCliFlags(process.argv.slice(2));
+  const store = await BrowserStore.open();
+  const searchUrlTemplate = process.env["VERGE_SEARCH_URL_TEMPLATE"];
+  const downloadDirectory = process.env["VERGE_DOWNLOAD_DIR"];
+  const browserOptions = () => ({
+    store,
+    services: createNodeBrowserServices(),
+    createAcquisition: (httpSession: HttpSessionAdapter) => new PageAcquisition({ httpSession }),
+    ...(searchUrlTemplate === undefined ? {} : { searchUrlTemplate }),
+    ...(downloadDirectory === undefined ? {} : { downloadDirectory }),
+    restoreWorkspace: cliFlags.initialTarget === null && !cliFlags.runOnce
+  });
+  const initialTarget = cliFlags.initialTarget ?? "about:newtab";
+  if (cliFlags.runOnce) {
+    const output = await renderBrowserOnce(initialTarget, browserOptions(), {
+      columns: process.stdout.columns || 100,
+      rows: process.stdout.rows || 24
+    });
+    process.stdout.write(`${output}\n`);
+    return;
+  }
+  const host = createNodeTerminalHost({
+    capabilities: { cellPresentation: { policy: "auto", exceptions: store.terminalSettings() } }
+  });
+  const failures: unknown[] = [];
+  let result: string | undefined;
+  try {
+    if (cliFlags.rememberTerminalSetting !== null || cliFlags.forgetTerminalSettings) {
+      result = await changeTerminalSettings(host, store, cliFlags);
+    } else {
+      await runBrowserTui(initialTarget, { ...browserOptions(), host });
+    }
+  } catch (error) {
+    failures.push(error);
+  }
+  await disposeTerminalHost(host, failures);
   if (failures.length === 1) throw failures[0];
   if (failures.length > 1) {
     throw new AggregateError(failures, "Browser operation and terminal cleanup both failed.", { cause: failures[0] });
   }
+  if (result !== undefined) process.stdout.write(`${result}\n`);
 }
 
 function failureMessage(error: unknown): string {
@@ -133,11 +161,14 @@ function presentationGuidance(error: unknown): string | undefined {
   for (let current = error; current instanceof Error && !seen.has(current); current = current.cause) {
     seen.add(current);
     if (!(current instanceof TuiRunError)) continue;
-    if (current.primaryDiagnostic?.code !== "HOST_CELL_PRESENTATION_UNQUALIFIED") return undefined;
-    return "Verge needs application-ordered left-to-right cells and matching input coordinates. "
-      + "After verifying your terminal configuration and transport, use --terminal-cell-presentation=existing "
-      + "if that guarantee already holds, or --terminal-cell-presentation=mode-8-reset if it holds after a verified mode-8 reset. "
-      + "These declarations do not configure character direction. Kitty also needs force_ltr=yes. "
+    const diagnostic = current.primaryDiagnostic;
+    if (diagnostic === undefined || !diagnostic.code.startsWith("HOST_CELL_PRESENTATION_")) return undefined;
+    const hint = diagnostic.hint;
+    const conditions = diagnostic.data?.["conditions"];
+    const commands = diagnostic.data?.["contextAvailable"] === true && Array.isArray(conditions) ? conditions.flatMap((condition: unknown) =>
+      condition === "kitty-force-ltr" || condition === "konsole-bidi-disabled"
+        ? [`After configuring the terminal, run verge --remember-terminal-setting=${condition} once in that terminal.`] : []) : [];
+    return (hint === undefined ? "" : `${hint} `) + (commands.length === 0 ? "" : `${commands.join(" ")} `)
       + "See https://github.com/Ismail-elkorchi/verge-browser/blob/main/docs/reference/cli.md#terminal-presentation";
   }
   return undefined;

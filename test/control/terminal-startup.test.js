@@ -10,8 +10,8 @@ import { TuiRunError } from "@ismail-elkorchi/terminal-ui/tui";
 import { BrowserStore } from "../../dist/app/storage.js";
 import { prepareBrowserTui, renderBrowserOnce, runBrowserTui } from "../../dist/ui/run.js";
 
-function unqualifiedHost() {
-  const host = createMemoryTerminalHost();
+function blockedHost() {
+  const host = createMemoryTerminalHost({ env: { TERM: "xterm-kitty", KITTY_WINDOW_ID: "1" } });
   const write = host.stdout.write.bind(host.stdout);
   host.stdout.write = async (chunk, context) => {
     await write(chunk, context);
@@ -26,7 +26,7 @@ function unqualifiedHost() {
 async function fixture(t, { servicesFailure, flushFailure } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "verge-terminal-startup-"));
   const store = await BrowserStore.open({ statePath: join(directory, "state.json") });
-  const host = unqualifiedHost();
+  const host = blockedHost();
   const calls = { services: 0, flush: 0, acquisitions: 0 };
   const flush = store.flush.bind(store);
   store.flush = async () => {
@@ -73,7 +73,7 @@ function assertPrimaryFailure(error) {
   assert.ok(error instanceof TuiRunError);
   const failure = error.primaryDiagnostic;
   assert.ok(failure);
-  assert.equal(failure.code, "HOST_CELL_PRESENTATION_UNQUALIFIED");
+  assert.equal(failure.code, "HOST_CELL_PRESENTATION_CONTRADICTED");
   assert.equal(failure.data.operation, "cellPresentation");
   assert.equal(failure.data.requirement, "required");
   assert.equal(failure.data.outcome, "rejected");

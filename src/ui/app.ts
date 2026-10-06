@@ -76,6 +76,7 @@ import type {
 } from "./model.js";
 import { browserMenuItems, formComboboxPageSize, linkMenuItems } from "./model.js";
 import { browserView } from "./view.js";
+import { terminalPresentationDiagnostics } from "./terminal-presentation.js";
 import type { ViewportRequestParameters } from "./render-worker/index.js";
 
 const pickerQuery = createTuiPreparedQuery({
@@ -87,6 +88,8 @@ const pickerQuery = createTuiPreparedQuery({
     }),
   toMessage: (message): BrowserTuiMessage => ({ kind: "pickerQuery", message })
 });
+
+type BrowserUpdateContext = Pick<TuiContext, "terminalSize"> & Partial<Pick<TuiContext, "capabilities">>;
 
 const EMPTY_COMMAND_SUGGESTIONS = createCommandSuggestions([]);
 const MAX_PAGE_SEARCH_MATCHES = 2000;
@@ -723,7 +726,7 @@ function runCommand(
   controller: BrowserController,
   state: BrowserTuiState,
   command: BrowserCommand,
-  context: Pick<TuiContext, "terminalSize">,
+  context: BrowserUpdateContext,
 ): TuiUpdateResult<BrowserTuiState, BrowserTuiMessage> {
   if (command.kind === "invalid") {
     return result({
@@ -831,7 +834,7 @@ function reduceBrowser(
   controller: BrowserController,
   state: BrowserTuiState,
   message: BrowserTuiMessage,
-  context: Pick<TuiContext, "terminalSize"> = { terminalSize: { columns: 100, rows: 24 } }
+  context: BrowserUpdateContext = { terminalSize: { columns: 100, rows: 24 } }
 ): TuiUpdateResult<BrowserTuiState, BrowserTuiMessage> {
   if (message.kind === "imageResource" || message.kind === "imageResourcesFailed") {
     return result(acceptImageResource(state, message, controller.retainedImageViewports(), controller.retainedImageStates(), controller.retainedImageSnapshots()));
@@ -1168,7 +1171,10 @@ function reduceBrowser(
           kind: "detail",
           detailKind: message.detail,
           title: `${message.detail.charAt(0).toUpperCase()}${message.detail.slice(1)}`,
-          lines: message.detail === "help" ? formatHelpText().split("\n") : controller.detail(message.detail, selectedTab as BrowserDocumentState),
+          lines: message.detail === "help" ? formatHelpText().split("\n") : [
+            ...controller.detail(message.detail, selectedTab as BrowserDocumentState),
+            ...(message.detail === "diagnostics" ? terminalPresentationDiagnostics(context.capabilities) : [])
+          ],
           scrollRow: 0
         }
       });
@@ -1943,7 +1949,7 @@ function updateBrowserState(
   controller: BrowserController,
   state: BrowserTuiState,
   message: BrowserTuiMessage,
-  context: Pick<TuiContext, "terminalSize"> = { terminalSize: { columns: 100, rows: 24 } },
+  context: BrowserUpdateContext = { terminalSize: { columns: 100, rows: 24 } },
 ): TuiUpdateResult<BrowserTuiState, BrowserTuiMessage> {
   const reduced = preparePickerUpdate(state, reduceBrowser(controller, state, message, context));
   const previous = activeTab(state);
@@ -2049,7 +2055,7 @@ export function updateBrowser(
   controller: BrowserController,
   state: BrowserTuiState,
   message: BrowserTuiMessage,
-  context: Pick<TuiContext, "terminalSize"> = { terminalSize: { columns: 100, rows: 24 } },
+  context: BrowserUpdateContext = { terminalSize: { columns: 100, rows: 24 } },
 ): TuiUpdateResult<BrowserTuiState, BrowserTuiMessage> {
   const updated = updateBrowserState(controller, state, message, context);
   controller.reserveImageRetentionState(state, updated.state);
