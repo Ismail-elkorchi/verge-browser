@@ -2100,7 +2100,7 @@ export function createBrowserApp(
     view: (state, context) => measured(
       instrumentation,
       "terminal-ui-element-tree-construction",
-      () => browserView(state, context),
+      () => browserView(state, { terminalSize: context.terminalSize, presentation: "interactive" }),
     ),
     resizeMessage: () => ({ kind: "terminalResized" }),
     inputBindings: [

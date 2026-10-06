@@ -4,6 +4,11 @@ All notable changes are documented in this file.
 
 ## Unreleased
 
+- Report progressive image and CSS-mask acquisition as loading rather than a
+  rendering error, retaining loading status until pixels are ready. Preserve
+  explicit resource failures and stable discovery ownership for failed masks;
+  refresh their diagnostics without unnecessary relayout or manual redraws.
+
 - Replace synchronous, scroll-keyed full-document rendering with a long-lived
   rendering worker and cost-bounded retained artifact store. Retain verified
   stylesheet syntax, compiled selectors and declarations, computed styles, the

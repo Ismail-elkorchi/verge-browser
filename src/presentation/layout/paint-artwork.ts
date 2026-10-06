@@ -16,7 +16,7 @@ export interface LayoutMaskArtwork {
   readonly tint: CssColor;
 }
 
-export type LayoutArtworkFallbackReason = "unsupported-mask" | "native-content-mask" | "mask-intrinsics-pending"
+export type LayoutArtworkFallbackReason = "unsupported-mask" | "native-content-mask" | "mask-intrinsics-pending" | "mask-resource-failed"
   | "repeating-mask" | "missing-mask-tint" | "unsupported-mask-paint";
 
 class ResolvedMaskArtwork implements LayoutMaskArtwork {
@@ -187,10 +187,11 @@ export function createLayoutArtworkResolver(layout: LayoutFragmentTree, styles: 
     if (scope.maskedAncestor) return scope.ownsMask && !scope.nativeContent
       ? { masked: true, artwork: null, fallback: "unsupported-mask-paint" } : maskedDescendant;
     if (!scope.ownsMask || style === null) return unmasked;
-    const resolved = resolveMaskArtwork(fragment, style, layout,
-      style.mask.image.kind === "url" ? metadata.get(style.mask.image.resourceId) : undefined, scope.nativeContent, scope.descendantPaint);
+    const resource = style.mask.image.kind === "url" ? metadata.get(style.mask.image.resourceId) : undefined;
+    const resolved = resolveMaskArtwork(fragment, style, layout, resource, scope.nativeContent, scope.descendantPaint);
     return typeof resolved === "string" ? { masked: true, artwork: null, fallback: resolved }
       : { masked: true, artwork: resolved,
-        fallback: resolved.naturalWidth === null || resolved.naturalHeight === null ? "mask-intrinsics-pending" : null };
+        fallback: resource?.failure !== undefined ? "mask-resource-failed"
+          : resolved.naturalWidth === null || resolved.naturalHeight === null ? "mask-intrinsics-pending" : null };
   };
 }

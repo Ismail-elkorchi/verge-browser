@@ -1067,7 +1067,7 @@ function findBar(state: BrowserTuiState): Element<BrowserTuiMessage> | null {
   });
 }
 
-function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMessage> {
+function baseView(state: BrowserTuiState, columns: number, presentation: "interactive" | "snapshot"): Element<BrowserTuiMessage> {
   const selected = state.documents[state.activeDocumentIndex] ?? state.documents[0];
   if (!selected) throw new Error("The browser view requires an open document.");
   const selectedUrl = selected.kind === "ready" ? selected.snapshot.finalUrl : selected.requestedUrl;
@@ -1087,6 +1087,15 @@ function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMe
   const incompleteStatus = allIncompleteRendering.length === 0
     ? null
     : `${selectedUrl} — rendering incomplete (${allIncompleteRendering.join(", ")})`;
+  const activeImages = ready !== null && !ready.loading && ready.rendering.committedViewportRevision > 0
+    ? ready.snapshot.images ?? [] : [];
+  let pendingImages = 0, failedImages = 0;
+  for (const image of activeImages) {
+    if (image.status === "pending" && presentation === "interactive") pendingImages += 1;
+    else if (image.status === "failed") failedImages += 1;
+  }
+  const imageStatus = failedImages > 0 ? `Images failed to load (${String(failedImages)}): ${selectedUrl}`
+    : pendingImages > 0 ? `Loading images (${String(pendingImages)}): ${selectedUrl}` : null;
   const pagePanel = ready === null
     ? surface(column([
         text({
@@ -1164,10 +1173,12 @@ function baseView(state: BrowserTuiState, columns: number): Element<BrowserTuiMe
       leading: [{
         id: "status",
         kind: "status",
-        text: selected.error ?? incompleteStatus ?? state.status?.text
+        text: selected.error ?? incompleteStatus ?? (state.status?.tone === "error" ? state.status.text : null)
+          ?? imageStatus ?? state.status?.text
           ?? (selected.kind === "ready" ? selected.snapshot.finalUrl : selected.requestedUrl),
-        status: selected.error !== null || incompleteStatus !== null || state.status?.tone === "error"
+        status: selected.error !== null || incompleteStatus !== null || state.status?.tone === "error" || failedImages > 0
           ? "error"
+          : pendingImages > 0 ? "running"
           : state.status?.tone === "success"
             ? "success"
             : selected.kind === "loading" || (selected.kind === "ready" && selected.loading)
@@ -1313,9 +1324,10 @@ function downloadPromptView(prompt: DownloadPromptOverlay): Element<BrowserTuiMe
 
 export function browserView(
   state: BrowserTuiState,
-  context: Pick<TuiContext, "terminalSize"> = { terminalSize: { columns: 80, rows: 24 } }
+  context: Pick<TuiContext, "terminalSize"> & { readonly presentation?: "interactive" | "snapshot" }
+    = { terminalSize: { columns: 80, rows: 24 } }
 ): Element<BrowserTuiMessage> {
-  const base = baseView(state, context.terminalSize.columns);
+  const base = baseView(state, context.terminalSize.columns, context.presentation ?? "interactive");
   if (state.overlay === null || state.overlay.kind === "browserMenu") return base;
   const transient = state.overlay.kind === "actionPalette"
     ? actionPaletteView(state.overlay)

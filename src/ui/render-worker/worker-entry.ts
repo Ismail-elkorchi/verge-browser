@@ -74,6 +74,9 @@ function incompleteRenderingLabels(artifacts: ReturnType<RenderArtifactStore["an
   add("layout", artifacts.documentLayout.outcome);
   add("display-list", artifacts.documentDisplayList.outcome);
   for (const fallback of artifacts.documentDisplayList.artworkFallbacks) {
+    // Intrinsics are acquired after the first viewport discovers its artwork.
+    // Resource progress belongs to the live snapshot, not permanent render errors.
+    if (fallback.reason === "mask-intrinsics-pending") continue;
     labels.push(`artwork.${fallback.reason}=${String(fallback.count)}`);
   }
   if (artifacts.documentDisplayList.artworkFallbacksOmitted > 0) labels.push("artwork.diagnostic-limit");
