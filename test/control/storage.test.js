@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { constants as fileSystemConstants } from "node:fs";
+import { chmod, mkdir, mkdtemp, open, readdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -607,23 +608,37 @@ test("terminal sidecars reject symlink reads while explicit mutations never foll
   const settingPath = terminalSettingPath(statePath, kittySetting.condition);
   const targetPath = join(directory, "target.json");
   const content = JSON.stringify(konsoleSetting);
+  async function observeFile(path) {
+    // Reopen the path for every observation: retaining an old handle would hide an unlink.
+    const handle = await open(path, fileSystemConstants.O_RDONLY | fileSystemConstants.O_NOFOLLOW | fileSystemConstants.O_NONBLOCK);
+    try {
+      const file = await handle.stat();
+      assert.equal(file.isFile(), true);
+      return { dev: file.dev, ino: file.ino, mode: file.mode & 0o777, content: await handle.readFile("utf8") };
+    } finally {
+      await handle.close();
+    }
+  }
   const store = await BrowserStore.open({ statePath });
   await writeFile(targetPath, content);
   await chmod(targetPath, 0o644);
+  const originalTarget = await observeFile(targetPath);
+  assert.equal(originalTarget.content, content);
+  assert.equal(originalTarget.mode, 0o644);
   await symlink(targetPath, settingPath);
   await assert.rejects(BrowserStore.open({ statePath }), {
     message: `Terminal setting path must be a regular file: ${settingPath}`
   });
-  assert.equal((await stat(targetPath)).mode & 0o777, 0o644);
+  assert.deepEqual(await observeFile(targetPath), originalTarget);
   await BrowserStore.forgetTerminalSetting(kittySetting.condition, { statePath });
-  assert.equal(await readFile(targetPath, "utf8"), content);
+  assert.deepEqual(await observeFile(targetPath), originalTarget);
   await assert.rejects(readFile(settingPath), { code: "ENOENT" });
   await symlink(targetPath, settingPath);
   await store.rememberTerminalSetting(kittySetting);
-  assert.equal(await readFile(targetPath, "utf8"), content);
-  assert.equal((await stat(targetPath)).mode & 0o777, 0o644);
-  assert.deepEqual(JSON.parse(await readFile(settingPath, "utf8")), kittySetting);
-  assert.equal((await stat(settingPath)).mode & 0o777, 0o600);
+  assert.deepEqual(await observeFile(targetPath), originalTarget);
+  const savedSetting = await observeFile(settingPath);
+  assert.deepEqual(JSON.parse(savedSetting.content), kittySetting);
+  assert.equal(savedSetting.mode, 0o600);
 });
 
 test("terminal mutations surface filesystem errors, preserve the other condition, and recover", async (t) => {
