@@ -2,7 +2,8 @@ import { SelectorResultCache } from "./selector-cache.js";
 import { nestedPrelude, nestingContext, resolveNesting, withImplicitNesting, type NestingContext } from "./nesting.js";
 import { DiagnosticCollector } from "./diagnostics.js";
 import { presentationalHints } from "./presentational-hints.js";
-import { EMPTY_NAMESPACES, stylesheetNamespaces, bindSelectorNamespaces } from "./namespaces.js";
+import { EMPTY_NAMESPACES, stylesheetNamespaces } from "./namespaces.js";
+import { admitSelectorList } from "./selector-admission.js";
 import { styleBudgets } from "./budgets.js";
 import { compileMediaQuery } from "./media.js";
 import { registerRetainedOwner } from "../../memory/retained-cost.js";
@@ -199,7 +200,7 @@ function selectorTarget(selector: ComplexSelector): {
 }
 
 function selectorSemanticFingerprint(selector: ComplexSelector): string {
-  return JSON.stringify(selector, (key, value: unknown) => key === "span" ? undefined : value);
+  return JSON.stringify(selector, (key, value: unknown) => key === "span" || key === "source" ? undefined : value);
 }
 
 function compileSelectorRule(
@@ -231,17 +232,17 @@ function compileSelectorRule(
       occurrences: 1,
     }));
   }
-  const selectors = parsed.value.selectors.map((selector) => bindSelectorNamespaces(selector, namespaces));
-  if (selectors.some((selector) => selector === null)) {
-    addDiagnostic(Object.freeze({ code: "selector-parse", sourceUrl, detail: "Unbound stylesheet namespace prefix.", occurrences: 1 }));
+  const admitted = admitSelectorList(parsed.value, namespaces, "stylesheet");
+  if (admitted === null) {
+    addDiagnostic(Object.freeze({ code: "selector-parse", sourceUrl, detail: "Unsupported selector or unbound stylesheet namespace prefix.", occurrences: 1 }));
     return Object.freeze([]);
   }
-  return Object.freeze((selectors as ComplexSelector[]).map((selector) => {
+  return Object.freeze(admitted.selectors.map((selector) => {
     const normalized = parent === null ? selector : withImplicitNesting(selector);
     const expanded = parent === null ? normalized : resolveNesting(normalized, parent);
     const target = selectorTarget(expanded);
     const list: SelectorList = Object.freeze({
-      ...parsed.value,
+      ...admitted,
       selectors: Object.freeze([target.selector]),
     });
     return Object.freeze({
@@ -387,6 +388,8 @@ export function compileStylesheetProgram(input: CompileStylesheetProgramInput): 
       if (item.kind === "qualified-rule") {
         const compiled = compileSelectorRule(item, source.sourceUrl, source.namespaces, addDiagnostic, parent, identity, input.signal);
         compiledSelectors.set(item, compiled);
+        // Invalid style rules are ignored together with their nested contents.
+        if (compiled.length === 0) continue;
         for (const selector of compiled) {
           for (const dependency of selector.dependencies) stateDependencies.add(dependency);
           if (source.origin === "author") {

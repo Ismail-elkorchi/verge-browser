@@ -1,0 +1,31 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Native text correctness</title>
+<style>
+html, body { margin: 0; padding: 0; }
+* { box-sizing: content-box; }
+input { display: inline-block; width: 160px; height: 16px; border: 0; padding: 0; margin: 0; }
+input::-webkit-search-cancel-button { display: none; }
+#card { display: flex; flex-direction: column; width: 240px; }
+#title, #excerpt, #short { margin: 0 auto; }
+#title { overflow-wrap: anywhere; }
+#short span { display: inline-block; width: 32px; height: 16px; }
+#ordinary, #supports { color: rgb(200, 0, 0); }
+#forgiving, #vendor { color: rgb(0, 0, 200); }
+input:verge-unsupported, #ordinary { color: rgb(0, 200, 0); }
+:is(input:verge-unsupported, #forgiving) { color: rgb(0, 200, 0); }
+input::-webkit-verge-unknown, #vendor { color: rgb(0, 200, 0); }
+@supports selector(:is(:verge-unsupported, .valid)) { #supports { color: rgb(0, 200, 0); } }
+.contents { display: contents; opacity: 0; }
+</style>
+<input id="search" type="search" value="READY" aria-label="Search fixture">
+<div id="card">
+  <p id="title">Words within a constrained card remain readable across multiple wrapped lines.</p>
+  <p id="excerpt">An automatic width with automatic side margins still uses the available space.</p>
+  <div id="short"><span></span></div>
+</div>
+<p id="ordinary">Ordinary selector remains unchanged.</p>
+<p id="forgiving">Forgiving selector retains its valid branch.</p>
+<p id="vendor">Vendor pseudo does not broaden its match.</p>
+<p id="supports">Recovered selector does not claim support.</p>
+<div class="contents"><p>Boxless opacity does not hide this text.</p></div>

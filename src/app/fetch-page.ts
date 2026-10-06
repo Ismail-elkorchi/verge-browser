@@ -443,11 +443,11 @@ const CSS_RESOURCE_PROFILE: NetworkResourceProfile = {
 };
 
 const IMAGE_RESOURCE_PROFILE: NetworkResourceProfile = {
-  accept: "image/png,image/jpeg",
-  label: "PNG/JPEG image",
+  accept: "image/png,image/jpeg,image/svg+xml",
+  label: "static PNG/JPEG/SVG image",
   acceptsContentType(contentType) {
     const type = contentType?.toLowerCase().split(";", 1)[0]?.trim();
-    return type === "image/png" || type === "image/jpeg";
+    return type === "image/png" || type === "image/jpeg" || type === "image/svg+xml";
   }
 };
 

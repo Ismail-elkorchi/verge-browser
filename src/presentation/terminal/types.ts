@@ -8,6 +8,7 @@ import type {
   LayoutFragmentTree, LayoutPaintStyle, LayoutTextCluster, LayoutTextClusters
 } from "../layout/index.js";
 import type { TextSearchMatchId } from "../search/index.js";
+import type { LayoutArtworkFallbackReason } from "../layout/paint-artwork.js";
 
 export interface TerminalCellRect {
   readonly row: number;
@@ -67,6 +68,8 @@ interface TerminalPaintCommandBase {
   readonly contentEndCodeUnit: number | null;
   readonly rect: CssRect;
   readonly clipRect: CssRect;
+  /** Canonical local ink clip, independent of ancestor overflow/scroll clips. */
+  readonly inkClipRect?: CssRect;
   readonly paintOrder: number;
   readonly action: DocumentActionIdentity | null;
   readonly semantic: DocumentSemanticEntry | null;
@@ -75,8 +78,12 @@ interface TerminalPaintCommandBase {
 
 export interface TerminalTextPaintCommand extends TerminalPaintCommandBase {
   readonly kind: "text";
+  /** Actual glyph baseline relative to rect.y; unchanged by viewport translation. */
+  readonly baseline: CssPixelLength;
   readonly text: string;
   readonly clusters: LayoutTextClusters;
+  /** Semantic artwork label when there are no source text clusters to paint. */
+  readonly mediaFallbackLabel?: string;
 }
 
 export type TerminalPaintTextCluster = LayoutTextCluster;
@@ -93,6 +100,10 @@ export interface TerminalBorderSidePaintCommand extends TerminalPaintCommandBase
 }
 
 export interface TerminalImagePaintCommand extends TerminalPaintCommandBase {
+  readonly mediaFallbackLabel?: string;
+  readonly hasAlpha: boolean | null;
+  /** Alpha silhouette color for admitted CSS mask artwork; ordinary media omit it. */
+  readonly maskTint?: NonNullable<LayoutPaintStyle["foreground"]>;
   /** Existing canonical fragment-paint ordinal, independent of command count. */
   readonly paintGroup: number;
   readonly kind: "image";
@@ -108,6 +119,16 @@ export type TerminalPaintCommand = TerminalBackgroundPaintCommand | TerminalBord
 
 /** Disjoint topmost cell coverage derived from the canonical painter's owner grid. */
 export interface TerminalImagePlacement {
+  readonly hasAlpha: boolean | null;
+  /** Exact CSS artwork extent inside outward-rounded cell bounds, normalized 0..1. */
+  readonly sourceInset?: { readonly left: number; readonly top: number; readonly width: number; readonly height: number };
+  /** Snapped allocation in CSS pixels, for accurate bounded alpha-artwork padding. */
+  readonly rasterSize?: { readonly width: number; readonly height: number };
+  readonly maskTint?: NonNullable<LayoutPaintStyle["foreground"]>;
+  /** Proven uniform opaque cell background before this image's paint phase. */
+  readonly compositingBackdrop: LayoutPaintStyle["background"];
+  /** Flattening transparency must not erase native glyph, control or other image ink. */
+  readonly safeForTransparency: boolean;
   readonly layoutFragment: LayoutFragmentId;
   readonly paintGroup: number;
   readonly action: DocumentActionIdentity | null;
@@ -143,6 +164,11 @@ export interface DocumentDisplayList {
   readonly context: TerminalRenderContext;
   /** Layout fragments in the CSS paint order used to build this display list. */
   readonly fragmentPaintOrder: readonly LayoutFragmentId[];
+  /** Effective zero-opacity owners retain all geometry and interaction identity. */
+  readonly paintSuppressed: ReadonlySet<LayoutFragmentId>;
+  /** Bounded artwork fallback diagnostics, aggregated by reason with one example. */
+  readonly artworkFallbacks: readonly { readonly reason: LayoutArtworkFallbackReason; readonly count: number; readonly layoutFragment: LayoutFragmentId }[];
+  readonly artworkFallbacksOmitted: number;
   /** Canvas paint is independent of element geometry, scroll ownership and hit testing. */
   readonly canvasBackground: { readonly source: DocumentNodeRef; readonly style: LayoutPaintStyle } | null;
   readonly commands: DocumentPaintCommands;
@@ -204,6 +230,8 @@ export interface TerminalCell {
 }
 
 export interface TerminalCellSpan {
+  /** Full logical text represented by a compact, non-literal media indicator. */
+  readonly logicalText?: string;
   readonly command: string;
   readonly layoutFragment: LayoutFragmentId;
   readonly formattingNode: FormattingNodeId;
@@ -367,6 +395,8 @@ export interface TerminalScrollPort {
 }
 
 export interface TerminalControlGeometry {
+  /** Suppresses native widget ink without removing its layout or interaction. */
+  readonly paintSuppressed: boolean;
   readonly paintGroup: number;
   readonly node: DocumentNodeRef;
   readonly layoutFragment: LayoutFragmentId;

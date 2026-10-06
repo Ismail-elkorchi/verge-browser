@@ -252,8 +252,12 @@ function stablePayload(snapshot, pipeline, requests) {
 export function principalRectangle(snapshot, pipeline, elementId) {
   const documentNode = snapshot.document.elementById(elementId);
   if (documentNode === undefined || documentNode === null) return null;
+  // Controls and replaced elements also own principal border boxes. Generated
+  // pseudo boxes and anonymous/text fragments must not stand in for their owner.
   const fragment = pipeline.artifacts.documentLayout.forDocumentNode(documentNode)
-    .find((candidate) => candidate.kind === "box" && candidate.borderRect.width > 0 && candidate.borderRect.height > 0);
+    .find((candidate) => (candidate.kind === "box" || candidate.kind === "control" || candidate.kind === "replaced")
+      && candidate.documentNode === documentNode && candidate.pseudoElement === null
+      && candidate.borderRect.width > 0 && candidate.borderRect.height > 0);
   if (fragment === undefined) return null;
   return {
     x: cssPixels(fragment.borderRect.x),

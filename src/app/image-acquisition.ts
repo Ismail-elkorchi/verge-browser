@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { MIMEType } from "node:util";
 import type { DocumentImageResource, ImageFailureCode, IndexedWebDocumentSnapshot } from "../document/index.js";
 import { StaticImageDecoder, type ImageDecoder } from "../runtime/image-decoder.js";
 import { inspectImageHeader, ImageResourceError } from "./image-header.js";
@@ -13,6 +14,9 @@ export interface ImageAcquisitionOptions {
   readonly signal: AbortSignal;
   readonly onResource: (resource: DocumentImageResource) => void | Promise<void>;
 }
+/** Internal accounting shared by progressive activations of one canonical document.
+ * Contains no resource/pixel ownership and is never attached to a document snapshot. */
+export interface ImageAcquisitionBudget { encodedBytes: number }
 export interface ImageAcquisitionMetrics {
   readonly resources: number;
   readonly omittedReferences: number;
@@ -31,7 +35,7 @@ export interface DiscoveredDocumentImages {
 }
 function failed(image: DocumentImageResource, code: ImageFailureCode, reason: string): DocumentImageResource {
   return Object.freeze({ id: image.id, requestUrl: image.requestUrl, owners: image.owners,
-    width: image.width, height: image.height, mimeType: image.mimeType, status: "failed", failure: code, reason });
+    width: image.width, height: image.height, hasAlpha: image.hasAlpha, mimeType: image.mimeType, status: "failed", failure: code, reason });
 }
 /** Discover stable identities without fetching; ready/failed resources are resumable snapshot state. */
 export function discoverDocumentImages(document: IndexedWebDocumentSnapshot, options: ImagePolicyOptions = {}): DiscoveredDocumentImages {
@@ -51,7 +55,7 @@ export function discoverDocumentImages(document: IndexedWebDocumentSnapshot, opt
       continue;
     }
     let resource: DocumentImageResource = Object.freeze({ id: image.source, requestUrl: image.source,
-      owners: Object.freeze([image.node]), width: null, height: null, mimeType: null, status: "pending" });
+      owners: Object.freeze([image.node]), width: null, height: null, hasAlpha: null, mimeType: null, status: "pending" });
     try {
       const protocol = new URL(image.source).protocol;
       if (protocol !== "http:" && protocol !== "https:" && protocol !== "data:") resource = failed(resource, "unsupported-protocol", "Only public HTTP(S) and bounded image data URLs are supported.");
@@ -61,17 +65,67 @@ export function discoverDocumentImages(document: IndexedWebDocumentSnapshot, opt
   return Object.freeze({ omittedReferences,
     resources: Object.freeze([...grouped.values()].map(({ resource, owners }) => Object.freeze({ ...resource, owners: Object.freeze(owners) }))) });
 }
+function hexDigit(byte: number): number {
+  if (byte >= 0x30 && byte <= 0x39) return byte - 0x30;
+  const lower = byte | 0x20;
+  return lower >= 0x61 && lower <= 0x66 ? lower - 0x61 + 10 : -1;
+}
+/** URL percent-decoding works on bytes and preserves a literal/malformed '%'.
+ * The SVG preflight remains responsible for fatal UTF-8 validation afterward. */
+function percentDecodedImageData(encoded: string, maxBytes: number): Buffer {
+  if (Buffer.byteLength(encoded, "utf8") > maxBytes * 4) throw new ImageResourceError("encoded-byte-limit", "Image data URL exceeds its byte budget.");
+  const bytes = Buffer.from(encoded, "utf8");
+  let length = 0;
+  for (let index = 0; index < bytes.byteLength; index += 1) {
+    const byte = bytes[index] ?? 0;
+    const high = hexDigit(bytes[index + 1] ?? 0), low = hexDigit(bytes[index + 2] ?? 0);
+    if (byte === 0x25 && high >= 0 && low >= 0) {
+      bytes[length++] = high * 16 + low; index += 2;
+    } else bytes[length++] = byte;
+  }
+  return bytes.subarray(0, length);
+}
 function dataImage(requestUrl: string, maxBytes: number): FetchImageResult {
   // Limit the encoded string before substring, base64 decoding, or percent decoding.
   if (requestUrl.length > maxBytes * 4 + 128) throw new ImageResourceError("encoded-byte-limit", "Image data URL exceeds its byte budget.");
-  const match = /^data:(image\/(?:png|jpeg));base64,([a-z0-9+/]*={0,2})$/iu.exec(requestUrl);
-  if (match === null) throw new ImageResourceError("unsupported-format", "Only base64 PNG/JPEG image data URLs are supported.");
-  const encoded = match[2] ?? "";
-  const byteLength = (encoded.length / 4) * 3 - (encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0);
-  if (encoded.length % 4 !== 0 || byteLength > maxBytes) throw new ImageResourceError("encoded-byte-limit", "Image data URL exceeds its byte budget.");
-  const bytes = Buffer.from(encoded, "base64");
-  if (bytes.byteLength !== byteLength || bytes.toString("base64") !== encoded) throw new ImageResourceError("malformed-image", "Malformed image base64.");
-  return { requestUrl, finalUrl: requestUrl, contentType: match[1]?.toLowerCase() ?? null, bytes };
+  const comma = requestUrl.indexOf(",");
+  if (comma < 0 || comma > 127) throw new ImageResourceError("malformed-image", "Malformed image data URL.");
+  // Fetch's data-URL base64 marker is a terminal suffix, not a MIME parameter.
+  // The platform MIME parser handles quoted values, duplicate precedence and
+  // ignored malformed/unknown parameters without a site-specific token list.
+  const metadata = requestUrl.slice(5, comma).replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/gu, "");
+  const base64Marker = /; *base64$/iu.exec(metadata);
+  let mime: MIMEType;
+  try { mime = new MIMEType(base64Marker === null ? metadata : metadata.slice(0, base64Marker.index)); }
+  catch { throw new ImageResourceError("unsupported-format", "Unsupported image data URL media type."); }
+  const contentType = mime.essence;
+  if (!["image/png", "image/jpeg", "image/svg+xml"].includes(contentType)) throw new ImageResourceError("unsupported-format", "Unsupported image data URL media type.");
+  const charset = mime.params.get("charset");
+  if (contentType === "image/svg+xml" && charset !== null) {
+    let encoding: string;
+    try { encoding = new TextDecoder(charset).encoding; }
+    catch { throw new ImageResourceError("unsupported-format", "Unsupported SVG data URL charset."); }
+    if (encoding !== "utf-8") throw new ImageResourceError("unsupported-format", "Unsupported SVG data URL charset.");
+  }
+  const encoded = requestUrl.slice(comma + 1);
+  if (base64Marker === null && contentType !== "image/svg+xml") throw new ImageResourceError("unsupported-format", "Binary image data URLs require base64.");
+  const decoded = percentDecodedImageData(encoded, maxBytes);
+  let bytes: Buffer;
+  if (base64Marker !== null) {
+    let body = decoded.toString("latin1").replace(/[\t\n\f\r ]/gu, "");
+    // Forgiving base64 accepts ASCII whitespace and omitted final padding, but
+    // never invalid alphabet, misplaced/excess padding or a one-character tail.
+    if (body.length % 4 === 0) body = body.replace(/={1,2}$/u, "");
+    if (body.length % 4 === 1 || !/^[a-z0-9+/]*$/iu.test(body)) throw new ImageResourceError("malformed-image", "Malformed image base64.");
+    const byteLength = Math.floor(body.length * 3 / 4);
+    if (byteLength > maxBytes) throw new ImageResourceError("encoded-byte-limit", "Image data URL exceeds its byte budget.");
+    bytes = Buffer.from(body, "base64");
+    if (bytes.byteLength !== byteLength) throw new ImageResourceError("malformed-image", "Malformed image base64.");
+  } else {
+    bytes = decoded;
+    if (bytes.byteLength > maxBytes) throw new ImageResourceError("encoded-byte-limit", "Image data URL exceeds its byte budget.");
+  }
+  return { requestUrl, finalUrl: requestUrl, contentType, bytes };
 }
 function waitWithSignal<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
   signal.throwIfAborted();
@@ -84,7 +138,8 @@ function waitWithSignal<T>(pending: Promise<T>, signal: AbortSignal): Promise<T>
 }
 /** One bounded activation operation. The caller owns admission and backpressure. */
 export async function acquireDocumentImages(snapshot: IndexedPageSnapshot, options: ImageAcquisitionOptions,
-  loader: ImageLoader, policy: Required<ImagePolicyOptions>, createDecoder: () => ImageDecoder = () => new StaticImageDecoder(policy)
+  loader: ImageLoader, policy: Required<ImagePolicyOptions>, createDecoder: () => ImageDecoder = () => new StaticImageDecoder(policy),
+  budget: ImageAcquisitionBudget = { encodedBytes: 0 }
 ): Promise<ImageAcquisitionMetrics> {
   options.signal.throwIfAborted();
   const deadline = AbortSignal.timeout(policy.maxTotalMilliseconds);
@@ -93,7 +148,7 @@ export async function acquireDocumentImages(snapshot: IndexedPageSnapshot, optio
   const discovery = snapshot.images === undefined ? discoverDocumentImages(snapshot.document, policy)
     : { resources: snapshot.images, omittedReferences: snapshot.imageOmittedReferenceCount ?? 0 };
   const resources = discovery.resources;
-  let completed = 0; let failures = 0; let encodedBytes = 0;
+  let completed = 0; let failures = 0; let encodedBytes = budget.encodedBytes;
   let decodedBytes = resources.reduce((sum, resource) => sum + (resource.status === "ready" ? resource.pixels.byteLength : 0), 0);
   let peakWorkspaceBytes = 0; let peakConcurrency = 0;
   let decoder: ImageDecoder | null = null;
@@ -120,6 +175,7 @@ export async function acquireDocumentImages(snapshot: IndexedPageSnapshot, optio
         // The HTTP failure contract does not expose consumed bytes. Reserve the full
         // allowance before starting and refund unused bytes only on bounded success.
         encodedBytes += remainingBytes;
+        budget.encodedBytes = encodedBytes;
         let fetched: FetchImageResult;
         if (resource.requestUrl.startsWith("data:")) fetched = dataImage(resource.requestUrl, remainingBytes);
         else {
@@ -133,6 +189,7 @@ export async function acquireDocumentImages(snapshot: IndexedPageSnapshot, optio
         signal.throwIfAborted();
         if (fetched.bytes.byteLength > remainingBytes) throw new ImageResourceError("encoded-byte-limit", "Image loader exceeded its transport byte budget.");
         encodedBytes -= remainingBytes - fetched.bytes.byteLength;
+        budget.encodedBytes = encodedBytes;
         const header = inspectImageHeader(fetched.bytes, fetched.contentType, policy);
         resource = Object.freeze({ ...resource, width: header.width, height: header.height, mimeType: header.mimeType });
         await emit(resource);
@@ -144,11 +201,14 @@ export async function acquireDocumentImages(snapshot: IndexedPageSnapshot, optio
         const pixels = await decoder.decode(fetched.bytes, header, signal);
         signal.throwIfAborted();
         if (pixels.byteLength !== header.width * header.height * 4) throw new ImageResourceError("decode-failed", "Decoder returned an unexpected pixel buffer.");
+        // Opacity is classified once at the owned pixel admission boundary and travels
+        // as metadata. Layout/paint workers never receive or rescan pixel buffers.
+        let hasAlpha = false;
         for (let index = 3; index < pixels.byteLength; index += 4) {
-          if (pixels[index] !== 255) throw new ImageResourceError("unsupported-alpha", "Transparent image pixels require backdrop compositing.");
+          if (pixels[index] !== 255) { hasAlpha = true; break; }
         }
         decodedBytes += pixels.byteLength;
-        await emit(Object.freeze({ ...resource, status: "ready", pixels }));
+        await emit(Object.freeze({ ...resource, status: "ready", hasAlpha, pixels }));
         completed += 1;
       } catch (error) {
         options.signal.throwIfAborted();

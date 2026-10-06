@@ -133,6 +133,12 @@ export interface PageSnapshot {
 export interface IndexedPageSnapshot extends Omit<PageSnapshot, "document"> {
   readonly document: IndexedWebDocumentSnapshot;
   readonly images?: readonly DocumentImageResource[];
+  /** Advances only when active resource identities/order change, not on completion. */
+  readonly imageResourceRevision?: number;
+  /** Inactive intrinsic geometry, bounded by canonical document img source URLs. */
+  readonly imageIntrinsicDimensions?: readonly { readonly id: string; readonly width: number; readonly height: number }[];
+  /** Shared img/CSS artwork resource admission limit for this accepted page. */
+  readonly imageResourceLimit?: number;
   /** Source-bearing img references omitted by the acquisition resource-count limit. */
   readonly imageOmittedReferenceCount?: number;
 }

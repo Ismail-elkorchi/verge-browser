@@ -8,6 +8,7 @@ import { PNG } from "pngjs";
 import { encode } from "jpeg-js";
 import { HttpFields } from "@ismail-elkorchi/http-client";
 import { parseWebDocument } from "../../dist/document/index.js";
+import { documentImageMetadata } from "../../dist/document/image-resources.js";
 import { acquireDocumentImages, discoverDocumentImages } from "../../dist/app/image-acquisition.js";
 import { inspectImageHeader } from "../../dist/app/image-header.js";
 import { imagePolicy } from "../../dist/app/image-policy.js";
@@ -54,6 +55,7 @@ test("image discovery deduplicates identities and preserves all owners without f
   assert.equal(result.images[0].id, "https://example.com/a.png");
   assert.equal(result.images[0].status, "pending");
   assert.equal(result.images[0].width, null);
+  assert.equal(result.images[0].hasAlpha, null);
   assert.equal(discoverDocumentImages(result.document, { maxResources: 0 }).resources.length, 0);
   assert.equal(snapshot('<img src="file:///secret.png">').images[0].failure, "unsupported-protocol");
 });
@@ -66,6 +68,8 @@ test("natural metadata arrives before ready pixels with awaited backpressure", a
   assert.equal(fetches, 1);
   assert.deepEqual(updates.map((entry) => entry.status), ["pending", "ready"]);
   assert.equal(updates[0].width, 2);
+  assert.equal(updates[0].hasAlpha, null);
+  assert.equal(updates[1].hasAlpha, false);
   assert.equal("pixels" in updates[0], false);
   assert.equal(result.decodedBytes, 16);
   assert.equal(result.encodedBytes, pngBytes.byteLength);
@@ -103,16 +107,20 @@ test("dimension, workspace, animation, interlace, profiles and malformed header 
   assert.throws(() => inspectImageHeader(insert(pngBytes, "PLTE", Buffer.alloc(771)), pngType, policy), { code: "malformed-image" });
 });
 
-test("transparent PNG and corrupt CRC retain their fallback", async () => {
-  const transparent = Buffer.from(pixels); transparent[3] = 0;
-  for (const [bytes, failure] of [[PNG.sync.write({ width: 2, height: 2, data: transparent }), "unsupported-alpha"], [Buffer.from(pngBytes), "malformed-image"]]) {
-    if (failure === "malformed-image") bytes[29] ^= 1;
-    const updates = [];
-    await acquireDocumentImages(snapshot(), { signal: new globalThis.AbortController().signal, onResource: (entry) => { updates.push(entry); } }, async (url) => fetched(url, bytes), policy);
-    assert.equal(updates.at(-1).failure, failure);
-    assert.equal(updates.at(-1).width, failure === "unsupported-alpha" ? 2 : null);
-    assert.equal("pixels" in updates.at(-1), false);
-  }
+test("transparent PNG owns alpha while corrupt CRC retains its fallback", async () => {
+  const transparent = Buffer.from(pixels); transparent[3] = 0; transparent[7] = 127;
+  const updates = [];
+  await acquireDocumentImages(snapshot(), { signal: new globalThis.AbortController().signal, onResource: (entry) => { updates.push(entry); } },
+    async (url) => fetched(url, PNG.sync.write({ width: 2, height: 2, data: transparent })), policy);
+  assert.equal(updates.at(-1).status, "ready");
+  assert.deepEqual([...updates.at(-1).pixels], [...transparent]);
+  assert.equal(updates.at(-1).hasAlpha, true);
+  const corrupt = Buffer.from(pngBytes); corrupt[29] ^= 1;
+  const failed = [];
+  await acquireDocumentImages(snapshot(), { signal: new globalThis.AbortController().signal, onResource: (entry) => { failed.push(entry); } }, async (url) => fetched(url, corrupt), policy);
+  assert.equal(failed.at(-1).failure, "malformed-image");
+  assert.equal(failed.at(-1).width, null);
+  assert.equal("pixels" in failed.at(-1), false);
 });
 
 test("PNG expansion is bounded by expected scanlines instead of compressed payload size", async () => {
@@ -121,9 +129,12 @@ test("PNG expansion is bounded by expected scanlines instead of compressed paylo
   const bytes = Buffer.concat([pngBytes.subarray(0, 33), chunk("IDAT", deflateSync(expanded)), chunk("IEND", Buffer.alloc(0))]);
   const decoder = new StaticImageDecoder(policy);
   try {
-    // A surplus stream is either rejected or decoded within the bounded output;
-    // alpha-zero content cannot be admitted as an opaque image.
-    await assert.rejects(decoder.decode(bytes, inspectImageHeader(bytes, pngType, policy), new globalThis.AbortController().signal), (error) => ["unsupported-alpha", "decode-failed"].includes(error.code));
+    // A surplus stream may decode, but cannot retain more than bounded RGBA output.
+    try {
+      const output = await decoder.decode(bytes, inspectImageHeader(bytes, pngType, policy), new globalThis.AbortController().signal);
+      assert.equal(output.byteLength, 16);
+      assert.equal(output.buffer.byteLength, 16);
+    } catch (error) { assert.equal(error.code, "decode-failed"); }
   } finally { await decoder.close(); }
 });
 
@@ -407,4 +418,86 @@ test("resource discovery reports omitted references without retaining omitted UR
       onResource() {} }, async (url) => fetched(url), policy);
     assert.equal(metrics.omittedReferences, 3);
   } finally { await acquisition.close(); }
+});
+
+
+test("canonical PNG sRGB chromaticity is validated with gamma, order, uniqueness and CRC", () => {
+  const chromaticity = Buffer.alloc(32);
+  [31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000].forEach((value, index) => chromaticity.writeUInt32BE(value, index * 4));
+  const gamma = Buffer.alloc(4); gamma.writeUInt32BE(45455);
+  const canonical = insert(insert(insert(pngBytes, "cHRM", chromaticity), "gAMA", gamma), "sRGB", Buffer.from([0]));
+  assert.equal(inspectImageHeader(canonical, pngType, policy).width, 2);
+  assert.equal(inspectImageHeader(insert(pngBytes, "cHRM", chromaticity), pngType, policy).width, 2);
+  for (let index = 0; index < 8; index++) {
+    const invalid = Buffer.from(chromaticity); invalid.writeUInt32BE(invalid.readUInt32BE(index * 4) + 1, index * 4);
+    assert.throws(() => inspectImageHeader(insert(pngBytes, "cHRM", invalid), pngType, policy), { code: "unsupported-color-profile" });
+  }
+  const invalidGamma = Buffer.alloc(4); invalidGamma.writeUInt32BE(100000);
+  assert.throws(() => inspectImageHeader(insert(canonical, "gAMA", invalidGamma), pngType, policy), { code: "unsupported-color-profile" });
+  for (const [name, body] of [["cHRM", chromaticity], ["gAMA", gamma], ["sRGB", Buffer.from([0])]]) {
+    assert.throws(() => inspectImageHeader(insert(insert(pngBytes, name, body), name, body), pngType, policy), { code: "malformed-image" });
+    const late = Buffer.concat([pngBytes.subarray(0, -12), chunk(name, body), pngBytes.subarray(-12)]);
+    assert.throws(() => inspectImageHeader(late, pngType, policy), { code: "malformed-image" });
+  }
+  assert.throws(() => inspectImageHeader(insert(pngBytes, "cHRM", chromaticity.subarray(1)), pngType, policy), { code: "malformed-image" });
+});
+
+test("EXIF orientation preserves partial and zero PNG alpha for every transform", async () => {
+  const rgba = Buffer.from([255,0,0,0, 0,255,0,51, 0,0,255,102, 255,255,0,153, 0,255,255,204, 255,0,255,255]);
+  const plain = PNG.sync.write({ width: 3, height: 2, data: rgba });
+  const orders = [[0,1,2,3,4,5], [2,1,0,5,4,3], [5,4,3,2,1,0], [3,4,5,0,1,2], [0,3,1,4,2,5], [3,0,4,1,5,2], [5,2,4,1,3,0], [2,5,1,4,0,3]];
+  const decoder = new StaticImageDecoder(policy);
+  try {
+    for (let orientation = 1; orientation <= 8; orientation++) {
+      const bytes = insert(plain, "eXIf", exif(orientation));
+      const output = await decoder.decode(bytes, inspectImageHeader(bytes, pngType, policy), new globalThis.AbortController().signal);
+      assert.deepEqual([...output], orders[orientation - 1].flatMap((index) => [...rgba.subarray(index * 4, index * 4 + 4)]));
+    }
+  } finally { await decoder.close(); }
+});
+
+test("progressive batches share a canonical page encoded budget across failures, cancellation and history wrappers", async () => {
+  let calls = 0;
+  const acquisition = new PageAcquisition({ loader: loaderPage, defaultParseMode: "text", imagePolicy: { maxEncodedBytes: 4, maxTotalEncodedBytes: 8 },
+    imageLoader: async () => { calls++; throw new Error("partial failed transport"); } });
+  try {
+    const page = await acquisition.acquire("https://example.com/");
+    const first = [];
+    const metrics = await acquisition.acquireImages(page, { signal: new globalThis.AbortController().signal, onResource: (entry) => { first.push(entry); } });
+    assert.equal(metrics.encodedBytes, 4);
+    const additional = { ...page.images[0], id: "https://example.com/b.png", requestUrl: "https://example.com/b.png" };
+    const second = [];
+    await acquisition.acquireImages({ ...page, images: [...first, additional] }, { signal: new globalThis.AbortController().signal, onResource: (entry) => { second.push(entry); } });
+    const third = [];
+    await acquisition.acquireImages({ ...page, images: [{ ...additional, id: "https://example.com/c.png", requestUrl: "https://example.com/c.png" }] }, { signal: new globalThis.AbortController().signal, onResource: (entry) => { third.push(entry); } });
+    assert.equal(calls, 2); assert.equal(third.at(-1).failure, "encoded-byte-limit");
+    // A new canonical document gets its own budget even at the same URL.
+    const newPage = await acquisition.acquire("https://example.com/");
+    await acquisition.acquireImages(newPage, { signal: new globalThis.AbortController().signal, onResource() {} });
+    assert.equal(calls, 3);
+  } finally { await acquisition.close(); }
+  const abort = new globalThis.AbortController(); let complete;
+  const cancelled = new PageAcquisition({ loader: loaderPage, defaultParseMode: "text", imagePolicy: { maxEncodedBytes: 4, maxTotalEncodedBytes: 4 },
+    imageLoader: () => { calls++; return new Promise((resolve) => { complete = resolve; }); } });
+  try {
+    const page = await cancelled.acquire("https://example.com/");
+    const pending = cancelled.acquireImages(page, { signal: abort.signal, onResource() { assert.fail(); } });
+    const rejected = assert.rejects(pending, /cancelled batch/u); await delay(0);
+    abort.abort(new Error("cancelled batch")); await rejected;
+    const updates = [];
+    await cancelled.acquireImages({ ...page }, { signal: new globalThis.AbortController().signal, onResource: (entry) => { updates.push(entry); } });
+    assert.equal(updates.at(-1).failure, "encoded-byte-limit");
+    complete(fetched("https://example.com/a.png", Buffer.alloc(1)));
+  } finally { await cancelled.close(); }
+});
+
+
+test("image metadata transfers known opacity without inspecting or retaining pixels", () => {
+  const metadata = { id: "a", requestUrl: "https://example.com/a.svg", owners: [], width: 4, height: 2, hasAlpha: true,
+    get pixels() { throw new Error("metadata transfer must not inspect pixels"); } };
+  const projected = documentImageMetadata(metadata);
+  assert.equal(projected.hasAlpha, true);
+  assert.equal("pixels" in projected, false);
+  assert.ok(Object.isFrozen(projected));
+  assert.equal(documentImageMetadata({ ...projected, hasAlpha: null }).hasAlpha, null);
 });

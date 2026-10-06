@@ -1,4 +1,4 @@
-import type { ComponentValue, CssStylesheet, ComplexSelector, CompoundSelector, SimpleSelector } from "@ismail-elkorchi/css-parser";
+import type { ComponentValue, CssStylesheet } from "@ismail-elkorchi/css-parser";
 import type { StylesheetNamespaces } from "./types.js";
 
 export const EMPTY_NAMESPACES: StylesheetNamespaces = Object.freeze({
@@ -39,35 +39,4 @@ export function stylesheetNamespaces(stylesheet: CssStylesheet): StylesheetNames
   }
   if (prefixes.size === 0 && defaultNamespace.kind === "any") return EMPTY_NAMESPACES;
   return Object.freeze({ defaultNamespace, prefixes, fingerprint: JSON.stringify([defaultNamespace, [...prefixes].sort(([left], [right]) => left.localeCompare(right))]) });
-}
-
-/** Reject unbound prefixes, pruning only forgiving selector-list branches. */
-export function bindSelectorNamespaces(selector: ComplexSelector, namespaces: StylesheetNamespaces): ComplexSelector | null {
-  const bound = (prefix: string | null): boolean => prefix === null || prefix === "" || prefix === "*" || namespaces.prefixes.has(prefix);
-  const compounds: CompoundSelector[] = [];
-  for (const compound of selector.compounds) {
-    if (!bound(compound.type?.namespace ?? null)) return null;
-    const simples: SimpleSelector[] = [];
-    for (const simple of compound.simples) {
-      if (simple.kind === "attribute" && !bound(simple.namespace)) return null;
-      if (simple.kind !== "pseudo-class" && simple.kind !== "pseudo-element") {
-        simples.push(simple);
-        continue;
-      }
-      const argument = simple.argument;
-      if (argument.kind === "selector-list") {
-        const selectors = argument.selectors.map((nested) => bindSelectorNamespaces(nested, namespaces));
-        if (!argument.forgiving && selectors.some((nested) => nested === null)) return null;
-        simples.push(Object.freeze({ ...simple, argument: Object.freeze({
-          ...argument, selectors: Object.freeze(selectors.filter((nested): nested is ComplexSelector => nested !== null)),
-        }) }));
-      } else if (argument.kind === "nth") {
-        const of = argument.of.map((nested) => bindSelectorNamespaces(nested, namespaces));
-        if (of.some((nested) => nested === null)) return null;
-        simples.push(Object.freeze({ ...simple, argument: Object.freeze({ ...argument, of: Object.freeze(of as ComplexSelector[]) }) }));
-      } else simples.push(simple);
-    }
-    compounds.push(Object.freeze({ ...compound, simples: Object.freeze(simples) }));
-  }
-  return Object.freeze({ ...selector, compounds: Object.freeze(compounds) });
 }

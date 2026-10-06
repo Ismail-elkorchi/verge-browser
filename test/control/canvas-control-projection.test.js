@@ -147,7 +147,7 @@ test("native allocation uses CSS content, preserving authored padding, border an
     assert.equal(control.content.width, cssPx(80));
     assert.equal(control.content.height, cssPx(48));
     assert.equal(control.allocation.column, 2);
-    assert.equal(control.allocation.row, 1);
+    assert.equal(control.allocation.row, 2, "the native 16px line is centered within the 48px CSS content box");
     assert.equal(control.allocation.width, 10);
     assert.equal(control.allocation.height, 1);
   } finally { value.store.dispose(); }
@@ -159,14 +159,32 @@ test("native colors are paired with the same current background-only viewport", 
   try {
     const initial = render(retained).terminal.controls[0];
     assert.deepEqual(initial.style.foreground, { r: 34, g: 34, b: 34, a: 1 });
-    assert.deepEqual(initial.style.background, { r: 255, g: 255, b: 255, a: 1 });
+    assert.equal(initial.style.background, null, "native paint inherits each underlying cell");
+    assert.deepEqual(background(render(retained), initial.visible.row, initial.visible.column), { r: 255, g: 255, b: 255, a: 1 });
     for (const value of [retained, fresh]) value.store.updateState({ documentId: "canvas", documentRevision: 1, stateRevision: 2,
       state: { ...value.state, focus: value.document.elementById("s") }, changed: new Set(["focus"]) });
     const changed = render(retained, { revision: 2 }), expected = render(fresh, { revision: 2 });
     assert.deepEqual(changed.terminal.controls, expected.terminal.controls);
     assert.equal(changed.stateRevision, 2);
-    assert.deepEqual(changed.terminal.controls[0].style.background, { r: 255, g: 255, b: 203, a: 1 });
+    assert.equal(changed.terminal.controls[0].style.background, null);
+    const focused = changed.terminal.controls[0];
+    assert.deepEqual(background(changed, focused.visible.row, focused.visible.column), { r: 255, g: 255, b: 203, a: 1 });
+    assert.ok(changed.displayList.commands.some((command) => command.kind === "background"
+      && command.layoutFragment === focused.layoutFragment && command.style.background?.b === 203));
   } finally { retained.store.dispose(); fresh.store.dispose(); }
+});
+
+test("transparent native control retains varying underlying cell backgrounds", () => {
+  const value = fixture('<style>html,body{margin:0}.left,.right,input{position:absolute;top:0;height:16px}'
+    + '.left{left:0;width:40px;background:red}.right{left:40px;width:40px;background:blue}'
+    + 'input{left:0;width:80px;border:0;padding:0;background:transparent}</style>'
+    + '<div class=left></div><div class=right></div><input value=alpha>');
+  try {
+    const painted = render(value), control = painted.terminal.controls[0];
+    assert.equal(control.style.background, null);
+    assert.deepEqual(background(painted, control.visible.row, 0), red);
+    assert.deepEqual(background(painted, control.visible.row, 9), blue);
+  } finally { value.store.dispose(); }
 });
 
 test("clipped native controls preserve allocation while writable cells remain viewport-bounded", () => {

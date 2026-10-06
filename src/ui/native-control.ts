@@ -70,7 +70,12 @@ export function nativeFormControl(
       ? ["label", "marker", "option", "description", "error"]
       : control.kind === "select" ? ["label", "marker", "option", "description", "value", "placeholder", "error"]
       : ["frame", "marker", "leading", "label", "trailing"];
-  const styles: NativeControlStyles = { root: style, parts: Object.fromEntries(parts.map((part) => [part, style])) };
+  // CSS chrome is already in the document cells. Clear widget base backgrounds
+  // for ordinary parts so each cell inherits its own painted backdrop. Popup
+  // options and selection retain their native surface/highlight contracts.
+  const transparent: TerminalStyle = { ...style, bg: style.bg ?? null };
+  const styles: NativeControlStyles = { root: style, parts: Object.fromEntries(parts.map((part) => [part,
+    control.kind === "select" && !control.multiple && (part === "option" || part === "description") ? style : transparent])) };
   const values = controlValues(document, control);
   if (control.kind === "hidden") return null;
   if (control.kind === "unsupported") {

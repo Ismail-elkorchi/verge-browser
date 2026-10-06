@@ -1,6 +1,8 @@
 import { checkPackedMetadata } from "../../memory/packed.js";
 import { PaintCommandBuilder } from "./paint-commands.js";
 import { createLayoutPaintResolver } from "../layout/paint-style.js";
+import { createPaintSuppressionResolver } from "./paint-suppression.js";
+import { createLayoutArtworkResolver, type LayoutArtworkFallbackReason } from "../layout/paint-artwork.js";
 import type { LayoutFragment } from "../layout/index.js";
 import type {
   BuildDocumentDisplayListInput,
@@ -86,7 +88,7 @@ function canvasBackground(input: BuildDocumentDisplayListInput): DocumentDisplay
       selected = bodyStyle;
     }
   }
-  if (selected.text.background === null || selected.text.background.a <= 0) return null;
+  if (selected.text.background === null || selected.text.background.a <= 0 || selected.mask.image.kind !== "none") return null;
   const base = input.layout.fragment(input.layout.root).style;
   return Object.freeze({ source, style: Object.freeze({ ...base, visible: true,
     foreground: null, background: selected.text.background }) });
@@ -100,28 +102,69 @@ export function buildDocumentDisplayList(input: BuildDocumentDisplayListInput): 
   const commands = new PaintCommandBuilder();
   checkPackedMetadata(64);
   const fragmentPaintOrder: LayoutFragment["id"][] = [];
+  const paintSuppressed = new Set<LayoutFragment["id"]>();
+  const artworkFallbacks = new Map<LayoutArtworkFallbackReason, { reason: LayoutArtworkFallbackReason; count: number; layoutFragment: LayoutFragment["id"] }>();
+  let artworkFallbacksOmitted = 0;
   if (rejection !== null || budgets === null) {
     return Object.freeze({
       layout: input.layout,
       styles: input.styles,
       context,
       fragmentPaintOrder: Object.freeze(fragmentPaintOrder),
+      paintSuppressed,
+      artworkFallbacks: Object.freeze([]), artworkFallbacksOmitted,
       canvasBackground: null,
       commands: commands.finish(input.layout, fragmentPaintOrder, 0, input.images),
       outcome: Object.freeze({ status: "rejected", reason: rejection ?? "invalid-budget" })
     });
   }
-  const selectedCanvas = canvasBackground(input);
+  const suppression = createPaintSuppressionResolver(input.layout, input.styles, input.signal);
+  // Geometry/control indexes may include owners after a truncated paint prefix.
+  // Resolve their eligibility too, so a paint budget cannot reveal hidden ink.
+  const pending = [input.layout.root];
+  while (pending.length > 0) {
+    input.signal?.throwIfAborted();
+    const id = pending.pop();
+    if (id === undefined) continue;
+    const fragment = input.layout.fragment(id);
+    if (suppression.formattingSuppressed(fragment.formattingNode)) {
+      checkPackedMetadata(8);
+      paintSuppressed.add(id);
+    }
+    for (const child of fragment.children) pending.push(child);
+  }
+  const resolveArtwork = createLayoutArtworkResolver(input.layout, input.styles, input.images, input.signal);
+  const candidateCanvas = canvasBackground(input);
+  const canvasMasked = candidateCanvas !== null && input.layout.forDocumentNode(candidateCanvas.source)
+    .some((fragment) => fragment.pseudoElement === null && resolveArtwork(fragment).masked);
+  const selectedCanvas = candidateCanvas !== null && (canvasMasked || suppression.sourceSuppressed(candidateCanvas.source)) ? null : candidateCanvas;
   const canvas = budgets.maxDisplayListCommands > 0 ? selectedCanvas : null;
   const reservedCommands = canvas === null ? 0 : 1;
   const paintStyle = createLayoutPaintResolver(input.layout, input.styles);
   const append = (fragment: LayoutFragment): boolean => {
     input.signal?.throwIfAborted();
+    if (paintSuppressed.has(fragment.id)) {
+      checkPackedMetadata(8);
+      fragmentPaintOrder.push(fragment.id);
+      return true;
+    }
     const current = paintStyle(fragment);
     const style = fragment.documentNode === canvas?.source && fragment.pseudoElement === null
       ? Object.freeze({ ...current, background: null }) : current;
     const node = input.layout.formatting.node(fragment.formattingNode);
-    if (!commands.append(fragment, fragmentPaintOrder.length, style, budgets.maxDisplayListCommands - reservedCommands, input.signal, node.kind === "image" && node.imageResourceId !== null)) return false;
+    const artwork = resolveArtwork(fragment);
+    if (artwork.fallback !== null) {
+      const previous = artworkFallbacks.get(artwork.fallback);
+      if (previous !== undefined) previous.count += 1;
+      else if (artworkFallbacks.size < Math.min(8, budgets.maxRetainedImagePlacements)) {
+        checkPackedMetadata(64);
+        artworkFallbacks.set(artwork.fallback, { reason: artwork.fallback, count: 1, layoutFragment: fragment.id });
+      } else artworkFallbacksOmitted += 1;
+    }
+    const maskLabel = artwork.fallback !== null && artwork.fallback !== "native-content-mask" && fragment.action !== null
+      && (fragment.semantic?.accessibleName || input.layout.formatting.semantic(fragment.action.node)?.accessibleName || "").length > 0;
+    if (!commands.append(fragment, fragmentPaintOrder.length, style, budgets.maxDisplayListCommands - reservedCommands, input.signal,
+      node.kind === "image" && node.imageResourceId !== null && !artwork.masked, artwork.masked, artwork.artwork, maskLabel)) return false;
     checkPackedMetadata(8);
     fragmentPaintOrder.push(fragment.id);
     return true;
@@ -194,6 +237,8 @@ export function buildDocumentDisplayList(input: BuildDocumentDisplayListInput): 
     styles: input.styles,
     context,
     fragmentPaintOrder: Object.freeze(fragmentPaintOrder),
+    paintSuppressed,
+    artworkFallbacks: Object.freeze([...artworkFallbacks.values()].map((entry) => Object.freeze(entry))), artworkFallbacksOmitted,
     canvasBackground: canvas,
     commands: commands.finish(input.layout, fragmentPaintOrder, reservedCommands, input.images),
     outcome: Object.freeze(outcome)

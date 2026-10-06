@@ -258,9 +258,23 @@ discovers metadata without delaying document publication for downloads. One
 active-document subscription awaits reliable resource completions; switching
 tabs aborts its work and waits for decoder termination before the next tab can
 allocate decoder workspace. Decoded pixels remain in accepted UI snapshots;
-the render worker receives resource identities and natural dimensions only.
+the render worker receives resource identities, natural dimensions and alpha
+presence only, never decoded pixels.
 The existing retained-history budget includes image ownership, and a separate
-64 MiB UI bound reserves both decoded storage and terminal-ui's raster copy.
+64 MiB UI bound includes decoded storage, live terminal rasters and pending
+preparation. One active URL pool admits at most 32 img and CSS artwork resources.
+Acquisition waits for the first accepted viewport. Discovery consumes existing
+spatially queried paint commands, including pending-mask commands, rather than
+rescanning document fragments on scroll. Visible img and artwork alternate
+priority when oversubscribed; they displace lower-priority offscreen resources
+without creating another loader or pixel cache. URL/order changes advance the
+source generation, so stale completions cannot enter a replacement pool even
+when its size is unchanged or a URL reenters. Owner-only and readiness changes
+do not restart acquisition; current CSS owners replace earlier viewport owners.
+Evicted img intrinsic dimensions remain metadata-only evidence keyed by the
+immutable document's source URLs, preserving layout and anchors without keeping
+evicted pixels or dynamic CSS URL history. The existing document source index
+validates owners; admission does not rebuild a second source manifest.
 
 Natural dimensions participate in shared replaced-element sizing. Layout
 records whether it consumed them, so fixed-size image metadata updates retain
@@ -268,10 +282,13 @@ layout, computed styles and logical search. Canonical image paint operations
 produce bounded visible cell clips in normal paint order. UI image slots retain
 native-control ordering and pointer ownership. Ready pixels are substituted
 only into placements with matching accepted natural dimensions. Raster handles
-are prepared once at the asynchronous completion boundary; rendering only
-looks them up. Failed uploads or unsupported terminals retain alternative text.
-This opaque-image path does not implement CSS subtree masks or alpha-over-text
-compositing.
+are prepared at asynchronous resource/viewport completion boundaries; rendering
+only looks them up. Transparent and tinted artwork needs an immutable viewport
+binding proving its backdrop and protected native-cell coverage. A rejected
+candidate cannot replace an accepted binding. Failed uploads or unsupported
+terminals retain semantic image alternatives. The pipeline does not implement
+CSS subtree masks, partial group opacity or alpha-over-native-text compositing,
+and never rasterizes document text.
 
 Every viewport names its required summary identity and layout revision. A
 summary contains document extent, scroll anchors, and logical focus order. The

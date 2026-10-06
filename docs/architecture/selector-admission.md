@@ -5,6 +5,32 @@ work meter. Verge does not implement a second selector matcher or impose a
 query-count cutoff. A stylesheet containing thousands of cheap indexed misses
 can be cheaper than one expensive filtered sibling query.
 
+## Syntax and implementation validity
+
+The CSS parser owns strict selector syntax and forgiving `:is()`/`:where()`
+recovery. A fatal component never leaves a matchable valid prefix. Parsed lists
+retain immutable discarded-branch spans once, and each complex selector retains
+whether its original input contained `&`, including inside discarded functions.
+
+`selector-admission.ts` is the single contextual walker for namespace bindings
+and Verge's implemented selector capabilities. Stylesheets reject the entire
+ordinary list when one branch is unsupported; only forgiving argument lists may
+prune branches. Pruning precedes specificity, dependency collection, and match
+cache identity. Unknown non-functional `::-webkit-*` pseudo-elements remain
+valid no-match AST nodes under Selectors 4's compatibility rule.
+
+`@supports selector()` requires exactly one complex selector, no parser
+recovery, and support for every nested branch before any contextual pruning.
+Unknown WebKit compatibility elements do not claim implementation support.
+The same walker validates namespaces in both contexts.
+
+Nesting insertion uses original `&` provenance, not the post-recovery AST.
+AST transformations retain source metadata, while match-cache fingerprints omit
+that metadata and source offsets. Relative nested selectors still acquire their
+explicit leading nesting anchor. Invalid parent rules suppress their complete
+nested subtree. The CSS matcher's existing three-valued host-state contract is
+unchanged; contextual admission does not convert an unavailable state to false.
+
 ## Independent bounds
 
 - Whole-index construction: `maxSelectorConstructionSteps`, 4,000,000 actual

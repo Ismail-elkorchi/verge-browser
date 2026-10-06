@@ -1,3 +1,4 @@
+import { inspectSvgHeader } from "./image-svg.js";
 import type { ImageFailureCode } from "../document/image-resources.js";
 import type { ImagePolicyOptions } from "./image-policy.js";
 
@@ -6,7 +7,7 @@ export class ImageResourceError extends Error {
   public constructor(code: ImageFailureCode, message: string) { super(message); this.code = code; }
 }
 export interface ImageHeader {
-  readonly mimeType: "image/png" | "image/jpeg";
+  readonly mimeType: "image/png" | "image/jpeg" | "image/svg+xml";
   readonly width: number;
   readonly height: number;
   readonly workspaceBytes: number;
@@ -70,6 +71,7 @@ function inspectPng(bytes: Uint8Array, policy: Required<ImagePolicyOptions>): Im
   let offset = 8; let header: ImageHeader | null = null; let dataSeen = false; let ended = false;
   let paletteSeen = false; let transparencySeen = false; let dataEnded = false;
   let orientation = 1; let exifSeen = false;
+  let gammaSeen = false; let chromaticitySeen = false; let srgbSeen = false;
   let color = -1;
   while (offset + 12 <= bytes.byteLength) {
     const length = view.getUint32(offset);
@@ -104,13 +106,24 @@ function inspectPng(bytes: Uint8Array, policy: Required<ImagePolicyOptions>): Im
       ended = true; break;
     } else if (type === "acTL" || type === "fcTL" || type === "fdAT") {
       throw new ImageResourceError("unsupported-animation", "Animated PNG is not a static image.");
-    } else if (type === "iCCP" || type === "cICP" || type === "cHRM") {
+    } else if (type === "iCCP" || type === "cICP") {
       throw new ImageResourceError("unsupported-color-profile", "This PNG color profile is not supported.");
+    } else if (type === "cHRM") {
+      if (chromaticitySeen || paletteSeen || dataSeen || length !== 32) reject("Invalid or misplaced PNG chromaticity chunk.");
+      chromaticitySeen = true;
+      // Exact PNG sRGB chromaticities, in the integer units specified by PNG.
+      // This admits canonical metadata without pretending to convert arbitrary profiles.
+      const srgb = [31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000];
+      if (srgb.some((value, index) => view.getUint32(start + index * 4) !== value)) {
+        throw new ImageResourceError("unsupported-color-profile", "Non-sRGB PNG chromaticities are not supported.");
+      }
     } else if (type === "gAMA") {
-      if (length !== 4) reject("Invalid PNG gamma chunk.");
+      if (gammaSeen || paletteSeen || dataSeen || length !== 4) reject("Invalid or misplaced PNG gamma chunk.");
+      gammaSeen = true;
       if (view.getUint32(start) !== 45455) throw new ImageResourceError("unsupported-color-profile", "Non-sRGB PNG gamma is not supported.");
     } else if (type === "sRGB") {
-      if (length !== 1 || (bytes[start] ?? 4) > 3) reject("Invalid PNG sRGB chunk.");
+      if (srgbSeen || paletteSeen || dataSeen || length !== 1 || (bytes[start] ?? 4) > 3) reject("Invalid or misplaced PNG sRGB chunk.");
+      srgbSeen = true;
     } else if (type === "eXIf") {
       if (exifSeen) reject("Repeated PNG EXIF metadata.");
       exifSeen = true;
@@ -183,14 +196,17 @@ function inspectJpeg(bytes: Uint8Array, policy: Required<ImagePolicyOptions>): I
   }
   reject("JPEG has no image scan.");
 }
-/** Allocation-free structural/dimension preflight before any pixel decoder is invoked. */
+/** Bounded structural/dimension preflight before any pixel decoder is invoked. */
 export function inspectImageHeader(bytes: Uint8Array, contentType: string | null, policy: Required<ImagePolicyOptions>): ImageHeader {
   if (bytes.byteLength > policy.maxEncodedBytes) throw new ImageResourceError("encoded-byte-limit", "Encoded image exceeds its byte budget.");
+  const type = contentType?.split(";", 1)[0]?.trim().toLowerCase();
   let header: ImageHeader;
   if (PNG_SIGNATURE.every((value, index) => bytes[index] === value)) header = inspectPng(bytes, policy);
   else if (bytes[0] === 255 && bytes[1] === 216) header = inspectJpeg(bytes, policy);
-  else throw new ImageResourceError("unsupported-format", "Only static PNG and JPEG are supported.");
-  const type = contentType?.split(";", 1)[0]?.trim().toLowerCase();
+  // SVG is never sniffed from HTML or an unknown media type. Its XML namespace and
+  // active/external content are validated before any renderer is invoked.
+  else if (type === "image/svg+xml") header = inspectSvgHeader(bytes, policy);
+  else throw new ImageResourceError("unsupported-format", "Only static PNG, JPEG and bounded SVG are supported.");
   if (type !== undefined && type !== header.mimeType) throw new ImageResourceError("unsupported-format", "Image media type does not match its signature.");
   return Object.freeze(header);
 }

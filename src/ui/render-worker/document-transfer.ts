@@ -1,5 +1,6 @@
 import { inspectStylesheetBytes, inspectStylesheetText, type StylesheetResource, type StylesheetSyntaxInstrumentation } from "../../presentation/style/index.js";
-import { documentImageMetadata, parseWebDocument } from "../../document/index.js";
+import { parseWebDocument } from "../../document/index.js";
+import { pageImageMetadata } from "../../app/image-admission.js";
 import type { IndexedPageSnapshot } from "../../app/types.js";
 import type { BrowserDocumentState } from "../model.js";
 import { transferDocumentState, type RenderDocumentAttachment } from "./protocol.js";
@@ -35,7 +36,7 @@ export function renderDocumentAttachment(
     stylesheetSources: Object.freeze(stylesheetSources),
     stylesheets: Object.freeze(stylesheets),
     styleDiagnostics: document.snapshot.styleDiagnostics,
-    images: Object.freeze((document.snapshot.images ?? []).map(documentImageMetadata)),
+    images: pageImageMetadata(document.snapshot),
   });
 }
 

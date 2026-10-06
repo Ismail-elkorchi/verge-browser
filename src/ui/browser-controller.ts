@@ -1,6 +1,10 @@
+import { prepareBrowserViewportImages, discardBrowserViewportImages, acceptBrowserViewportImages } from "./image-presentation.js";
+import { retainedImageBytes, MAX_RETAINED_IMAGE_BYTES } from "./image-loading.js";
 import { TabRestorationScheduler } from "./tab-restoration.js";
-import { documentImageMetadata, type DocumentImageMetadata, type DocumentImageResource } from "../document/image-resources.js";
+import { type DocumentImageMetadata, type DocumentImageResource } from "../document/image-resources.js";
+import { pageImageMetadata } from "../app/image-admission.js";
 import { dirname } from "node:path";
+import type { TuiEventSource } from "@ismail-elkorchi/terminal-ui/tui";
 
 import {
   NetworkSafetyPolicy,
@@ -43,6 +47,7 @@ import { RenderWorkerClient, type ViewportRenderPayload, type ViewportRequestPar
 import type {
   BrowserDocumentState,
   BrowserPlaceholderTabState,
+  BrowserTuiMessage,
   BrowserTuiState,
   BrowserTabState,
   DetailKind,
@@ -238,6 +243,62 @@ export class BrowserController {
   #nextDocumentNumber = 1;
   #workspaceSaveRevision = 0;
   #imageOperation: Promise<unknown> | null = null;
+  readonly #imageAcquisitionOwners = new Set<{ readonly snapshot: IndexedPageSnapshot }>();
+  #imageRetentionState: BrowserTuiState | null = null;
+  #imageRetentionRevision = 0;
+  #acceptedImageRetentionRevision = 0;
+  #imageRetentionCandidate: { readonly revision: number; readonly state: WeakRef<BrowserTuiState> } | null = null;
+  readonly #imageCandidates = new Map<string, ViewportRenderPayload>();
+
+  /** Adopt only a published state. Planning a reducer/subscription is speculative. */
+  public observeImageRetentionState(state: BrowserTuiState): void {
+    this.#imageRetentionState = state;
+    if (this.#imageRetentionCandidate?.state.deref() === state) this.#imageRetentionCandidate = null;
+  }
+
+  /** One weak speculative owner cannot retain rejected states or form a history. */
+  public reserveImageRetentionState(previous: BrowserTuiState, next: BrowserTuiState): void {
+    this.#imageRetentionState ??= previous;
+    if (next === this.#imageRetentionState) { this.#imageRetentionCandidate = null; return; }
+    if (this.#imageRetentionCandidate?.state.deref() === next) return;
+    this.#imageRetentionCandidate = { revision: ++this.#imageRetentionRevision, state: new WeakRef(next) };
+  }
+
+  public retainedImageStates(): readonly BrowserTuiState[] {
+    const candidate = this.#imageRetentionCandidate?.state.deref();
+    return [...(this.#imageRetentionState === null ? [] : [this.#imageRetentionState]),
+      ...(candidate === undefined || candidate === this.#imageRetentionState ? [] : [candidate])];
+  }
+
+  /** Queued and retiring acquisitions keep their input pixels until cleanup settles. */
+  public retainedImageSnapshots(): readonly IndexedPageSnapshot[] {
+    return [...this.#imageAcquisitionOwners].map((owner) => owner.snapshot);
+  }
+
+  /** Subscription activation is synchronous after publication and budget admission.
+   * It emits no message and coalesces every reducer in a dispatchMany transaction. */
+  public imageRetentionSource(state: BrowserTuiState): TuiEventSource<BrowserTuiMessage> {
+    const revision = this.#imageRetentionCandidate?.state.deref() === state
+      ? this.#imageRetentionCandidate.revision : this.#acceptedImageRetentionRevision;
+    const accepted = new WeakRef(state);
+    return { id: "image-retention", generation: revision, channel: { capacity: 1 },
+      run: (context) => {
+        context.signal.throwIfAborted();
+        const published = accepted.deref();
+        if (published !== undefined && revision >= this.#acceptedImageRetentionRevision) {
+          this.#acceptedImageRetentionRevision = revision;
+          this.observeImageRetentionState(published);
+        }
+        return Promise.resolve();
+      } };
+  }
+
+  /** Count the transport's existing owners too, including an unpublished candidate
+   * or an accepted frame whose successor has not been acknowledged. */
+  public retainedImageViewports(): readonly ViewportRenderPayload["cellBuffer"][] {
+    return [...this.#renderer.retainedViewports()].map((viewport) => viewport.cellBuffer);
+  }
+
 
   public constructor(options: BrowserControllerOptions) {
     this.#renderWorkerFactory = options.renderWorkerFactory ?? (() => new RenderWorkerClient());
@@ -289,6 +350,10 @@ export class BrowserController {
 
   async #close(): Promise<void> {
     this.#closed = true;
+    for (const candidate of this.#imageCandidates.values()) discardBrowserViewportImages(candidate.cellBuffer);
+    this.#imageCandidates.clear();
+    this.#imageRetentionState = null;
+    this.#imageRetentionCandidate = null;
     this.#restorations.close();
     this.#workerEpoch += 1;
     for (const id of this.#documentAttachments.keys()) this.#renderer.cancelDocument(id);
@@ -375,26 +440,59 @@ export class BrowserController {
     signal?.throwIfAborted();
     const renderer = await waitForPreparation(this.#prepareRendering(document), signal);
     signal?.throwIfAborted();
-    return renderer.renderViewport(document, viewportRevision, parameters);
+    this.#discardImageCandidate(document.id);
+    const payload = await renderer.renderViewport(document, viewportRevision, parameters);
+    signal?.throwIfAborted();
+    if (!(document.snapshot.images ?? []).some((resource) => resource.status === "ready")) return payload;
+    this.#imageCandidates.set(document.id, payload);
+    const retainedState = (): BrowserTuiState => this.#imageRetentionState ?? {
+      documents: [document], recentlyClosed: [],
+    } as unknown as BrowserTuiState;
+    try {
+      await prepareBrowserViewportImages(document.snapshot.images ?? [], payload.cellBuffer,
+        () => MAX_RETAINED_IMAGE_BYTES - retainedImageBytes(retainedState(), undefined, this.retainedImageViewports(), this.retainedImageStates(), this.retainedImageSnapshots()), signal);
+      signal?.throwIfAborted();
+      return payload;
+    } catch (error) {
+      discardBrowserViewportImages(payload.cellBuffer);
+      if (this.#imageCandidates.get(document.id) === payload) this.#imageCandidates.delete(document.id);
+      throw error;
+    }
   }
 
-  public cancelViewport(documentId: string): void { this.#renderer.cancelViewport(documentId); }
+  #discardImageCandidate(documentId: string): void {
+    const candidate = this.#imageCandidates.get(documentId);
+    if (candidate !== undefined) discardBrowserViewportImages(candidate.cellBuffer);
+    this.#imageCandidates.delete(documentId);
+  }
+
+  public cancelViewport(documentId: string): void {
+    this.#discardImageCandidate(documentId);
+    this.#renderer.cancelViewport(documentId);
+  }
 
   public async acquireImages(
-    document: BrowserDocumentState,
+    documentId: string,
+    snapshot: IndexedPageSnapshot,
     signal: AbortSignal,
     onResource: (resource: DocumentImageResource) => Promise<void>,
   ): Promise<void> {
     signal.throwIfAborted();
-    while (this.#imageOperation !== null) {
-      await waitForPreparation(this.#imageOperation.catch(() => undefined), signal);
-      signal.throwIfAborted();
+    const owner = { snapshot };
+    this.#imageAcquisitionOwners.add(owner);
+    try {
+      while (this.#imageOperation !== null) {
+        await waitForPreparation(this.#imageOperation.catch(() => undefined), signal);
+        signal.throwIfAborted();
+      }
+      if (this.#closed) throw new Error("Browser controller is closed.");
+      const operation = this.#acquisition(documentId).acquireImages(snapshot, { signal, onResource });
+      this.#imageOperation = operation;
+      try { await operation; }
+      finally { if (this.#imageOperation === operation) this.#imageOperation = null; }
+    } finally {
+      this.#imageAcquisitionOwners.delete(owner);
     }
-    if (this.#closed) throw new Error("Browser controller is closed.");
-    const operation = this.#acquisition(document.id).acquireImages(document.snapshot, { signal, onResource });
-    this.#imageOperation = operation;
-    try { await operation; }
-    finally { if (this.#imageOperation === operation) this.#imageOperation = null; }
   }
 
   /** Internal interaction metrics used by deterministic browser qualification. */
@@ -415,11 +513,18 @@ export class BrowserController {
     return renderer.search(document, query, parameters, 2_000, requestGeneration);
   }
 
-  public cancelDocumentRendering(documentId: string): void { this.#renderer.cancelDocument(documentId); }
+  public cancelDocumentRendering(documentId: string): void {
+    this.#discardImageCandidate(documentId);
+    this.#renderer.cancelDocument(documentId);
+  }
 
   public cancelSearch(documentId: string): void { this.#renderer.cancelSearch(documentId); }
 
-  public acknowledgeViewport(payload: ViewportRenderPayload): void { this.#renderer.acknowledgeViewport(payload); }
+  public acknowledgeViewport(payload: ViewportRenderPayload): void {
+    acceptBrowserViewportImages(payload.cellBuffer);
+    if (this.#imageCandidates.get(payload.documentId) === payload) this.#imageCandidates.delete(payload.documentId);
+    this.#renderer.acknowledgeViewport(payload);
+  }
 
   public prioritizeRendering(documentId: string | null): void { this.#renderer.prioritize(documentId); }
 
@@ -479,11 +584,13 @@ export class BrowserController {
         await renderer.updateState(document, changed, attached.documentRevision === document.documentRevision
           ? undefined : attached.documentRevision);
       }
-      const images = (document.snapshot.images ?? []).map(documentImageMetadata);
+      const images = pageImageMetadata(document.snapshot);
       if (attached !== null && attached.sourceId === sourceId
         && (attached.images.length !== images.length || images.some((image, index) => {
           const previous = attached.images[index];
-          return previous?.id !== image.id || previous.width !== image.width || previous.height !== image.height;
+          return previous?.id !== image.id || previous.width !== image.width || previous.height !== image.height || previous.hasAlpha !== image.hasAlpha
+            || previous.requestUrl !== image.requestUrl || previous.owners.length !== image.owners.length
+            || previous.owners.some((owner, ownerIndex) => owner !== image.owners[ownerIndex]);
         }))) await renderer.updateDocumentImages(document);
       // Record an acknowledged producer even when its consumer was superseded.
       // The serialized successor must advance from the worker's actual revision.
@@ -508,6 +615,7 @@ export class BrowserController {
   }
 
   public async releaseRendering(documentId: string): Promise<void> {
+    this.#discardImageCandidate(documentId);
     this.#documentAttachments.delete(documentId);
     await this.#renderer.release(documentId);
   }

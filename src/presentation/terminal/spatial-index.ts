@@ -216,14 +216,17 @@ class ImmutableDisplayListSpatialIndex implements DisplayListSpatialIndex {
       const fragment = retained.layoutFragment(index);
       const originalRect = retained.rect(index);
       const resolvedRect = projection.rect(fragment, originalRect);
-      const clipRect = projection.clip(fragment, !retained.isText(index));
+      let clipRect = projection.clip(fragment, !retained.isText(index));
+      const command = retained.at(index);
+      if (command === undefined) throw new RangeError("Missing indexed paint command.");
+      if (command.inkClipRect !== undefined) {
+        clipRect = cssIntersection(clipRect, projection.rect(fragment, command.inkClipRect));
+      }
       const visible = cssIntersection(resolvedRect, clipRect);
       if ((originalRect.width > 0 && originalRect.height > 0 && (visible.width <= 0 || visible.height <= 0))
         || visible.x >= rect.x + rect.width || visible.x + Math.max(1, visible.width) <= rect.x
         || visible.y >= rect.y + rect.height || visible.y + Math.max(1, visible.height) <= rect.y
         || clipRect.width <= 0 || clipRect.height <= 0) return;
-      const command = retained.at(index);
-      if (command === undefined) throw new RangeError("Missing indexed paint command.");
       const resolved = { ...command, rect: resolvedRect, clipRect };
       commands.push(Object.freeze(command.kind === "border-side"
         ? { ...resolved, borderRect: projection.rect(fragment, command.borderRect) } : resolved));

@@ -1,5 +1,6 @@
+import { discardBrowserViewportImages } from "./image-presentation.js";
 import { scrollDocument } from "./document-scroll.js";
-import { acceptImageResource, imageSources } from "./image-loading.js";
+import { acceptImageResource, acceptViewportImageAdmission, imageSources, retainedImageBytes, MAX_RETAINED_IMAGE_BYTES } from "./image-loading.js";
 import { assertPageInitiatedNavigation } from "../app/security.js";
 import { currentEntry, traverseHistory, isSameDocumentNavigation, fragmentSnapshot, type NavigationProvenance } from "../app/navigation-history.js";
 import { acceptNavigation, activateHistory, resumeDocument } from "./navigation-state.js";
@@ -833,7 +834,7 @@ function reduceBrowser(
   context: Pick<TuiContext, "terminalSize"> = { terminalSize: { columns: 100, rows: 24 } }
 ): TuiUpdateResult<BrowserTuiState, BrowserTuiMessage> {
   if (message.kind === "imageResource" || message.kind === "imageResourcesFailed") {
-    return result(acceptImageResource(state, message));
+    return result(acceptImageResource(state, message, controller.retainedImageViewports(), controller.retainedImageStates(), controller.retainedImageSnapshots()));
   }
   if (message.kind === "pickerQuery") {
     const settled = pickerQuery.update(state.pickerQuery, message.message).state;
@@ -925,7 +926,17 @@ function reduceBrowser(
         || current.documentRevision !== payload.documentRevision
         || current.stateRevision !== payload.stateRevision
         || current.rendering.requestedViewportRevision !== payload.viewportRevision
-        || payload.summary.identity !== payload.summaryIdentity) return result(state);
+        || payload.summary.identity !== payload.summaryIdentity) {
+        discardBrowserViewportImages(payload.cellBuffer);
+        return result(state);
+      }
+      // Pixels may arrive while this candidate is being prepared. Revalidate the
+      // shared cap before committing; native fallback is always safe to retain.
+      if (retainedImageBytes(state, undefined, controller.retainedImageViewports(), controller.retainedImageStates(), controller.retainedImageSnapshots()) > MAX_RETAINED_IMAGE_BYTES) {
+        discardBrowserViewportImages(payload.cellBuffer);
+      }
+      // Acceptance moves to the acknowledged effect after frame publication.
+      // Until then, the candidate remains reserved and separately reclaimable.
       const pendingFocus = current.rendering.pendingFocus;
       const focusVisible = current.id === selectedTab.id && pendingFocus !== null
         && payload.focusTargets.some((target) => target.node === pendingFocus.node);
@@ -938,8 +949,8 @@ function reduceBrowser(
         const restoreAnchor = entry.rendering.summary === null && entry.rendering.pendingReveal === null;
         const preserveAnchor = entry.rendering.pendingReveal === null && (restoreAnchor || payload.scrollRow === documentScrollRow(entry));
         const positioned = preserveAnchor ? committed : documentWithScrollRow(committed, payload.scrollRow, viewportRows);
-        return { ...positioned, rendering: { ...positioned.rendering,
-          requestKey: restoreAnchor ? entry.rendering.requestKey : viewportRequestKey(positioned, viewportParameters(state, positioned, context.terminalSize)) } };
+        return acceptViewportImageAdmission({ ...positioned, rendering: { ...positioned.rendering,
+          requestKey: restoreAnchor ? entry.rendering.requestKey : viewportRequestKey(positioned, viewportParameters(state, positioned, context.terminalSize)) } }, payload.visibleImages);
       });
       const firstCommittedViewport = current.rendering.committedViewportRevision === 0;
       return result(updated, {
@@ -1928,7 +1939,7 @@ function preparePickerUpdate(previous: BrowserTuiState, update: TuiUpdateResult<
   return { ...update, state: { ...next, pickerQuery: requested.state }, effects: [...(update.effects ?? []), ...(requested.effects ?? [])] };
 }
 
-export function updateBrowser(
+function updateBrowserState(
   controller: BrowserController,
   state: BrowserTuiState,
   message: BrowserTuiMessage,
@@ -2033,6 +2044,18 @@ export function updateBrowser(
   };
 }
 
+/** Reserve the speculative state without replacing the accepted publication owner. */
+export function updateBrowser(
+  controller: BrowserController,
+  state: BrowserTuiState,
+  message: BrowserTuiMessage,
+  context: Pick<TuiContext, "terminalSize"> = { terminalSize: { columns: 100, rows: 24 } },
+): TuiUpdateResult<BrowserTuiState, BrowserTuiMessage> {
+  const updated = updateBrowserState(controller, state, message, context);
+  controller.reserveImageRetentionState(state, updated.state);
+  return updated;
+}
+
 function textBinding(id: string, text: string, message: BrowserTuiMessage) {
   return {
     id,
@@ -2067,7 +2090,7 @@ export function createBrowserApp(
       };
     },
     update: (state, message, context) => updateBrowser(controller, state, message, context),
-    subscriptions: (state) => imageSources(controller, state),
+    subscriptions: (state) => [controller.imageRetentionSource(state), ...imageSources(controller, state)],
     view: (state, context) => measured(
       instrumentation,
       "terminal-ui-element-tree-construction",

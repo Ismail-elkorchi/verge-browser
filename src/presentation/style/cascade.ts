@@ -1,3 +1,4 @@
+import { MASK_PROPERTIES, NO_MASK, UNSUPPORTED_MASK_IMAGE, maskImageValue, maskSizeValue, maskPositionValue, maskRepeatValue, maskPropertySupported, sameCssMask } from "./mask-values.js";
 import { parseContent, parseCounterOperations, NORMAL_CONTENT, NO_COUNTER_OPERATIONS,
   generatedContentEqual, counterOperationsEqual, htmlCounterDefaults } from "./generated-content.js";
 import { freezeComputedStyleRecords, StyleRecordSharing, sameComputedBoxStyle, sameComputedTextStyle,
@@ -9,7 +10,8 @@ import { SelectorResultCache } from "./selector-cache.js";
 import { normalizedOverflow } from "./overflow.js";
 import { parseListStyle, parseListStylePosition, parseListStyleType } from "./list-style.js";
 import { DiagnosticCollector, diagnosticIdentity } from "./diagnostics.js";
-import { EMPTY_NAMESPACES, bindSelectorNamespaces } from "./namespaces.js";
+import { EMPTY_NAMESPACES } from "./namespaces.js";
+import { admitSelectorList } from "./selector-admission.js";
 import { isValidMediaEnvironment, mediaApplies } from "./media.js";
 export { terminalMediaMayApply } from "./media.js";
 import { styleBudgets } from "./budgets.js";
@@ -26,12 +28,10 @@ import {
   serializeCssComponentValues,
   SyntaxResourceError,
   validateCssPropertyValue,
-  type ComplexSelector,
   type ComponentValue,
   type CssDeclaration,
   type CssBlockItem,
   type SelectorEnvironment,
-  type SelectorList,
   type SelectorSpecificity
 } from "@ismail-elkorchi/css-parser";
 
@@ -113,7 +113,8 @@ import {
 } from "./table/index.js";
 
 const SUPPORTED_PROPERTIES = new Set([
-  "display", "visibility", "white-space", "color", "background", "background-color",
+  ...MASK_PROPERTIES,
+  "display", "visibility", "opacity", "white-space", "color", "background", "background-color",
   "font", "font-weight", "font-style", "text-decoration", "text-decoration-line", "text-transform",
   "font-size", "line-height", "vertical-align", "direction", "unicode-bidi", "text-align", "text-indent",
   "line-break", "word-break", "overflow-wrap", "hyphens", "tab-size",
@@ -643,6 +644,7 @@ function implementationSupportsDeclaration(source: string): boolean {
     return gridPropertyValueSupported(property, value);
   }
   if (TABLE_PROPERTIES.has(property)) return tablePropertyValueSupported(property, value);
+  if (MASK_PROPERTIES.has(property)) return maskPropertySupported(property, cssValue(parsed.value), parsed.value.value);
   const validation = validateCssPropertyValue(parsed.value);
   if (validation.status !== "valid") return false;
   const familySupport = valueFamilySupported(property, parsed.value.value);
@@ -657,6 +659,7 @@ function implementationSupportsDeclaration(source: string): boolean {
   switch (property) {
     case "display": return parseDisplay(value, initialDisplay(false), null) !== null;
     case "visibility": return keyword("visible", "hidden", "collapse");
+    case "opacity": return cellOpacity(value) !== null;
     case "white-space": return keyword("normal", "nowrap", "pre", "pre-wrap", "pre-line", "break-spaces");
     case "color":
     case "background-color": return parseColor(value, TRANSPARENT) !== undefined;
@@ -765,41 +768,6 @@ function implementationSupportsDeclaration(source: string): boolean {
   }
 }
 
-const IMPLEMENTED_PSEUDO_CLASSES = new Set([
-  "active", "any-link", "checked", "disabled", "empty", "enabled", "first-child",
-  "first-of-type", "focus", "focus-visible", "focus-within", "has", "hover", "is",
-  "last-child", "last-of-type", "link", "not", "nth-child", "nth-last-child",
-  "nth-last-of-type", "nth-of-type", "only-child", "only-of-type", "open", "root",
-  "scope", "target", "visited", "where"
-]);
-
-function selectorImplementationSupported(selector: SelectorList, namespaces: StylesheetNamespaces): boolean {
-  const complexSupported = (complex: ComplexSelector): boolean => complex.compounds.every((compound) => {
-    const typeNamespace = compound.type?.namespace ?? null;
-    if (typeNamespace !== null && typeNamespace !== "*"
-      && typeNamespace !== "" && !namespaces.prefixes.has(typeNamespace)) return false;
-    return compound.simples.every((simple) => {
-      if (simple.kind === "nesting") return true;
-      if (simple.kind === "attribute") {
-        return simple.namespace === null || simple.namespace === "*" || simple.namespace === ""
-          || namespaces.prefixes.has(simple.namespace);
-      }
-      if (simple.kind === "pseudo-element") {
-        return simple.argument.kind === "none" && ["before", "after", "marker"].includes(simple.name);
-      }
-      if (simple.kind !== "pseudo-class" || !IMPLEMENTED_PSEUDO_CLASSES.has(simple.name)) {
-        return simple.kind !== "pseudo-class";
-      }
-      if (simple.argument.kind === "selector-list") {
-        return simple.argument.selectors.every(complexSupported);
-      }
-      if (simple.argument.kind === "nth") return simple.argument.of.every(complexSupported);
-      return simple.argument.kind === "none";
-    });
-  });
-  return selector.selectors.every(complexSupported);
-}
-
 function supportsCondition(values: readonly ComponentValue[], namespaces: StylesheetNamespaces = EMPTY_NAMESPACES): boolean {
   const compact = values.filter((value) => value.kind !== "whitespace");
   if (compact[0]?.kind === "ident" && compact[0].value.toLowerCase() === "not") {
@@ -831,10 +799,7 @@ function supportsCondition(values: readonly ComponentValue[], namespaces: Styles
   }
   if (condition?.kind === "function-block" && condition.name.toLowerCase() === "selector") {
     const selector = parseSelectorListFromComponentValues(condition.value);
-    if (!selector.ok) return false;
-    const selectors = selector.value.selectors.map((entry) => bindSelectorNamespaces(entry, namespaces));
-    return selectors.every((entry) => entry !== null)
-      && selectorImplementationSupported({ ...selector.value, selectors }, namespaces);
+    return selector.ok && admitSelectorList(selector.value, namespaces, "supports") !== null;
   }
   return false;
 }
@@ -1068,8 +1033,10 @@ function collectCandidates(
           } else diagnostics.add("unsupported-at-rule", source.sourceUrl, `Unsupported @${rule.name} rule.`);
           continue;
         }
+        const compiledRule = input.program.compiledSelectors.get(rule);
+        if (compiledRule === undefined || compiledRule.length === 0) continue;
         const matchingByPseudo = new Map<PseudoElementIdentity | null, Map<DocumentNodeRef, SelectorSpecificity>>();
-        for (const compiled of input.program.compiledSelectors.get(rule) ?? []) {
+        for (const compiled of compiledRule) {
           const matching = matchingByPseudo.get(compiled.pseudoElement) ?? new Map<DocumentNodeRef, SelectorSpecificity>();
           matchingByPseudo.set(compiled.pseudoElement, matching);
             const authorRule = source.origin === "author";
@@ -1402,6 +1369,8 @@ function initialStyle(parent: ComputedStyle | null, replaced: boolean, htmlDirec
   return {
     display: initialDisplay(replaced),
     visibility: parent?.visibility ?? "visible",
+    opacity: 1,
+    mask: NO_MASK,
     listStyleType: parent?.listStyleType ?? "disc",
     listStylePosition: parent?.listStylePosition ?? "outside",
     text: {
@@ -1634,6 +1603,19 @@ function nonNegativeCssNumber(value: string): number | null {
   return Number.isFinite(number) && number >= 0 && number <= Number.MAX_SAFE_INTEGER ? number : null;
 }
 
+/** Only endpoint opacity is representable without compositing native glyphs. */
+function cellOpacity(value: string): 0 | 1 | null {
+  const parsed = parseComponentValues(value);
+  if (!parsed.ok) return null;
+  const components = parsed.value.filter((component) => component.kind !== "whitespace");
+  if (components.length !== 1) return null;
+  const component = components[0];
+  const number = component?.kind === "number" ? component.value
+    : component?.kind === "percentage" ? component.value / 100 : Number.NaN;
+  if (!Number.isFinite(number)) return null;
+  return number <= 0 ? 0 : number >= 1 ? 1 : null;
+}
+
 interface FlexShorthandValue {
   readonly grow: number;
   readonly shrink: number;
@@ -1822,6 +1804,59 @@ function computeStyle(
     const computed = resolvedWide("visibility", visibility.value, "visible", parent?.visibility ?? null);
     if (computed === "visible" || computed === "hidden" || computed === "collapse") style = { ...style, visibility: computed };
     else unsupported(visibility);
+  }
+  const opacity = value("opacity");
+  if (opacity !== null) {
+    const wide = cssWide(opacity.value);
+    const computed = wide === "inherit" ? parent?.opacity ?? 1
+      : wide !== null ? 1 : cellOpacity(opacity.value);
+    if (computed === null) unsupported(opacity);
+    else style = { ...style, opacity: computed };
+  }
+  const maskImage = value(["mask-image", "mask"]);
+  if (maskImage !== null) {
+    const wide = cssWide(maskImage.value);
+    const image = wide === "inherit" ? parent?.mask.image ?? NO_MASK.image : wide !== null ? NO_MASK.image
+      : maskImage.property === "mask" && maskImage.value.trim().toLowerCase() !== "none" ? UNSUPPORTED_MASK_IMAGE
+      : maskImageValue(maskImage.components, maskImage.sourceUrl,
+        maskImage.sourceUrl === "inline-style" || maskImage.sourceUrl.startsWith(`${document.finalUrl}#style-`)
+          ? document.baseUrl : maskImage.sourceUrl);
+    if (image.kind === "unsupported") unsupported(maskImage);
+    style = { ...style, mask: Object.freeze({ ...style.mask, image }) };
+  }
+  const maskSize = value(["mask-size", "mask"]);
+  if (maskSize !== null) {
+    const wide = cssWide(maskSize.value);
+    const size = wide === "inherit" ? parent?.mask.size ?? NO_MASK.size : wide !== null || maskSize.property === "mask"
+      ? NO_MASK.size : maskSizeValue(maskSize.value);
+    if (size === null) { unsupported(maskSize); style = { ...style, mask: Object.freeze({ ...style.mask, image: style.mask.image.kind === "none" ? NO_MASK.image : UNSUPPORTED_MASK_IMAGE }) }; }
+    else style = { ...style, mask: Object.freeze({ ...style.mask, size }) };
+  }
+  const maskPosition = value(["mask-position", "mask"]);
+  if (maskPosition !== null) {
+    const wide = cssWide(maskPosition.value);
+    const position = wide === "inherit" ? parent?.mask.position ?? NO_MASK.position : wide !== null || maskPosition.property === "mask"
+      ? NO_MASK.position : maskPositionValue(maskPosition.value);
+    if (position === null) { unsupported(maskPosition); style = { ...style, mask: Object.freeze({ ...style.mask, image: style.mask.image.kind === "none" ? NO_MASK.image : UNSUPPORTED_MASK_IMAGE }) }; }
+    else style = { ...style, mask: Object.freeze({ ...style.mask, position }) };
+  }
+  const maskRepeat = value(["mask-repeat", "mask"]);
+  if (maskRepeat !== null) {
+    const wide = cssWide(maskRepeat.value);
+    const repeat = wide === "inherit" ? parent?.mask.repeat ?? NO_MASK.repeat : wide !== null || maskRepeat.property === "mask"
+      ? NO_MASK.repeat : maskRepeatValue(maskRepeat.value);
+    if (repeat === null) { unsupported(maskRepeat); style = { ...style, mask: Object.freeze({ ...style.mask, image: style.mask.image.kind === "none" ? NO_MASK.image : UNSUPPORTED_MASK_IMAGE }) }; }
+    else style = { ...style, mask: Object.freeze({ ...style.mask, repeat }) };
+  }
+  for (const property of ["mask-mode", "mask-origin", "mask-clip", "mask-composite", "mask-type"]) {
+    const entry = value(property);
+    if (entry !== null && cssWide(entry.value) === null) {
+      const allowed: Readonly<Record<string, readonly string[]>> = { "mask-mode": ["match-source", "alpha"],
+        "mask-origin": ["border-box"], "mask-clip": ["border-box"], "mask-composite": ["add"], "mask-type": ["alpha"] };
+      if (!allowed[property]?.includes(entry.value.trim().toLowerCase())) {
+        unsupported(entry); style = { ...style, mask: Object.freeze({ ...style.mask, image: style.mask.image.kind === "none" ? NO_MASK.image : UNSUPPORTED_MASK_IMAGE }) };
+      }
+    }
   }
   const whiteSpace = value("white-space");
   if (whiteSpace !== null) {
@@ -2711,7 +2746,7 @@ export function compareStyleSnapshots(previous: StyleSnapshot, next: StyleSnapsh
       if ((left.box.emptyCells === "hide" && left.display.box === "principal" && left.display.internal === "table-cell")
         || (right.box.emptyCells === "hide" && right.display.box === "principal" && right.display.internal === "table-cell")) changes.backgroundOnly = false;
       if (left === right) continue;
-      const sameOther = sameComputedDisplay(left.display, right.display) && left.visibility === right.visibility
+      const sameOther = sameComputedDisplay(left.display, right.display) && left.visibility === right.visibility && left.opacity === right.opacity && sameCssMask(left.mask, right.mask)
         && left.listStyleType === right.listStyleType && left.listStylePosition === right.listStylePosition
         && generatedContentEqual(left.generatedContent, right.generatedContent)
         && counterOperationsEqual(left.counterReset, right.counterReset) && counterOperationsEqual(left.counterSet, right.counterSet)

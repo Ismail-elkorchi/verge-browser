@@ -62,12 +62,14 @@
     "unicode:generate": "node scripts/unicode/generate-unicode-data.mjs"
   },
   "dependencies": {
-    "@ismail-elkorchi/css-parser": "github:Ismail-elkorchi/css-parser#585c1c59b66f98c6ee63875ed1f9fa6bd5477bed",
+    "@ismail-elkorchi/css-parser": "github:Ismail-elkorchi/css-parser#ad3815962938e2534e157804f02d77e4841e5a7a",
     "@ismail-elkorchi/html-parser": "git+https://github.com/Ismail-elkorchi/html-parser.git#f52548202a9fed8f2d9f59f67732fe339922462b",
     "@ismail-elkorchi/http-client": "0.1.1",
-    "@ismail-elkorchi/terminal-ui": "github:Ismail-elkorchi/terminal-ui#c21d7821045f11d2c97e77ea38fbaa284d374389",
+    "@ismail-elkorchi/terminal-ui": "github:Ismail-elkorchi/terminal-ui#7431f7e3368a14f3020c49384c687694211ebe73",
+    "@resvg/resvg-wasm": "2.6.2",
     "jpeg-js": "0.4.4",
     "pngjs": "7.0.0",
+    "saxes": "6.0.0",
     "tough-cookie": "6.0.2"
   },
   "devDependencies": {

@@ -210,9 +210,24 @@ export interface ComputedBoxStyle {
   readonly contain: "none" | "paint";
 }
 
+export type CssMaskImage = { readonly kind: "none" } | { readonly kind: "unsupported" }
+  | { readonly kind: "url"; readonly resourceId: string; readonly requestUrl: string; readonly sourceUrl: string };
+export type CssMaskSize = { readonly kind: "auto" | "contain" | "cover" }
+  | { readonly kind: "explicit"; readonly width: CssLength; readonly height: CssLength };
+export interface CssMask {
+  readonly image: CssMaskImage;
+  readonly size: CssMaskSize;
+  readonly position: "center" | "top-left";
+  readonly repeat: "repeat" | "no-repeat";
+}
+
 export interface ComputedStyle {
   readonly display: ComputedDisplay;
   readonly visibility: "visible" | "hidden" | "collapse";
+  /** Cell output supports fully opaque or paint-suppressed subtrees. Not inherited. */
+  readonly opacity: 0 | 1;
+  /** Artwork-only projection; masks never turn native text into pixels. */
+  readonly mask: CssMask;
   readonly listStylePosition: "inside" | "outside";
   readonly listStyleType:
     | "none"

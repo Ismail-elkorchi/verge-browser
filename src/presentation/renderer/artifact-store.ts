@@ -262,13 +262,16 @@ export class RenderArtifactStore {
     }
   }
 
-  /** Pixel readiness is a UI concern. Only consumed natural geometry retires layout. */
+  /** Pixel ownership stays in the UI. Known opacity refreshes paint only;
+   * only consumed natural geometry retires layout. */
   public updateImages(input: { readonly documentId: string; readonly documentRevision: number;
     readonly images: readonly DocumentImageMetadata[] }): "none" | "paint" | "layout" {
     const document = this.#document(input.documentId, input.documentRevision);
     if (document.images.length === input.images.length && document.images.every((image, index) => {
       const next = input.images[index];
-      return next !== undefined && image.id === next.id && image.width === next.width && image.height === next.height;
+      return next !== undefined && image.id === next.id && image.width === next.width && image.height === next.height
+        && image.hasAlpha === next.hasAlpha && image.requestUrl === next.requestUrl
+        && image.owners.length === next.owners.length && image.owners.every((owner, ownerIndex) => owner === next.owners[ownerIndex]);
     })) return "none";
     const oldById = new Map(document.images.map((image) => [image.id, image]));
     const nextById = new Map(input.images.map((image) => [image.id, image]));

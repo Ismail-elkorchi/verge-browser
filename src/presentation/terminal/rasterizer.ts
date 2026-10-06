@@ -3,9 +3,11 @@ import {
   cssCoordinateAdd,
   cssIntersection,
   cssLengthFromFixed,
+  cssPixels,
   type CssRect
 } from "../layout/index.js";
 import { terminalPaintBudgets, validTerminalRenderContext } from "./display-list.js";
+import { textCellRow } from "./text-projection.js";
 import type {
   RasterizeViewportDisplayListInput,
   TerminalCell,
@@ -28,6 +30,7 @@ type RasterizationDisplayList = Pick<DocumentDisplayList,
   "layout" | "context" | "fragmentPaintOrder" | "outcome"> & { readonly commands: readonly TerminalPaintCommand[] };
 
 interface PaintUnit {
+  readonly logicalText?: string;
   readonly command: TerminalPaintCommand;
   readonly row: number;
   readonly column: number;
@@ -39,10 +42,21 @@ interface PaintUnit {
   readonly contentEndCodeUnit: number | null;
   readonly sourceRange: DocumentSourceRange | null;
   readonly visible: boolean;
+  /** Subcell chrome is a glyph approximation, never a full-cell opaque surface. */
+  readonly decoration: boolean;
 }
 
 interface PaintedUnit extends PaintUnit {
   readonly actualStyle: TerminalStyle;
+}
+
+/** Action identity does not turn CSS background/padding into native ink.
+ * Subcell chrome may yield to later artwork, like it already yields to text.
+ * Native editor allocations (including blank future caret cells) are fenced
+ * separately by imageClipsAboveControls using their actual paint geometry. */
+function protectedImageBackdropInk(unit: PaintUnit): boolean {
+  return unit.command.kind === "image" || (!unit.decoration && unit.text.trim().length > 0)
+    || (unit.command.kind === "text" && unit.command.action?.kind === "form-control");
 }
 
 class InvalidTerminalCellMeasurement extends Error {}
@@ -169,7 +183,7 @@ function reservePaintUnit(state: PaintUnitGenerationState): boolean {
   return true;
 }
 
-function* textUnits(
+function* clusterTextUnits(
   command: Extract<TerminalPaintCommand, { readonly kind: "text" | "image" }>,
   list: RasterizationDisplayList,
   budgets: TerminalPaintBudgets,
@@ -178,7 +192,8 @@ function* textUnits(
 ): Generator<PaintUnit> {
   const clip = textClip(command, list, budgets);
   if (clip.width === 0 || clip.height === 0) return;
-  const row = Math.floor(command.rect.y / list.context.rowHeightCssPx);
+  const row = command.kind === "text" ? textCellRow(command.rect, command.baseline, list.layout, list.context.rowHeightCssPx)
+    : Math.floor(command.rect.y / list.context.rowHeightCssPx);
   const rowVisible = row >= clip.row && row < safeAdd(clip.row, clip.height);
   const clipEdge = safeAdd(clip.column, clip.width);
   let previousCodeUnit = 0;
@@ -223,10 +238,68 @@ function* textUnits(
       contentEndCodeUnit: grapheme.contentEndCodeUnit,
       sourceRange: grapheme.sourceRange,
       visible: rowVisible && column >= clip.column && end <= clipEdge
-        && (!confinesText || cssCursor <= contentEdge)
+        && (!confinesText || cssCursor <= contentEdge),
+      decoration: false,
     };
   }
   if (previousCodeUnit !== command.text.length) throw new InvalidTerminalCellMeasurement();
+}
+
+function measuredCells(text: string, list: RasterizationDisplayList): number {
+  const width = list.context.cellMeasurer.width(text);
+  if (!Number.isSafeInteger(width) || width < 0) throw new InvalidTerminalCellMeasurement();
+  return width;
+}
+
+function compactMediaLabel(capacity: number, action: boolean, list: RasterizationDisplayList): string {
+  const candidates = action ? ["[link]", ...(list.context.unicode ? ["↗"] : []), ">"]
+    : ["[image]", "[img]", "img", "[]", ...(list.context.unicode ? ["▧"] : []), "*"];
+  return candidates.find((label) => measuredCells(label, list) <= capacity) ?? "";
+}
+
+/** A narrow authored image box gets a recognisable marker, never an accidental
+ * alt-text prefix. The original clusters/name stay canonical and the one
+ * projected span retains their complete logical range for search/selection.
+ */
+function* textUnits(command: Extract<TerminalPaintCommand, { readonly kind: "text" | "image" }>,
+  list: RasterizationDisplayList, budgets: TerminalPaintBudgets, generation: PaintUnitGenerationState,
+  signal: AbortSignal | undefined): Generator<PaintUnit> {
+  const capacity = Math.floor(command.rect.width / list.context.cellWidthCssPx);
+  const semanticLabel = command.mediaFallbackLabel;
+  const node = list.layout.formatting.node(command.formattingNode);
+  const compact = (command.kind === "image" || node.kind === "image")
+    && command.text.length > 0 && measuredCells(command.text, list) > capacity;
+  if (semanticLabel === undefined && !compact) {
+    yield* clusterTextUnits(command, list, budgets, generation, signal);
+    return;
+  }
+  let sourceRange: DocumentSourceRange | null = null;
+  let contentStartCodeUnit: number | null = null, contentEndCodeUnit: number | null = null;
+  if (compact) {
+    // Validate and budget the original clusters exactly as the ordinary path.
+    for (const unit of clusterTextUnits(command, list, budgets, generation, signal)) {
+      if (unit.contentStartCodeUnit !== null) contentStartCodeUnit = Math.min(contentStartCodeUnit ?? unit.contentStartCodeUnit, unit.contentStartCodeUnit);
+      if (unit.contentEndCodeUnit !== null) contentEndCodeUnit = Math.max(contentEndCodeUnit ?? unit.contentEndCodeUnit, unit.contentEndCodeUnit);
+      if (unit.sourceRange !== null) sourceRange = sourceRange === null ? unit.sourceRange : Object.freeze({
+        start: Math.min(sourceRange.start, unit.sourceRange.start), end: Math.max(sourceRange.end, unit.sourceRange.end), provenance: sourceRange.provenance,
+      });
+    }
+    if (generation.truncated) return;
+  }
+  if (capacity <= 0) return;
+  const label = semanticLabel !== undefined && measuredCells(semanticLabel, list) <= capacity ? semanticLabel
+    : compactMediaLabel(capacity, semanticLabel !== undefined && command.action?.kind === "link", list);
+  if (label.length === 0 || !reservePaintUnit(generation)) return;
+  cancellationCheckpoint(generation, signal);
+  const clip = textClip(command, list, budgets);
+  const row = command.kind === "text" ? textCellRow(command.rect, command.baseline, list.layout, list.context.rowHeightCssPx)
+    : Math.floor(command.rect.y / list.context.rowHeightCssPx);
+  const column = Math.floor(command.rect.x / list.context.cellWidthCssPx), width = Math.max(1, measuredCells(label, list));
+  const logicalText = semanticLabel ?? (node.kind === "image" || node.kind === "replaced-element" ? node.fallbackText : command.text);
+  yield { command, row, column, width, text: label, logicalText, startCodeUnit: 0, endCodeUnit: logicalText.length,
+    contentStartCodeUnit, contentEndCodeUnit, sourceRange, decoration: false,
+    visible: row >= clip.row && row < safeAdd(clip.row, clip.height) && column >= clip.column
+      && safeAdd(column, width) <= safeAdd(clip.column, clip.width) };
 }
 
 function* backgroundUnits(
@@ -236,7 +309,25 @@ function* backgroundUnits(
   generation: PaintUnitGenerationState,
   signal: AbortSignal | undefined
 ): Generator<PaintUnit> {
-  const box = snapCssRect(command.rect, command.clipRect, list, budgets);
+  let box = snapCssRect(command.rect, command.clipRect, list, budgets);
+  // A strip narrower than half a cell cannot faithfully become an opaque
+  // whole-cell fill. Represent its centreline with one glyph; tiny marks use a
+  // point. This is geometry-only and shared by authored/generated decorations.
+  const thinHorizontal = command.kind === "background" && command.rect.height < list.context.rowHeightCssPx / 2;
+  const thinVertical = command.kind === "background" && command.rect.width < list.context.cellWidthCssPx / 2;
+  const decoration = thinHorizontal || thinVertical;
+  let text = " ";
+  if (decoration) {
+    const horizontal = thinHorizontal && command.rect.width >= list.context.cellWidthCssPx;
+    const vertical = thinVertical && command.rect.height >= list.context.rowHeightCssPx;
+    const row = Math.floor((command.rect.y + command.rect.height / 2) / list.context.rowHeightCssPx);
+    const column = Math.floor((command.rect.x + command.rect.width / 2) / list.context.cellWidthCssPx);
+    box = cellIntersection(box, cellRect(horizontal ? row : box.row, vertical ? column : box.column,
+      vertical ? 1 : box.width, horizontal ? 1 : box.height));
+    if (!horizontal && !vertical) box = cellIntersection(box, cellRect(row, column, 1, 1));
+    text = horizontal ? (list.context.unicode ? "─" : "-")
+      : vertical ? (list.context.unicode ? "│" : "|") : (list.context.unicode ? "·" : ".");
+  }
   for (let row = box.row; row < safeAdd(box.row, box.height); row += 1) {
     for (let column = box.column; column < safeAdd(box.column, box.width); column += 1) {
       if (!reservePaintUnit(generation)) return;
@@ -246,13 +337,14 @@ function* backgroundUnits(
         row,
         column,
         width: 1,
-        text: " ",
+        text,
         startCodeUnit: 0,
         endCodeUnit: 0,
         contentStartCodeUnit: null,
         contentEndCodeUnit: null,
         sourceRange: null,
-        visible: true
+        visible: true,
+        decoration,
       };
     }
   }
@@ -313,7 +405,9 @@ function* borderUnits(
       contentStartCodeUnit: null,
       contentEndCodeUnit: null,
       sourceRange: null,
-      visible: true
+      visible: true,
+      decoration: command.borderWidths[command.side] < (command.side === "top" || command.side === "bottom"
+        ? list.context.rowHeightCssPx : list.context.cellWidthCssPx) / 2,
     };
   };
   if (command.side === "top" || command.side === "bottom") {
@@ -408,10 +502,10 @@ function terminalColor(color: TerminalColor | null, depth: RasterizationDisplayL
   return Object.freeze({ r: nearest[0], g: nearest[1], b: nearest[2], a: color.a });
 }
 
-function actualStyle(command: TerminalPaintCommand, under: PaintedUnit | undefined, depth: RasterizationDisplayList["context"]["colorDepth"]): TerminalStyle {
-  const background = composite(command.style.background, under?.actualStyle.background ?? null);
+function actualStyle(command: TerminalPaintCommand, under: PaintedUnit | undefined, depth: RasterizationDisplayList["context"]["colorDepth"], decoration: boolean): TerminalStyle {
+  const background = composite(decoration ? null : command.style.background, under?.actualStyle.background ?? null);
   const foregroundSource = command.kind === "border-side" ? command.style.borderColors[command.side]
-    : (command.kind === "text" || command.kind === "image") ? command.style.foreground : null;
+    : (command.kind === "text" || command.kind === "image") ? command.style.foreground : decoration ? command.style.background : null;
   return Object.freeze({
     foreground: terminalColor(composite(foregroundSource, background), depth),
     background: terminalColor(background, depth),
@@ -505,14 +599,30 @@ export function rasterizeViewportDisplayList(
     addTruncation(truncations, "maxRetainedCellBufferRows", budgets.maxRetainedCellBufferRows);
   }
   const owners: (PaintedUnit | undefined)[][] = Array.from({ length: rowCount }, () => []);
+  const imageBackdrops = new Map<TerminalPaintCommand, { background: TerminalColor | null; safe: boolean }>();
+  const observeImageBackdrop = (unit: PaintUnit, previous: PaintedUnit | undefined): void => {
+    if (unit.command.kind !== "image" || unit.endCodeUnit !== 0) return;
+    const background = previous?.actualStyle.background ?? null;
+    const ink = previous !== undefined && protectedImageBackdropInk(previous);
+    const safe = background?.a === 1 && !ink;
+    const known = imageBackdrops.get(unit.command);
+    if (known === undefined) imageBackdrops.set(unit.command, { background, safe });
+    else if (!safe || known.background === null
+      || known.background.r !== background.r || known.background.g !== background.g
+      || known.background.b !== background.b || known.background.a !== background.a) {
+      known.safe = false;
+      known.background = null;
+    }
+  };
   const terminalStyles = new Map<TerminalPaintCommand, Map<TerminalStyle | null, TerminalStyle>>();
-  const styleFor = (command: TerminalPaintCommand, under: PaintedUnit | undefined): TerminalStyle => {
+  const styleFor = (unit: PaintUnit, under: PaintedUnit | undefined): TerminalStyle => {
+    const command = unit.command;
     const byUnder = terminalStyles.get(command) ?? new Map<TerminalStyle | null, TerminalStyle>();
     terminalStyles.set(command, byUnder);
     const underStyle = under?.actualStyle ?? null;
     const retained = byUnder.get(underStyle);
     if (retained !== undefined) return retained;
-    const style = actualStyle(command, under, localList.context.colorDepth);
+    const style = actualStyle(command, under, localList.context.colorDepth, unit.decoration);
     byUnder.set(underStyle, style);
     return style;
   };
@@ -537,6 +647,17 @@ export function rasterizeViewportDisplayList(
           const previous = row[column];
           if (previous !== undefined && !collided.includes(previous)) collided.push(previous);
         }
+        // A terminal cell cannot simultaneously carry text and a separate thin
+        // line. Degrade only subcell chrome in that collision, preserving the
+        // complete text cluster and its source identity. Actual surface paint
+        // still follows ordinary paint order and can cover earlier glyphs.
+        if (unit.decoration && collided.some((previous) => previous.endCodeUnit > previous.startCodeUnit
+          && previous.text.trim().length > 0)) continue;
+        // Known alpha artwork cannot flatten over native glyphs or prior image
+        // ink. Preserve their canonical ownership, including wide clusters, so
+        // withholding a graphics placement never leaves erased text behind.
+        if (command.kind === "image" && command.hasAlpha === true && collided.some((previous) => previous.command !== command
+          && protectedImageBackdropInk(previous))) continue;
         const coveredEdge = safeAdd(unit.column, unit.width);
         let removed = 0;
         for (const previous of collided) {
@@ -553,6 +674,7 @@ export function rasterizeViewportDisplayList(
           paintStopped = true;
           break;
         }
+        observeImageBackdrop(unit, collided[0]);
         for (const previous of collided) {
           for (let column = previous.column; column < safeAdd(previous.column, previous.width); column += 1) {
             row[column] = previous.command.kind === "image" && (column < unit.column || column >= coveredEdge)
@@ -564,7 +686,7 @@ export function rasterizeViewportDisplayList(
         const under = collided[0];
         const painted: PaintedUnit = {
           ...unit,
-          actualStyle: styleFor(command, under)
+          actualStyle: styleFor(unit, under)
         };
         for (let column = unit.column; column < safeAdd(unit.column, unit.width); column += 1) row[column] = painted;
         retainedCells = projectedCells;
@@ -605,8 +727,25 @@ export function rasterizeViewportDisplayList(
           clip: cellRect(previous.clip.row, previous.clip.column, previous.clip.width, previous.clip.height + 1) });
       } else if (images.length < budgets.maxRetainedImagePlacements) {
         const whole = snapUnclippedCssRect(command.rect, localList);
+        const boundedFraction = (value: number): number => Math.max(0, Math.min(1, value));
+        const physicalWidth = whole.width * localList.context.cellWidthCssPx;
+        const physicalHeight = whole.height * localList.context.rowHeightCssPx;
+        const sourceInset = Object.freeze({
+          left: boundedFraction((command.rect.x - whole.column * localList.context.cellWidthCssPx) / physicalWidth),
+          top: boundedFraction((command.rect.y - whole.row * localList.context.rowHeightCssPx) / physicalHeight),
+          width: boundedFraction(command.rect.width / physicalWidth),
+          height: boundedFraction(command.rect.height / physicalHeight),
+        });
         openImageRuns.set(key, images.length);
+        const backdrop = imageBackdrops.get(command);
         images.push(Object.freeze({ layoutFragment: command.layoutFragment, id: `${command.id}:${String(images.length)}`, resourceId: command.resourceId, naturalWidth: command.naturalWidth, naturalHeight: command.naturalHeight, paintGroup: command.paintGroup, action: command.action,
+          hasAlpha: command.hasAlpha,
+          sourceInset,
+          rasterSize: Object.freeze({ width: Math.ceil(whole.width * cssPixels(localList.context.cellWidthCssPx)),
+            height: Math.ceil(whole.height * cssPixels(localList.context.rowHeightCssPx)) }),
+          compositingBackdrop: backdrop?.safe === true ? backdrop.background : null,
+          safeForTransparency: backdrop?.safe === true,
+          ...(command.maskTint === undefined ? {} : { maskTint: command.maskTint }),
           bounds: cellRect(whole.row + windowStartRow, whole.column + windowStartColumn, whole.width, whole.height),
           clip: cellRect(windowStartRow + localRow, start + windowStartColumn, width, 1) }));
       } else addTruncation(truncations, "maxRetainedImagePlacements", budgets.maxRetainedImagePlacements);
@@ -639,6 +778,7 @@ export function rasterizeViewportDisplayList(
       }));
       if ((command.kind === "text" || command.kind === "image") && unit.endCodeUnit > unit.startCodeUnit) {
         const span: TerminalCellSpan = Object.freeze({
+          ...(unit.logicalText === undefined ? {} : { logicalText: unit.logicalText }),
           command: command.id,
           layoutFragment: command.layoutFragment,
           formattingNode: command.formattingNode,

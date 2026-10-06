@@ -44,8 +44,12 @@ export class StaticImageDecoder implements ImageDecoder {
         const failed = (error: Error): void => { stop(new ImageResourceError("decode-failed", error.message)); };
         const exited = (code: number): void => { stop(new ImageResourceError("decode-failed", `Image decoder exited with ${String(code)}.`)); };
         const message = (response: ImageDecodeResponse): void => {
-          if ("failure" in response) finish(new ImageResourceError(response.failure, response.reason));
-          else finish(null, response.pixels);
+          if ("failure" in response) {
+            const error = new ImageResourceError(response.failure, response.reason);
+            // A codec/WASM trap can leave allocator state unusable. The next serialized
+            // resource gets a fresh worker after termination, never a poisoned instance.
+            if (response.failure === "decode-failed") stop(error); else finish(error);
+          } else finish(null, response.pixels);
         };
         const timer = setTimeout(() => { stop(new ImageResourceError("timeout", "Image decoding exceeded its deadline.")); }, this.#policy.maxDecodeMilliseconds);
         signal.addEventListener("abort", abort, { once: true });

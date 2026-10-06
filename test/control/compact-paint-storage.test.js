@@ -8,6 +8,7 @@ import { embeddedStylesheetSources } from "../../dist/presentation/style/index.j
 import { cssCoordinate, cssPx, cssRect } from "../../dist/presentation/layout/index.js";
 import { buildDocumentDisplayList, buildDisplayListSpatialIndex } from "../../dist/presentation/terminal/index.js";
 import { PaintCommandBuilder } from "../../dist/presentation/terminal/paint-commands.js";
+import { createLayoutArtworkResolver } from "../../dist/presentation/layout/paint-artwork.js";
 import { terminalCellMeasurer, terminalCssTextMeasurer, terminalCssControlMeasurer } from "../../dist/ui/terminal-measure.js";
 
 function request(columns = 80) {
@@ -51,7 +52,7 @@ test("packed paint owns only descriptor capacity and shared canonical dependenci
     assert.equal(commands.at(0).style, commands.at(128).style);
     assert.equal(commands.at(0).sourceRange, fragment.sourceRange);
     assert.equal(commands.at(0).clusters, fragment.visualClusters);
-    assert.equal(commands.rect(0), fragment.contentRect);
+    assert.equal(commands.rect(0), fragment.inkRect, "paint retains canonical glyph ink geometry rather than the CSS line-height box");
     const expanded = [...commands];
     const expandedCost = estimatedRetainedCost([layout, fragments, expanded]) - canonical;
     assert.ok(owned < expandedCost / 8, `${owned} packed bytes versus ${expandedCost} expanded bytes`);
@@ -97,6 +98,55 @@ test("spatial index construction never decodes commands and queries decode only 
     assert.equal(decoded, visible.commands.length);
     assert.ok(visible.metrics.visitedIntervals < list.commands.length / 10);
     assert.ok(store.metrics().retainedCost >= store.recountRetainedCost());
+  } finally { store.dispose(); }
+});
+
+test("resolved mask artwork fences its new geometry and packed paint retains only one shared reference", () => {
+  const store = fixture('<div id=icon style="width:32px;height:32px;background:red;mask-image:url(/icon.svg);mask-size:contain;mask-repeat:no-repeat"></div>');
+  try {
+    const { documentLayout: layout } = store.analyze(request());
+    const node = layout.formatting.document.elementById("icon");
+    const fragment = layout.forDocumentNode(node).find((entry) => entry.kind === "box");
+    const fragments = Object.freeze([fragment.id]);
+    const images = Object.freeze([Object.freeze({ id: "https://paint.test/icon.svg", requestUrl: "https://paint.test/icon.svg",
+      owners: Object.freeze([]), width: 32, height: 16, hasAlpha: true })]);
+    const resolveArtwork = createLayoutArtworkResolver(layout, layout.formatting.styles, images);
+    let charged = 0, artwork;
+    const commands = withPackedAllocationCheck((bytes) => { charged += bytes; }, () => {
+      artwork = resolveArtwork(fragment).artwork;
+      assert.ok(artwork);
+      const builder = new PaintCommandBuilder();
+      assert.equal(builder.append(fragment, 0, fragment.style, 1, undefined, false, true, artwork), true);
+      return builder.finish(layout, fragments, 0, images);
+    });
+    const canonical = estimatedRetainedCost([layout, fragments, images]);
+    const owned = estimatedRetainedCost([commands]) - canonical;
+    assert.equal(charged, owned, "resolved descriptor, new rectangle, reference slot and packed capacity are all fenced exactly");
+    assert.equal(commands.rect(0), artwork.rect);
+    assert.equal(commands.at(0).maskTint, fragment.style.background);
+    assert.equal(Object.isFrozen(artwork), true);
+  } finally { store.dispose(); }
+});
+
+test("pending mask descriptors fence only new metadata while sharing authored geometry and URL identity", () => {
+  const store = fixture('<div id=icon style="width:32px;height:32px;background:red;mask-image:url(/icon.svg);mask-repeat:no-repeat"></div>');
+  try {
+    const { documentLayout: layout } = store.analyze(request());
+    const fragment = layout.forDocumentNode(layout.formatting.document.elementById("icon")).find((entry) => entry.kind === "box");
+    const fragments = Object.freeze([fragment.id]);
+    const resolveArtwork = createLayoutArtworkResolver(layout, layout.formatting.styles, undefined);
+    let charged = 0;
+    const commands = withPackedAllocationCheck((bytes) => { charged += bytes; }, () => {
+      const resolved = resolveArtwork(fragment);
+      assert.equal(resolved.fallback, "mask-intrinsics-pending");
+      assert.equal(resolved.artwork.rect, fragment.borderRect);
+      const builder = new PaintCommandBuilder();
+      assert.equal(builder.append(fragment, 0, fragment.style, 1, undefined, false, true, resolved.artwork), true);
+      return builder.finish(layout, fragments, 0);
+    });
+    assert.equal(charged, estimatedRetainedCost([commands]) - estimatedRetainedCost([layout, fragments]));
+    assert.equal(commands.at(0).naturalWidth, null);
+    assert.equal(commands.rect(0), fragment.borderRect);
   } finally { store.dispose(); }
 });
 

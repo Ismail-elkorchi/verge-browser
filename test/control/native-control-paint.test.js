@@ -121,8 +121,11 @@ test('reset native focus clears the previous editor authored focus background', 
     await runtime.handleInput({ kind: 'text', text: 'curl', paste: false });
     await waitUntil(runtime, ready);
     assert.equal(current().documentState.focus, input);
-    assert.deepEqual(current().rendering.viewport.controls.find((entry) => entry.node === input).style.background,
-      { r: 255, g: 255, b: 203, a: 1 });
+    assert.equal(current().rendering.viewport.controls.find((entry) => entry.node === input).style.background, null);
+    assert.ok(runtime.frame().cells.some((cell) => cell.source?.elementId === input
+      && cell.style?.bg?.kind === 'rgb' && cell.style.bg.r === 255 && cell.style.bg.g === 255 && cell.style.bg.b === 203),
+    JSON.stringify({ control: current().rendering.viewport.controls.find((entry) => entry.node === input),
+      cells: runtime.frame().cells.filter((cell) => cell.source?.elementId === input).slice(0, 12) }));
     const target = runtime.frame().hitTargets.find((entry) => entry.id === reset || entry.id.startsWith(`${reset}:`));
     assert.ok(target, JSON.stringify(runtime.frame().hitTargets.map((entry) => ({id:entry.id,bounds:entry.bounds}))));
     for (const action of ['press', 'release']) await runtime.handleInput({ kind: 'mouse', sequence: '', encoding: 'sgr', action,
@@ -130,12 +133,41 @@ test('reset native focus clears the previous editor authored focus background', 
     await waitUntil(runtime, () => ready() && runtime.frame().focusPath?.includes(reset));
     assert.equal(current().documentState.focus, reset);
     assert.equal(current().documentState.controls.get(input).value, '');
-    assert.deepEqual(current().rendering.viewport.controls.find((entry) => entry.node === input).style.background,
-      { r: 255, g: 255, b: 255, a: 1 });
-    assert.deepEqual(current().rendering.viewport.controls.find((entry) => entry.node === reset).style.background,
-      { r: 255, g: 255, b: 203, a: 1 });
+    assert.equal(current().rendering.viewport.controls.find((entry) => entry.node === input).style.background, null);
+    assert.equal(current().rendering.viewport.controls.find((entry) => entry.node === reset).style.background, null);
     const cells = runtime.frame().cells.filter((cell) => cell.source?.elementId === input);
     assert.ok(cells.length > 0);
     assert.ok(cells.every((cell) => cell.style?.bg?.b !== 203));
+  } finally { await close(); }
+});
+
+test('opacity-zero native form controls keep input and focus without ink or cursor', async () => {
+  const { runtime, close } = await fixture('<style>body{margin:0;background:white;color:black}.hidden{opacity:0}input:focus{background:red}</style><p>VISIBLE</p><div class=hidden><input id=q value="SECRET"><input id=c type=checkbox aria-label="Hidden choice"><span>HIDDEN_LABEL</span></div>');
+  try {
+    const current = () => runtime.state().documents[0];
+    const document = current().snapshot.document;
+    const input = document.elementById('q'), checkbox = document.elementById('c');
+    const ready = () => current().rendering.status === 'ready' && current().rendering.viewport.stateRevision === current().stateRevision;
+    assert.ok(renderFramePlain(runtime.frame()).includes('VISIBLE'));
+    assert.ok(!renderFramePlain(runtime.frame()).includes('SECRET'));
+    assert.ok(!renderFramePlain(runtime.frame()).includes('HIDDEN_LABEL'));
+    assert.equal(current().rendering.viewport.controls.find((entry) => entry.node === input).paintSuppressed, true);
+    await runtime.dispatch({ kind: 'movePageFocus', direction: 'next', currentActionId: '' });
+    await waitUntil(runtime, () => ready() && runtime.frame().focusPath?.includes(input));
+    assert.equal(runtime.frame().cursor, undefined);
+    await runtime.handleInput(key('end'));
+    await runtime.handleInput({ kind: 'text', text: 'X', paste: false });
+    await waitUntil(runtime, ready);
+    assert.equal(current().documentState.controls.get(input).value, 'SECRETX');
+    assert.ok(!renderFramePlain(runtime.frame()).includes('SECRET'));
+    assert.equal(runtime.frame().cursor, undefined);
+    const target = runtime.frame().hitTargets.find((entry) => entry.id === checkbox || entry.id.startsWith(`${checkbox}:`));
+    assert.ok(target);
+    for (const action of ['press', 'release']) await runtime.handleInput({ kind: 'mouse', sequence: '', encoding: 'sgr', action,
+      button: 'left', row: target.bounds.row, column: target.bounds.column, rawCode: 0, modifiers: { shift: false, alt: false, ctrl: false } });
+    await waitUntil(runtime, ready);
+    assert.equal(current().documentState.controls.get(checkbox).checked, true);
+    assert.equal(runtime.frame().cursor, undefined);
+    assert.ok(!runtime.frame().cells.some((cell) => cell.source?.elementId === input || cell.source?.elementId === checkbox));
   } finally { await close(); }
 });
