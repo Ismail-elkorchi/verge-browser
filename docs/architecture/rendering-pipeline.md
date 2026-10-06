@@ -622,10 +622,10 @@ their logical content range and document source range. The cell rasterizer does
 not segment, line-break, or run the bidi algorithm. A session-owned
 `TextPresentation` adapter uses the same Unicode resolver for browser chrome and
 native control text, retaining logical editor offsets while mapping visual cells.
-Interactive startup and resume require explicit visual-cell presentation so the
-terminal cannot reorder already ordered cells a second time. The TUI establishes
-a fresh owned screen after acquiring that state and restores the original mode
-on release; an unknown initial state is not guessed from `TERM`. See the
+Interactive startup and resume require qualified application-ordered LTR cells
+and matching input coordinates. Mode-8 state does not prove character direction.
+The TUI establishes a fresh owned screen after admission and restores the known
+raw modes it changed on release; unknown state is not guessed from `TERM`. See the
 [Unicode text contract](./unicode-text.md) for the host boundary and control
 direction limits. Terminal emulators remain responsible for glyph shaping;
 correct Arabic bidi order does not imply that Verge implements an Arabic

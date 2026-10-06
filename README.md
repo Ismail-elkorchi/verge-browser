@@ -5,7 +5,11 @@ navigation, transport, and immutable web-document APIs.
 
 ## Install
 
-The interactive CLI requires Node.js 24 or newer:
+The interactive CLI requires Node.js 24 or newer. Before interactive use, choose
+the qualification matching your terminal configuration in the
+[terminal presentation guide](./docs/reference/cli.md#terminal-presentation).
+Unqualified startup stops with guidance; the commands below do not assume that
+mode 8 or the terminal name establishes the required ordering:
 
 ```sh
 npm install --global @ismail-elkorchi/verge-browser
@@ -52,8 +56,8 @@ reader output, page diagnostics, cookie inspection, and tab/workspace
 persistence. Non-HTML navigation offers to download the resource instead of
 replacing the current page.
 
-Interactive mode requires a terminal host with explicit visual-cell presentation
-so page and editor text is not reordered twice. Unknown host state fails startup;
+Interactive mode requires qualified application-ordered LTR cells and matching
+input coordinates. A mode-8 reset alone is insufficient. Unknown presentation fails startup;
 see the [CLI terminal contract](./docs/reference/cli.md). `--once` needs no terminal
 mode acquisition.
 
