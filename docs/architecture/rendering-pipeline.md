@@ -267,8 +267,14 @@ discovers metadata without delaying document publication for downloads. One
 active-document subscription awaits reliable resource completions; switching
 tabs aborts its work and waits for decoder termination before the next tab can
 allocate decoder workspace. Decoded pixels remain in accepted UI snapshots;
-the render worker receives resource identities, natural dimensions and alpha
-presence only, never decoded pixels.
+the render worker receives resource identities, natural dimensions, alpha presence
+and failure codes only, never decoded pixels. Pending intrinsic dimensions are
+resource progress rather than incomplete-render errors. Loading remains active
+until pixels arrive; failed masks retain discovery ownership and their known
+geometry while the UI's existing readiness gate prevents graphic placement.
+Failure-only changes refresh paint diagnostics without retiring layout.
+The live view reports acquisition progress; one-shot snapshots explicitly omit
+resource activity indicators because they do not start resource subscriptions.
 The existing retained-history budget includes image ownership, and a separate
 64 MiB UI bound includes decoded storage, live terminal rasters and pending
 preparation. One active URL pool admits at most 32 img and CSS artwork resources.

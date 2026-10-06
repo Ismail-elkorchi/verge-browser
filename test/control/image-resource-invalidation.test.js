@@ -30,7 +30,10 @@ test("known alpha changes retire paint while intrinsic geometry, styles and sear
       assert.equal(store.updateImages({ documentId: "alpha", documentRevision: 1, images: [{ ...image, hasAlpha }] }), "none");
       before = after;
     }
-    for (const metadata of [{ ...image, hasAlpha: false, owners: ["replacement-owner"] },
+    for (const metadata of [{ ...image, hasAlpha: false, failure: "decode-failed" },
+      { ...image, hasAlpha: false, failure: "fetch-failed" },
+      { ...image, hasAlpha: false },
+      { ...image, hasAlpha: false, owners: ["replacement-owner"] },
       { ...image, hasAlpha: false, owners: ["replacement-owner"], requestUrl: "https://alpha.test/replaced.png" }]) {
       assert.equal(store.updateImages({ documentId: "alpha", documentRevision: 1, images: [metadata] }), "paint");
       const after = store.analyze(request);

@@ -589,6 +589,7 @@ export class BrowserController {
         && (attached.images.length !== images.length || images.some((image, index) => {
           const previous = attached.images[index];
           return previous?.id !== image.id || previous.width !== image.width || previous.height !== image.height || previous.hasAlpha !== image.hasAlpha
+            || previous.failure !== image.failure
             || previous.requestUrl !== image.requestUrl || previous.owners.length !== image.owners.length
             || previous.owners.some((owner, ownerIndex) => owner !== image.owners[ownerIndex]);
         }))) await renderer.updateDocumentImages(document);

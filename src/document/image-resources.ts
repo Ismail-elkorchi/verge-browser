@@ -9,6 +9,8 @@ export interface DocumentImageMetadata {
   readonly height: number | null;
   /** Known only after pixel decode; alpha changes affect paint, not intrinsic layout. */
   readonly hasAlpha: boolean | null;
+  /** Terminal acquisition failure affects artwork diagnostics, never pixel ownership. */
+  readonly failure?: ImageFailureCode;
 }
 
 export type ImageFailureCode = "unsupported-protocol" | "unsupported-format" | "unsupported-animation"
@@ -31,5 +33,6 @@ export type DocumentImageResource = DocumentImageMetadata & {
 /** Metadata-only boundary used by layout and the rendering worker. */
 export function documentImageMetadata(image: DocumentImageMetadata): DocumentImageMetadata {
   return Object.freeze({ id: image.id, requestUrl: image.requestUrl, owners: image.owners,
-    width: image.width, height: image.height, hasAlpha: image.hasAlpha });
+    width: image.width, height: image.height, hasAlpha: image.hasAlpha,
+    ...(image.failure === undefined ? {} : { failure: image.failure }) });
 }

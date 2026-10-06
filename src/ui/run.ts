@@ -141,7 +141,7 @@ export async function renderBrowserOnce(
       ),
     };
     output = renderFramePlain(renderElementFrame(
-      browserView(renderedState, { terminalSize }),
+      browserView(renderedState, { terminalSize, presentation: "snapshot" }),
       terminalSize,
       { textPresentation: prepared.textPresentation }
     ));

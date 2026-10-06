@@ -270,7 +270,7 @@ export class RenderArtifactStore {
     if (document.images.length === input.images.length && document.images.every((image, index) => {
       const next = input.images[index];
       return next !== undefined && image.id === next.id && image.width === next.width && image.height === next.height
-        && image.hasAlpha === next.hasAlpha && image.requestUrl === next.requestUrl
+        && image.hasAlpha === next.hasAlpha && image.failure === next.failure && image.requestUrl === next.requestUrl
         && image.owners.length === next.owners.length && image.owners.every((owner, ownerIndex) => owner === next.owners[ownerIndex]);
     })) return "none";
     const oldById = new Map(document.images.map((image) => [image.id, image]));

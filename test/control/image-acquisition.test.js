@@ -500,4 +500,10 @@ test("image metadata transfers known opacity without inspecting or retaining pix
   assert.equal("pixels" in projected, false);
   assert.ok(Object.isFrozen(projected));
   assert.equal(documentImageMetadata({ ...projected, hasAlpha: null }).hasAlpha, null);
+  const failed = documentImageMetadata({ ...projected, failure: "decode-failed",
+    get pixels() { throw new Error("failed metadata must not inspect pixels"); },
+    get reason() { throw new Error("worker metadata must not retain failure messages"); } });
+  assert.equal(failed.failure, "decode-failed");
+  assert.equal("pixels" in failed, false);
+  assert.equal("reason" in failed, false);
 });

@@ -139,7 +139,8 @@ test("render worker discovers computed mask references then consumes shared imag
     assert.equal(first.visibleImages.length, 1);
     assert.equal(first.visibleImages[0].requestUrl, url);
     assert.equal("pixels" in first.visibleImages[0], false);
-    assert.ok(first.summary.incomplete.some((label) => label.startsWith("artwork.mask-intrinsics-pending")));
+    assert.equal(first.summary.incomplete.some((label) => label.startsWith("artwork.mask-intrinsics-pending")), false,
+      "resource acquisition is progress rather than an incomplete-render error");
     document = { ...document, snapshot: { ...snapshot, images: [{ ...first.visibleImages[0], width: 20, height: 20,
       hasAlpha: true, mimeType: "image/svg+xml", status: "ready", pixels: new Uint8Array(1600) }] } };
     assert.equal(await client.updateDocumentImages(document), "paint");
@@ -147,10 +148,26 @@ test("render worker discovers computed mask references then consumes shared imag
     assert.ok(second.cellBuffer.images.some((image) => image.resourceId === url && image.maskTint?.r === 18));
     assert.equal(second.layoutRevision, first.layoutRevision);
     assert.equal(second.summary.incomplete.some((label) => label.startsWith("artwork.mask-intrinsics-pending")), false);
+    let viewportRevision = 2;
+    for (const dimensions of [{ width: null, height: null }, { width: 20, height: 20 }]) {
+      const failed = { ...document, snapshot: { ...document.snapshot, images: [{ ...first.visibleImages[0],
+        ...dimensions, hasAlpha: null, status: "failed", failure: "decode-failed", reason: "Controlled failure" }] } };
+      assert.equal(await client.updateDocumentImages(failed), "paint");
+      const failure = await client.renderViewport(failed, ++viewportRevision, parameters);
+      assert.equal(failure.layoutRevision, first.layoutRevision);
+      assert.deepEqual(failure.summary.incomplete, ["artwork.mask-resource-failed=1"]);
+      assert.equal(failure.visibleImages[0].requestUrl, url, "failed masks retain spatial resource ownership");
+      assert.ok(failure.cellBuffer.images.every((image) => image.naturalWidth === dimensions.width && image.naturalHeight === dimensions.height),
+        "failed masks preserve their true discovery geometry; pixel readiness remains UI-owned");
+      assert.equal(await client.updateDocumentImages(document), "paint");
+      const recovered = await client.renderViewport(document, ++viewportRevision, parameters);
+      assert.equal(recovered.summary.incomplete.length, 0);
+      assert.ok(recovered.cellBuffer.images.some((image) => image.maskTint !== undefined));
+    }
     const pixels = document.snapshot.images[0].pixels;
     document = { ...document, stateRevision: 2, documentState: { ...f.state, hover: f.document.elementById("icon") } };
     await client.updateState(document, ["hover"]);
-    const third = await client.renderViewport(document, 3, parameters);
+    const third = await client.renderViewport(document, ++viewportRevision, parameters);
     assert.deepEqual(third.visibleImages, []);
     assert.equal(third.cellBuffer.images.length, 0);
     const retained = selectViewportImages(document.snapshot, third.visibleImages);
@@ -159,7 +176,7 @@ test("render worker discovers computed mask references then consumes shared imag
     assert.equal(retained[0].status, "ready");
     document = { ...document, snapshot: { ...document.snapshot, images: retained } };
     await client.updateDocumentImages(document);
-    const fourth = await client.renderViewport(document, 4, parameters);
+    const fourth = await client.renderViewport(document, ++viewportRevision, parameters);
     assert.equal(fourth.cellBuffer.images.length, 0);
   } finally { await client.close(); }
 });

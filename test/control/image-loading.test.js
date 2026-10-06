@@ -93,7 +93,9 @@ test("source failure settles only pending resources and leaves accepted images i
   const settled = acceptImageResource(initial, { kind: "imageResourcesFailed", documentId: "tab-1", documentRevision: 3, resourceRevision: 0 });
   assert.equal(settled.documents[0].snapshot.images[0], ready);
   assert.equal(settled.documents[0].snapshot.images[1].status, "failed");
-  assert.equal(settled.documents[0].rendering, initial.documents[0].rendering);
+  assert.equal(settled.documents[0].stateRevision, initial.documents[0].stateRevision + 1);
+  assert.equal(settled.documents[0].rendering.requestKey, null);
+  assert.equal(settled.documents[0].documentState, initial.documents[0].documentState);
   assert.deepEqual(imageSources({}, settled), []);
 });
 

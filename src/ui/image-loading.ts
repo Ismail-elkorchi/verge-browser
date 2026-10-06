@@ -109,6 +109,7 @@ export function acceptImageResource(state: BrowserTuiState, message: ImageResour
   });
   if (images.every((resource, index) => resource === resources[index])) return state;
   const paintChanged = images.some((resource, index) => resources[index]?.hasAlpha !== resource.hasAlpha
+    || resources[index].failure !== resource.failure
     || (resource.status === "ready" && resources[index].status !== "ready"));
   const geometryChanged = images.some((resource, index) => {
     const previous = resources[index];
