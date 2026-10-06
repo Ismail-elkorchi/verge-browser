@@ -39,6 +39,15 @@ spatial query, and viewport rasterizer. There is no flat renderer, cell-native C
 fallback geometry path, or conversion from layout fragments back into an older
 layout model.
 
+Interactive startup is admitted by terminal-ui before page acquisition or frame
+publication. Its automatic policy distinguishes assumptions from observations and
+rejects known hazards or contradictory evidence. Browser chrome and page controls
+keep the session-owned native text adapter. Graphics capability selection is
+independent; failed text admission never selects a raster/ASCII/one-shot fallback.
+Page diagnostics read the running TUI context rather than probing the terminal
+again. See [Unicode text layout](./unicode-text.md) for presentation and restoration
+ownership.
+
 ## Ownership
 
 - `src/document/` alone imports the HTML parser. It owns node identities,

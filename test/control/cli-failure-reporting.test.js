@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL, URL } from "node:url";
 const cliUrl = new URL("../../dist/cli.js", import.meta.url);
 const hostUrl = import.meta.resolve("@ismail-elkorchi/terminal-ui/host");
 const storeUrl = new URL("../../dist/app/storage.js", import.meta.url).href;
-const primaryMessage = "Application-ordered physical cells are unqualified";
+const primaryMessage = "Native cell ordering requires explicit configuration for kitty-force-ltr.";
 const cleanupMessages = {
   services: "injected browser services cleanup failure",
   flush: "injected browser store flush failure",
@@ -22,7 +22,7 @@ async function reportingHook(directory) {
     "@ismail-elkorchi/terminal-ui/host": `import { createMemoryTerminalHost } from ${JSON.stringify(hostUrl)};
 import { appendFileSync } from "node:fs";
 export function createNodeTerminalHost(options) {
-  const host = createMemoryTerminalHost(options);
+  const host = createMemoryTerminalHost({ ...options, env: { TERM: "xterm-kitty", KITTY_WINDOW_ID: "1" } });
   const write = host.stdout.write.bind(host.stdout);
   host.stdout.write = async (chunk, context) => {
     await write(chunk, context);
@@ -97,7 +97,10 @@ for (const failures of [[], ["services"], ["flush"], ["services", "flush"], ["se
     assert.ok(result.stderr.startsWith(`Fatal error: ${primaryMessage}`), result.stderr);
     assert.equal(await readFile(events, "utf8"), "frames=0\n");
     assert.equal(result.stderr.split(primaryMessage).length - 1, 1);
-    assert.ok(result.stderr.includes("After verifying your terminal configuration and transport"), result.stderr);
+    assert.ok(result.stderr.includes("--remember-terminal-setting=kitty-force-ltr"), result.stderr);
+    assert.ok(result.stderr.includes("Only after configuring all direct sessions"), result.stderr);
+    assert.ok(result.stderr.includes("including other windows and profiles"), result.stderr);
+    assert.ok(result.stderr.includes("temporary launch override is not sufficient"), result.stderr);
     let previous = result.stderr.indexOf(primaryMessage);
     for (const [name, message] of Object.entries(cleanupMessages)) {
       assert.equal(result.stderr.split(message).length - 1, failures.includes(name) ? 1 : 0, result.stderr);
@@ -173,7 +176,7 @@ for (const keepAlive of [false, true]) {
     assert.ok(result.stderr.includes("Cleanup: TUI finalization timed out: flush."), result.stderr);
     assert.ok(result.stderr.includes("Terminal host cleanup timed out."), result.stderr);
     assert.equal(result.stderr.split("Terminal host cleanup timed out.").length - 1, 1);
-    assert.ok(!result.stderr.includes("After verifying your terminal configuration and transport"), result.stderr);
+    assert.ok(!result.stderr.includes("--remember-terminal-setting=kitty-force-ltr"), result.stderr);
     assert.equal(await readFile(events, "utf8"), "dispose\naborted=true raw=false\n");
   });
 }

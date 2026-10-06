@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { constants as fileSystemConstants } from "node:fs";
-import { chmod, lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { homedir } from "node:os";
 
+import type { TerminalCellPresentationException } from "@ismail-elkorchi/terminal-ui/host";
 import type { HttpSessionAdapter } from "@ismail-elkorchi/http-client";
 import type { SerializedCookieJar } from "tough-cookie";
 
@@ -78,6 +79,9 @@ export interface BrowserWorkspace {
   readonly sidePanel: StoredSidePanel;
 }
 
+/** An explicit assertion about an unqueryable terminal setting, never a session result. */
+export type StoredTerminalSetting = TerminalCellPresentationException;
+
 interface BrowserState {
   readonly bookmarks: readonly BookmarkEntry[];
   readonly history: readonly HistoryEntry[];
@@ -87,6 +91,9 @@ interface BrowserState {
   readonly workspace: BrowserWorkspace | null;
 }
 
+const TERMINAL_SETTING_CONDITIONS = ["kitty-force-ltr", "konsole-bidi-disabled"] as const;
+const MAX_TERMINAL_SETTING_BYTES = 32 * 1024;
+const MAX_TERMINAL_CONTEXT_CODE_UNITS = 4096;
 const DEFAULT_HISTORY_LIMIT = 500;
 const DEFAULT_INDEX_LIMIT = 250;
 const MAX_HISTORY_LIMIT = 2000;
@@ -274,6 +281,36 @@ function normalizeWorkspace(value: unknown): BrowserWorkspace | null {
   };
 }
 
+function normalizeTerminalSetting(value: unknown): StoredTerminalSetting | null {
+  if (value === null || typeof value !== "object") return null;
+  const candidate = value as Record<string, unknown>;
+  const context = candidate["context"];
+  const condition = candidate["condition"];
+  if (typeof context !== "string" || context.length === 0 || context.length > MAX_TERMINAL_CONTEXT_CODE_UNITS
+    || (condition !== "kitty-force-ltr" && condition !== "konsole-bidi-disabled")) return null;
+  return Object.freeze({ context, condition });
+}
+
+function terminalSettingPath(statePath: string, condition: StoredTerminalSetting["condition"]): string {
+  return `${statePath}.terminal-${condition}.json`;
+}
+
+async function loadTerminalSettings(statePath: string): Promise<readonly StoredTerminalSetting[]> {
+  const records = await Promise.all(TERMINAL_SETTING_CONDITIONS.map(async (condition) => {
+    const rawText = await readPrivateStateFile(
+      terminalSettingPath(statePath, condition), MAX_TERMINAL_SETTING_BYTES, "Terminal setting"
+    );
+    if (rawText === null) return [];
+    try {
+      const record = normalizeTerminalSetting(JSON.parse(rawText) as unknown);
+      return record?.condition === condition ? [record] : [];
+    } catch {
+      return [];
+    }
+  }));
+  return Object.freeze(records.flat());
+}
+
 function normalizeState(value: unknown): BrowserState {
   if (value === null || typeof value !== "object") {
     return createEmptyState();
@@ -334,12 +371,21 @@ export async function readBrowserStateFile(
   statePath: string,
   afterOpen: () => void | Promise<void> = () => undefined
 ): Promise<string | null> {
+  return await readPrivateStateFile(statePath, MAX_STATE_BYTES, "Browser state", afterOpen);
+}
+
+async function readPrivateStateFile(
+  statePath: string,
+  maxBytes: number,
+  description: string,
+  afterOpen: () => void | Promise<void> = () => undefined
+): Promise<string | null> {
   let expectedWindowsFile: Awaited<ReturnType<typeof lstat>> | undefined;
   if (process.platform === "win32") {
     try {
       expectedWindowsFile = await lstat(statePath);
       if (!expectedWindowsFile.isFile() || expectedWindowsFile.isSymbolicLink()) {
-        throw new Error(`Browser state path must be a regular file: ${statePath}`);
+        throw new Error(`${description} path must be a regular file: ${statePath}`);
       }
     } catch (error) {
       if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
@@ -354,13 +400,13 @@ export async function readBrowserStateFile(
       statePath,
       process.platform === "win32"
         ? fileSystemConstants.O_RDONLY
-        : fileSystemConstants.O_RDONLY | fileSystemConstants.O_NOFOLLOW
+        : fileSystemConstants.O_RDONLY | fileSystemConstants.O_NOFOLLOW | fileSystemConstants.O_NONBLOCK
     );
   } catch (error) {
     if (error && typeof error === "object" && "code" in error) {
       if (error.code === "ENOENT") return null;
       if (error.code === "ELOOP") {
-        throw new Error(`Browser state path must be a regular file: ${statePath}`, {
+        throw new Error(`${description} path must be a regular file: ${statePath}`, {
           cause: error
         });
       }
@@ -370,7 +416,7 @@ export async function readBrowserStateFile(
   try {
     await afterOpen();
     const file = await handle.stat();
-    if (!file.isFile()) throw new Error(`Browser state path must be a regular file: ${statePath}`);
+    if (!file.isFile()) throw new Error(`${description} path must be a regular file: ${statePath}`);
     if (
       expectedWindowsFile !== undefined
       && (
@@ -378,13 +424,23 @@ export async function readBrowserStateFile(
         || file.ino !== expectedWindowsFile.ino
       )
     ) {
-      throw new Error(`Browser state path changed while it was opened: ${statePath}`);
+      throw new Error(`${description} path changed while it was opened: ${statePath}`);
     }
-    if (file.size > MAX_STATE_BYTES) {
-      throw new Error(`Browser state exceeds the ${String(MAX_STATE_BYTES)}-byte safety limit: ${statePath}`);
+    if (file.size > maxBytes) {
+      throw new Error(`${description} exceeds the ${String(maxBytes)}-byte safety limit: ${statePath}`);
     }
     if (process.platform !== "win32") await handle.chmod(PRIVATE_FILE_MODE);
-    return await handle.readFile("utf8");
+    // Bound actual bytes read as well as the stat size, including files growing after validation.
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    while (totalBytes <= maxBytes) {
+      const chunk = Buffer.alloc(Math.min(64 * 1024, maxBytes + 1 - totalBytes));
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+      if (bytesRead === 0) return Buffer.concat(chunks, totalBytes).toString("utf8");
+      totalBytes += bytesRead;
+      chunks.push(chunk.subarray(0, bytesRead));
+    }
+    throw new Error(`${description} exceeds the ${String(maxBytes)}-byte safety limit: ${statePath}`);
   } finally {
     await handle.close();
   }
@@ -430,12 +486,18 @@ async function prepareStateDirectory(statePath: string): Promise<void> {
 }
 
 async function saveStateToPath(statePath: string, state: BrowserState): Promise<void> {
+  const payload = `${JSON.stringify(normalizeState(state), null, 2)}\n`;
+  await writePrivateStateFile(statePath, payload, MAX_STATE_BYTES, "Browser state");
+}
+
+async function writePrivateStateFile(
+  statePath: string, payload: string, maxBytes: number, description: string
+): Promise<void> {
   await prepareStateDirectory(statePath);
   const tempPath = `${statePath}.tmp-${String(process.pid)}-${randomUUID()}`;
-  const payload = `${JSON.stringify(normalizeState(state), null, 2)}\n`;
-  if (Buffer.byteLength(payload, "utf8") > MAX_STATE_BYTES) {
+  if (Buffer.byteLength(payload, "utf8") > maxBytes) {
     throw new Error(
-      `Browser state exceeds the ${String(MAX_STATE_BYTES)}-byte safety limit.`
+      `${description} exceeds the ${String(maxBytes)}-byte safety limit.`
     );
   }
   try {
@@ -458,12 +520,18 @@ export class BrowserStore {
   private readonly cookieSession: BrowserCookieSession;
   private state: BrowserState;
   private saveTail: Promise<void> = Promise.resolve();
+  private terminalSettingsTail: Promise<void> = Promise.resolve();
+  private terminalSettingsSnapshot: readonly StoredTerminalSetting[];
 
-  private constructor(statePath: string, historyLimit: number, indexLimit: number, state: BrowserState) {
+  private constructor(
+    statePath: string, historyLimit: number, indexLimit: number, state: BrowserState,
+    terminalSettings: readonly StoredTerminalSetting[]
+  ) {
     this.statePath = statePath;
     this.historyLimit = historyLimit;
     this.indexLimit = indexLimit;
     this.state = state;
+    this.terminalSettingsSnapshot = terminalSettings;
     this.cookieSession = new BrowserCookieSession(
       state.cookieJar,
       async (cookieJar) => {
@@ -483,7 +551,50 @@ export class BrowserStore {
     const indexLimit = boundedInteger(options.indexLimit, DEFAULT_INDEX_LIMIT, 50, MAX_INDEX_LIMIT);
     await prepareStateDirectory(statePath);
     const state = await loadStateFromPath(statePath);
-    return new BrowserStore(statePath, historyLimit, indexLimit, state);
+    const terminalSettings = await loadTerminalSettings(statePath);
+    return new BrowserStore(statePath, historyLimit, indexLimit, state, terminalSettings);
+  }
+
+  public static async forgetTerminalSetting(
+    condition: StoredTerminalSetting["condition"],
+    options: { readonly statePath?: string } = {}
+  ): Promise<void> {
+    if (!TERMINAL_SETTING_CONDITIONS.includes(condition)) {
+      throw new Error("Invalid terminal setting condition.");
+    }
+    const statePath = options.statePath ?? defaultStatePath();
+    await prepareStateDirectory(statePath);
+    // Administrative recovery must not read either assertions or browsing state. Direct unlink
+    // removes only this condition, including malformed files or symlinks, without following them.
+    // Concurrent explicit mutations take effect at the condition's atomic rename or unlink.
+    try {
+      await unlink(terminalSettingPath(statePath, condition));
+    } catch (error) {
+      if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) {
+        throw error;
+      }
+    }
+  }
+
+  public terminalSettings(): readonly StoredTerminalSetting[] {
+    return this.terminalSettingsSnapshot;
+  }
+
+  public async rememberTerminalSetting(setting: StoredTerminalSetting): Promise<void> {
+    const normalized = normalizeTerminalSetting(setting);
+    if (normalized === null) throw new Error("Invalid terminal setting assertion.");
+    await this.mutateTerminalSettings(async () => {
+      // Each condition owns one file: replacement never rewrites another condition or browsing state.
+      await writePrivateStateFile(
+        terminalSettingPath(this.statePath, normalized.condition),
+        `${JSON.stringify(normalized)}\n`, MAX_TERMINAL_SETTING_BYTES, "Terminal setting"
+      );
+      this.terminalSettingsSnapshot = Object.freeze(TERMINAL_SETTING_CONDITIONS.flatMap((condition) => (
+        condition === normalized.condition
+          ? [normalized]
+          : this.terminalSettingsSnapshot.filter((entry) => entry.condition === condition)
+      )));
+    });
   }
 
   public listBookmarks(): readonly BookmarkEntry[] {
@@ -707,6 +818,13 @@ export class BrowserStore {
   public async flush(): Promise<void> {
     await this.cookieSession.flush();
     await this.saveTail;
+    await this.terminalSettingsTail;
+  }
+
+  private mutateTerminalSettings(mutation: () => Promise<void>): Promise<void> {
+    const completion = this.terminalSettingsTail.then(mutation);
+    this.terminalSettingsTail = completion.catch(() => undefined);
+    return completion;
   }
 
   private save(): Promise<void> {

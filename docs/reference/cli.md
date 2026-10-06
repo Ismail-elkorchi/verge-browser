@@ -3,7 +3,9 @@
 ## Usage
 
 ```text
-verge [initial-target] [--once] [--terminal-cell-presentation=existing|mode-8-reset]
+verge [initial-target] [--once]
+verge --remember-terminal-setting=kitty-force-ltr|konsole-bidi-disabled
+verge --forget-terminal-setting=kitty-force-ltr|konsole-bidi-disabled
 ```
 
 - An explicit target opens in a fresh browser workspace.
@@ -18,68 +20,80 @@ to the package’s library primitives.
 
 ## Terminal presentation
 
-Verge resolves bidirectional text before painting. Interactive startup requires
-application-ordered left-to-right physical cells, with matching cursor, pointer
-and arrow-key coordinates. Standard mode 8 reports bidirectional processing;
-it does **not** establish character direction or the complete presentation
-contract. An explicit RTL character path can mirror the entire canvas even
-when mode 8 reports reset.
+Verge resolves bidirectional text before painting and keeps text native. Normal
+`verge` startup automatically asks the terminal-ui host to admit the session.
+The session requires application-ordered left-to-right physical cells and matching
+cursor, pointer and arrow-key coordinates. Graphics support is a separate decision.
 
-Use one invocation-scoped declaration only after qualifying the actual terminal
-configuration and transport:
+The default support policy admits conventional VT presentation under explicitly
+reported assumptions. A terminal name, successful write or mode-8 reply is never
+proof of the complete presentation contract. Page diagnostics expose the policy,
+evidence and decision from the running TUI context, including assumptions.
+These are the capability snapshot before session acquisition: an observed mode-8
+`set` and `reset-required` decision describe the input to the verified transition,
+not a claim that the running session still has implicit bidirectional processing.
+Known configuration hazards, conflicting replies and unsafe mode transitions block
+startup before page acquisition or a published frame. The error describes the
+actual blocker and remedy. Verge does not switch to ASCII text, rasterized text or
+`--once` when admission fails.
 
-- `--terminal-cell-presentation=existing` declares that the full contract already
-  holds. It does not configure the terminal or override contradictory evidence.
-- `--terminal-cell-presentation=mode-8-reset` declares that the full contract holds
-  after a verified reset of standard mode 8, including an independently known
-  LTR character path. The host requires a known restoration baseline and verifies
-  any mode change before rendering.
+The host is the only probe and input-stream owner. Standard mode 8 reports
+bidirectional processing, not character direction. Any supported mode change needs
+an observed restoration baseline and verification before rendering. An explicit
+RTL character path can mirror the canvas even with mode 8 reset. Startup and
+resume re-evaluate evidence; contradictory observations cannot be overridden by a
+saved setting. Restoration changes only state the session owns and never guesses
+that a terminal's default matches its inherited state.
 
-The qualification applies throughout the host lifetime, including suspend and
-resume. External terminal use must preserve its qualified preconditions. A new
-mode query refreshes raw mode evidence; it cannot verify an unreported character
-path. Terminal names, graphics support, and a successful write do not establish
-this guarantee. Unknown presentation fails before a frame is published.
+### Remembering an unqueryable setting
 
-The old `explicit` value is rejected. `--once` produces plain output and does not
-acquire terminal state, regardless of a declaration.
+Two narrow, optional commands record settings the terminal cannot report. First
+configure the terminal itself, then run the matching command there once:
 
-### Qualified configurations
+- Kitty: consistently set `force_ltr=yes` across the scope below, then run
+  `verge --remember-terminal-setting=kitty-force-ltr`
+- Konsole: disable bidirectional rendering in every profile within that scope, then run
+  `verge --remember-terminal-setting=konsole-bidi-disabled`
 
-Kitty 0.45.0 needs `force_ltr=yes`; its stock behavior changes RTL glyph order.
-The option alone does not configure Kitty:
+These commands assert an existing setting; they do not change terminal
+configuration. Each command exits without opening a page. Later launches use
+ordinary `verge`, without flags. A setting can only be remembered when the TUI
+recognizes the matching condition and an unambiguous terminal/transport context.
+SSH and shared multiplexer contexts cannot safely reuse these exceptions.
+A setting for another recorded terminal identity or transport is ignored.
+
+The scope is all direct sessions sharing the host-recorded `TERM`, terminal-program
+and reported-version fields. It includes other windows and pre-existing profiles
+with those same fields; it does not identify an individual window, profile or
+configuration file. Remember a setting only when it is consistently enabled across
+that entire scope. A temporary `kitty -o force_ltr=yes` launch is not sufficient.
+The assertion is a user-maintained assumption, not a measured or verified setting.
+If profiles within that scope need different settings, do not remember an assertion.
+If the terminal setting changes, revoke its saved assertion. This works from any
+terminal or non-TTY context and removes that condition's record regardless of its
+recorded terminal context. Revocation does not need to read the assertion or
+ordinary browser state, so malformed records do not prevent their removal:
 
 ```sh
-kitty -o force_ltr=yes verge --terminal-cell-presentation=existing https://example.com
+verge --forget-terminal-setting=kitty-force-ltr
+verge --forget-terminal-setting=konsole-bidi-disabled
 ```
 
-Ghostty 1.3.1's tested configuration preserves application cell order but does
-not report standard mode 8:
+BrowserStore owns one bounded private atomic file per condition, separate from
+ordinary browsing-state writes. At most two assertions are retained, one current
+context per condition; remembering a different context replaces that condition's
+previous record. Only explicit setting commands change these files, so a stale
+running browser cannot recreate a revoked assertion. Concurrent explicit commands
+take effect in their atomic replace or unlink order for that condition. They are
+never saved automatically after a successful run. They
+cannot override an observed contradiction, unknown restoration baseline or a
+failed verification. No general trust override or terminal-profile framework is
+provided. The former `--terminal-cell-presentation` options, including `existing`,
+`mode-8-reset` and `explicit`, and the former plural `--forget-terminal-settings`
+option are rejected without aliases.
 
-```sh
-ghostty -e verge --terminal-cell-presentation=existing https://example.com
-```
-
-VTE/Ptyxis and WezTerm also have an independent character-path setting. In a
-qualified LTR configuration, use `mode-8-reset` to permit the observed, verified
-bidirectional-mode transition. A mode-8 reset reply alone is insufficient; do
-not use the declaration to conceal an unknown or inherited RTL direction.
-
-The application does not force SCP LTR and then restore SCP default: default
-is not necessarily the inherited state, and these inspected versions expose no
-verified exact restoration path. The full-screen session restores the raw modes
-it actually owns. See [Unicode text layout](../architecture/unicode-text.md).
-
-Qualification records distinguish native versions, configuration, fonts and
-transport. Debian checks of Kitty 0.45.0, Ghostty 1.3.1 and WezTerm
-`20260912-133823-2afb8364` are not universal Ubuntu or multiplexer guarantees.
-Final-source checks covered missing-declaration rejection, qualified startup,
-pointer targeting within Hebrew text, physical Right/Left caret movement, mixed-text
-edits, partial redraw and Ctrl-C in these three terminals and Xfce/VTE 0.80.1.
-All eight admission cases restored termios exactly. VTE inherited RTL rejection
-was also observed visually; no equivalent WezTerm visual-reversal claim is made.
-Cooperative suspension/resume is covered by runtime tests, not a native CLI
-job-control claim. Full native Ubuntu Ptyxis qualification remains separate.
+`--once` deliberately produces plain output and does not acquire terminal state.
+Setting-management commands cannot be combined with a target or `--once`.
 
 ### Observed graphics redraw limitation
 

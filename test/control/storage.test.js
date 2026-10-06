@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
+import { constants as fileSystemConstants } from "node:fs";
+import { chmod, mkdir, mkdtemp, open, readdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { URL } from "node:url";
+import { promisify } from "node:util";
 
 import { HttpFields } from "@ismail-elkorchi/http-client";
 
@@ -343,4 +348,390 @@ test("state loading reads the same file handle that passed validation", async ()
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
+});
+
+const terminalSettingPath = (statePath, condition) => `${statePath}.terminal-${condition}.json`;
+const kittySetting = { context: "context:kitty:direct:v1", condition: "kitty-force-ltr" };
+const konsoleSetting = { context: "context:konsole:direct:v1", condition: "konsole-bidi-disabled" };
+
+test("terminal setting assertions are explicit, exact-context, private and removable by condition", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "verge-terminal-settings-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const statePath = join(directory, "state.json");
+  const store = await BrowserStore.open({ statePath });
+  assert.deepEqual(store.terminalSettings(), []);
+  assert.throws(() => { store.terminalSettings().push(kittySetting); }, TypeError);
+  const remote = { ...kittySetting, context: "context:kitty:ssh:v1" };
+  await store.rememberTerminalSetting(kittySetting);
+  await store.rememberTerminalSetting(remote);
+  assert.deepEqual(store.terminalSettings(), [remote]);
+  await store.rememberTerminalSetting(konsoleSetting);
+  await store.rememberTerminalSetting(kittySetting);
+  assert.deepEqual(store.terminalSettings(), [kittySetting, konsoleSetting]);
+  await assert.rejects(readFile(statePath), { code: "ENOENT" });
+  await store.recordHistory("about:newtab", "New tab");
+  await store.flush();
+  assert.equal(Object.hasOwn(JSON.parse(await readFile(statePath, "utf8")), "terminalSettings"), false);
+  const reopened = await BrowserStore.open({ statePath });
+  assert.deepEqual(reopened.terminalSettings(), [kittySetting, konsoleSetting]);
+  assert.throws(() => { reopened.terminalSettings()[0].context = "other"; }, TypeError);
+  assert.throws(() => { reopened.terminalSettings().push(kittySetting); }, TypeError);
+  if (process.platform !== "win32") {
+    assert.equal((await stat(directory)).mode & 0o777, 0o700);
+    assert.equal((await stat(statePath)).mode & 0o777, 0o600);
+    for (const setting of [kittySetting, konsoleSetting]) {
+      assert.equal((await stat(terminalSettingPath(statePath, setting.condition))).mode & 0o777, 0o600);
+    }
+  }
+  await BrowserStore.forgetTerminalSetting(kittySetting.condition, { statePath });
+  assert.throws(() => { reopened.terminalSettings().push(kittySetting); }, TypeError);
+  assert.deepEqual((await BrowserStore.open({ statePath })).terminalSettings(), [konsoleSetting]);
+  await BrowserStore.forgetTerminalSetting(kittySetting.condition, { statePath });
+  assert.deepEqual(reopened.terminalSettings(), [kittySetting, konsoleSetting]);
+  await BrowserStore.forgetTerminalSetting(konsoleSetting.condition, { statePath });
+  assert.deepEqual((await BrowserStore.open({ statePath })).terminalSettings(), []);
+});
+
+test("terminal setting storage rejects malformed and oversized contexts without broadening context", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "verge-terminal-settings-invalid-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const statePath = join(directory, "state.json");
+  const invalid = [null, {}, [], { context: "", condition: "kitty-force-ltr" },
+    { context: "x".repeat(4097), condition: "kitty-force-ltr" },
+    { context: "exact-context", condition: "trust-all" },
+    { context: 7, condition: "kitty-force-ltr" }];
+  const store = await BrowserStore.open({ statePath });
+  await store.rememberTerminalSetting(konsoleSetting);
+  for (const entry of invalid) {
+    await assert.rejects(store.rememberTerminalSetting(entry), { message: "Invalid terminal setting assertion." });
+    await writeFile(terminalSettingPath(statePath, kittySetting.condition), JSON.stringify(entry));
+    assert.deepEqual((await BrowserStore.open({ statePath })).terminalSettings(), [konsoleSetting]);
+  }
+  for (const condition of ["", "trust-all", "../state", undefined, null, 7]) {
+    await assert.rejects(BrowserStore.forgetTerminalSetting(condition, { statePath }), { message: "Invalid terminal setting condition." });
+  }
+  for (const content of ["{ bad json", "", JSON.stringify(konsoleSetting), JSON.stringify([kittySetting])]) {
+    await writeFile(terminalSettingPath(statePath, kittySetting.condition), content);
+    assert.deepEqual((await BrowserStore.open({ statePath })).terminalSettings(), [konsoleSetting]);
+  }
+  await writeFile(terminalSettingPath(statePath, kittySetting.condition), JSON.stringify({
+    ...kittySetting, unexpected: "ignored", sessionAccepted: true
+  }));
+  assert.deepEqual((await BrowserStore.open({ statePath })).terminalSettings(), [kittySetting, konsoleSetting]);
+  assert.deepEqual(store.terminalSettings(), [konsoleSetting]);
+});
+
+test("terminal setting retention is one current context per condition, with bounded record bytes", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "verge-terminal-settings-bounded-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const statePath = join(directory, "state.json");
+  const store = await BrowserStore.open({ statePath });
+  await store.rememberTerminalSetting(konsoleSetting);
+  for (let index = 0; index < 40; index += 1) {
+    const setting = { ...kittySetting, context: `context-${index}` };
+    await store.rememberTerminalSetting(setting);
+    assert.deepEqual(store.terminalSettings(), [setting, konsoleSetting]);
+  }
+  // JSON escaping can use six bytes per code unit; the complete valid context still fits.
+  const largest = { ...kittySetting, context: "\u0000".repeat(4096) };
+  await store.rememberTerminalSetting(largest);
+  assert.deepEqual((await BrowserStore.open({ statePath })).terminalSettings(), [largest, konsoleSetting]);
+  assert.deepEqual((await readdir(directory)).sort(), [
+    "state.json.terminal-kitty-force-ltr.json", "state.json.terminal-konsole-bidi-disabled.json"
+  ]);
+  assert.ok((await stat(terminalSettingPath(statePath, kittySetting.condition))).size <= 32 * 1024);
+  await writeFile(terminalSettingPath(statePath, kittySetting.condition), " ".repeat(32 * 1024 + 1));
+  await assert.rejects(BrowserStore.open({ statePath }), {
+    message: `Terminal setting exceeds the 32768-byte safety limit: ${terminalSettingPath(statePath, kittySetting.condition)}`
+  });
+});
+
+test("legacy inline terminal assertions are ignored and removed by browsing saves", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "verge-terminal-settings-legacy-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const statePath = join(directory, "state.json");
+  await writeFile(statePath, JSON.stringify({ terminalSettings: [kittySetting, konsoleSetting] }));
+  const store = await BrowserStore.open({ statePath });
+  assert.deepEqual(store.terminalSettings(), []);
+  await store.rememberTerminalSetting(kittySetting);
+  await BrowserStore.forgetTerminalSetting(kittySetting.condition, { statePath });
+  // Even before the legacy state is rewritten, it cannot resurrect a removed sidecar.
+  assert.deepEqual((await BrowserStore.open({ statePath })).terminalSettings(), []);
+  await store.recordHistory("about:newtab", "New tab");
+  assert.equal(Object.hasOwn(JSON.parse(await readFile(statePath, "utf8")), "terminalSettings"), false);
+  assert.deepEqual((await BrowserStore.open({ statePath })).terminalSettings(), []);
+});
+
+test("stale browsing stores cannot erase, revert, or resurrect explicit terminal settings", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "verge-terminal-settings-stale-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const statePath = join(directory, "state.json");
+  const beforeRemember = await BrowserStore.open({ statePath });
+  const admin = await BrowserStore.open({ statePath });
+  await admin.rememberTerminalSetting(kittySetting);
+  await admin.rememberTerminalSetting(konsoleSetting);
+  const beforeForget = await BrowserStore.open({ statePath });
+  const replacement = { ...kittySetting, context: "context:kitty:replacement:v1" };
+  await admin.rememberTerminalSetting(replacement);
+  const unchangedBytes = await readFile(terminalSettingPath(statePath, kittySetting.condition), "utf8");
+  await beforeRemember.recordHistory("https://example.test/before-remember", "Before remember");
+  await beforeForget.recordHistory("https://example.test/before-forget", "Before forget");
+  assert.equal(await readFile(terminalSettingPath(statePath, kittySetting.condition), "utf8"), unchangedBytes);
+  assert.deepEqual((await BrowserStore.open({ statePath })).terminalSettings(), [replacement, konsoleSetting]);
+  await BrowserStore.forgetTerminalSetting(kittySetting.condition, { statePath });
+  await beforeForget.recordHistory("https://example.test/after-forget", "After forget");
+  await beforeForget.saveWorkspace({ documents: [], activeDocumentIndex: 0, sidePanel: null });
+  await beforeForget.httpSession.acceptResponse({
+    requestId: 1, attemptIndex: 0, url: "https://example.test/", method: "GET", statusCode: 200,
+    statusMessage: "OK", fields: new HttpFields([{ name: "set-cookie", value: "sid=abc; Path=/" }])
+  });
+  await beforeForget.flush();
+  assert.deepEqual((await BrowserStore.open({ statePath })).terminalSettings(), [konsoleSetting]);
+  await assert.rejects(readFile(terminalSettingPath(statePath, kittySetting.condition)), { code: "ENOENT" });
+});
+
+test("independent stores preserve concurrent mutations of different terminal conditions", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "verge-terminal-settings-concurrent-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const statePath = join(directory, "state.json");
+  const kittyStore = await BrowserStore.open({ statePath });
+  const konsoleStore = await BrowserStore.open({ statePath });
+  const browsingStore = await BrowserStore.open({ statePath });
+  await Promise.all([
+    kittyStore.rememberTerminalSetting(kittySetting),
+    konsoleStore.rememberTerminalSetting(konsoleSetting),
+    browsingStore.recordHistory("about:newtab", "New tab")
+  ]);
+  assert.deepEqual((await BrowserStore.open({ statePath })).terminalSettings(), [kittySetting, konsoleSetting]);
+  const replacement = { ...konsoleSetting, context: "context:konsole:replacement:v1" };
+  await Promise.all([
+    BrowserStore.forgetTerminalSetting(kittySetting.condition, { statePath }),
+    konsoleStore.rememberTerminalSetting(replacement),
+    browsingStore.recordHistory("about:newtab", "New tab")
+  ]);
+  assert.deepEqual((await BrowserStore.open({ statePath })).terminalSettings(), [replacement]);
+});
+
+test("static condition revocation removes the current context without changing open snapshots", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "verge-terminal-settings-order-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const statePath = join(directory, "state.json");
+  const older = await BrowserStore.open({ statePath });
+  await older.rememberTerminalSetting(kittySetting);
+  const newer = await BrowserStore.open({ statePath });
+  const replacement = { ...kittySetting, context: "context:kitty:newer:v1" };
+  await newer.rememberTerminalSetting(replacement);
+  await BrowserStore.forgetTerminalSetting(kittySetting.condition, { statePath });
+  assert.deepEqual((await BrowserStore.open({ statePath })).terminalSettings(), []);
+  await newer.rememberTerminalSetting(replacement);
+  assert.deepEqual((await BrowserStore.open({ statePath })).terminalSettings(), [replacement]);
+  assert.deepEqual(older.terminalSettings(), [kittySetting]);
+  assert.equal(Object.hasOwn(BrowserStore.prototype, "forgetTerminalSetting"), false);
+  await Promise.all([
+    older.rememberTerminalSetting(kittySetting),
+    older.rememberTerminalSetting(replacement)
+  ]);
+  await older.flush();
+  assert.deepEqual(older.terminalSettings(), [replacement]);
+  assert.deepEqual((await BrowserStore.open({ statePath })).terminalSettings(), [replacement]);
+});
+
+test("a separate running browser process cannot resurrect an administrator's revocation", { timeout: 15_000 }, async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "verge-terminal-settings-process-"));
+  const statePath = join(directory, "state.json");
+  const storageUrl = new URL("../../dist/app/storage.js", import.meta.url).href;
+  const setup = await BrowserStore.open({ statePath });
+  await setup.rememberTerminalSetting(kittySetting);
+  await setup.rememberTerminalSetting(konsoleSetting);
+  const browser = spawn(process.execPath, ["--input-type=module", "--eval", `
+    import { BrowserStore } from ${JSON.stringify(storageUrl)};
+    const store = await BrowserStore.open({ statePath: ${JSON.stringify(statePath)} });
+    process.send({ phase: "opened", settings: store.terminalSettings() });
+    process.once("message", async () => {
+      try {
+        await store.recordHistory("https://example.test/stale-process", "Stale browser");
+        await store.flush();
+        process.send({ phase: "saved" });
+      } catch (error) {
+        process.send({ phase: "failed", message: error.message });
+        process.exitCode = 1;
+      } finally {
+        process.disconnect();
+      }
+    });
+  `], { stdio: ["ignore", "ignore", "pipe", "ipc"] });
+  let stderr = "";
+  browser.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+  const closed = once(browser, "close");
+  t.after(async () => {
+    if (browser.exitCode === null) browser.kill();
+    await closed;
+    await rm(directory, { recursive: true, force: true });
+  });
+  assert.deepEqual((await once(browser, "message"))[0], {
+    phase: "opened", settings: [kittySetting, konsoleSetting]
+  });
+  await promisify(execFile)(process.execPath, ["--input-type=module", "--eval", `
+    import { BrowserStore } from ${JSON.stringify(storageUrl)};
+    await BrowserStore.forgetTerminalSetting("kitty-force-ltr", { statePath: ${JSON.stringify(statePath)} });
+  `]);
+  assert.deepEqual((await BrowserStore.open({ statePath })).terminalSettings(), [konsoleSetting]);
+  const saved = once(browser, "message");
+  browser.send("save");
+  assert.deepEqual((await saved)[0], { phase: "saved" });
+  assert.equal((await closed)[0], 0, stderr);
+  const reopened = await BrowserStore.open({ statePath });
+  assert.deepEqual(reopened.terminalSettings(), [konsoleSetting]);
+  assert.equal(reopened.listHistory()[0].url, "https://example.test/stale-process");
+  assert.equal(Object.hasOwn(JSON.parse(await readFile(statePath, "utf8")), "terminalSettings"), false);
+});
+
+test("terminal sidecar reads tighten private permissions", {
+  skip: process.platform === "win32" ? "Windows relies on the profile directory ACL" : false
+}, async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "verge-terminal-settings-permissions-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const statePath = join(directory, "state.json");
+  const settingPath = terminalSettingPath(statePath, kittySetting.condition);
+  await writeFile(settingPath, JSON.stringify(kittySetting), { mode: 0o666 });
+  await chmod(settingPath, 0o666);
+  assert.deepEqual((await BrowserStore.open({ statePath })).terminalSettings(), [kittySetting]);
+  assert.equal((await stat(settingPath)).mode & 0o777, 0o600);
+});
+
+test("terminal sidecars reject symlink reads while explicit mutations never follow targets", {
+  skip: process.platform === "win32" ? "Windows symlink creation requires additional privileges" : false
+}, async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "verge-terminal-settings-symlink-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const statePath = join(directory, "state.json");
+  const settingPath = terminalSettingPath(statePath, kittySetting.condition);
+  const targetPath = join(directory, "target.json");
+  const content = JSON.stringify(konsoleSetting);
+  async function observeFile(path) {
+    // Reopen the path for every observation: retaining an old handle would hide an unlink.
+    const handle = await open(path, fileSystemConstants.O_RDONLY | fileSystemConstants.O_NOFOLLOW | fileSystemConstants.O_NONBLOCK);
+    try {
+      const file = await handle.stat();
+      assert.equal(file.isFile(), true);
+      return { dev: file.dev, ino: file.ino, mode: file.mode & 0o777, content: await handle.readFile("utf8") };
+    } finally {
+      await handle.close();
+    }
+  }
+  const store = await BrowserStore.open({ statePath });
+  await writeFile(targetPath, content);
+  await chmod(targetPath, 0o644);
+  const originalTarget = await observeFile(targetPath);
+  assert.equal(originalTarget.content, content);
+  assert.equal(originalTarget.mode, 0o644);
+  await symlink(targetPath, settingPath);
+  await assert.rejects(BrowserStore.open({ statePath }), {
+    message: `Terminal setting path must be a regular file: ${settingPath}`
+  });
+  assert.deepEqual(await observeFile(targetPath), originalTarget);
+  await BrowserStore.forgetTerminalSetting(kittySetting.condition, { statePath });
+  assert.deepEqual(await observeFile(targetPath), originalTarget);
+  await assert.rejects(readFile(settingPath), { code: "ENOENT" });
+  await symlink(targetPath, settingPath);
+  await store.rememberTerminalSetting(kittySetting);
+  assert.deepEqual(await observeFile(targetPath), originalTarget);
+  const savedSetting = await observeFile(settingPath);
+  assert.deepEqual(JSON.parse(savedSetting.content), kittySetting);
+  assert.equal(savedSetting.mode, 0o600);
+});
+
+test("terminal mutations surface filesystem errors, preserve the other condition, and recover", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "verge-terminal-settings-errors-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const statePath = join(directory, "state.json");
+  const store = await BrowserStore.open({ statePath });
+  await store.rememberTerminalSetting(konsoleSetting);
+  const settingPath = terminalSettingPath(statePath, kittySetting.condition);
+  await mkdir(settingPath);
+  await writeFile(join(settingPath, "keep.txt"), "must survive");
+  await assert.rejects(BrowserStore.open({ statePath }), /Terminal setting path must be a regular file/u);
+  // unlink/rename on a directory must not be mistaken for an absent assertion.
+  const directoryError = (error) => ["EISDIR", "EEXIST", "ENOTEMPTY", "EPERM", "EACCES"].includes(error.code);
+  await assert.rejects(BrowserStore.forgetTerminalSetting(kittySetting.condition, { statePath }), directoryError);
+  await assert.rejects(store.rememberTerminalSetting(kittySetting), directoryError);
+  assert.equal((await stat(settingPath)).isDirectory(), true);
+  assert.equal(await readFile(join(settingPath, "keep.txt"), "utf8"), "must survive");
+  assert.deepEqual(store.terminalSettings(), [konsoleSetting]);
+  assert.deepEqual(JSON.parse(await readFile(terminalSettingPath(statePath, konsoleSetting.condition), "utf8")), konsoleSetting);
+  assert.equal((await readdir(directory)).some((name) => name.includes(".tmp-")), false);
+  await rm(settingPath, { recursive: true });
+  await store.rememberTerminalSetting(kittySetting);
+  assert.deepEqual((await BrowserStore.open({ statePath })).terminalSettings(), [kittySetting, konsoleSetting]);
+  await BrowserStore.forgetTerminalSetting(kittySetting.condition, { statePath });
+  assert.deepEqual((await BrowserStore.open({ statePath })).terminalSettings(), [konsoleSetting]);
+});
+
+
+test("static condition revocation recovers malformed and oversized assertions without opening state", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "verge-terminal-settings-recovery-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const statePath = join(directory, "state.json");
+  const settingPath = terminalSettingPath(statePath, kittySetting.condition);
+  const otherPath = terminalSettingPath(statePath, konsoleSetting.condition);
+  for (const content of ["{ bad json", " ".repeat(32 * 1024 + 1)]) {
+    await writeFile(settingPath, content);
+    if (content.length > 32 * 1024) {
+      await assert.rejects(BrowserStore.open({ statePath }), /32768-byte safety limit/u);
+    }
+    await BrowserStore.forgetTerminalSetting(kittySetting.condition, { statePath });
+    await assert.rejects(readFile(settingPath), { code: "ENOENT" });
+    assert.deepEqual((await BrowserStore.open({ statePath })).terminalSettings(), []);
+  }
+  // Recovery remains available when both unrelated browsing state and the other assertion
+  // would make normal startup fail. Neither unrelated path is read or replaced.
+  await mkdir(statePath);
+  const unrelatedContent = " ".repeat(32 * 1024 + 1);
+  await writeFile(otherPath, unrelatedContent);
+  await writeFile(settingPath, JSON.stringify(kittySetting));
+  await assert.rejects(BrowserStore.open({ statePath }), /Browser state path must be a regular file/u);
+  await BrowserStore.forgetTerminalSetting(kittySetting.condition, { statePath });
+  await assert.rejects(readFile(settingPath), { code: "ENOENT" });
+  assert.equal((await stat(statePath)).isDirectory(), true);
+  assert.equal(await readFile(otherPath, "utf8"), unrelatedContent);
+  await BrowserStore.forgetTerminalSetting(kittySetting.condition, { statePath });
+  assert.equal(await readFile(otherPath, "utf8"), unrelatedContent);
+});
+
+test("static condition revocation does not follow invalid unrelated symlinks", {
+  skip: process.platform === "win32" ? "Windows symlink creation requires additional privileges" : false
+}, async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "verge-terminal-settings-recovery-symlinks-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const statePath = join(directory, "state.json");
+  const settingPath = terminalSettingPath(statePath, kittySetting.condition);
+  const otherPath = terminalSettingPath(statePath, konsoleSetting.condition);
+  const targetPath = join(directory, "target.json");
+  const content = "{ unrelated invalid data";
+  await writeFile(targetPath, content);
+  await chmod(targetPath, 0o644);
+  for (const path of [statePath, settingPath, otherPath]) await symlink(targetPath, path);
+  await assert.rejects(BrowserStore.open({ statePath }), /Browser state path must be a regular file/u);
+  await BrowserStore.forgetTerminalSetting(kittySetting.condition, { statePath });
+  await assert.rejects(readFile(settingPath), { code: "ENOENT" });
+  assert.equal(await readFile(statePath, "utf8"), content);
+  assert.equal(await readFile(otherPath, "utf8"), content);
+  assert.equal(await readFile(targetPath, "utf8"), content);
+  assert.equal((await stat(targetPath)).mode & 0o777, 0o644);
+});
+
+test("static condition revocation refuses an insecure caller-owned directory", {
+  skip: process.platform === "win32" ? "Windows relies on directory ACLs rather than POSIX modes" : false
+}, async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "verge-terminal-settings-recovery-permissions-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const statePath = join(directory, "state.json");
+  const settingPath = terminalSettingPath(statePath, kittySetting.condition);
+  const content = JSON.stringify(kittySetting);
+  await writeFile(settingPath, content);
+  await chmod(directory, 0o777);
+  await assert.rejects(BrowserStore.forgetTerminalSetting(kittySetting.condition, { statePath }),
+    /directory permissions must exclude group and other users/u);
+  assert.equal(await readFile(settingPath, "utf8"), content);
+  assert.equal((await stat(directory)).mode & 0o777, 0o777);
 });
