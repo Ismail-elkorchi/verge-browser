@@ -149,6 +149,6 @@ header-association-work limit; an incomplete current table is discarded while
 metadata for earlier tables remains coherent and reachable.
 
 The current boundary excludes vertical writing modes, pagination and
-fragmentation, CSS image masks, web fonts, and complete graphical-browser
+fragmentation, masks over table/text subtrees, web fonts, and complete graphical-browser
 paint fidelity. Supported terminal borders are `none`, `hidden`, and `solid`;
 other border styles remain typed unsupported rather than approximated.

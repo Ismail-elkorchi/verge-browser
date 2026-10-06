@@ -26,7 +26,7 @@ export function imageClipsAboveControls(
     let clips = [image.clip];
     for (const control of controls) {
       signal?.throwIfAborted();
-      if (control.paintGroup <= image.paintGroup) continue;
+      if (control.paintGroup <= image.paintGroup && image.hasAlpha !== true) continue;
       const next: TerminalCellRect[] = [];
       for (const clip of clips) {
         const parts = subtract(clip, control.visible);

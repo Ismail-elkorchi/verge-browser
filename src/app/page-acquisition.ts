@@ -27,7 +27,7 @@ import {
 import { withNavigationSource } from "./http-session-context.js";
 import { assertPageInitiatedNavigation } from "./security.js";
 import { acquireDocumentImages, discoverDocumentImages, type ImageAcquisitionOptions,
-  type ImageAcquisitionMetrics, type ImageLoader } from "./image-acquisition.js";
+  type ImageAcquisitionMetrics, type ImageAcquisitionBudget, type ImageLoader } from "./image-acquisition.js";
 import { imagePolicy, type ImagePolicyOptions } from "./image-policy.js";
 import type {
   FetchPagePayload,
@@ -213,6 +213,9 @@ export class PageAcquisition {
   readonly #imageLoader: ImageLoader;
   readonly #imagePolicy: Required<ImagePolicyOptions>;
   readonly #imageOperations = new Set<Promise<ImageAcquisitionMetrics>>();
+  // The canonical source document survives progressive resource snapshots/history restores.
+  // A weak key cannot prolong page lifetime; this ledger retains numbers, never resources.
+  readonly #imageBudgets = new WeakMap<IndexedWebDocumentSnapshot, ImageAcquisitionBudget>();
   #activeImages: AbortController | null = null;
   #activeNavigation: AbortController | null = null;
   #navigationSequence = 0;
@@ -336,9 +339,11 @@ export class PageAcquisition {
     this.#activeImages?.abort(new Error("Image activation superseded."));
     const controller = new AbortController();
     this.#activeImages = controller;
+    const budget = this.#imageBudgets.get(snapshot.document) ?? { encodedBytes: 0 };
+    this.#imageBudgets.set(snapshot.document, budget);
     // A replacement activation cannot overlap the previous decoder's termination.
     const pending = Promise.allSettled([...this.#imageOperations]).then(() => acquireDocumentImages(snapshot, { ...options,
-      signal: AbortSignal.any([controller.signal, options.signal]) }, this.#imageLoader, this.#imagePolicy));
+      signal: AbortSignal.any([controller.signal, options.signal]) }, this.#imageLoader, this.#imagePolicy, undefined, budget));
     this.#imageOperations.add(pending);
     const finish = (): void => {
       this.#imageOperations.delete(pending);
@@ -796,6 +801,7 @@ export class PageAcquisition {
         document,
         images: images.resources,
         imageOmittedReferenceCount: images.omittedReferences,
+        imageResourceLimit: this.#imagePolicy.maxResources,
         stylesheets: stylesheets.resources,
         styleDiagnostics: stylesheets.diagnostics,
         diagnostics: diagnosticsFromDocument(

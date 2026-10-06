@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { rasterImage } from "@ismail-elkorchi/terminal-ui";
 import { HttpFields } from "@ismail-elkorchi/http-client";
 import { createMemoryTerminalHost } from "@ismail-elkorchi/terminal-ui/host";
 import { renderFramePlain } from "@ismail-elkorchi/terminal-ui/renderer";
@@ -11,7 +12,7 @@ import { PageAcquisition } from "../../dist/app/page-acquisition.js";
 import { BrowserStore } from "../../dist/app/storage.js";
 import { createDocumentState, parseWebDocument } from "../../dist/document/index.js";
 import { estimatedRetainedCost } from "../../dist/memory/retained-cost.js";
-import { browserRasterImage, prepareBrowserImage } from "../../dist/ui/image-presentation.js";
+import { acceptBrowserViewportImages, browserRasterImage, discardBrowserViewportImages, prepareBrowserViewportImages } from "../../dist/ui/image-presentation.js";
 import { browserPageSize, browserRenderPreferences } from "../../dist/ui/document-layout.js";
 import { prepareBrowserTui } from "../../dist/ui/run.js";
 import { browserView } from "../../dist/ui/view.js";
@@ -19,37 +20,45 @@ import { renderDocumentAttachment } from "../../dist/ui/render-worker/document-t
 
 function readyImage(id = "https://images.test/a.png") {
   return Object.freeze({ id, requestUrl: id, owners: [], width: 2, height: 2,
-    status: "ready", mimeType: "image/png", pixels: new Uint8Array(16).fill(255) });
+    status: "ready", hasAlpha: false, mimeType: "image/png", pixels: new Uint8Array(16).fill(255) });
 }
 
-test("UI raster handles are reused, private copy bytes counted, alpha keeps explicit fallback", () => {
+test("UI raster handles are reused, private copy bytes counted, failed decode keeps explicit fallback", async () => {
   const resource = readyImage();
+  const placement = { id: "image", resourceId: resource.id, naturalWidth: 2, naturalHeight: 2, hasAlpha: false };
+  const viewport = { images: [placement] };
   const before = estimatedRetainedCost([resource]);
-  assert.equal(browserRasterImage(resource), null);
-  prepareBrowserImage(resource);
-  const handle = browserRasterImage(resource);
+  assert.equal(browserRasterImage(resource, placement, viewport), null);
+  await prepareBrowserViewportImages([resource], viewport, () => 32);
+  acceptBrowserViewportImages(viewport);
+  const handle = browserRasterImage(resource, placement, viewport);
   assert.ok(handle);
-  assert.equal(browserRasterImage(resource), handle);
+  assert.equal(browserRasterImage(resource, placement, viewport), handle);
   assert.ok(estimatedRetainedCost([resource]) >= before + resource.pixels.byteLength);
   assert.equal(Object.hasOwn(handle, "data"), false);
-  const alpha = { ...readyImage(), status: "failed", failure: "unsupported-alpha", reason: "Decoded alpha is unsupported." };
-  prepareBrowserImage(alpha);
-  assert.equal(browserRasterImage(alpha), null);
-  assert.equal(browserRasterImage(alpha), null);
+  const failed = { ...readyImage(), status: "failed", failure: "decode-failed", reason: "Image decode failed." };
+  const failedViewport = { images: [placement] };
+  await prepareBrowserViewportImages([failed], failedViewport, () => 32);
+  assert.equal(browserRasterImage(failed, placement, failedViewport), null);
+  discardBrowserViewportImages(failedViewport);
 });
 
-test("one-time worker attachment transfers image metadata without readiness, pixels or raster handles", () => {
+test("one-time worker attachment transfers image metadata without readiness, pixels or raster handles", async () => {
   const document = parseWebDocument('<img src="a.png" alt="ALT">', { requestUrl: "https://images.test/", finalUrl: "https://images.test/" });
-  const image = readyImage(); prepareBrowserImage(image);
+  const image = readyImage();
+  const viewport = { images: [{ id: "image", resourceId: image.id, naturalWidth: 2, naturalHeight: 2, hasAlpha: false }] };
+  await prepareBrowserViewportImages([image], viewport, () => 32);
+  acceptBrowserViewportImages(viewport);
   const attachment = renderDocumentAttachment({ id: "images", documentRevision: 1, stateRevision: 1,
     documentState: createDocumentState(document), snapshot: { document, images: [image], requestUrl: document.requestUrl,
       finalUrl: document.finalUrl, stylesheets: [], styleDiagnostics: [] } });
-  assert.deepEqual(Object.keys(attachment.images[0]).sort(), ["height", "id", "owners", "requestUrl", "width"]);
+  assert.deepEqual(Object.keys(attachment.images[0]).sort(), ["hasAlpha", "height", "id", "owners", "requestUrl", "width"]);
   assert.deepEqual(globalThis.structuredClone(attachment.images), attachment.images);
 });
 
 async function fixture(html, { staleDimensions = false, graphics = "none", graphicsBudget,
-  imageFailed = false, imagePending = false, searchQuery = null, activeMatchIndex = 0,
+  imageFailed = false, imagePending = false, pixelResource = null, searchQuery = null, activeMatchIndex = 0,
+  renderPreferences = browserRenderPreferences(),
   terminalSize = { columns: 50, rows: 16 }, sidePanel = null, scrollRow = 0, scrollColumn = 0 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "verge-image-presentation-"));
   const store = await BrowserStore.open({ statePath: join(directory, "state.json") });
@@ -62,16 +71,15 @@ async function fixture(html, { staleDimensions = false, graphics = "none", graph
     }) }) });
   prepared.controller.configureRestoration(prepared.state.documents[0]);
   let document = await prepared.controller.restorePlaceholder(prepared.state.documents[0]);
-  const ready = readyImage();
+  const ready = pixelResource ?? readyImage();
   const resource = imageFailed ? { id: ready.id, requestUrl: ready.requestUrl, owners: ready.owners,
     width: ready.width, height: ready.height, mimeType: ready.mimeType, status: "failed",
     failure: "decode-failed", reason: "Fixture decode failure." } : imagePending ? { ...ready, status: "pending", pixels: undefined } : ready;
-  prepareBrowserImage(resource);
   document = { ...document, snapshot: { ...document.snapshot, images: staleDimensions ? [{ ...resource, width: null, height: null, status: "pending", pixels: undefined }] : [resource] } };
   const screenState = { ...prepared.state, sidePanel };
   const size = browserPageSize(screenState, terminalSize);
   const payload = await prepared.controller.renderViewport(document, 1, { ...size, scrollRow, scrollColumn,
-    scrollOffsets: [], overscanBefore: 1, overscanAfter: 1, preferences: browserRenderPreferences(), searchQuery });
+    scrollOffsets: [], overscanBefore: 1, overscanAfter: 1, preferences: renderPreferences, searchQuery });
   document = { ...document, snapshot: { ...document.snapshot, images: [resource] }, rendering: { ...document.rendering,
     viewport: payload, previousViewport: null, summary: payload.summary, status: "ready", committedViewportRevision: 1,
     requestedViewportRevision: 1, error: null },
@@ -291,5 +299,83 @@ test('physical clipping during pending shrink agrees for graphics, fallback, sem
     assert.equal(clipped.hitTargets.some((entry) => entry.id === 'image'), false);
     assert.equal(clipped.graphics.length, 0);
     assert.doesNotMatch(JSON.stringify(clipped.accessibility), /IMAGE_MARKER/u);
+  } finally { await value.close(); }
+});
+
+
+test("alpha media paints artwork without covering native text or native editor cells", async () => {
+  const pixelResource = { ...readyImage(), hasAlpha: true, pixels: new Uint8Array([
+    255, 0, 0, 128, 0, 255, 0, 0, 0, 0, 255, 255, 255, 255, 0, 128,
+  ]) };
+  const value = await fixture('<style>body{margin:0;min-height:64px;background:white;color:black}'
+    + 'p{position:absolute;left:0;top:0;margin:0}'
+    + 'input{position:absolute;left:0;top:32px;width:128px;height:16px;padding:0;border:0}'
+    + 'img{position:absolute;left:0;top:0;width:192px;height:64px}</style>'
+    + '<body><p>NATIVE_KEEP</p><input id=q value="EDIT_KEEP"><img src="/a.png" alt="ART"></body>', { pixelResource, renderPreferences: browserRenderPreferences({ COLORTERM: "truecolor", TERM: "xterm-256color" }) });
+  try {
+    const frame = value.runtime.frame();
+    assert.ok(renderFramePlain(frame).includes("NATIVE_KEEP"), renderFramePlain(frame));
+    assert.ok(renderFramePlain(frame).includes("EDIT_KEEP"), renderFramePlain(frame));
+    assert.ok(frame.graphics.length > 0, "safe parts of the alpha artwork remain graphics: " + JSON.stringify(value.document.rendering.viewport.cellBuffer.images));
+    for (const marker of ["NATIVE_KEEP", "EDIT_KEEP"]) {
+      for (const origin of markerPositions(frame, marker)) {
+        for (const graphic of frame.graphics) {
+          const clip = graphic.clip;
+          const intersects = origin.row >= clip.row && origin.row < clip.row + clip.height
+            && origin.column < clip.column + clip.width && origin.column + marker.length > clip.column;
+          assert.equal(intersects, false, `${marker} must remain native glyphs outside every graphics clip`);
+        }
+      }
+    }
+    assert.ok(value.document.rendering.viewport.cellBuffer.images.every((image) => image.safeForTransparency));
+  } finally { await value.close(); }
+});
+
+test("alpha media with an unknown actual backdrop keeps semantic fallback and surrounding native text", async () => {
+  const pixelResource = { ...readyImage(), hasAlpha: true,
+    pixels: new Uint8Array([255, 0, 0, 128, 0, 0, 0, 0, 255, 0, 0, 128, 0, 0, 0, 0]) };
+  const value = await fixture('<style>body{margin:0}img{width:64px;height:32px}</style>'
+    + '<p>NATIVE_KEEP</p><img src="/a.png" alt="ART_FALLBACK">', { pixelResource });
+  try {
+    assert.equal(value.runtime.frame().graphics.length, 0);
+    assert.ok(renderFramePlain(value.runtime.frame()).includes("NATIVE_KEEP"));
+    assert.ok(JSON.stringify(value.runtime.frame().accessibility).includes("ART_FALLBACK"));
+  } finally { await value.close(); }
+});
+
+test("alpha media on a proven authored white surface reaches graphics", async () => {
+  const pixelResource = { ...readyImage(), hasAlpha: true,
+    pixels: new Uint8Array([255, 0, 0, 128, 0, 0, 0, 0, 255, 0, 0, 128, 0, 0, 0, 0]) };
+  const value = await fixture('<style>body{margin:0;background:white}img{width:64px;height:32px}</style>'
+    + '<body><p>NATIVE_KEEP</p><img src="/a.png" alt="ART"></body>', { pixelResource, renderPreferences: browserRenderPreferences({ COLORTERM: "truecolor", TERM: "xterm-256color" }) });
+  try {
+    assert.ok(value.runtime.frame().graphics.length > 0,
+      JSON.stringify(value.document.rendering.viewport.cellBuffer.images));
+    assert.ok(renderFramePlain(value.runtime.frame()).includes("NATIVE_KEEP"));
+  } finally { await value.close(); }
+});
+
+
+test("computed CSS mask tint and contain geometry reach the asynchronous prepared graphic", async () => {
+  const pixelResource = { ...readyImage(), width: 2, height: 1, hasAlpha: true,
+    pixels: new Uint8Array([255, 255, 255, 255, 255, 255, 255, 0]) };
+  const value = await fixture('<style>body{margin:0;background:white;color:black}'
+    + '#icon{display:inline-block;width:32px;height:32px;background-color:rgb(12,34,56);'
+    + 'mask-image:url(/a.png);mask-size:contain;mask-repeat:no-repeat;mask-position:center}</style>'
+    + '<body><span id=icon></span><span>NATIVE_KEEP</span></body>',
+    { pixelResource, renderPreferences: browserRenderPreferences({ COLORTERM: "truecolor", TERM: "xterm-256color" }) });
+  try {
+    const frame = value.runtime.frame();
+    assert.equal(frame.graphics.length, 1, JSON.stringify(value.document.rendering.viewport.cellBuffer.images));
+    const handle = frame.graphics[0].image;
+    assert.equal(handle.width, 32); assert.equal(handle.height, 32);
+    const pixels = new Uint8Array(32 * 32 * 4).fill(255);
+    for (let row = 8; row < 24; row += 1) for (let column = 0; column < 16; column += 1) {
+      const offset = (row * 32 + column) * 4;
+      pixels[offset] = 12; pixels[offset + 1] = 34; pixels[offset + 2] = 56;
+    }
+    const expected = rasterImage({ width: 32, height: 32, format: "rgba8", data: pixels });
+    assert.equal(handle.contentDigest, expected.contentDigest);
+    assert.ok(renderFramePlain(frame).includes("NATIVE_KEEP"));
   } finally { await value.close(); }
 });

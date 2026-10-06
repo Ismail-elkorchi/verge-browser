@@ -2,15 +2,16 @@ import type { DocumentImageMetadata } from "../../document/index.js";
 import { PackedRows, ValueSequence, checkPackedMetadata } from "../../memory/packed.js";
 import { registerRetainedOwner } from "../../memory/retained-cost.js";
 import {
-  EMPTY_TEXT_CLUSTERS, cssCoordinateAdd, cssCoordinateDifference, cssMax, cssMin, cssNonNegativeLength, cssPx, cssRect,
+  EMPTY_TEXT_CLUSTERS, cssAdd, cssCoordinateAdd, cssCoordinateDifference, cssCoordinateSubtract, cssMax, cssNonNegativeLength, cssPx, cssRect,
   type CssEdges, type CssRect, type LayoutFragment, type LayoutFragmentId, type LayoutFragmentTree,
   type LayoutPaintStyle,
 } from "../layout/index.js";
 import type { DocumentPaintCommands, TerminalPaintCommand } from "./types.js";
+import type { LayoutMaskArtwork } from "../layout/paint-artwork.js";
 
 // Rows retain only canonical fragment/continuation IDs and paint-specific selections.
 // The ordinary box/text geometry and semantic/source identities remain in layout.
-const BACKGROUND = 0, TOP = 1, LEFT = 4, COLLAPSED = 5, CONTROL_LINE = 6, TEXT = 7, IMAGE = 8;
+const BACKGROUND = 0, TOP = 1, LEFT = 4, COLLAPSED = 5, CONTROL_LINE = 6, TEXT = 7, IMAGE = 8, MASK = 9, MASK_LABEL = 10;
 const SIDES = ["top", "right", "bottom", "left"] as const;
 
 function box(fragment: LayoutFragment, continuation: number) {
@@ -39,8 +40,8 @@ function paintsBorderColor(color: LayoutPaintStyle["foreground"]): boolean {
   return color === null || color.a > 0;
 }
 
-function *operations(fragment: LayoutFragment, style: LayoutPaintStyle, image: boolean): IterableIterator<readonly [number, number]> {
-  if (style.visible && fragment.kind !== "text") {
+function *operations(fragment: LayoutFragment, style: LayoutPaintStyle, image: boolean, masked: boolean, artwork: boolean, maskLabel: boolean): IterableIterator<readonly [number, number]> {
+  if (style.visible && fragment.kind !== "text" && !masked) {
     const count = fragment.inlineContinuations?.length ?? 1;
     for (let continuation = 0; continuation < count; continuation += 1) {
       if (style.background !== null && style.background.a > 0) yield [BACKGROUND, continuation];
@@ -56,6 +57,8 @@ function *operations(fragment: LayoutFragment, style: LayoutPaintStyle, image: b
       }
     }
   }
+  if (style.visible && artwork) yield [MASK, 0];
+  else if (style.visible && maskLabel) yield [MASK_LABEL, 0];
   if (fragment.kind === "control") {
     for (const [index, line] of (fragment.controlLines ?? []).entries()) {
       if (line.blockOffset >= fragment.contentRect.height) break;
@@ -72,14 +75,16 @@ export class PaintCommandBuilder {
   readonly #styles: LayoutPaintStyle[] = [];
   readonly #styleIds = new Map<LayoutPaintStyle, number>();
   readonly #foregroundStyles = new Map<LayoutPaintStyle, LayoutPaintStyle>();
+  readonly #masks: LayoutMaskArtwork[] = [];
   public constructor() {
-    // Immutable sequence wrapper/private slots and its style-reference owner.
-    checkPackedMetadata(64 + 6 * 8 + 64);
+    // Immutable sequence/private slots and its style- and artwork-reference owners.
+    checkPackedMetadata(64 + 7 * 8 + 64 + 64);
   }
   public get length(): number { return this.#rows.length; }
-  public append(fragment: LayoutFragment, fragmentIndex: number, style: LayoutPaintStyle, limit: number, signal?: AbortSignal, image = false): boolean {
+  public append(fragment: LayoutFragment, fragmentIndex: number, style: LayoutPaintStyle, limit: number, signal?: AbortSignal, image = false,
+    masked = false, mask: LayoutMaskArtwork | null = null, maskLabel = false): boolean {
     let count = 0;
-    const pending = operations(fragment, style, image);
+    const pending = operations(fragment, style, image, masked, mask !== null, maskLabel);
     while (!pending.next().done) {
       if ((count++ & 255) === 0) signal?.throwIfAborted();
       if (this.length + count > limit) return false;
@@ -93,7 +98,7 @@ export class PaintCommandBuilder {
       return index;
     };
     let foreground: LayoutPaintStyle | undefined;
-    for (const [kind, detail] of operations(fragment, style, image)) {
+    for (const [kind, detail] of operations(fragment, style, image, masked, mask !== null, maskLabel)) {
       signal?.throwIfAborted();
       let selected = style;
       if (kind === COLLAPSED) {
@@ -108,12 +113,19 @@ export class PaintCommandBuilder {
         }
         selected = foreground;
       }
-      this.#rows.push(fragmentIndex, kind, detail, styleId(selected));
+      let retainedDetail = detail;
+      if (kind === MASK && mask !== null) {
+        // Resolved artwork owns and fences its geometry at the layout boundary.
+        checkPackedMetadata(8);
+        retainedDetail = this.#masks.length;
+        this.#masks.push(mask);
+      }
+      this.#rows.push(fragmentIndex, kind, retainedDetail, styleId(selected));
     }
     return true;
   }
   public finish(layout: LayoutFragmentTree, fragments: readonly LayoutFragmentId[], reserved: number, images?: readonly DocumentImageMetadata[]): DocumentPaintCommands {
-    return new PackedPaintCommands(layout, fragments, this.#rows.seal(), Object.freeze(this.#styles), reserved, images);
+    return new PackedPaintCommands(layout, fragments, this.#rows.seal(), Object.freeze(this.#styles), reserved, images, Object.freeze(this.#masks));
   }
 }
 
@@ -124,10 +136,12 @@ class PackedPaintCommands extends ValueSequence<TerminalPaintCommand> implements
   readonly #styles: readonly LayoutPaintStyle[];
   readonly #reserved: number;
   readonly #images: readonly DocumentImageMetadata[] | undefined;
+  readonly #masks: readonly LayoutMaskArtwork[];
   public constructor(layout: LayoutFragmentTree, fragments: readonly LayoutFragmentId[], rows: PackedRows,
-    styles: readonly LayoutPaintStyle[], reserved: number, images?: readonly DocumentImageMetadata[]) {
+    styles: readonly LayoutPaintStyle[], reserved: number, images: readonly DocumentImageMetadata[] | undefined, masks: readonly LayoutMaskArtwork[]) {
     super(); this.#layout = layout; this.#fragments = fragments; this.#rows = rows; this.#styles = styles; this.#reserved = reserved; this.#images = images;
-    registerRetainedOwner(this, [layout, fragments, rows, styles, images], () => 6 * 8); Object.freeze(this);
+    this.#masks = masks;
+    registerRetainedOwner(this, [layout, fragments, rows, styles, images, masks], () => 7 * 8); Object.freeze(this);
   }
   public get length(): number { return this.#rows.length; }
   public layoutFragment(index: number): LayoutFragmentId {
@@ -139,6 +153,12 @@ class PackedPaintCommands extends ValueSequence<TerminalPaintCommand> implements
   public rect(index: number): CssRect {
     const fragment = this.#layout.fragment(this.layoutFragment(index));
     const kind = this.#rows.get(index, 1), detail = this.#rows.get(index, 2);
+    if (kind === MASK) {
+      const mask = this.#masks[detail];
+      if (mask === undefined) throw new RangeError("Missing retained mask artwork.");
+      return mask.rect;
+    }
+    if (kind === MASK_LABEL) return fragment.borderRect;
     if (kind <= LEFT) return box(fragment, detail).borderRect;
     if (kind === COLLAPSED && fragment.kind === "box") {
       const segment = fragment.tableCollapsedBorderSegments?.[detail];
@@ -146,11 +166,16 @@ class PackedPaintCommands extends ValueSequence<TerminalPaintCommand> implements
     }
     if (kind === CONTROL_LINE && fragment.kind === "control") {
       const line = fragment.controlLines?.[detail];
-      if (line !== undefined) return cssRect(fragment.contentRect.x, cssCoordinateAdd(fragment.contentRect.y, line.blockOffset),
-        fragment.contentRect.width, cssMin(line.height, cssCoordinateDifference(
-          cssCoordinateAdd(fragment.contentRect.y, fragment.contentRect.height), cssCoordinateAdd(fragment.contentRect.y, line.blockOffset))));
+      if (line !== undefined) {
+        const metrics = fragment.usedFontMetrics ?? this.#layout.context.textMeasurer.defaultFontMetrics();
+        const baseline = cssCoordinateAdd(cssCoordinateAdd(fragment.contentRect.y, line.blockOffset), line.baseline);
+        return cssRect(fragment.contentRect.x, cssCoordinateSubtract(baseline, metrics.ascent),
+          fragment.contentRect.width, cssAdd(metrics.ascent, metrics.descent));
+      }
     }
-    if (kind === TEXT || kind === IMAGE) return fragment.contentRect;
+    if (kind === TEXT) return fragment.kind === "text" ? fragment.inkRect
+      : fragment.kind === "control" ? fragment.nativeControlPaintRect ?? fragment.contentRect : fragment.contentRect;
+    if (kind === IMAGE) return fragment.contentRect;
     throw new RangeError("Missing canonical paint geometry.");
   }
   public at(index: number): TerminalPaintCommand | undefined {
@@ -172,6 +197,20 @@ class PackedPaintCommands extends ValueSequence<TerminalPaintCommand> implements
     const common = { layoutFragment: fragment.id, formattingNode: fragment.formattingNode, documentNode: fragment.documentNode,
       sourceRange: fragment.sourceRange, contentStartCodeUnit: fragment.contentStartCodeUnit, contentEndCodeUnit: fragment.contentEndCodeUnit,
       clipRect: fragment.clipRect, action: fragment.action, semantic: fragment.semantic, style, paintOrder, rect: this.rect(index) };
+    const maskLabel = (): string => fragment.action === null ? "" : fragment.semantic?.accessibleName
+      || this.#layout.formatting.semantic(fragment.action.node)?.accessibleName || "";
+    if (kind === MASK_LABEL) return Object.freeze({ ...common, id: `terminal-paint:mask-label:${fragment.id}`, kind: "text",
+      baseline: this.#layout.context.textMeasurer.defaultFontMetrics().baseline,
+      mediaFallbackLabel: maskLabel(), inkClipRect: fragment.borderRect, text: "", clusters: EMPTY_TEXT_CLUSTERS });
+    if (kind === MASK) {
+      const mask = this.#masks[detail];
+      if (mask === undefined) throw new RangeError("Missing retained mask artwork.");
+      return Object.freeze({ ...common, id: `terminal-paint:mask:${fragment.id}`, kind: "image", hasAlpha: true,
+        resourceId: mask.resourceId, paintGroup: this.#rows.get(index, 0), maskTint: mask.tint,
+        naturalWidth: mask.naturalWidth, naturalHeight: mask.naturalHeight,
+        ...(maskLabel().length === 0 ? {} : { mediaFallbackLabel: maskLabel() }),
+        inkClipRect: mask.clipRect, text: "", clusters: EMPTY_TEXT_CLUSTERS });
+    }
     if (kind === BACKGROUND) return Object.freeze({ ...common, id: `terminal-paint:background:${fragment.id}:${String(detail)}`, kind: "background" });
     if (kind >= TOP && kind <= LEFT) {
       const side = SIDES[kind - TOP];
@@ -182,18 +221,26 @@ class PackedPaintCommands extends ValueSequence<TerminalPaintCommand> implements
     if (kind === CONTROL_LINE && fragment.kind === "control") {
       const line = fragment.controlLines?.[detail];
       if (line === undefined) throw new RangeError("Missing control paint line.");
-      return Object.freeze({ ...common, id: `terminal-paint:control-line:${fragment.id}:${String(detail)}`, kind: "text", text: line.text, clusters: line.clusters });
+      const metrics = fragment.usedFontMetrics ?? this.#layout.context.textMeasurer.defaultFontMetrics();
+      return Object.freeze({ ...common, id: `terminal-paint:control-line:${fragment.id}:${String(detail)}`, kind: "text",
+        inkClipRect: fragment.nativeControlPaintRect ?? fragment.contentRect,
+        baseline: metrics.ascent, text: line.text, clusters: line.clusters });
     }
     if (kind === IMAGE) {
       const node = this.#layout.formatting.node(fragment.formattingNode);
       if (node.kind !== "image" || node.imageResourceId === null) throw new RangeError("Missing canonical image resource.");
       const metadata = this.#images?.find((image) => image.id === node.imageResourceId);
       return Object.freeze({ ...common, id: `terminal-paint:image:${fragment.id}`, kind: "image", resourceId: node.imageResourceId, paintGroup: this.#rows.get(index, 0),
+        hasAlpha: metadata?.hasAlpha ?? null,
         naturalWidth: metadata === undefined ? node.naturalWidth : metadata.width,
         naturalHeight: metadata === undefined ? node.naturalHeight : metadata.height,
         text: fragmentText(fragment), clusters: fragment.visualClusters ?? EMPTY_TEXT_CLUSTERS });
     }
-    return Object.freeze({ ...common, id: `terminal-paint:text:${fragment.id}`, kind: "text", text: fragmentText(fragment),
+    const baseline = fragment.kind === "text"
+      ? cssCoordinateDifference(cssCoordinateAdd(fragment.contentRect.y, fragment.baseline), common.rect.y)
+      : fragment.kind === "control" ? fragment.nativeControlBaseline ?? this.#layout.context.textMeasurer.defaultFontMetrics().baseline
+      : this.#layout.context.textMeasurer.defaultFontMetrics().baseline;
+    return Object.freeze({ ...common, id: `terminal-paint:text:${fragment.id}`, kind: "text", baseline, text: fragmentText(fragment),
       clusters: fragment.visualClusters ?? EMPTY_TEXT_CLUSTERS });
   }
 }

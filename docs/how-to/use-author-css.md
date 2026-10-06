@@ -112,20 +112,40 @@ create authored overlap.
 
 The `grid` shorthand, subgrid, masonry, vertical writing modes, table
 fragmentation, multi-column layout, rotated/scaled/3D transforms, web fonts,
-CSS background images and masks, SVG rasterization, and page
+CSS background images, masks over text or control subtrees, partial group opacity, and page
 JavaScript remain explicit gaps. The implemented `grid-template` shorthand
 does not imply support for the separate `grid` shorthand. Supported positioned clipping retains document
 semantics while its actual paint and pointer geometry stays clipped. Sticky
 positioning uses the relevant scroll owner, including supported nested scrolling
 boxes.
 
-Static opaque PNG/JPEG `img` resources have bounded progressive decoding and
+Static PNG/JPEG and admitted SVG resources have bounded progressive decoding and
 terminal graphics output where supported. Natural dimensions and aspect ratio
 participate in the same replaced-element sizing used by inline, block, flex,
 grid and table layout. HTML dimensions enter the cascade as presentational
 hints; an author `auto` value can override them. Missing or unsupported image
-resources retain their alternative text and semantic/link identity. This does
+resources retain their full alternative text and semantic/link identity. When
+an authored box cannot fit the label, a compact image indicator preserves its
+logical source range instead of displaying an arbitrary clipped prefix. This does
 not enable CSS image functions or arbitrary web-font rendering.
+
+Single URL masks on empty artwork boxes can use the shared image pipeline, with
+admitted size/position values and alpha silhouettes of the box's actual uniform
+background paint. A foreground color alone does not create mask ink; masked
+border contributions remain an explicit unsupported case.
+Unsupported masks never expose their unmasked solid background as a substitute
+icon. Transparent graphics require a known opaque backdrop and safe whole-cell
+ownership; native text is never rasterized to make an image effect work.
+Unsupported terminals keep semantic alternatives and native controls. Opacity
+zero on a generated box suppresses subtree paint, including native cursor/focus
+ink, without removing input, focus or accessibility. A `display: contents`
+element has no box on which its own opacity can act. Intermediate group opacity is reported
+as unsupported. Fixed-cell baseline projection preserves aligned text, but
+fractional CSS line intervals still quantize to integral terminal rows. Inline
+artwork retains its CSS placement; snapping native glyph baselines can leave an
+artwork/text offset of less than one terminal row. Thin
+decorations use line glyphs or an explicit readable degradation when no separate
+decoration cell exists; CSS box sizes are not inflated to accommodate them.
 
 HTML meaning remains available when a rule cannot be represented. Unsupported
 selectors, properties, and values are ignored and aggregated in the browser's

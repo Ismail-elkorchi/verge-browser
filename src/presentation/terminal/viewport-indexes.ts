@@ -1,6 +1,7 @@
 import { imageClipsAboveControls } from "./image-projection.js";
 import { createLayoutPaintResolver } from "../layout/paint-style.js";
-import { cssRect, cssMin } from "../layout/index.js";
+import { cssCoordinateAdd, cssCoordinateDifference } from "../layout/index.js";
+import { textCellCssRect, textCellRow } from "./text-projection.js";
 import type { DocumentNodeRef } from "../../document/index.js";
 import type { CssRect, LayoutFragmentId } from "../layout/index.js";
 import type {
@@ -61,7 +62,17 @@ function resolvedViewportGeometry(
   return rects.flatMap((rect, index) => {
     const fragment = fragments[index];
     if (fragment === undefined) throw new Error("Semantic rectangle is missing its layout owner.");
-    const resolved = displayList.projection.visible(fragment, rect);
+    const layout = displayList.documentDisplayList.layout;
+    const source = layout.fragment(fragment);
+    let resolved = displayList.projection.visible(fragment, rect);
+    if (resolved.width <= 0 || resolved.height <= 0) return [];
+    if (source.kind === "text") {
+      const baseline = cssCoordinateDifference(cssCoordinateAdd(source.contentRect.y, source.baseline), source.inkRect.y);
+      const ink = displayList.projection.rect(fragment, source.inkRect);
+      const projected = textCellCssRect(ink, baseline, layout, displayList.context.rowHeightCssPx);
+      // Keep the clipped inline extent, but use the glyph's one projected row.
+      resolved = { ...projected, x: resolved.x, width: resolved.width };
+    }
     return cssRectsToCellRects([resolved], displayList).map((cellRect) => ({ rect: cellRect, fragment }));
   });
 }
@@ -171,7 +182,8 @@ function searchResult(
         if (span.contentStartCodeUnit === null || span.contentEndCodeUnit === null
           || layoutSpan.contentStartCodeUnit >= span.contentEndCodeUnit
           || layoutSpan.contentEndCodeUnit <= span.contentStartCodeUnit) continue;
-        const exact = span.contentEndCodeUnit - span.contentStartCodeUnit === span.endCodeUnit - span.startCodeUnit;
+        const exact = span.logicalText === undefined
+          && span.contentEndCodeUnit - span.contentStartCodeUnit === span.endCodeUnit - span.startCodeUnit;
         let sourceRange = layoutSpan.sourceRange;
         if (sourceRange !== null && span.sourceRange !== null) {
           const start = Math.max(sourceRange.start, span.sourceRange.start);
@@ -396,16 +408,15 @@ export function buildViewportTerminalResult(input: BuildViewportTerminalResultIn
   for (const control of controlCandidates) {
     const fragment = layout.fragment(control.fragment);
     if (fragment.kind !== "control" || fragment.nativeControlMetrics === undefined) continue;
-    const source = layout.formatting.document.control(control.node);
-    const multiline = source?.kind === "textarea" || (source?.kind === "select" && source.multiple);
-    const nativeRect = cssRect(fragment.contentRect.x, fragment.contentRect.y, fragment.contentRect.width,
-      multiline ? fragment.contentRect.height : cssMin(fragment.contentRect.height, fragment.nativeControlMetrics.height));
+    const nativeRect = fragment.nativeControlPaintRect;
+    if (nativeRect === undefined) continue;
     const native = input.displayList.projection.rect(control.fragment, nativeRect);
     const clipped = input.displayList.projection.visible(control.fragment, nativeRect);
     // A text origin owns its cell until the next origin. Outward border rounding
     // instead claims a neighbour's first cell at fractional CSS coordinates.
     const column = Math.floor(native.x / cellWidth);
-    const row = Math.floor(native.y / rowHeight);
+    const row = fragment.nativeControlBaseline === null || fragment.nativeControlBaseline === undefined
+      ? Math.floor(native.y / rowHeight) : textCellRow(native, fragment.nativeControlBaseline, layout, rowHeight);
     const allocation = Object.freeze({ column, row,
       width: Math.max(0, Math.floor((native.x + native.width) / cellWidth) - column),
       height: Math.max(0, Math.floor((native.y + native.height) / rowHeight) - row),
@@ -423,20 +434,25 @@ export function buildViewportTerminalResult(input: BuildViewportTerminalResultIn
       Math.floor((window.y + window.height) / rowHeight));
     if (right <= visibleColumn || bottom <= visibleRow) continue;
     const current = paintStyle(fragment);
-    const under = input.cellBuffer.rows.find((entry) => entry.row === visibleRow)?.cells
-      .find((cell) => cell.column <= visibleColumn && cell.column + cell.width > visibleColumn)?.style;
-    const background = under?.background ?? current.background;
-    const foreground = current.foreground ?? under?.foreground ?? (background === null ? null
-      : { r: 0, g: 0, b: 0, a: 1 });
     controls.push(Object.freeze({ node: control.node, layoutFragment: control.fragment, allocation, paintGroup: control.paintGroup,
+      paintSuppressed: input.displayList.documentDisplayList.paintSuppressed.has(control.fragment),
       visible: Object.freeze({ column: visibleColumn, row: visibleRow, width: right - visibleColumn, height: bottom - visibleRow }),
       outer: input.displayList.projection.rect(control.fragment, fragment.borderRect),
       content: input.displayList.projection.rect(control.fragment, fragment.contentRect),
-      style: Object.freeze({ foreground, background, bold: current.bold, italic: current.italic,
+      style: Object.freeze({ foreground: current.foreground, background: null, bold: current.bold, italic: current.italic,
         underline: current.underline, strikethrough: current.strikethrough }),
     }));
   }
-  const imageProjection = imageClipsAboveControls(input.cellBuffer.images, controls.map((control) => ({
+  const nativeSafeImages = input.cellBuffer.images.map((image) => {
+    const earlierControl = controls.some((control) => !control.paintSuppressed && control.paintGroup < image.paintGroup
+      && control.visible.column < image.clip.column + image.clip.width && control.visible.column + control.visible.width > image.clip.column
+      && control.visible.row < image.clip.row + image.clip.height && control.visible.row + control.visible.height > image.clip.row);
+    // Known-alpha artwork is clipped against all native controls below. Only
+    // the surviving disjoint cells are flattened, so they retain their proof.
+    return earlierControl && image.hasAlpha !== true
+      ? Object.freeze({ ...image, safeForTransparency: false, compositingBackdrop: null }) : image;
+  });
+  const imageProjection = imageClipsAboveControls(nativeSafeImages, controls.filter((control) => !control.paintSuppressed).map((control) => ({
     visible: control.visible, paintGroup: control.paintGroup,
   })), budgets.maxRetainedImagePlacements, input.signal);
   if (imageProjection.truncated) truncations.push(Object.freeze({ budget: "maxRetainedImagePlacements", limit: budgets.maxRetainedImagePlacements }));

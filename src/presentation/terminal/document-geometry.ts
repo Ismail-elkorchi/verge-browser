@@ -176,9 +176,8 @@ class OwnedGeometrySpatialIndex<T> {
 }
 
 function fragmentBorderRects(fragment: LayoutFragment): readonly CssRect[] {
-  return fragment.kind !== "text" && fragment.inlineContinuations !== undefined
-    ? fragment.inlineContinuations.map((continuation) => continuation.borderRect)
-    : [fragment.borderRect];
+  return fragment.kind === "text" ? [fragment.inkRect] : fragment.inlineContinuations !== undefined
+    ? fragment.inlineContinuations.map((continuation) => continuation.borderRect) : [fragment.borderRect];
 }
 
 class ImmutableDocumentGeometryIndex implements DocumentGeometryIndex {
@@ -358,7 +357,9 @@ export function buildDocumentGeometryIndex(
     if (fragment.kind === "control" && fragment.documentNode !== null && fragment.style.visible
       && fragment.borderRect.width > 0 && fragment.borderRect.height > 0) {
       if (controls.length < budgets.maxRetainedDocumentRectangles) {
-        controls.push(Object.freeze({ node: fragment.documentNode, fragment: fragment.id, rect: fragment.borderRect,
+        controls.push(Object.freeze({ node: fragment.documentNode, fragment: fragment.id,
+          rect: fragment.nativeControlPaintRect === undefined ? fragment.borderRect
+            : cssUnion([fragment.borderRect, fragment.nativeControlPaintRect], fragment.borderRect),
           paintGroup: controlPaintGroups.get(fragment.id) ?? -1 }));
       } else truncated("maxRetainedDocumentRectangles", budgets.maxRetainedDocumentRectangles);
     }

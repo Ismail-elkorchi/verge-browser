@@ -78,7 +78,7 @@ export interface LayoutBudgets {
   readonly maxDepth: number;
 }
 
-/** A native single-line baseline is relative to the content origin; null requests synthesis. */
+/** A native single-line baseline is relative to its natural footprint origin; null requests synthesis. */
 export interface CssControlMetrics extends CssSize {
   readonly baseline: CssPixelLength | null;
 }
@@ -133,6 +133,8 @@ export interface LayoutControlTextLine {
   readonly clusters: LayoutTextClusters;
   readonly blockOffset: CssPixelLength;
   readonly height: CssPixelLength;
+  /** Glyph baseline relative to this line's blockOffset. */
+  readonly baseline: CssPixelLength;
 }
 
 export interface LayoutTextFragment {
@@ -158,6 +160,9 @@ export interface LayoutTextFragment {
   readonly children: readonly LayoutFragmentId[];
   readonly lineBoxes: readonly LineBox[];
   readonly usedFontMetrics: UsedFontMetrics;
+  /** Actual glyph footprint, including overflow from negative half-leading. */
+  readonly inkRect: CssRect;
+  /** Actual glyph baseline relative to contentRect.y, after vertical alignment. */
   readonly baseline: CssPixelLength;
   readonly visualOrder: number;
   readonly paintOrder: number;
@@ -213,6 +218,10 @@ export interface LayoutBoxFragment {
   readonly inlineContinuations?: readonly InlineContinuationGeometry[];
   /** Natural native block footprint, independent of the CSS outer box and line strut. */
   readonly nativeControlMetrics?: CssControlMetrics;
+  /** Native content placement in document CSS coordinates; independent of CSS box chrome. */
+  readonly nativeControlPaintRect?: CssRect;
+  /** Glyph baseline relative to nativeControlPaintRect.y; null for multiline widgets. */
+  readonly nativeControlBaseline?: CssPixelLength | null;
   readonly controlLabel?: string;
   readonly controlValue?: string;
   readonly controlText?: string;

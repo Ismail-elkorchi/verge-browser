@@ -41,19 +41,9 @@ export function nestedPrelude(values: readonly ComponentValue[]): readonly Compo
   return Object.freeze(result);
 }
 
-export function containsNesting(selector: ComplexSelector): boolean {
-  return selector.compounds.some((compound) => compound.simples.some((simple) => {
-    if (simple.kind === "nesting") return true;
-    if (simple.kind !== "pseudo-class" && simple.kind !== "pseudo-element") return false;
-    if (simple.argument.kind === "selector-list") return simple.argument.selectors.some(containsNesting);
-    if (simple.argument.kind === "nth") return simple.argument.of.some(containsNesting);
-    return false;
-  }));
-}
-
 /** Insert implicit descendant nesting without reparsing or expanding parent selector products. */
 export function withImplicitNesting(selector: ComplexSelector): ComplexSelector {
-  if (containsNesting(selector)) return selector;
+  if (selector.source.containsNesting) return selector;
   const compound = Object.freeze({ type: null,
     simples: Object.freeze([{ kind: "nesting" as const, span: selector.span }]), span: selector.span });
   return Object.freeze({ ...selector,

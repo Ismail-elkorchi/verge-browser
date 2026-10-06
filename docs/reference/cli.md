@@ -81,6 +81,16 @@ was also observed visually; no equivalent WezTerm visual-reversal claim is made.
 Cooperative suspension/resume is covered by runtime tests, not a native CLI
 job-control claim. Full native Ubuntu Ptyxis qualification remains separate.
 
+### Observed graphics redraw limitation
+
+During native qualification on Kitty 0.45.0, a first graphics frame after an idle
+interval sometimes showed cleared rectangles until the next redraw. The same
+captured output reproduced this in a standalone terminal replay without Verge
+running. An empty synchronized redraw revealed the existing images without
+retransmitting or replacing them. This isolates a timing-dependent terminal
+presentation limitation; it does not establish the exact internal cause.
+Native text remained visible. Verge does not add periodic redraws to conceal it.
+
 ## Browser keys
 
 | Key | Action |

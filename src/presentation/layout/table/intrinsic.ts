@@ -88,12 +88,13 @@ export function intrinsicTableBlockSize(
   node: FormattingNode,
   availableInlineSize: CssPixelLength,
   depth: number,
+  forcedContentWidth: CssPixelLength | null = null,
 ): CssNonNegativeLength {
   const table = tableNode(host, node);
   if (table === null) return ZERO;
   const style = host.computed(table);
   if (style === null) return ZERO;
-  const sizing = resolveTableSizing(host, table, style, availableInlineSize);
+  const sizing = resolveTableSizing(host, table, style, availableInlineSize, null, forcedContentWidth);
   let result: CssPixelLength = sizing.contentHeight;
   if (node.kind === "table-wrapper") {
     const captionWidth = cssAdd(sizing.widthResult.usedGridWidth,

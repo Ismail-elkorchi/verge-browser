@@ -198,8 +198,12 @@ export function reconcileScrollOffsets(layout: LayoutFragmentTree, offsets: read
 
 export function logicalRangeRect(layout: LayoutFragmentTree, fragment: LayoutFragmentId, start: number, end: number): CssRect | null {
   const value = layout.fragment(fragment);
-  const lines = value.kind === "control" && value.controlLines !== undefined ? value.controlLines
-    : [{clusters:value.visualClusters??[],blockOffset:0,height:value.contentRect.height}];
+  const origin = value.kind === "text" ? value.inkRect : value.kind === "control"
+    ? value.nativeControlPaintRect ?? value.contentRect : value.contentRect;
+  const lines = value.kind === "control" && value.controlLines !== undefined ? value.controlLines.map((line) => ({
+    ...line, blockOffset: line.blockOffset + line.baseline - (value.usedFontMetrics?.ascent ?? line.baseline),
+    height: value.usedFontMetrics === null ? line.height : cssLengthFromFixed(value.usedFontMetrics.ascent + value.usedFontMetrics.descent),
+  })) : [{clusters:value.visualClusters??[],blockOffset:0,height:origin.height}];
   for (const line of lines) {
     let advance = 0;
     let left: number | null = null;
@@ -211,8 +215,8 @@ export function logicalRangeRect(layout: LayoutFragmentTree, fragment: LayoutFra
       }
       advance += cluster.advance;
     }
-    if (left !== null) return cssRect(cssCoordinateFromFixed(value.contentRect.x+left),
-      cssCoordinateFromFixed(value.contentRect.y+line.blockOffset),cssLengthFromFixed(Math.max(1,right-left)),line.height);
+    if (left !== null) return cssRect(cssCoordinateFromFixed(origin.x+left),
+      cssCoordinateFromFixed(origin.y+line.blockOffset),cssLengthFromFixed(Math.max(1,right-left)),line.height);
   }
   return null;
 }

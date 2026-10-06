@@ -68,6 +68,9 @@ html|hr { border-style: solid; border-width: 1px; }
 html|b, html|strong, html|h1, html|h2, html|h3, html|h4, html|h5,
 html|h6, html|th { font-weight: 700; }
 html|address, html|cite, html|em, html|i { font-style: italic; }
+html|sub { vertical-align: sub; }
+html|sup { vertical-align: super; }
+html|sub, html|sup { line-height: normal; font-size: smaller; }
 html|u { text-decoration-line: underline; }
 html|del, html|s, html|strike { text-decoration-line: line-through; }
 html|pre, html|xmp, html|plaintext, html|listing { white-space: pre; }

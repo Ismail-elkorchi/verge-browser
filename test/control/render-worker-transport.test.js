@@ -7,6 +7,11 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 import { RenderWorkerClient } from "../../dist/ui/render-worker/client.js";
 import { createDocumentState, parseWebDocument } from "../../dist/document/index.js";
+import { acceptBrowserViewportImages, browserRasterImage, discardBrowserViewportImages, prepareBrowserViewportImages } from "../../dist/ui/image-presentation.js";
+import { acceptImageResource, retainedImageBytes, MAX_RETAINED_IMAGE_BYTES } from "../../dist/ui/image-loading.js";
+import { text } from "@ismail-elkorchi/terminal-ui/components";
+import { createMemoryTerminalHost, failedTerminalWrite } from "@ismail-elkorchi/terminal-ui/host";
+import { createTuiRuntime, defineTui } from "@ismail-elkorchi/terminal-ui/tui";
 
 class ControlledWorker extends EventEmitter {
   requests = [];
@@ -58,13 +63,145 @@ const parameters = { columns: 80, rows: 24, scrollRow: 0, overscanBefore: 2, ove
 function viewport(request, identity, summary) {
   return { kind: "viewport-ready", requestId: request.requestId, payload: {
     documentId: request.documentId, documentRevision: request.documentRevision, stateRevision: request.stateRevision, viewportRevision: request.viewportRevision,
-    summaryIdentity: identity, layoutRevision: identity, summary,
+    summaryIdentity: identity, layoutRevision: identity, summary, visibleImages: [],
   } };
 }
 
 const summary = { identity: "layout-1", documentRowCount: 500, incomplete: [], scrollAnchors: [{ documentNode: "target", row: 300 }],
   styleOutcome: { status: "complete", computedNodes: 1 }, styleDiagnostics: [], omittedStyleDiagnosticCount: 0,
   focusOrder: [{ node: "target", scrollOwner: null, actionId: "link:target", actionKind: "link", topRow: 300, bottomRow: 301 }], authorStateDependencies: [] };
+
+test("transport-held pixels stay counted and immutable through failed publication and candidate retry", async () => {
+  const f = fixture();
+  const controller = new BrowserController({ store: { async flush() {} }, services: { async close() {} },
+    renderWorkerFactory: () => f.client, createAcquisition: () => { throw new Error("unexpected acquisition"); } });
+  try {
+    await attach(f);
+    const work = f.client.renderViewport(f.document, 1, parameters);
+    const image = { id: "art", requestUrl: "https://example.test/art.png", owners: [], width: 2, height: 1,
+      hasAlpha: true, status: "ready", mimeType: "image/png", pixels: new Uint8Array(8) };
+    const paint = { id: "paint", resourceId: image.id, naturalWidth: 2, naturalHeight: 1,
+      hasAlpha: true, safeForTransparency: true, compositingBackdrop: { r: 255, g: 255, b: 255, a: 1 } };
+    const response = viewport(f.worker.requests.at(-1), "layout-1", summary);
+    f.worker.respond({ ...response, payload: { ...response.payload, cellBuffer: { images: [paint] } } });
+    const payload = await work;
+    await prepareBrowserViewportImages([image], payload.cellBuffer, () => 100);
+    acceptBrowserViewportImages(payload.cellBuffer); f.client.acknowledgeViewport(payload);
+    const snapshot = { ...f.document.snapshot, images: [image] };
+    const document = { ...f.document, kind: "ready", snapshot, navigation: { entries: [{ snapshot }] },
+      rendering: { viewport: payload, previousViewport: null } };
+    const state = { documents: [document], recentlyClosed: [], activeDocumentIndex: 0 };
+    const handle = browserRasterImage(image, paint, payload.cellBuffer);
+    assert.ok(handle);
+    for (const visible of [state,
+      { ...state, documents: [{ ...document, rendering: { viewport: null, previousViewport: payload } }] },
+      { documents: [], recentlyClosed: [document] }]) {
+      controller.observeImageRetentionState(visible);
+      assert.equal(browserRasterImage(image, paint, payload.cellBuffer), handle);
+      assert.equal(retainedImageBytes(visible), 16);
+    }
+    const navigated = { ...state, documents: [{ ...document, rendering: { viewport: null, previousViewport: null } }] };
+    controller.observeImageRetentionState(navigated);
+    assert.ok([...f.client.retainedViewports()].includes(payload), "the actual transport still owns its old payload");
+    assert.equal(browserRasterImage(image, paint, payload.cellBuffer), handle, "speculative reducer observation cannot retire accepted pixels");
+    const bytes = (value = navigated, addition) => retainedImageBytes(value, addition, controller.retainedImageViewports());
+    assert.equal(bytes(), 16, "transport-only raster bytes count even when the speculative state has no viewport");
+    const pending = { ...image, id: "next", requestUrl: "https://example.test/next.png", status: "pending", pixels: undefined };
+    const incoming = { ...pending, status: "ready", pixels: new Uint8Array(MAX_RETAINED_IMAGE_BYTES - 8) };
+    const admitting = { ...navigated, documents: [{ ...navigated.documents[0], snapshot: { ...snapshot, images: [image, pending] } }] };
+    const rejected = acceptImageResource(admitting, { kind: "imageResource", documentId: document.id,
+      documentRevision: document.documentRevision, resourceRevision: document.snapshot.imageResourceRevision ?? 0,
+      resource: incoming }, controller.retainedImageViewports());
+    assert.equal(rejected.documents[0].snapshot.images[1].failure, "resource-limit");
+
+    const nextPaint = { ...paint, compositingBackdrop: { r: 0, g: 0, b: 0, a: 1 } };
+    const next = { ...payload, viewportRevision: 2, cellBuffer: { images: [nextPaint] } };
+    await prepareBrowserViewportImages([image], next.cellBuffer, () => MAX_RETAINED_IMAGE_BYTES - bytes());
+    assert.equal(bytes(), 24);
+    const memory = createMemoryTerminalHost({ terminalSize: { columns: 30, rows: 3 } });
+    let failWrite = false, acknowledged = false;
+    const host = { ...memory, write: (...args) => failWrite
+      ? Promise.resolve(failedTerminalWrite("image-publication-test", new Error("rejected output"))) : memory.write(...args) };
+    const runtime = createTuiRuntime({ host, app: defineTui({ id: "image-publication", init: () => ({ state }),
+      subscriptions: (value) => [controller.imageRetentionSource(value)],
+      view: (value) => text({ content: value === state ? "accepted frame" : "candidate frame" }),
+      update(previous) {
+        controller.reserveImageRetentionState(previous, navigated);
+        return { state: navigated, effects: [{ id: "accepted", run() {
+          acknowledged = true; controller.acknowledgeViewport(next); return Promise.resolve({ kind: "none" });
+        } }] };
+      } }) });
+    try {
+      await runtime.start(); failWrite = true;
+      await assert.rejects(runtime.dispatch({ kind: "navigate" }));
+      assert.equal(runtime.state(), state);
+      assert.equal(acknowledged, false, "acceptance effects wait for actual publication");
+      assert.equal(browserRasterImage(image, paint, payload.cellBuffer), handle);
+      assert.equal(bytes(), 24, "unpublished candidate remains reserved alongside the accepted transport owner");
+      discardBrowserViewportImages(next.cellBuffer);
+      assert.equal(bytes(), 16);
+      await prepareBrowserViewportImages([image], next.cellBuffer, () => MAX_RETAINED_IMAGE_BYTES - bytes());
+      assert.ok(browserRasterImage(image, nextPaint, next.cellBuffer), "a discarded publication can be prepared again");
+      discardBrowserViewportImages(next.cellBuffer);
+      assert.equal(bytes(), 16);
+    } finally { failWrite = false; await runtime.dispose(); discardBrowserViewportImages(next.cellBuffer); }
+  } finally { await controller.close(); }
+});
+
+test("image state ownership coalesces batches and adopts only publication-admitted subscription state", async () => {
+  const f = controllerFixture();
+  const state = (size, label, block = false) => {
+    const image = { id: label, requestUrl: `https://example.test/${label}.png`, owners: [], width: size / 4, height: 1,
+      hasAlpha: true, status: "ready", mimeType: "image/png", pixels: new Uint8Array(size) };
+    const snapshot = { images: [image] };
+    return { label, block, documents: [{ kind: "ready", snapshot, navigation: { entries: [{ snapshot }] },
+      rendering: { viewport: null, previousViewport: null } }], recentlyClosed: [] };
+  };
+  const initial = state(8, "initial"), intermediate = state(16, "intermediate"), published = state(24, "published");
+  f.controller.reserveImageRetentionState(initial, initial);
+  const memory = createMemoryTerminalHost({ terminalSize: { columns: 30, rows: 3 } });
+  let failWrite = false;
+  const writes = [];
+  const host = { ...memory, write: (...args) => {
+    writes.push(f.controller.retainedImageStates().map((value) => value.label));
+    return failWrite ? Promise.resolve(failedTerminalWrite("image-state-test", new Error("rejected output"))) : memory.write(...args);
+  } };
+  const runtime = createTuiRuntime({ host, runtimePolicy: { maxOwnedSources: 1 }, app: defineTui({ id: "image-state", init: () => ({ state: initial }),
+    subscriptions: (value) => [f.controller.imageRetentionSource(value), ...(value.block
+      ? [{ id: "over-admission", generation: 1, channel: { capacity: 1 }, async run() {} }] : [])],
+    view: (value) => text({ content: value.label }),
+    update(previous, message) {
+      f.controller.reserveImageRetentionState(previous, message.state);
+      return { state: message.state };
+    } }) });
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  const bytes = () => retainedImageBytes(runtime.state(), undefined, [], f.controller.retainedImageStates());
+  try {
+    await runtime.start(); await settle();
+    const messages = runtime.metrics().dispatchedMessages;
+    await runtime.dispatchMany([{ state: intermediate }, { state: published }]); await settle();
+    assert.deepEqual(writes.at(-1), ["initial", "published"], "intermediate reducer states never replace the accepted owner");
+    assert.deepEqual(f.controller.retainedImageStates(), [published]);
+    assert.equal(bytes(), 24);
+    assert.equal(runtime.metrics().dispatchedMessages, messages + 2, "retention subscriptions emit no completion messages");
+    const rejected = state(32, "rejected"); failWrite = true;
+    await assert.rejects(runtime.dispatch({ state: rejected }));
+    assert.equal(runtime.state(), published);
+    assert.deepEqual(f.controller.retainedImageStates(), [published, rejected]);
+    assert.equal(bytes(), 56, "actual accepted and live speculative decoded-only pixels both count");
+    failWrite = false;
+    const denied = state(40, "denied", true), written = writes.length;
+    await assert.rejects(runtime.dispatch({ state: denied }), /source_generations/u);
+    assert.equal(runtime.state(), published);
+    assert.equal(writes.length, written, "subscription admission fails before output");
+    assert.deepEqual(f.controller.retainedImageStates(), [published, denied], "one candidate replaces the rejected candidate without a chain");
+    const recovered = state(48, "recovered");
+    await runtime.dispatch({ state: recovered }); await settle();
+    assert.deepEqual(f.controller.retainedImageStates(), [recovered]);
+    assert.equal(bytes(), 48);
+  } finally { failWrite = false; await runtime.dispose(); await f.controller.close(); }
+  assert.deepEqual(f.controller.retainedImageStates(), []);
+});
 
 test("summary receipt survives rejection of its viewport and acknowledges only held identity", async () => {
   const f = fixture();

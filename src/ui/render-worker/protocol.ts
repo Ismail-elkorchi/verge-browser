@@ -131,6 +131,8 @@ export interface RenderFocusOrderEntry {
 }
 
 export interface ViewportRenderPayload {
+  /** Bounded, fair img/artwork priority from the accepted viewport geometry. */
+  readonly visibleImages: readonly DocumentImageMetadata[];
   readonly minScrollColumn?: number;
   readonly maxScrollColumn?: number;
   readonly viewportOverflow: { readonly x: CssOverflow; readonly y: CssOverflow };

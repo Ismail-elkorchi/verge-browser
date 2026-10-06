@@ -128,22 +128,35 @@ fixup, automatic or fixed column layout, row and rowspan distribution, top and
 bottom captions, separated or collapsed borders, RTL geometry, and source-owned
 explicit, transitive, scoped, and automatic header associations. Verge does not
 cover subgrid, masonry, vertical writing
-modes, table fragmentation, animation, web fonts, CSS image masks, or
+modes, table fragmentation, animation, web fonts, masks over document text, or
 page JavaScript. Client-rendered
 sites, anti-bot challenges, media, and unsupported form encodings may therefore
 be unavailable. Network access remains constrained by the package’s protocol,
 redirect, content-type, timeout, and size policies.
-The interactive view progressively loads opaque static PNG/JPEG `img` resources
+The interactive view progressively loads static PNG/JPEG and bounded SVG resources
 through the same document-scoped network policy. Decoding runs in a bounded,
 cancellable worker; supported terminals use terminal-ui's Kitty/SIXEL graphics.
-Plain output, unsupported terminals, transparent images, interlaced PNG,
-unsupported color profiles and failed resources retain alternative text.
-SVG, CSS background images and image masks are not enabled by this support.
+Document text and controls remain native terminal output. Transparent images and
+single-image decorative masks use graphics only with a verified opaque backdrop
+and safe cell ownership; overlapping native ink and complex backdrops retain a
+semantic media fallback. Plain output, unsupported terminals, interlaced PNG,
+unsupported color profiles and failed resources retain image alternatives.
+Static SVG support excludes scripts, external resources, fonts, filters and
+animation. Canonical sRGB PNG metadata is admitted; arbitrary ICC conversion is
+not implemented. CSS background-image painting, mask stacks, masks over text and
+partial group opacity remain unsupported. Fully transparent subtrees retain
+layout and interaction while suppressing their ink and cursor.
 Image diagnostics distinguish pending, ready and failed resources. The default
-activation admits at most 32 image resources, 2 MiB per encoded response,
-8 MiB total encoded data, 2,097,152 pixels per image and 32 MiB decoded data.
-The UI separately reserves at most 64 MiB for decoded pixels and their terminal
-raster copies across tabs and history. Images do not delay first document acceptance.
+active pool admits at most 32 img and CSS artwork resources, prioritizing both
+visible kinds after the first viewport. Offscreen pixels can be replaced while
+known img dimensions preserve layout. Acquisition allows 2 MiB per encoded
+response, 8 MiB total encoded data, 2,097,152 pixels per image and 32 MiB decoded
+data; changing the visible pool does not reset the shared encoded-byte budget.
+The UI separately admits at most 64 MiB for decoded pixels, retained terminal
+rasters and pending preparation across tabs and history. SVG admission bounds
+source structure, references, path work and conservative intermediate workspace;
+the WASM decoder has no hard linear-memory maximum. Decoder deadlines remain
+terminable. Images do not delay first document acceptance.
 Interactive form indexing is capped at 256 forms per page, 2,000 controls per
 form, and 2,000 options per select to keep hostile documents responsive.
 

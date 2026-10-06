@@ -1,3 +1,4 @@
+import { discoverViewportImages } from "../../app/image-admission.js";
 import { viewportInlineRange } from "../../presentation/terminal/viewport-geometry.js";
 import { RenderBudgetExceededError } from "../../memory/retained-cost.js";
 import { parentPort, workerData } from "node:worker_threads";
@@ -72,6 +73,10 @@ function incompleteRenderingLabels(artifacts: ReturnType<RenderArtifactStore["an
   add("formatting", artifacts.boxTree.outcome);
   add("layout", artifacts.documentLayout.outcome);
   add("display-list", artifacts.documentDisplayList.outcome);
+  for (const fallback of artifacts.documentDisplayList.artworkFallbacks) {
+    labels.push(`artwork.${fallback.reason}=${String(fallback.count)}`);
+  }
+  if (artifacts.documentDisplayList.artworkFallbacksOmitted > 0) labels.push("artwork.diagnostic-limit");
   return Object.freeze(labels);
 }
 
@@ -273,10 +278,12 @@ function receive(message: RenderWorkerRequest): void {
       signal: viewportSignal,
     }, (result, artifacts) => {
       completedViewportRequests += 1;
-      const summaryKey = [message.documentId, message.documentRevision, result.artifactKey.documentLayout, result.artifactKey.reporting].join("\u0000");
+      const summaryKey = [message.documentId, message.documentRevision, result.artifactKey.documentLayout, result.artifactKey.reporting, result.artifactKey.documentDisplayList].join("\u0000");
       const includeSummary = message.heldSummaryIdentity !== summaryKey;
       const inlineRange = viewportInlineRange(artifacts.documentLayout, message.parameters.columns * CELL_WIDTH);
+      const visibleImages = discoverViewportImages(result.displayList, viewportSignal);
       const payload: TransferredViewportRenderPayload = Object.freeze({
+        visibleImages: visibleImages.resources,
         viewportOverflow: artifacts.documentLayout.viewportOverflow,
         cellInline: renderContext.terminalContext.cellWidthCssPx,
         cellBlock: renderContext.terminalContext.rowHeightCssPx,
@@ -302,7 +309,8 @@ function receive(message: RenderWorkerRequest): void {
         summary: includeSummary ? Object.freeze({
           identity: summaryKey,
           documentRowCount: result.documentExtentRows,
-          incomplete: incompleteRenderingLabels(artifacts),
+          incomplete: Object.freeze([...incompleteRenderingLabels(artifacts),
+            ...(visibleImages.omittedReferences > 0 ? ["visible-images.resource-limit"] : [])]),
           styleOutcome: artifacts.computedStyles.outcome,
           styleDiagnostics: artifacts.computedStyles.diagnostics,
           omittedStyleDiagnosticCount: artifacts.computedStyles.omittedDiagnosticCount,

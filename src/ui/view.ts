@@ -172,6 +172,7 @@ function labelledBrowserControl(
 ): Element<BrowserTuiMessage> {
   const labelled = browserControlComponent({
     id: `${id}:labelled-control`,
+    ...(geometry.paintSuppressed ? { meta: { paint: "suppressed" as const } } : {}),
     label,
     node,
     geometry,
@@ -430,7 +431,8 @@ const browserImageComponent = defineComponent<{
     }
     const resource = document.source.snapshot.images?.find((entry) => entry.id === placement.resourceId);
     if (resource === undefined || resource.width !== placement.naturalWidth || resource.height !== placement.naturalHeight) return;
-    const image = browserRasterImage(resource);
+    const committed = document.source.rendering.viewport ?? document.source.rendering.previousViewport;
+    const image = browserRasterImage(resource, placement, committed?.cellBuffer);
     if (image === null) return;
     target.placeGraphic({ id: `${document.source.id}:${placement.id}`, image, fit: "fill", clip: bounds,
       bounds: documentCellRect(placement.bounds, page) });

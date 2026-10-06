@@ -1,4 +1,4 @@
-import { documentImageMetadata } from "../../document/index.js";
+import { pageImageMetadata } from "../../app/image-admission.js";
 import { estimatedRetainedCost, RenderBudgetExceededError } from "../../memory/retained-cost.js";
 import { setTimeout, clearTimeout } from "node:timers";
 import { Worker } from "node:worker_threads";
@@ -132,6 +132,11 @@ export class RenderWorkerClient {
   public get failed(): boolean { return this.#failure !== null; }
   public get pendingRequestCount(): number { return this.#pending.size; }
 
+  /** Existing transport owners may outlive the UI's current source activation. */
+  public retainedViewports(): Iterable<ViewportRenderPayload> {
+    return new Set([...this.#viewports.values(), ...this.#committedViewports.values()]);
+  }
+
   public acknowledgeViewport(payload: ViewportRenderPayload): void {
     if (this.#viewports.get(payload.documentId) !== payload) return;
     this.#committedViewports.set(payload.documentId, payload);
@@ -199,7 +204,7 @@ export class RenderWorkerClient {
       requestId: this.#nextRequestId(),
       documentId: document.id,
       documentRevision: document.documentRevision,
-      images: Object.freeze((document.snapshot.images ?? []).map(documentImageMetadata)),
+      images: pageImageMetadata(document.snapshot),
     });
     if (response.kind !== "images-updated") throw new Error("Unexpected image metadata update response.");
     return response.change;
