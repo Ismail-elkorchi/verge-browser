@@ -70,20 +70,28 @@ function usedMaskLength(value: CssLength, basis: CssPixelLength, fragment: Layou
   }
 }
 
-/** One image-backed alpha silhouette. Layout stays canonical; only its artwork
- * size/position is resolved here. Native text/control descendants never rasterize.
- */
-function resolveMaskArtwork(fragment: LayoutFragment, style: ComputedStyle, layout: LayoutFragmentTree,
-  metadata: DocumentImageMetadata | undefined, nativeContent: boolean): LayoutMaskArtwork | LayoutArtworkFallbackReason {
-  if (style.mask.image.kind !== "url") return "unsupported-mask";
-  if (nativeContent || fragment.kind !== "box") return "native-content-mask";
+function paintsBorder(fragment: LayoutFragment, style: ComputedStyle): boolean {
   const border = fragment.borderRect, padding = fragment.paddingRect;
   const widths = { top: padding.y - border.y, right: border.x + border.width - padding.x - padding.width,
     bottom: border.y + border.height - padding.y - padding.height, left: padding.x - border.x };
   for (const side of ["top", "right", "bottom", "left"] as const) {
     const color = style.box.borderColors[side];
-    if (widths[side] > 0 && style.box.borderStyles[side] === "solid" && (color === null || color.a > 0)) return "unsupported-mask-paint";
+    if (widths[side] > 0 && style.box.borderStyles[side] === "solid" && (color === null || color.a > 0)) return true;
   }
+  return fragment.kind === "box" && (fragment.tableCollapsedBorderSegments ?? []).some((segment) => {
+    const color = segment.style.borderColors[segment.side];
+    return color === null || color.a > 0;
+  });
+}
+
+/** One image-backed alpha silhouette. Layout stays canonical; only its artwork
+ * size/position is resolved here. Native text/control descendants never rasterize.
+ */
+function resolveMaskArtwork(fragment: LayoutFragment, style: ComputedStyle, layout: LayoutFragmentTree,
+  metadata: DocumentImageMetadata | undefined, nativeContent: boolean, descendantPaint: boolean): LayoutMaskArtwork | LayoutArtworkFallbackReason {
+  if (style.mask.image.kind !== "url") return "unsupported-mask";
+  if (nativeContent || fragment.kind !== "box") return "native-content-mask";
+  if (descendantPaint || paintsBorder(fragment, style)) return "unsupported-mask-paint";
   // A mask clips existing paint; color alone does not fill an empty element.
   // background:currentColor is already resolved by the canonical style stage.
   // This bounded artwork path models one uniform background, not border ink.
@@ -124,34 +132,63 @@ function resolveMaskArtwork(fragment: LayoutFragment, style: ComputedStyle, layo
 export function createLayoutArtworkResolver(layout: LayoutFragmentTree, styles: StyleSnapshot,
   images: readonly DocumentImageMetadata[] | undefined, signal?: AbortSignal): (fragment: LayoutFragment) =>
   { readonly masked: boolean; readonly artwork: LayoutMaskArtwork | null; readonly fallback: LayoutArtworkFallbackReason | null } {
-  const order: LayoutFragment[] = [];
-  const pending = [layout.root];
+  // This one construction-only traversal owns both mask ancestry and subtree
+  // eligibility. Stacking order may visit a descendant independently later;
+  // it must not turn that descendant's chrome into unmasked source paint.
+  const scopes = new Map<LayoutFragment["id"], {
+    readonly fragment: LayoutFragment;
+    readonly style: ComputedStyle | null;
+    readonly ownsMask: boolean;
+    readonly maskedAncestor: boolean;
+    nativeContent: boolean;
+    decorativeContent: boolean;
+    descendantPaint: boolean;
+  }>();
+  const pending = [{ id: layout.root, maskedAncestor: false }];
   while (pending.length > 0) {
     signal?.throwIfAborted();
-    const id = pending.pop();
-    if (id === undefined) continue;
+    const entry = pending.pop();
+    if (entry === undefined) continue;
+    const { id, maskedAncestor } = entry;
     const fragment = layout.fragment(id);
-    order.push(fragment);
-    for (const child of fragment.children) pending.push(child);
+    const node = layout.formatting.node(fragment.formattingNode);
+    const style = formattingComputedStyle(node, styles);
+    const ownsMask = node.appliesBoxStyle && fragment.kind !== "text"
+      && style !== null && style.mask.image.kind !== "none";
+    scopes.set(id, { fragment, style, ownsMask, maskedAncestor, descendantPaint: false,
+      nativeContent: fragment.kind === "control" || fragment.kind === "replaced"
+        || fragment.kind === "text" && fragment.visualText.trim().length > 0,
+      decorativeContent: node.appliesBoxStyle && fragment.kind !== "text" && style !== null && style.visibility === "visible"
+        && (ownsMask || style.text.background !== null && style.text.background.a > 0 || paintsBorder(fragment, style)),
+    });
+    for (const child of fragment.children) pending.push({ id: child, maskedAncestor: maskedAncestor || ownsMask });
   }
-  const nativeContent = new Set<LayoutFragment["id"]>();
+  const order = [...scopes.values()];
   for (let index = order.length - 1; index >= 0; index -= 1) {
     signal?.throwIfAborted();
-    const fragment = order[index];
-    if (fragment === undefined) continue;
-    if (fragment.kind === "control" || fragment.kind === "replaced"
-      || (fragment.kind === "text" && fragment.visualText.trim().length > 0)
-      || fragment.children.some((child) => nativeContent.has(child))) nativeContent.add(fragment.id);
+    const scope = order[index];
+    if (scope === undefined) continue;
+    for (const child of scope.fragment.children) {
+      const descendant = scopes.get(child);
+      if (descendant === undefined) continue;
+      scope.nativeContent ||= descendant.nativeContent;
+      scope.descendantPaint ||= descendant.decorativeContent;
+    }
+    scope.decorativeContent ||= scope.descendantPaint;
   }
   const metadata = new Map(images?.map((image) => [image.id, image]));
   const unmasked = Object.freeze({ masked: false, artwork: null, fallback: null });
+  const maskedDescendant = Object.freeze({ masked: true, artwork: null, fallback: null });
   return (fragment) => {
     signal?.throwIfAborted();
-    const node = layout.formatting.node(fragment.formattingNode);
-    const style = formattingComputedStyle(node, styles);
-    if (!node.appliesBoxStyle || fragment.kind === "text" || style === null || style.mask.image.kind === "none") return unmasked;
+    const scope = scopes.get(fragment.id);
+    if (scope === undefined) return unmasked;
+    const { style } = scope;
+    if (scope.maskedAncestor) return scope.ownsMask && !scope.nativeContent
+      ? { masked: true, artwork: null, fallback: "unsupported-mask-paint" } : maskedDescendant;
+    if (!scope.ownsMask || style === null) return unmasked;
     const resolved = resolveMaskArtwork(fragment, style, layout,
-      style.mask.image.kind === "url" ? metadata.get(style.mask.image.resourceId) : undefined, nativeContent.has(fragment.id));
+      style.mask.image.kind === "url" ? metadata.get(style.mask.image.resourceId) : undefined, scope.nativeContent, scope.descendantPaint);
     return typeof resolved === "string" ? { masked: true, artwork: null, fallback: resolved }
       : { masked: true, artwork: resolved,
         fallback: resolved.naturalWidth === null || resolved.naturalHeight === null ? "mask-intrinsics-pending" : null };

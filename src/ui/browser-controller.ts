@@ -243,6 +243,7 @@ export class BrowserController {
   #nextDocumentNumber = 1;
   #workspaceSaveRevision = 0;
   #imageOperation: Promise<unknown> | null = null;
+  readonly #imageAcquisitionOwners = new Set<{ readonly snapshot: IndexedPageSnapshot }>();
   #imageRetentionState: BrowserTuiState | null = null;
   #imageRetentionRevision = 0;
   #acceptedImageRetentionRevision = 0;
@@ -267,6 +268,11 @@ export class BrowserController {
     const candidate = this.#imageRetentionCandidate?.state.deref();
     return [...(this.#imageRetentionState === null ? [] : [this.#imageRetentionState]),
       ...(candidate === undefined || candidate === this.#imageRetentionState ? [] : [candidate])];
+  }
+
+  /** Queued and retiring acquisitions keep their input pixels until cleanup settles. */
+  public retainedImageSnapshots(): readonly IndexedPageSnapshot[] {
+    return [...this.#imageAcquisitionOwners].map((owner) => owner.snapshot);
   }
 
   /** Subscription activation is synchronous after publication and budget admission.
@@ -444,7 +450,7 @@ export class BrowserController {
     } as unknown as BrowserTuiState;
     try {
       await prepareBrowserViewportImages(document.snapshot.images ?? [], payload.cellBuffer,
-        () => MAX_RETAINED_IMAGE_BYTES - retainedImageBytes(retainedState(), undefined, this.retainedImageViewports(), this.retainedImageStates()), signal);
+        () => MAX_RETAINED_IMAGE_BYTES - retainedImageBytes(retainedState(), undefined, this.retainedImageViewports(), this.retainedImageStates(), this.retainedImageSnapshots()), signal);
       signal?.throwIfAborted();
       return payload;
     } catch (error) {
@@ -466,20 +472,27 @@ export class BrowserController {
   }
 
   public async acquireImages(
-    document: BrowserDocumentState,
+    documentId: string,
+    snapshot: IndexedPageSnapshot,
     signal: AbortSignal,
     onResource: (resource: DocumentImageResource) => Promise<void>,
   ): Promise<void> {
     signal.throwIfAborted();
-    while (this.#imageOperation !== null) {
-      await waitForPreparation(this.#imageOperation.catch(() => undefined), signal);
-      signal.throwIfAborted();
+    const owner = { snapshot };
+    this.#imageAcquisitionOwners.add(owner);
+    try {
+      while (this.#imageOperation !== null) {
+        await waitForPreparation(this.#imageOperation.catch(() => undefined), signal);
+        signal.throwIfAborted();
+      }
+      if (this.#closed) throw new Error("Browser controller is closed.");
+      const operation = this.#acquisition(documentId).acquireImages(snapshot, { signal, onResource });
+      this.#imageOperation = operation;
+      try { await operation; }
+      finally { if (this.#imageOperation === operation) this.#imageOperation = null; }
+    } finally {
+      this.#imageAcquisitionOwners.delete(owner);
     }
-    if (this.#closed) throw new Error("Browser controller is closed.");
-    const operation = this.#acquisition(document.id).acquireImages(document.snapshot, { signal, onResource });
-    this.#imageOperation = operation;
-    try { await operation; }
-    finally { if (this.#imageOperation === operation) this.#imageOperation = null; }
   }
 
   /** Internal interaction metrics used by deterministic browser qualification. */

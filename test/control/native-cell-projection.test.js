@@ -478,3 +478,80 @@ test("mask artwork admits computed currentColor backgrounds but rejects unmodell
   assert.deepEqual(command.maskTint, { r: 18, g: 52, b: 86, a: 1 });
   assert.equal(supported.documentDisplayList.artworkFallbacks.length, 0);
 });
+
+test("masked groups reject descendant decorative paint instead of leaking unmasked child surfaces", (t) => {
+  for (const child of [
+    '<div id=child style="width:32px;height:32px;background:blue"></div>',
+    '<div><div id=child style="width:32px;height:32px;border:2px solid blue"></div></div>',
+    '<style>#masked::before{content:"";display:block;width:32px;height:32px;background:blue}</style>',
+    '<div id=child style="position:absolute;left:48px;top:0;z-index:1;width:32px;height:32px;background:blue"></div>',
+    '<div><div id=child style="position:fixed;left:48px;top:0;z-index:1;width:32px;height:32px;background:blue"></div></div>',
+    '<a id=child href=/next aria-label="Nested icon" style="display:block;width:32px;height:32px;background:blue;mask-image:url(/icon.svg);mask-repeat:no-repeat"></a>',
+  ]) {
+    const result = fixture(t, '<style>body{background:white}</style><div id=masked style="width:32px;height:32px;background:red;'
+      + `mask-image:url(/icon.svg);mask-size:16px 16px;mask-repeat:no-repeat">${child}</div>`, { images: [imageMetadata()] });
+    assert.ok(result.documentDisplayList.artworkFallbacks.some((entry) => entry.reason === "unsupported-mask-paint"), child);
+    assert.equal(result.terminal.cellBuffer.images.length, 0, child);
+    assert.ok(result.displayList.commands.every((command) => command.kind === "text" || command.documentNode === null), child);
+    assert.ok(result.terminal.cellBuffer.rows.flatMap((row) => row.cells).every((cell) =>
+      cell.style.background?.r === 255 && cell.style.background?.g === 255 && cell.style.background?.b === 255), child);
+  }
+});
+
+test("masked descendant fallback preserves native text, editor interaction, image alternatives and layout", (t) => {
+  const result = fixture(t, '<style>body{background:white;color:black}#masked{mask-image:url(/icon.svg);mask-repeat:no-repeat;background:red}'
+    + '#link,#editor,#image{background:blue;border:1px solid green}</style><div id=masked>'
+    + '<a id=link href=/next>Keep readable text</a><input id=editor value=editable>'
+    + '<a id=media-link href=/media><img id=image src=/icon.svg alt="Media alternative" style="width:160px;height:16px"></a></div>',
+    { images: [imageMetadata()], searchQuery: "Media alternative" });
+  const text = result.terminal.cellBuffer.rows.map((row) => row.text).join("\n");
+  assert.ok(text.includes("Keep readable text"), text);
+  assert.ok(text.includes("editable"), text);
+  assert.ok(text.includes("Media alternative"), text);
+  assert.equal(result.terminal.cellBuffer.images.length, 0);
+  assert.equal(result.terminal.search.matches.length, 1);
+  assert.ok(result.documentDisplayList.artworkFallbacks.some((entry) => entry.reason === "native-content-mask"));
+  assert.ok(result.displayList.commands.every((command) => command.kind === "text" || command.documentNode === null));
+  const editor = result.document.elementById("editor"), link = result.document.elementById("link");
+  const control = result.terminal.controls.find((entry) => entry.node === editor);
+  assert.ok(control && !control.paintSuppressed);
+  assert.equal(result.terminal.hitTestIndex.at(control.visible.row, control.visible.column)?.action.node, editor);
+  assert.ok(result.terminal.focusMap.forNode(editor));
+  assert.ok(result.terminal.focusMap.forNode(link));
+  assert.ok(result.terminal.focusMap.forNode(result.document.elementById("media-link")));
+  assert.ok(result.terminal.accessibilityBounds.some((entry) => entry.documentNode === editor));
+  const imageNode = result.document.elementById("image");
+  assert.ok(result.terminal.accessibilityBounds.some((entry) => entry.documentNode === imageNode && entry.name === "Media alternative"));
+  const image = result.documentLayout.forDocumentNode(imageNode).find((entry) => entry.kind === "replaced");
+  assert.equal(image.contentRect.width, cssPx(160));
+  assert.equal(image.contentRect.height, cssPx(16));
+});
+
+test("a masked root cannot leak a propagated descendant canvas background", (t) => {
+  const result = fixture(t, '<style>html{mask-image:url(/icon.svg);mask-repeat:no-repeat}body{background:blue}</style><p>Readable</p>',
+    { images: [imageMetadata()] });
+  assert.equal(result.documentDisplayList.canvasBackground, null);
+  assert.ok(result.displayList.commands.every((command) => command.kind === "text"));
+  assert.ok(result.terminal.cellBuffer.rows.some((row) => row.text.includes("Readable")));
+});
+
+test("narrow image alternatives inside masked groups retain compact markers and complete source semantics", (t) => {
+  const alt = "A complete media alternative";
+  const result = fixture(t, '<div style="mask-image:url(/icon.svg);mask-repeat:no-repeat">'
+    + `<a id=link href=/next><img id=image src=/icon.svg alt="${alt}" style="width:16px;height:16px"></a></div>`,
+    { images: [imageMetadata()], searchQuery: "complete media" });
+  const row = textRows(result)[0], span = row.spans[0];
+  assert.equal(result.terminal.cellBuffer.images.length, 0);
+  assert.equal(row.text.trim(), "[]");
+  assert.equal(span.logicalText, alt);
+  assert.equal(span.contentStartCodeUnit, 0);
+  assert.equal(span.contentEndCodeUnit, alt.length);
+  assert.ok(span.sourceRange);
+  assert.equal(result.terminal.search.matches.length, 1);
+  const range = result.terminal.search.ranges[0];
+  assert.equal(row.text.slice(range.startCodeUnit, range.endCodeUnit), "[]");
+  const link = result.document.elementById("link");
+  assert.equal(result.terminal.hitTestIndex.at(row.row, span.column)?.action.node, link);
+  assert.ok(result.terminal.focusMap.forNode(link));
+  assert.ok(result.terminal.accessibilityBounds.some((entry) => entry.documentNode === result.document.elementById("image") && entry.name === alt));
+});

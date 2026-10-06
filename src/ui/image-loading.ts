@@ -32,8 +32,9 @@ export type ImageResourceMessage = {
 /** Count unique live source buffers and raster handles across tabs/history/candidates.
  * Pending completion owners also reserve their pixel-conversion workspace. */
 export function retainedImageBytes(state: BrowserTuiState, addition?: DocumentImageResource,
-  transportViewports: Iterable<ViewportCellBuffer> = [], retainedStates: readonly BrowserTuiState[] = []): number {
-  const snapshots = new Set<IndexedPageSnapshot>();
+  transportViewports: Iterable<ViewportCellBuffer> = [], retainedStates: readonly BrowserTuiState[] = [],
+  acquisitionSnapshots: Iterable<IndexedPageSnapshot> = []): number {
+  const snapshots = new Set<IndexedPageSnapshot>(acquisitionSnapshots);
   const resources = new Set<DocumentImageResource>();
   const buffers = new Set<ArrayBufferLike>();
   const handles = new Set<RasterImage>();
@@ -82,7 +83,8 @@ function failed(resource: DocumentImageResource, failure: ImageFailureCode, reas
 
 /** Image completion changes derived resources, never the current document or interaction state. */
 export function acceptImageResource(state: BrowserTuiState, message: ImageResourceMessage,
-  transportViewports: Iterable<ViewportCellBuffer> = [], retainedStates: readonly BrowserTuiState[] = []): BrowserTuiState {
+  transportViewports: Iterable<ViewportCellBuffer> = [], retainedStates: readonly BrowserTuiState[] = [],
+  acquisitionSnapshots: Iterable<IndexedPageSnapshot> = []): BrowserTuiState {
   const document = state.documents[state.activeDocumentIndex];
   if (document?.kind !== "ready" || document.id !== message.documentId || document.loading
     || document.documentRevision !== message.documentRevision
@@ -98,7 +100,7 @@ export function acceptImageResource(state: BrowserTuiState, message: ImageResour
     if (previous.id !== candidate.id || previous.requestUrl !== candidate.requestUrl) return previous;
     let resource = previous.owners.length === candidate.owners.length && previous.owners.every((owner, index) => owner === candidate.owners[index])
       ? candidate : Object.freeze({ ...candidate, owners: previous.owners });
-    if (candidate.status === "ready" && retainedImageBytes(state, candidate, transportViewports, retainedStates) > MAX_RETAINED_IMAGE_BYTES) {
+    if (candidate.status === "ready" && retainedImageBytes(state, candidate, transportViewports, retainedStates, acquisitionSnapshots) > MAX_RETAINED_IMAGE_BYTES) {
       resource = failed(resource, "resource-limit", "The browser image retention limit was reached.");
     }
     if (resource === previous || (resource.status === "pending" && previous.width === resource.width
@@ -136,19 +138,23 @@ export function imageSources(controller: BrowserController, state: BrowserTuiSta
   const document = state.documents[state.activeDocumentIndex];
   if (document?.kind !== "ready" || document.loading || document.rendering.committedViewportRevision === 0
     || !(document.snapshot.images ?? []).some((resource) => resource.status === "pending")) return [];
-  const failure: ImageResourceMessage = { kind: "imageResourcesFailed", documentId: document.id,
-    documentRevision: document.documentRevision, resourceRevision: document.snapshot.imageResourceRevision ?? 0,
-    resourceIds: Object.freeze((document.snapshot.images ?? []).filter((resource) => resource.status === "pending").map((resource) => resource.id)) };
+  // A long-lived source must not retain the starting viewport or navigation graph.
+  // Only acquisition's actual snapshot and completion identity cross this boundary.
+  const documentId = document.id, documentRevision = document.documentRevision, snapshot = document.snapshot;
+  const resourceRevision = snapshot.imageResourceRevision ?? 0;
+  const failure: ImageResourceMessage = { kind: "imageResourcesFailed", documentId,
+    documentRevision, resourceRevision,
+    resourceIds: Object.freeze((snapshot.images ?? []).filter((resource) => resource.status === "pending").map((resource) => resource.id)) };
   return [{
-    id: `images:${document.id}`,
-    generation: `${String(document.documentRevision)}:${String(document.snapshot.imageResourceRevision ?? 0)}`,
+    id: `images:${documentId}`,
+    generation: `${String(documentRevision)}:${String(resourceRevision)}`,
     channel: { capacity: 1 },
     async run(context, sink) {
       try {
-        await controller.acquireImages(document, context.signal, async (resource) => {
+        await controller.acquireImages(documentId, snapshot, context.signal, async (resource) => {
           context.signal.throwIfAborted();
-          await sink.emit({ kind: "reliable", message: { kind: "imageResource", documentId: document.id,
-            documentRevision: document.documentRevision, resourceRevision: document.snapshot.imageResourceRevision ?? 0, resource } });
+          await sink.emit({ kind: "reliable", message: { kind: "imageResource", documentId,
+            documentRevision, resourceRevision, resource } });
         });
       } catch {
         context.signal.throwIfAborted();

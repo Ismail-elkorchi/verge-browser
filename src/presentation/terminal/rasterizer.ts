@@ -266,7 +266,9 @@ function* textUnits(command: Extract<TerminalPaintCommand, { readonly kind: "tex
   signal: AbortSignal | undefined): Generator<PaintUnit> {
   const capacity = Math.floor(command.rect.width / list.context.cellWidthCssPx);
   const semanticLabel = command.mediaFallbackLabel;
-  const compact = command.kind === "image" && command.text.length > 0 && measuredCells(command.text, list) > capacity;
+  const node = list.layout.formatting.node(command.formattingNode);
+  const compact = (command.kind === "image" || node.kind === "image")
+    && command.text.length > 0 && measuredCells(command.text, list) > capacity;
   if (semanticLabel === undefined && !compact) {
     yield* clusterTextUnits(command, list, budgets, generation, signal);
     return;
@@ -293,7 +295,6 @@ function* textUnits(command: Extract<TerminalPaintCommand, { readonly kind: "tex
   const row = command.kind === "text" ? textCellRow(command.rect, command.baseline, list.layout, list.context.rowHeightCssPx)
     : Math.floor(command.rect.y / list.context.rowHeightCssPx);
   const column = Math.floor(command.rect.x / list.context.cellWidthCssPx), width = Math.max(1, measuredCells(label, list));
-  const node = list.layout.formatting.node(command.formattingNode);
   const logicalText = semanticLabel ?? (node.kind === "image" || node.kind === "replaced-element" ? node.fallbackText : command.text);
   yield { command, row, column, width, text: label, logicalText, startCodeUnit: 0, endCodeUnit: logicalText.length,
     contentStartCodeUnit, contentEndCodeUnit, sourceRange, decoration: false,

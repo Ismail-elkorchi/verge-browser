@@ -834,7 +834,7 @@ function reduceBrowser(
   context: Pick<TuiContext, "terminalSize"> = { terminalSize: { columns: 100, rows: 24 } }
 ): TuiUpdateResult<BrowserTuiState, BrowserTuiMessage> {
   if (message.kind === "imageResource" || message.kind === "imageResourcesFailed") {
-    return result(acceptImageResource(state, message, controller.retainedImageViewports(), controller.retainedImageStates()));
+    return result(acceptImageResource(state, message, controller.retainedImageViewports(), controller.retainedImageStates(), controller.retainedImageSnapshots()));
   }
   if (message.kind === "pickerQuery") {
     const settled = pickerQuery.update(state.pickerQuery, message.message).state;
@@ -932,7 +932,7 @@ function reduceBrowser(
       }
       // Pixels may arrive while this candidate is being prepared. Revalidate the
       // shared cap before committing; native fallback is always safe to retain.
-      if (retainedImageBytes(state, undefined, controller.retainedImageViewports(), controller.retainedImageStates()) > MAX_RETAINED_IMAGE_BYTES) {
+      if (retainedImageBytes(state, undefined, controller.retainedImageViewports(), controller.retainedImageStates(), controller.retainedImageSnapshots()) > MAX_RETAINED_IMAGE_BYTES) {
         discardBrowserViewportImages(payload.cellBuffer);
       }
       // Acceptance moves to the acknowledged effect after frame publication.

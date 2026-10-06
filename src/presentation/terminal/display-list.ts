@@ -135,7 +135,9 @@ export function buildDocumentDisplayList(input: BuildDocumentDisplayListInput): 
   }
   const resolveArtwork = createLayoutArtworkResolver(input.layout, input.styles, input.images, input.signal);
   const candidateCanvas = canvasBackground(input);
-  const selectedCanvas = candidateCanvas !== null && suppression.sourceSuppressed(candidateCanvas.source) ? null : candidateCanvas;
+  const canvasMasked = candidateCanvas !== null && input.layout.forDocumentNode(candidateCanvas.source)
+    .some((fragment) => fragment.pseudoElement === null && resolveArtwork(fragment).masked);
+  const selectedCanvas = candidateCanvas !== null && (canvasMasked || suppression.sourceSuppressed(candidateCanvas.source)) ? null : candidateCanvas;
   const canvas = budgets.maxDisplayListCommands > 0 ? selectedCanvas : null;
   const reservedCommands = canvas === null ? 0 : 1;
   const paintStyle = createLayoutPaintResolver(input.layout, input.styles);
@@ -162,7 +164,7 @@ export function buildDocumentDisplayList(input: BuildDocumentDisplayListInput): 
     const maskLabel = artwork.fallback !== null && artwork.fallback !== "native-content-mask" && fragment.action !== null
       && (fragment.semantic?.accessibleName || input.layout.formatting.semantic(fragment.action.node)?.accessibleName || "").length > 0;
     if (!commands.append(fragment, fragmentPaintOrder.length, style, budgets.maxDisplayListCommands - reservedCommands, input.signal,
-      node.kind === "image" && node.imageResourceId !== null, artwork.masked, artwork.artwork, maskLabel)) return false;
+      node.kind === "image" && node.imageResourceId !== null && !artwork.masked, artwork.masked, artwork.artwork, maskLabel)) return false;
     checkPackedMetadata(8);
     fragmentPaintOrder.push(fragment.id);
     return true;

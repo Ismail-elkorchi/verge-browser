@@ -144,7 +144,7 @@ test("constant-size replacement starts a new source and rejects stale deliveries
     assert.equal(acceptImageResource(sized, incoming(document, completion)).documents[0].snapshot.images[0].status, "ready");
     let calls = 0;
     const events = [];
-    const [source] = imageSources({ async acquireImages(_document, _signal, emit) { calls += 1; await emit(completion); } }, current);
+    const [source] = imageSources({ async acquireImages(_documentId, _snapshot, _signal, emit) { calls += 1; await emit(completion); } }, current);
     await source.run({ signal: new globalThis.AbortController().signal }, { async emit(value) { events.push(value.message); } });
     assert.equal(calls, 1); assert.equal(events[0].resourceRevision, document.snapshot.imageResourceRevision);
     assert.equal(source.onLifecycle({ kind: "failed" }).resourceRevision, document.snapshot.imageResourceRevision);
