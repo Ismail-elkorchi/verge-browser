@@ -129,6 +129,7 @@ const browserControlComponent = defineComponent<
   identity: "required",
   structure: "composite",
   semantics: "semantic",
+  emitsActions: true,
   accessibleRole: "group",
   slots: browserControlSlots,
   measure({ model }) {
@@ -145,7 +146,6 @@ const browserControlComponent = defineComponent<
     const labelId = `${id}:label`;
     return {
       id,
-      role: "group",
       label: model.label,
       children: [
         { id: labelId, role: "text", value: model.label, controls: control.id },
@@ -411,6 +411,7 @@ const browserImageComponent = defineComponent<{
   identity: "required",
   structure: "leaf",
   semantics: "semantic",
+  emitsActions: true,
   accessibleRole: "text",
   measure({ model }) {
     return { minWidth: 0, minHeight: 0, preferredWidth: model.placement.clip.width,
@@ -439,7 +440,7 @@ const browserImageComponent = defineComponent<{
   },
   accessibility({ id }) {
     // The document owns the single semantic image/alt identity.
-    return { id, role: "text", label: "" };
+    return { id, label: "" };
   },
   hitTargets({ model, bounds }) {
     const action = model.placement.action;
@@ -469,6 +470,7 @@ const browserDocumentComponent = defineComponent<BrowserDocumentComponentOptions
   identity: "required",
   structure: "composite",
   semantics: "semantic",
+  emitsActions: true,
   accessibleRole: "document",
   slots: browserDocumentSlots,
   measure({ model, constraints, slots }) {
@@ -551,7 +553,6 @@ const browserDocumentComponent = defineComponent<BrowserDocumentComponentOptions
     });
     return {
       id,
-      role: "document",
       label: document.source.snapshot.document.title,
       description: document.finalUrl,
       window: {
